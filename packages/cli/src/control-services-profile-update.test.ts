@@ -13,6 +13,8 @@ import {
 } from "@claudexor/schema";
 import { controlServices } from "./control-services.js";
 import { credentialUnusableLedger } from "./run-orchestrator.js";
+import { modelSubstitutionLedger } from "./model-services.js";
+import { bustGlobalCredentialStatusCaches } from "./credential-status-invalidation.js";
 import { registerConfigDirProfile } from "./profile-registration.js";
 
 const gatewayMock = vi.hoisted(() => ({
@@ -804,6 +806,24 @@ describe("A7 per-subject unusable-ledger clearing on control-API credential muta
     const live = credentialUnusableLedger.live();
     expect(live.filter((o) => o.profile_id === null)).toEqual([]);
     expect(live.find((o) => o.profile_id === "work")).toBeTruthy();
+  });
+
+  it("a profile mutation voids that account's model-substitution observations; a login/logout voids all", async () => {
+    const substituted = (profileId: string) => ({
+      harness_id: "codex",
+      profile_id: profileId,
+      requested_model: "model-a",
+      served_model: "model-b",
+    });
+    modelSubstitutionLedger.noteCredentialChange();
+    registerConfigDirProfile({ harnessId: "codex", profileId: "work" });
+    modelSubstitutionLedger.record(substituted("work"));
+    modelSubstitutionLedger.record(substituted("other"));
+    const svc = services();
+    await svc.updateCredentialProfile({ harnessId: "codex", profileId: "work", enabled: false });
+    expect(modelSubstitutionLedger.live().map((o) => o.profile_id)).toEqual(["other"]);
+    bustGlobalCredentialStatusCaches(() => ({ noteCredentialChange }) as never);
+    expect(modelSubstitutionLedger.live()).toEqual([]);
   });
 
   it("deleteSecret clears the referencing profile's subject too", async () => {

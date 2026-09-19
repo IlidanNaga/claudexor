@@ -310,3 +310,50 @@ describe("bound-row A7 unusable ledger (thread stickiness)", () => {
     expect(String(laneSwitch?.payload["reason"])).toMatch(/unusable \(auth_revoked\)/);
   });
 });
+
+describe("model-substitution observations (model operations only)", () => {
+  const substitutions = [
+    {
+      harness_id: "claude",
+      profile_id: "a",
+      requested_model: "model-a",
+      served_model: "model-b",
+      observed_at: "2026-09-20T10:00:00.000Z",
+      expires_at: "2099-01-01T00:00:00.000Z",
+    },
+  ];
+  const registry = [profileRow({ profile_id: "a" }), profileRow({ profile_id: "b" })];
+
+  it("moves the unbound pool choice to an unmarked sibling and changes nothing without them", async () => {
+    const plain = ctx({ registry, model: "model-a" });
+    await expect(resolveAccountForRun(plain)).resolves.toMatchObject({ profile_id: "a" });
+    const marked = ctx({ registry, model: "model-a", substitutions });
+    await expect(resolveAccountForRun(marked)).resolves.toMatchObject({ profile_id: "b" });
+    const otherModel = ctx({ registry, model: "model-z", substitutions });
+    await expect(resolveAccountForRun(otherModel)).resolves.toMatchObject({ profile_id: "a" });
+  });
+
+  it("still selects a marked account when it is the only one, or every account is marked", async () => {
+    const solo = ctx({ registry: [registry[0]!], model: "model-a", substitutions });
+    await expect(resolveAccountForRun(solo)).resolves.toMatchObject({ profile_id: "a" });
+    const all = ctx({
+      registry,
+      model: "model-a",
+      substitutions: [
+        ...substitutions,
+        { ...substitutions[0]!, profile_id: "b", observed_at: "2026-09-20T09:00:00.000Z" },
+      ],
+    });
+    await expect(resolveAccountForRun(all)).resolves.toMatchObject({ profile_id: "b" });
+    expect(all.events.map((event) => event.type)).toEqual(["route.account.pool_selected"]);
+  });
+
+  it("never moves an explicit pin or a usable bound account", async () => {
+    const pinned = ctx({ registry, pinnedProfile: registry[0]!, model: "model-a", substitutions });
+    await expect(resolveAccountForRun(pinned)).resolves.toBe(registry[0]);
+    expect(pinned.events).toEqual([]);
+    const bound = ctx({ registry, boundProfileId: "a", model: "model-a", substitutions });
+    await expect(resolveAccountForRun(bound)).resolves.toBe(registry[0]);
+    expect(bound.events).toEqual([]);
+  });
+});

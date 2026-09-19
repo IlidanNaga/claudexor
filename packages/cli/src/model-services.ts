@@ -3,6 +3,7 @@ import { credentialProfilePolicyState } from "@claudexor/core";
 import { loadConfig } from "@claudexor/config";
 import {
   ModelOperations,
+  ModelSubstitutionLedger,
   type CredentialUnusableLedger,
   type DaemonClient,
   type ModelOperationDependencies,
@@ -26,6 +27,7 @@ import {
   type CredentialProfile,
   type HarnessEvent,
   type ModelAccountChoice,
+  type ModelCallResult,
   type ModelUsage,
 } from "@claudexor/schema";
 import { errorCode, noProjectRepoRoot, redactSecrets } from "@claudexor/util";
@@ -34,6 +36,13 @@ import { buildRegistry } from "./registry.js";
 import { credentialUnusableLedger } from "./run-orchestrator.js";
 import type { RetentionRunner } from "./retention-service.js";
 import { catalogProfiles, enumerateAccountCatalogs } from "./account-catalog.js";
+
+/**
+ * Daemon-lifetime model-substitution observations: in-memory and bounded, like
+ * the unusable-credential ledger, and cleared at the same credential-generation
+ * call sites. Model operations are their only producer and consumer.
+ */
+export const modelSubstitutionLedger = new ModelSubstitutionLedger();
 
 interface ModelSource {
   adapter: ModelAdapter;
@@ -48,6 +57,7 @@ interface Dependencies extends Pick<ModelOperationDependencies, "commands" | "re
   registry?: AdapterRegistry;
   sources?: readonly ModelSource[];
   unusable?: CredentialUnusableLedger;
+  substitutions?: ModelSubstitutionLedger;
   migrationGate?: typeof accountsMigrationGate;
 }
 
@@ -64,6 +74,7 @@ export function createModelServices(deps: Dependencies) {
   const registry = deps.registry ?? buildRegistry({ includeFakes: false });
   const config = deps.config ?? (() => loadConfig(noProjectRepoRoot()).global);
   const unusable = deps.unusable ?? credentialUnusableLedger;
+  const substitutions = deps.substitutions ?? modelSubstitutionLedger;
   const lifetime = new AbortController();
   const getSource = (id: string): ModelSource => {
     const source = sources.find((entry) => entry.adapter.id === id);
@@ -167,6 +178,7 @@ export function createModelServices(deps: Dependencies) {
           snapshots: currentQuota.snapshots,
           quota: currentQuota,
           unusable: unusable.live(),
+          substitutions: substitutions.live(),
           probe,
           pinnedProfile,
           boundProfileId: account.mode === "auto" ? (account.preferredProfileId ?? null) : null,
@@ -369,12 +381,32 @@ export function createModelServices(deps: Dependencies) {
         adapter: {
           ...source.adapter,
           invoke: async (input, context) => {
-            const result = await source.adapter.invoke(input, { ...context, catalog });
+            const served = await source.adapter.invoke(input, { ...context, catalog });
+            // A typed fact about this generation, never a changed outcome: set
+            // only when a terminal response disclosed a model and its exact id
+            // differs from the requested one. The caller decides what to do.
+            const observed = served.route.model;
+            const result: ModelCallResult =
+              (served.outcome === "completed" || served.outcome === "incomplete") &&
+              observed !== null &&
+              observed !== input.model
+                ? { ...served, modelMismatch: { requested: input.model, observed } }
+                : served;
             // Evidence maintenance must not erase an already-received model result.
             try {
+              // The next Auto selection for this model prefers other accounts.
+              if (result.modelMismatch)
+                substitutions.record({
+                  harness_id: source.credentialHarness,
+                  profile_id: profile.profile_id,
+                  requested_model: result.modelMismatch.requested,
+                  served_model: result.modelMismatch.observed,
+                });
               await observe(source, profile, result.problem, result.usage, result.route.model);
             } catch (error) {
-              deps.warn?.(`Model quota evidence was not recorded: ${redactSecrets(String(error))}`);
+              deps.warn?.(
+                `Model account evidence was not recorded: ${redactSecrets(String(error))}`,
+              );
             }
             return result;
           },

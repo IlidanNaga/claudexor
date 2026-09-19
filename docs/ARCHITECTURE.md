@@ -816,7 +816,9 @@ descending, unknown/stale quota after known-positive headroom but before
 exhausted (stale quota never authorizes routing), deterministic profile-id
 tie-break; a row under an observed live block (a reactive vendor-limit
 cooldown or spent window — the A4 reader) ranks exhausted with its release
-instant. An empty or exhausted pool is a TYPED TERMINAL
+instant. Model operations pass one more ordering key, a live model-substitution
+observation (see [Caller-owned model operations](#caller-owned-model-operations));
+Agent Runs pass none. An empty or exhausted pool is a TYPED TERMINAL
 (`route.account.pool_exhausted`, then `credential_pool_exhausted` with the
 pool's earliest known reset — owner Q3=A): an unpinned run under `auto` or
 explicit `subscription` waits for a window instead of silently taking the
@@ -1385,6 +1387,14 @@ The caller retains it through tools, steering and compaction within a live turn,
 then clears it at a new turn or cold restart. There is no daemon state map,
 checkpoint token, automatic retry, or token in public receipts and usage fields.
 
+Historical assistant `codex.responses.v1` items replay only under the exact
+account, profile and model that produced them, so the binding stays truthful
+when the vendor answers a request with another model. A turn the same account
+served with another or an undisclosed model is not replayed: it is sent through
+its canonical content and tool calls, with the original tool IDs. A message that
+has nothing but its continuation, a changed or unknown account, and a malformed
+continuation still refuse with `invalid_continuation` before dispatch.
+
 `ModelOperations` uses the existing daemon command store, idempotency lookup,
 queue capacity, cancellation and terminal boundary. Models and Agents share the
 regular slots described in [Main Execution Paths](#6-main-execution-paths); a
@@ -1457,6 +1467,23 @@ and a mixed, unknown, empty or disabled pool remains unavailable with its compac
 prove quota exhaustion. Legacy selected-account catalog reads obey the same current quota admission
 without starting a generation. The opt-in account view enumerates enabled
 inventories separately, as described [above](#processing-and-account-catalogs).
+
+A terminal response may disclose a model other than the requested one, with no
+error and nothing in the account's quota. The result then carries the optional
+`modelMismatch` fact (`requested`, `observed`). It is set only for a completed or
+incomplete response whose observed model is known and differs by exact id;
+outcome, message, usage and custody are unchanged, and the engine neither
+retries nor discards the generation. Accepting it or creating another operation
+is the caller's decision. The same composition point records a
+`ModelSubstitutionObservation` in the daemon's in-memory
+`ModelSubstitutionLedger`: bounded, newest-wins per account and requested model,
+kept for 30 minutes (observation retention, not a vendor reset time), never
+cleared by a later success, and voided with the credential generation at the
+unusable ledger's call sites. While one is live, Auto selection for that
+requested model ranks the account after every other selectable account, oldest
+observation first, so a fully marked pool takes turns. The observation never
+excludes an account or exhausts a pool, and a pin or a usable preferred account
+is resolved before it. Agent Runs do not pass it.
 
 Catalog `provenance: "provider_http"` means the adapter read and validated a
 successful upstream HTTP catalog response at `observedAt`. Reusing that catalog

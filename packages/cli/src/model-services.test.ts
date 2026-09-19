@@ -9,6 +9,7 @@ import {
   CredentialUnusableLedger,
   DaemonClient,
   DaemonServer,
+  ModelSubstitutionLedger,
   QuotaRegistry,
   ResourceStore,
 } from "@claudexor/daemon";
@@ -55,6 +56,10 @@ async function fixture(options: { lazy?: boolean } = {}) {
   const commands = { current: () => store };
   const quota = new QuotaRegistry(journal);
   const unusable = new CredentialUnusableLedger();
+  const clock = { now: Date.now() };
+  const substitutions = new ModelSubstitutionLedger(() => new Date(clock.now));
+  // The model each account's terminal response discloses; absent = the requested one.
+  const served: Record<string, string | null> = {};
   let resourceStore: ResourceStore | undefined;
   const resources = vi.fn(() => (resourceStore ??= new ResourceStore(join(root, "resources"))));
   const profiles = ["a", "b"].map((id) =>
@@ -110,7 +115,10 @@ async function fixture(options: { lazy?: boolean } = {}) {
     return ModelCallResult.parse({
       outcome: code ? "failed" : "completed",
       message: code ? null : { role: "assistant", content: "own model reply" },
-      route,
+      route:
+        context.profile.profile_id in served
+          ? { ...route, model: served[context.profile.profile_id] }
+          : route,
       usage: code ? {} : { input_tokens: 5, output_tokens: 3 },
       cost: {
         knowledge: "unknown",
@@ -139,6 +147,7 @@ async function fixture(options: { lazy?: boolean } = {}) {
     quota: () => quota,
     config: () => cfg,
     unusable,
+    substitutions,
     migrationGate: () => null,
     registry: new Map([["codex", { ...createCodexAdapter(), probeCredentialProfile: probe }]]),
     sources: [
@@ -196,6 +205,9 @@ async function fixture(options: { lazy?: boolean } = {}) {
     probe,
     quota,
     unusable,
+    substitutions,
+    served,
+    clock,
     client,
     agentRunner,
     run,
@@ -412,6 +424,75 @@ describe("production model service composition", () => {
     expect(pinned.problem?.code).toBe("subscription_window_exhausted");
     expect(pinned.dispatch.state).toBe("not_started");
     expect(f.invoke).toHaveBeenCalledTimes(2);
+  });
+
+  it("states a served-model mismatch as a typed fact; the next Auto operation prefers other accounts", async () => {
+    const f = await fixture();
+    const result = async (id: string) =>
+      JSON.parse((await f.services.routes.readModelResult(id)).bytes.toString());
+    f.served.a = "other-model";
+    const first = await f.run();
+    // One generation, an unchanged outcome and a fact the caller can act on.
+    expect(first.state).toBe("succeeded");
+    expect(first.dispatch.route).toMatchObject({ credentialProfileId: "a", model: "other-model" });
+    expect(await result(first.id)).toMatchObject({
+      outcome: "completed",
+      message: { content: "own model reply" },
+      modelMismatch: { requested: "test-model", observed: "other-model" },
+    });
+    expect(f.substitutions.live()).toMatchObject([
+      {
+        harness_id: "codex",
+        profile_id: "a",
+        requested_model: "test-model",
+        served_model: "other-model",
+      },
+    ]);
+    const next = await f.run();
+    expect(next.dispatch.route?.credentialProfileId).toBe("b");
+    expect(await result(next.id)).not.toHaveProperty("modelMismatch");
+    // A preferred account and a pin are resolved before the ordering.
+    f.clock.now += 60_000;
+    const preferred = await f.run({ mode: "auto", preferredProfileId: "a" });
+    expect(preferred.dispatch.route?.credentialProfileId).toBe("a");
+    const pinned = await f.run({ mode: "pin", profileId: "a" });
+    expect(pinned.dispatch.route?.credentialProfileId).toBe("a");
+    expect(f.invoke).toHaveBeenCalledTimes(4);
+  });
+
+  it("takes turns through a fully substituting pool and restores the order when observations expire", async () => {
+    const f = await fixture();
+    f.served.a = f.served.b = "other-model";
+    const chosen: Array<string | undefined> = [];
+    for (let i = 0; i < 4; i += 1) {
+      f.clock.now += 60_000;
+      const done = await f.run();
+      expect(done.state).toBe("succeeded");
+      chosen.push(done.dispatch.route?.credentialProfileId);
+    }
+    // Never refused: a marked account is still selected, oldest observation first.
+    expect(chosen).toEqual(["a", "b", "a", "b"]);
+    f.clock.now += 31 * 60_000;
+    expect(f.substitutions.live()).toEqual([]);
+    expect((await f.run()).dispatch.route?.credentialProfileId).toBe("a");
+  });
+
+  it("records no mismatch without a known, different model on a terminal response", async () => {
+    const f = await fixture();
+    f.served.a = null;
+    const unknown = await f.run({ mode: "pin", profileId: "a" });
+    expect(
+      JSON.parse((await f.services.routes.readModelResult(unknown.id)).bytes.toString()),
+    ).not.toHaveProperty("modelMismatch");
+    f.served.a = "other-model";
+    f.failures.a = "provider_failed";
+    f.failureContext.a = {};
+    const failed = await f.run({ mode: "pin", profileId: "a" });
+    expect(failed.state).toBe("failed");
+    expect(
+      JSON.parse((await f.services.routes.readModelResult(failed.id)).bytes.toString()),
+    ).not.toHaveProperty("modelMismatch");
+    expect(f.substitutions.live()).toEqual([]);
   });
 
   it("types an all-quota pool before catalog polling or another generation", async () => {

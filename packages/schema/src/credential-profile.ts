@@ -208,6 +208,30 @@ export const CredentialUnusableObservation = z
 export type CredentialUnusableObservation = z.infer<typeof CredentialUnusableObservation>;
 
 /**
+ * ONE typed observation that an account answered a model operation's request
+ * for `requested_model` with `served_model`. It is not a quota fact (the
+ * vendor's quota meter does not show this state) and not a dead credential: the
+ * row stays selectable and only RANKS after other selectable rows for that
+ * requested model (INV-135). In-memory and self-expiring, never durable config.
+ */
+export const ModelSubstitutionObservation = z
+  .object({
+    harness_id: Id.describe("Harness family the observed account belongs to."),
+    profile_id: Id.describe("Account row that answered with another model."),
+    requested_model: z.string().describe("Model the operation asked this account for."),
+    served_model: z.string().describe("Model the terminal response disclosed instead."),
+    observed_at: IsoTimestamp.describe("When the substitution was observed."),
+    expires_at: IsoTimestamp.describe(
+      "Self-expiry instant (observation retention, not a vendor reset time); after this the observation is ignored.",
+    ),
+  })
+  .strict()
+  .describe(
+    "A bounded, self-expiring typed observation that an account served a different model than a model operation requested; it orders the account pool and never excludes a row.",
+  );
+export type ModelSubstitutionObservation = z.infer<typeof ModelSubstitutionObservation>;
+
+/**
  * NON-SECRET account identity projection (INV-067/INV-135): the email and plan
  * label derived DAEMON-SIDE from a sanctioned per-account source. Codex and
  * Claude may use their scoped credential stores; Cursor may expose an

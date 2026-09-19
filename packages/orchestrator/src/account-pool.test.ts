@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { CredentialProfile, QuotaSnapshot } from "@claudexor/schema";
+import type {
+  CredentialProfile,
+  ModelSubstitutionObservation,
+  QuotaSnapshot,
+} from "@claudexor/schema";
 import { GlobalConfig } from "@claudexor/schema";
 import { rankAccountPool, selectFromAccountPool } from "./account-pool.js";
 
@@ -184,6 +188,120 @@ describe("account pool ranking (unified model, D-U1 + K.5)", () => {
     });
     expect(ranked.map((c) => c.profile.profile_id)).toEqual(["scoped", "other"]);
     expect(ranked[1]?.verdict.kind).toBe("unknown");
+  });
+});
+
+describe("model-substitution ordering (INV-135: ordered last, never excluded)", () => {
+  const MODEL = "model-a";
+  const substituted = (
+    profileId: string,
+    observedAt: string,
+    over: Partial<ModelSubstitutionObservation> = {},
+  ): ModelSubstitutionObservation => ({
+    harness_id: "claude",
+    profile_id: profileId,
+    requested_model: MODEL,
+    served_model: "model-b",
+    observed_at: observedAt,
+    expires_at: "2099-01-01T00:00:00.000Z",
+    ...over,
+  });
+  const pool = (ids: string[], usedRatios: Record<string, number> = {}) => ({
+    ...baseArgs,
+    model: MODEL,
+    registry: ids.map((id) => row(id)),
+    snapshots: Object.entries(usedRatios).map(([id, used]) => snapshot(id, used)),
+    readyProfileIds: new Set(ids),
+  });
+  const order = (args: Parameters<typeof rankAccountPool>[0]) =>
+    rankAccountPool(args).map((c) => c.profile.profile_id);
+
+  it("ranks a marked row after every other selectable row, whatever its headroom", () => {
+    const args = pool(["best", "low", "unknown"], { best: 0.1, low: 0.8 });
+    expect(order(args)).toEqual(["best", "low", "unknown"]);
+    expect(
+      order({ ...args, substitutions: [substituted("best", "2026-09-20T10:00:00.000Z")] }),
+    ).toEqual(["low", "unknown", "best"]);
+  });
+
+  it("orders a fully marked pool oldest observation first and still selects from it", () => {
+    const args = {
+      ...pool(["a", "b", "c"], { a: 0.1, b: 0.5 }),
+      substitutions: [
+        substituted("a", "2026-09-20T10:20:00.000Z"),
+        substituted("b", "2026-09-20T10:00:00.000Z"),
+        substituted("c", "2026-09-20T10:10:00.000Z"),
+      ],
+    };
+    expect(order(args)).toEqual(["b", "c", "a"]);
+    expect(selectFromAccountPool(args)).toMatchObject({
+      outcome: "selected",
+      candidate: { profile: { profile_id: "b" }, verdict: { kind: "fresh_headroom" } },
+    });
+  });
+
+  it("a refreshed observation re-orders: the account marked longest ago goes first", () => {
+    const args = pool(["a", "b"], { a: 0.1, b: 0.5 });
+    const old = substituted("b", "2026-09-20T10:00:00.000Z");
+    expect(
+      order({ ...args, substitutions: [substituted("a", "2026-09-20T10:05:00.000Z"), old] }),
+    ).toEqual(["b", "a"]);
+    // b substituted again: its refreshed observation is now the newest.
+    expect(
+      order({
+        ...args,
+        substitutions: [
+          substituted("a", "2026-09-20T10:05:00.000Z"),
+          substituted("b", "2026-09-20T10:06:00.000Z"),
+        ],
+      }),
+    ).toEqual(["a", "b"]);
+    // Equal instants fall back to today's order.
+    expect(order({ ...args, substitutions: [substituted("a", old.observed_at), old] })).toEqual([
+      "a",
+      "b",
+    ]);
+  });
+
+  it("keeps a marked singleton selectable and never makes a pool exhausted", () => {
+    const only = {
+      ...pool(["only"]),
+      substitutions: [substituted("only", "2026-09-20T10:00:00.000Z")],
+    };
+    expect(selectFromAccountPool(only)).toMatchObject({
+      outcome: "selected",
+      candidate: { profile: { profile_id: "only" } },
+    });
+    const spent = {
+      ...pool(["marked", "spent"], { spent: 0.99 }),
+      substitutions: [
+        substituted("marked", "2026-09-20T10:00:00.000Z"),
+        substituted("spent", "2026-09-20T09:00:00.000Z"),
+      ],
+    };
+    // An exhausted row keeps its place at the end whatever its mark says.
+    expect(order(spent)).toEqual(["marked", "spent"]);
+    expect(selectFromAccountPool(spent)).toMatchObject({
+      outcome: "selected",
+      candidate: { profile: { profile_id: "marked" } },
+    });
+  });
+
+  it("ignores expired, foreign-harness and other-model observations", () => {
+    const args = pool(["a", "b"], { a: 0.1, b: 0.5 });
+    const at = "2026-09-20T10:00:00.000Z";
+    for (const substitutions of [
+      [substituted("a", "2020-01-01T00:00:00.000Z", { expires_at: "2020-01-01T00:30:00.000Z" })],
+      [substituted("a", at, { harness_id: "codex" })],
+      [substituted("a", at, { requested_model: "model-z" })],
+      [],
+    ])
+      expect(order({ ...args, substitutions })).toEqual(["a", "b"]);
+    // No requested model (a catalog read) matches no observation.
+    expect(order({ ...args, model: null, substitutions: [substituted("a", at)] })).toEqual([
+      "a",
+      "b",
+    ]);
   });
 });
 
