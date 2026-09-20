@@ -2018,7 +2018,6 @@ export class Orchestrator {
       ...(intent === "synthesize" ? {} : { instructions: contract.instructions }),
       // The answer contract rides every answer-producing lane, including synthesis.
       // vendor-STRICT transport form; the engine validator keeps the ORIGINAL
-      // contract as the conformance authority.
       ...(contract.output_schema
         ? { output_schema: strictifyOutputSchema(contract.output_schema) }
         : {}),
