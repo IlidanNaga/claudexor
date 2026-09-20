@@ -1438,6 +1438,11 @@ reader EOF, independently of provider terminal framing; an unreceived suffix is
 never claimed captured. Successful completed results carry no duplicate wire.
 The evidence follows the existing result resource, GET, ACK and expiry; only
 compact structural diagnostics enter the problem, journal and status.
+For a failed or unknown stream, compact problem context also carries
+`timeToFirstByteMs`, `silenceMs`, and `largestSilenceMs` when the reader saw
+bytes. These are measurements, not an idle watchdog or retry signal; a missing
+terminal frame remains `transport_unknown` and the existing custody/no-blind-
+retry rule stays authoritative.
 Coherent provider terminal facts precede message conversion: unusable completed
 or incomplete output retains its provider outcome and usage, with null message,
 `response_rejected`, `response_received` dispatch and failed operation lifecycle.
@@ -3014,6 +3019,15 @@ final message stays markdown, so the fenced-JSON path carries claude (and
 every non-capable route). Structured output is also gated OFF when the spec
 will ride the interactive stream-json transport — that vendor combination
 is unverified; fenced parsing carries interactive runs.
+
+Strict transport optionality is adapter-owned. A caller schema keeps its
+original optional property semantics as the conformance authority; when the
+strict vendor form emits `null` for a property that was optional and
+non-nullable in that original schema, the engine restores omission before
+validation. Required or caller-nullable `null` values retain their original
+semantics. The receipt records the number of restored adapter-created nulls as
+`normalized_optional_nulls`, while the raw answer and invalid diagnostic stay
+unchanged.
 
 WorkReport envelope (D-16): on a `work_report_transport: constrained` route the
 engine COMPILES a transport ENVELOPE `{ work_report, output }` that wraps any

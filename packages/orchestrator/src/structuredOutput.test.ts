@@ -55,7 +55,7 @@ describe("structured output schema dialects", () => {
       answerText: JSON.stringify({ tuple: ["ok"] }),
     });
 
-    expect(verdict).toEqual({ status: "passed", reason: null });
+    expect(verdict).toEqual({ status: "passed", reason: null, normalizedOptionalNulls: 0 });
     expect(JSON.parse(readFileSync(join(paths.finalDir, "output.json"), "utf8"))).toEqual({
       tuple: ["ok"],
     });
@@ -63,6 +63,120 @@ describe("structured output schema dialects", () => {
       schema_dialect: "draft-2020-12",
       schema_hash: hashJson(draft202012Schema),
       status: "passed",
+    });
+    log.dispose();
+  });
+
+  it("restores an adapter-created optional null before validating the original schema", () => {
+    const schema = {
+      type: "object",
+      properties: { note: { type: "string" } },
+      required: [],
+      additionalProperties: false,
+    };
+    const root = reapMk(join(tmpdir(), "claudexor-structured-output-"));
+    const store = new ArtifactStore(root, { claudexorDir: join(root, "runtime") });
+    const paths = store.createRun("run-optional-null");
+    const log = new EventLog(paths.eventsPath, "run-optional-null", "task-test");
+    const verdict = finalizeStructuredOutput({
+      store,
+      finalDir: paths.finalDir,
+      log,
+      schema,
+      answerText: JSON.stringify({ note: null }),
+    });
+    expect(verdict).toEqual({ status: "passed", reason: null, normalizedOptionalNulls: 1 });
+    expect(JSON.parse(readFileSync(join(paths.finalDir, "output.json"), "utf8"))).toEqual({});
+    expect(store.readYaml(join(paths.finalDir, "structured_output.yaml"))).toMatchObject({
+      status: "passed",
+      normalized_optional_nulls: 1,
+    });
+    log.dispose();
+  });
+
+  it("keeps required null invalid after optional-null restoration", () => {
+    const schema = {
+      type: "object",
+      properties: { note: { type: "string" } },
+      required: ["note"],
+      additionalProperties: false,
+    };
+    const root = reapMk(join(tmpdir(), "claudexor-structured-output-"));
+    const store = new ArtifactStore(root, { claudexorDir: join(root, "runtime") });
+    const paths = store.createRun("run-required-null");
+    const log = new EventLog(paths.eventsPath, "run-required-null", "task-test");
+    const verdict = finalizeStructuredOutput({
+      store,
+      finalDir: paths.finalDir,
+      log,
+      schema,
+      answerText: JSON.stringify({ note: null }),
+    });
+    expect(verdict.status).toBe("failed");
+    expect(verdict.normalizedOptionalNulls).toBe(0);
+    expect(JSON.parse(readFileSync(join(paths.finalDir, "output.invalid.json"), "utf8"))).toEqual({
+      note: null,
+    });
+    log.dispose();
+  });
+
+  it("preserves substantive PASS/FAIL findings while restoring absent obligations", () => {
+    const schema = {
+      type: "object",
+      properties: {
+        findings: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              item: { type: "string" },
+              verdict: { type: "string", enum: ["PASS", "FAIL"] },
+              severity: { type: "string", enum: ["critical", "advisory"] },
+              reason: { type: "string" },
+              obligation_id: { type: "string" },
+            },
+            required: ["item", "verdict", "severity", "reason"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["findings"],
+      additionalProperties: false,
+    };
+    const root = reapMk(join(tmpdir(), "claudexor-structured-output-"));
+    const store = new ArtifactStore(root, { claudexorDir: join(root, "runtime") });
+    const paths = store.createRun("run-review-findings");
+    const log = new EventLog(paths.eventsPath, "run-review-findings", "task-test");
+    const verdict = finalizeStructuredOutput({
+      store,
+      finalDir: paths.finalDir,
+      log,
+      schema,
+      answerText: JSON.stringify({
+        findings: [
+          {
+            item: "quality",
+            verdict: "FAIL",
+            severity: "critical",
+            reason: "broken",
+            obligation_id: null,
+          },
+          {
+            item: "docs",
+            verdict: "PASS",
+            severity: "advisory",
+            reason: "clear",
+            obligation_id: null,
+          },
+        ],
+      }),
+    });
+    expect(verdict).toEqual({ status: "passed", reason: null, normalizedOptionalNulls: 2 });
+    expect(JSON.parse(readFileSync(join(paths.finalDir, "output.json"), "utf8"))).toEqual({
+      findings: [
+        { item: "quality", verdict: "FAIL", severity: "critical", reason: "broken" },
+        { item: "docs", verdict: "PASS", severity: "advisory", reason: "clear" },
+      ],
     });
     log.dispose();
   });

@@ -13,14 +13,31 @@ export class ResponseFailureCapture {
   private errors: ModelFailureEvidence["errors"] = [];
   private causeCycle = false;
   private requestId: string | null = null;
+  private readonly now: () => number;
+  private responseStartedAtMs: number | null = null;
+  private firstChunkAtMs: number | null = null;
+  private lastChunkAtMs: number | null = null;
+  private largestSilenceMs = 0;
 
-  constructor(private readonly enabled = false) {}
+  constructor(
+    private readonly enabled = false,
+    now: () => number = Date.now,
+  ) {
+    this.now = now;
+  }
 
   response(response: Response): void {
+    this.responseStartedAtMs = this.now();
     this.requestId = response.headers.get("x-request-id") ?? response.headers.get("request-id");
   }
 
   receive(chunk: Uint8Array): void {
+    const receivedAt = this.now();
+    if (this.firstChunkAtMs === null) this.firstChunkAtMs = receivedAt;
+    if (this.lastChunkAtMs !== null) {
+      this.largestSilenceMs = Math.max(this.largestSilenceMs, receivedAt - this.lastChunkAtMs);
+    }
+    this.lastChunkAtMs = receivedAt;
     this.receivedBytes += chunk.byteLength;
     if (this.enabled) this.chunks.push(Buffer.from(chunk));
   }
@@ -58,6 +75,16 @@ export class ResponseFailureCapture {
     if (result.outcome === "completed" && result.problem === null) return result;
     const first = this.errors[0];
     const code = this.errors.find((error) => error.code !== null)?.code;
+    const finishedAtMs = this.now();
+    const timing = {
+      ...(this.responseStartedAtMs !== null && this.firstChunkAtMs !== null
+        ? { timeToFirstByteMs: Math.max(0, this.firstChunkAtMs - this.responseStartedAtMs) }
+        : {}),
+      ...(this.lastChunkAtMs !== null
+        ? { silenceMs: Math.max(0, finishedAtMs - this.lastChunkAtMs) }
+        : {}),
+      largestSilenceMs: this.largestSilenceMs,
+    };
     if (result.problem)
       result.problem = {
         ...result.problem,
@@ -73,6 +100,7 @@ export class ResponseFailureCapture {
           ...(code !== undefined && code !== null
             ? { errorCode: typeof code === "string" ? redactSecrets(code) : code }
             : {}),
+          ...timing,
         },
       };
     if (this.enabled)

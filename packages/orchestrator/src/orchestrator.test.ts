@@ -11550,15 +11550,15 @@ describe("Orchestrator", () => {
         yield { type: "completed", session_id: spec.session_id, ts };
       },
     });
-    // `note` is OPTIONAL string in the CALLER's schema. Strictify would make it
-    // `string|null` required, so `{"note":null}` would falsely PASS the vendor
-    // form. Validated against the ORIGINAL, null is not a string → failed.
+    // `note` is OPTIONAL string in the CALLER's schema. Strictify makes it
+    // `string|null` required on the vendor wire; the engine restores that
+    // adapter-created null to omission before validating the ORIGINAL schema.
     const schema = {
       type: "object",
       properties: { note: { type: "string" } },
       required: [],
     };
-    const bad = await new Orchestrator({
+    const restored = await new Orchestrator({
       registry: new Map([["schema-capable", makeAdapter(JSON.stringify({ note: null }))]]),
       reviewers: [],
     }).run({
@@ -11569,9 +11569,31 @@ describe("Orchestrator", () => {
       n: 1,
       outputSchema: schema,
     });
-    expect(readFileSync(join(bad.runDir, "final", "structured_output.yaml"), "utf8")).toContain(
-      "status: failed",
+    expect(
+      readFileSync(join(restored.runDir, "final", "structured_output.yaml"), "utf8"),
+    ).toContain("status: passed");
+    expect(
+      readFileSync(join(restored.runDir, "final", "structured_output.yaml"), "utf8"),
+    ).toContain("normalized_optional_nulls: 1");
+    expect(JSON.parse(readFileSync(join(restored.runDir, "final", "output.json"), "utf8"))).toEqual(
+      {},
     );
+
+    const required = { ...schema, required: ["note"] };
+    const rejected = await new Orchestrator({
+      registry: new Map([["schema-capable", makeAdapter(JSON.stringify({ note: null }))]]),
+      reviewers: [],
+    }).run({
+      repoRoot: repo,
+      prompt: "x",
+      mode: "agent",
+      harnesses: ["schema-capable"],
+      n: 1,
+      outputSchema: required,
+    });
+    expect(
+      readFileSync(join(rejected.runDir, "final", "structured_output.yaml"), "utf8"),
+    ).toContain("status: failed");
     // The same schema with the field ABSENT (its optionality) is conformant.
     const ok = await new Orchestrator({
       registry: new Map([["schema-capable", makeAdapter(JSON.stringify({}))]]),

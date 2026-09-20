@@ -1,11 +1,38 @@
 import { describe, expect, it } from "vitest";
 import {
   normalizeUserOutputSchema,
+  restoreStrictOptionalNulls,
   strictifyOutputSchema,
   UnsupportedOutputSchemaError,
 } from "./output-schema.js";
 
 describe("strictifyOutputSchema", () => {
+  it("restores adapter-created nulls only for optional non-nullable properties", () => {
+    const schema = {
+      type: "object",
+      properties: {
+        optionalText: { type: "string" },
+        nullableText: { type: ["string", "null"] },
+        requiredText: { type: "string" },
+        nested: {
+          type: "object",
+          properties: { child: { type: "string" } },
+          required: [],
+        },
+      },
+      required: ["requiredText"],
+    };
+    const restored = restoreStrictOptionalNulls(schema, {
+      optionalText: null,
+      nullableText: null,
+      requiredText: null,
+      nested: { child: null },
+    });
+    expect(restored).toEqual({
+      value: { nullableText: null, requiredText: null, nested: {} },
+      erasedCount: 2,
+    });
+  });
   it("keeps the dialect declaration out of the native provider transport", () => {
     const source = {
       $schema: "https://json-schema.org/draft/2020-12/schema",

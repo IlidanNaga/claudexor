@@ -101,6 +101,96 @@ export function strictifyOutputSchema(schema: Record<string, unknown>): Record<s
   return transportSchema;
 }
 
+function schemaAllowsNull(schema: unknown): boolean {
+  if (!schema || typeof schema !== "object") return false;
+  const value = schema as Record<string, unknown>;
+  if (value["const"] === null) return true;
+  if (Array.isArray(value["type"]) && value["type"].includes("null")) return true;
+  for (const key of ["anyOf", "oneOf"] as const) {
+    const alternatives = value[key];
+    if (Array.isArray(alternatives) && alternatives.some(schemaAllowsNull)) return true;
+  }
+  return false;
+}
+
+/**
+ * Restore the caller's optional-field semantics after a vendor strict transport
+ * response. Strict mode has to emit every key, and represents a caller-optional
+ * non-nullable field as `required: true` plus `type: [T, "null"]`. A null in
+ * exactly that adapter-created position means omission; null in a caller-
+ * required or caller-nullable field remains data and is judged by the original
+ * schema. The returned value is a copy and the count is receipt telemetry.
+ */
+export function restoreStrictOptionalNulls(
+  schema: Record<string, unknown>,
+  value: unknown,
+): { value: unknown; erasedCount: number } {
+  // Some caller schemas are valid for the engine's dialect-aware validator but
+  // are deliberately rejected by native transport preflight. Finalization is
+  // also used directly by historical-artifact tests, so a transport copy that
+  // cannot be reconstructed must leave the original validation path unchanged.
+  let original: Record<string, unknown>;
+  let transport: Record<string, unknown>;
+  try {
+    original = dereferenceLocalOutputSchema(schema);
+    transport = strictifyForStructuredOutput(original);
+  } catch {
+    return { value, erasedCount: 0 };
+  }
+  let erasedCount = 0;
+
+  const walk = (source: unknown, constrained: unknown, current: unknown): unknown => {
+    if (Array.isArray(current)) {
+      const sourceItems =
+        source && typeof source === "object"
+          ? (source as Record<string, unknown>)["items"]
+          : undefined;
+      const constrainedItems =
+        constrained && typeof constrained === "object"
+          ? (constrained as Record<string, unknown>)["items"]
+          : undefined;
+      return current.map((item) => walk(sourceItems, constrainedItems, item));
+    }
+    if (!current || typeof current !== "object") return current;
+    const sourceObject =
+      source && typeof source === "object" ? (source as Record<string, unknown>) : {};
+    const constrainedObject =
+      constrained && typeof constrained === "object"
+        ? (constrained as Record<string, unknown>)
+        : {};
+    const sourceProperties = sourceObject["properties"];
+    const constrainedProperties = constrainedObject["properties"];
+    if (!sourceProperties || typeof sourceProperties !== "object") return current;
+    const sourceProps = sourceProperties as Record<string, unknown>;
+    const constrainedProps =
+      constrainedProperties && typeof constrainedProperties === "object"
+        ? (constrainedProperties as Record<string, unknown>)
+        : {};
+    const required = new Set(
+      Array.isArray(sourceObject["required"]) ? sourceObject["required"] : [],
+    );
+    const copy = { ...(current as Record<string, unknown>) };
+    for (const [key, propertySchema] of Object.entries(sourceProps)) {
+      if (!(key in copy)) continue;
+      const constrainedSchema = constrainedProps[key];
+      if (
+        copy[key] === null &&
+        !required.has(key) &&
+        !schemaAllowsNull(propertySchema) &&
+        schemaAllowsNull(constrainedSchema)
+      ) {
+        delete copy[key];
+        erasedCount += 1;
+        continue;
+      }
+      copy[key] = walk(propertySchema, constrainedSchema, copy[key]);
+    }
+    return copy;
+  };
+
+  return { value: walk(original, transport, value), erasedCount };
+}
+
 function decodeJsonPointerToken(token: string): string {
   if (/~(?:[^01]|$)/.test(token)) {
     throw new UnsupportedOutputSchemaError(

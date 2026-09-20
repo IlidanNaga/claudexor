@@ -180,7 +180,11 @@ gate's explicit exemptions):
   transport copy; external, cyclic, dynamic/recursive, and nested-`$id`
   references, `$ref` siblings, `unevaluatedItems`, and non-equivalent
   `unevaluatedProperties` shapes are refused at preflight with the typed
-  `invalid_output_schema` code — never a mid-run vendor error.
+  `invalid_output_schema` code — never a mid-run vendor error. Strict transport
+  may emit `null` for a caller-optional field; the engine restores that
+  adapter-created omission before original-schema validation and records the
+  count in `normalized_optional_nulls`. Required-null and caller-nullable
+  fields retain their original semantics.
 - `--thread <id>` / `--resume`: continue an existing thread (the daemon
   funnels the run through its single thread-turn creation point); `--resume`
   picks the most recently updated thread.

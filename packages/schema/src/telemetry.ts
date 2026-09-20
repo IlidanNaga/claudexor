@@ -271,6 +271,14 @@ export const StructuredOutputConformance = z
       .describe(
         "Artifact path of the materialized structured output: final/output.json when conformant, final/output.invalid.json when parsed but non-conformant; null when the answer never parsed.",
       ),
+    normalized_optional_nulls: z
+      .number()
+      .int()
+      .nonnegative()
+      .default(0)
+      .describe(
+        "Number of adapter-created nullable optional fields restored to omission before original-schema validation.",
+      ),
     generated_at: IsoTimestamp.describe("When the receipt was generated."),
   })
   .describe(

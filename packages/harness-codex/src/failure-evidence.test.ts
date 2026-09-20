@@ -2,7 +2,8 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { CredentialProfile, ModelCallRequest, ModelCallResult } from "@claudexor/schema";
 import { createCodexModelAdapter } from "./model.js";
-import { readResponsesStream } from "./responses.js";
+import { emptyModelResult, readResponsesStream } from "./responses.js";
+import { ResponseFailureCapture } from "./failure-evidence.js";
 
 const route = {
   source: "codex",
@@ -41,6 +42,34 @@ const socketError = () =>
   });
 
 describe("exact failed Responses evidence", () => {
+  it("records first-byte, final silence and largest inter-chunk gaps", () => {
+    let now = 1000;
+    const capture = new ResponseFailureCapture(false, () => now);
+    capture.response(new Response(null));
+    now += 20;
+    capture.receive(new Uint8Array([1]));
+    now += 80;
+    capture.receive(new Uint8Array([2]));
+    now += 40;
+    const result = emptyModelResult(route);
+    result.outcome = "unknown";
+    result.problem = {
+      code: "transport_unknown",
+      message: "interrupted",
+      context: {},
+      retryable: false,
+      fieldErrors: {},
+      requiredActions: [],
+      evidenceRefs: [],
+    };
+    capture.finish(result);
+    expect(result.problem?.context).toMatchObject({
+      timeToFirstByteMs: 20,
+      silenceMs: 40,
+      largestSilenceMs: 80,
+    });
+  });
+
   it("retains the received prefix when the final UTF-8 decoder flush fails", async () => {
     const bytes = Buffer.from([195]);
     const result = await readResponsesStream(new Response(bytes), route, true);
