@@ -1,5 +1,12 @@
 # @claudexor/schema
 
+## 3.12.7
+
+### Patch Changes
+
+- Restore adapter-created nulls for optional review fields before original-schema validation, preserving the caller contract and substantive findings. Codex Responses failure evidence now records monotonic chunk timing and deterministic interrupted-stream diagnostics without adding automatic retries.
+  - @claudexor/util@3.12.7
+
 ## 3.12.6
 
 ### Patch Changes

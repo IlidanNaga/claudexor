@@ -1,5 +1,35 @@
 # @claudexor/cli
 
+## 3.12.7
+
+### Patch Changes
+
+- Restore adapter-created nulls for optional review fields before original-schema validation, preserving the caller contract and substantive findings. Codex Responses failure evidence now records monotonic chunk timing and deterministic interrupted-stream diagnostics without adding automatic retries.
+- Updated dependencies
+  - @claudexor/harness-codex@3.12.7
+  - @claudexor/orchestrator@3.12.7
+  - @claudexor/schema@3.12.7
+  - @claudexor/acp-server@3.12.7
+  - @claudexor/config@3.12.7
+  - @claudexor/control-api@3.12.7
+  - @claudexor/core@3.12.7
+  - @claudexor/daemon@3.12.7
+  - @claudexor/delivery@3.12.7
+  - @claudexor/gateway@3.12.7
+  - @claudexor/harness-agy@3.12.7
+  - @claudexor/harness-claude@3.12.7
+  - @claudexor/harness-cursor@3.12.7
+  - @claudexor/harness-fake@3.12.7
+  - @claudexor/harness-opencode@3.12.7
+  - @claudexor/harness-raw-api@3.12.7
+  - @claudexor/mcp-server@3.12.7
+  - @claudexor/review@3.12.7
+  - @claudexor/workspace@3.12.7
+  - @claudexor/artifact-store@3.12.7
+  - @claudexor/journal@3.12.7
+  - @claudexor/secrets@3.12.7
+  - @claudexor/util@3.12.7
+
 ## 3.12.6
 
 ### Patch Changes
