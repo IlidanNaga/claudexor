@@ -2,7 +2,8 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { CredentialProfile, ModelCallRequest, ModelCallResult } from "@claudexor/schema";
 import { createCodexModelAdapter } from "./model.js";
-import { readResponsesStream } from "./responses.js";
+import { emptyModelResult, readResponsesStream } from "./responses.js";
+import { ResponseFailureCapture } from "./failure-evidence.js";
 
 const route = {
   source: "codex",
@@ -41,6 +42,59 @@ const socketError = () =>
   });
 
 describe("exact failed Responses evidence", () => {
+  it("records first-byte, final silence and largest inter-chunk gaps", () => {
+    let now = 1000;
+    const capture = new ResponseFailureCapture(false, () => now);
+    capture.response(new Response(null));
+    now += 20;
+    capture.receive(new Uint8Array([1]));
+    now += 80;
+    capture.receive(new Uint8Array([2]));
+    now += 120;
+    const result = emptyModelResult(route);
+    result.outcome = "unknown";
+    result.problem = {
+      code: "transport_unknown",
+      message: "interrupted",
+      context: {},
+      retryable: false,
+      fieldErrors: {},
+      requiredActions: [],
+      evidenceRefs: [],
+    };
+    capture.finish(result);
+    expect(result.problem?.context).toMatchObject({
+      timeToFirstChunkMs: 20,
+      lastChunkAfterResponseMs: 100,
+      silenceMs: 120,
+      largestSilenceMs: 120,
+    });
+  });
+
+  it("ignores a zero-length chunk before recording timing", () => {
+    let now = 1000;
+    const capture = new ResponseFailureCapture(false, () => now);
+    capture.response(new Response(null));
+    now += 20;
+    capture.receive(new Uint8Array());
+    const result = emptyModelResult(route);
+    result.outcome = "unknown";
+    result.problem = {
+      code: "transport_unknown",
+      message: "empty",
+      context: {},
+      retryable: false,
+      fieldErrors: {},
+      requiredActions: [],
+      evidenceRefs: [],
+    };
+    capture.finish(result);
+    expect(result.problem?.context).not.toHaveProperty("timeToFirstChunkMs");
+    expect(result.problem?.context).not.toHaveProperty("silenceMs");
+    expect(result.problem?.context).not.toHaveProperty("largestSilenceMs");
+    expect(result.problem?.context).not.toHaveProperty("lastChunkAfterResponseMs");
+  });
+
   it("retains the received prefix when the final UTF-8 decoder flush fails", async () => {
     const bytes = Buffer.from([195]);
     const result = await readResponsesStream(new Response(bytes), route, true);
@@ -55,6 +109,27 @@ describe("exact failed Responses evidence", () => {
     });
     expect(Buffer.from(result.failureEvidence!.bodyBase64, "base64").equals(bytes)).toBe(true);
   });
+
+  it.each([
+    ["created", 'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n'],
+    ["reasoning", 'data: {"type":"response.reasoning_summary_text.delta","delta":"x"}\n\n'],
+    ["mid-delta", 'data: {"type":"response.output_text.delta","delta":"partial"}\n\n'],
+  ] as const)(
+    "classifies a reader break after %s as unknown with captured breakpoint",
+    async (_label, raw) => {
+      const result = await readResponsesStream(
+        brokenReader(Buffer.from(raw), new Error("read ETIMEDOUT")),
+        route,
+        true,
+      );
+      expect(result).toMatchObject({
+        outcome: "unknown",
+        problem: { code: "transport_unknown", context: { stage: "read" } },
+        failureEvidence: { bodyComplete: false, errors: [{ message: "read ETIMEDOUT" }] },
+      });
+      expect(result.problem?.context.lastEventType).toBeTruthy();
+    },
+  );
 
   it("captures the canonical message-schema rejection before it reaches the daemon", async () => {
     const result = await readResponsesStream(

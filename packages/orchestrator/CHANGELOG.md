@@ -1,5 +1,27 @@
 # @claudexor/orchestrator
 
+## 3.12.7
+
+### Patch Changes
+
+- Restore adapter-created nulls for optional review fields before original-schema validation, preserving the caller contract and substantive findings. Codex Responses failure evidence now records monotonic chunk timing and deterministic interrupted-stream diagnostics without adding automatic retries.
+- Updated dependencies
+  - @claudexor/schema@3.12.7
+  - @claudexor/arbitration@3.12.7
+  - @claudexor/budget@3.12.7
+  - @claudexor/config@3.12.7
+  - @claudexor/context@3.12.7
+  - @claudexor/core@3.12.7
+  - @claudexor/delivery@3.12.7
+  - @claudexor/event-log@3.12.7
+  - @claudexor/gateway@3.12.7
+  - @claudexor/policy@3.12.7
+  - @claudexor/review@3.12.7
+  - @claudexor/workspace@3.12.7
+  - @claudexor/synthesis@3.12.7
+  - @claudexor/artifact-store@3.12.7
+  - @claudexor/util@3.12.7
+
 ## 3.12.6
 
 ### Patch Changes
