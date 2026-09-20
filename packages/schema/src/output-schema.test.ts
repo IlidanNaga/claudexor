@@ -33,6 +33,18 @@ describe("strictifyOutputSchema", () => {
       erasedCount: 2,
     });
   });
+
+  it("fails closed when branch-dependent schema applicators are present", () => {
+    const schema = {
+      type: "object",
+      properties: { status: { type: "string" } },
+      anyOf: [{ properties: { status: { type: ["string", "null"] } } }],
+    };
+    expect(restoreStrictOptionalNulls(schema, { status: null })).toEqual({
+      value: { status: null },
+      erasedCount: 0,
+    });
+  });
   it("keeps the dialect declaration out of the native provider transport", () => {
     const source = {
       $schema: "https://json-schema.org/draft/2020-12/schema",

@@ -84,6 +84,7 @@ describe("structured output schema dialects", () => {
       log,
       schema,
       answerText: JSON.stringify({ note: null }),
+      transportStrictified: true,
     });
     expect(verdict).toEqual({ status: "passed", reason: null, normalizedOptionalNulls: 1 });
     expect(JSON.parse(readFileSync(join(paths.finalDir, "output.json"), "utf8"))).toEqual({});
@@ -111,6 +112,7 @@ describe("structured output schema dialects", () => {
       log,
       schema,
       answerText: JSON.stringify({ note: null }),
+      transportStrictified: true,
     });
     expect(verdict.status).toBe("failed");
     expect(verdict.normalizedOptionalNulls).toBe(0);
@@ -170,6 +172,7 @@ describe("structured output schema dialects", () => {
           },
         ],
       }),
+      transportStrictified: true,
     });
     expect(verdict).toEqual({ status: "passed", reason: null, normalizedOptionalNulls: 2 });
     expect(JSON.parse(readFileSync(join(paths.finalDir, "output.json"), "utf8"))).toEqual({

@@ -123,6 +123,8 @@ export function finalizeStructuredOutput(opts: {
   log: EventLog;
   schema: Record<string, unknown>;
   answerText: string | null | undefined;
+  /** True only when the answer rode the adapter-owned strict transport copy. */
+  transportStrictified?: boolean;
 }): StructuredOutputVerdict {
   const schemaDialect = outputSchemaDialect(opts.schema);
   const text = opts.answerText?.trim() ?? "";
@@ -147,7 +149,9 @@ export function finalizeStructuredOutput(opts: {
     // strict:false — accept the JSON Schema dialect as-authored; do not
     // re-litigate meta-schema strictness (the boundary already proved it
     // compiles). This validates the ORIGINAL caller schema.
-    const restored = restoreStrictOptionalNulls(opts.schema, value);
+    const restored = opts.transportStrictified
+      ? restoreStrictOptionalNulls(opts.schema, value)
+      : { value, erasedCount: 0 };
     normalizedOptionalNulls = restored.erasedCount;
     const compiler = outputSchemaCompiler(opts.schema);
     try {

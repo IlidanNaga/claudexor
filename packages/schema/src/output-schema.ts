@@ -109,6 +109,32 @@ function schemaAllowsNull(schema: unknown): boolean {
   return false;
 }
 
+function supportsReviewNullRestore(schema: unknown): boolean {
+  if (Array.isArray(schema)) return schema.every(supportsReviewNullRestore);
+  if (!schema || typeof schema !== "object") return true;
+  const unsupported = new Set([
+    "allOf",
+    "anyOf",
+    "oneOf",
+    "if",
+    "then",
+    "else",
+    "contains",
+    "prefixItems",
+    "dependencies",
+    "dependentSchemas",
+    "patternProperties",
+    "unevaluatedProperties",
+    "unevaluatedItems",
+  ]);
+  for (const [key, child] of Object.entries(schema as Record<string, unknown>)) {
+    if (unsupported.has(key)) return false;
+    if (key === "items" && Array.isArray(child)) return false;
+    if (!supportsReviewNullRestore(child)) return false;
+  }
+  return true;
+}
+
 /**
  * Restore the caller's optional-field semantics after a vendor strict transport
  * response. Strict mode has to emit every key, and represents a caller-optional
@@ -137,6 +163,7 @@ export function restoreStrictOptionalNulls(
   } catch {
     return { value, erasedCount: 0 };
   }
+  if (!supportsReviewNullRestore(original)) return { value, erasedCount: 0 };
   let erasedCount = 0;
 
   const walk = (source: unknown, constrained: unknown, current: unknown): unknown => {

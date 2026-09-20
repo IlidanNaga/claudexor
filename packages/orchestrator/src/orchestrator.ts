@@ -4099,6 +4099,7 @@ export class Orchestrator {
           log,
           schema: contract.output_schema,
           answerText: winnerAnswer,
+          transportStrictified: true,
         });
       }
       if (mutatingRun && winnerRun.files) {
@@ -7433,6 +7434,7 @@ export class Orchestrator {
         log,
         schema: contract.output_schema,
         answerText: opts.deepScan ? report : (succeeded[0]?.report ?? ""),
+        transportStrictified: true,
       });
     }
     this.writeRunTelemetry(

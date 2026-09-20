@@ -50,7 +50,7 @@ describe("exact failed Responses evidence", () => {
     capture.receive(new Uint8Array([1]));
     now += 80;
     capture.receive(new Uint8Array([2]));
-    now += 40;
+    now += 120;
     const result = emptyModelResult(route);
     result.outcome = "unknown";
     result.problem = {
@@ -65,8 +65,8 @@ describe("exact failed Responses evidence", () => {
     capture.finish(result);
     expect(result.problem?.context).toMatchObject({
       timeToFirstChunkMs: 20,
-      silenceMs: 40,
-      largestSilenceMs: 80,
+      silenceMs: 120,
+      largestSilenceMs: 120,
     });
   });
 
@@ -84,6 +84,27 @@ describe("exact failed Responses evidence", () => {
     });
     expect(Buffer.from(result.failureEvidence!.bodyBase64, "base64").equals(bytes)).toBe(true);
   });
+
+  it.each([
+    ["created", 'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n'],
+    ["reasoning", 'data: {"type":"response.reasoning_summary_text.delta","delta":"x"}\n\n'],
+    ["mid-delta", 'data: {"type":"response.output_text.delta","delta":"partial"}\n\n'],
+  ] as const)(
+    "classifies a reader break after %s as unknown with captured breakpoint",
+    async (_label, raw) => {
+      const result = await readResponsesStream(
+        brokenReader(Buffer.from(raw), new Error("read ETIMEDOUT")),
+        route,
+        true,
+      );
+      expect(result).toMatchObject({
+        outcome: "unknown",
+        problem: { code: "transport_unknown", context: { stage: "read" } },
+        failureEvidence: { bodyComplete: false, errors: [{ message: "read ETIMEDOUT" }] },
+      });
+      expect(result.problem?.context.lastEventType).toBeTruthy();
+    },
+  );
 
   it("captures the canonical message-schema rejection before it reaches the daemon", async () => {
     const result = await readResponsesStream(

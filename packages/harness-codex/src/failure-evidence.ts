@@ -76,6 +76,8 @@ export class ResponseFailureCapture {
     const first = this.errors[0];
     const code = this.errors.find((error) => error.code !== null)?.code;
     const finishedAtMs = this.now();
+    const trailingSilenceMs =
+      this.lastChunkAtMs === null ? null : Math.max(0, finishedAtMs - this.lastChunkAtMs);
     const timing = {
       ...(this.responseStartedAtMs !== null && this.firstChunkAtMs !== null
         ? { timeToFirstChunkMs: Math.max(0, this.firstChunkAtMs - this.responseStartedAtMs) }
@@ -83,7 +85,9 @@ export class ResponseFailureCapture {
       ...(this.lastChunkAtMs !== null
         ? { silenceMs: Math.max(0, finishedAtMs - this.lastChunkAtMs) }
         : {}),
-      ...(this.lastChunkAtMs !== null ? { largestSilenceMs: this.largestSilenceMs } : {}),
+      ...(trailingSilenceMs !== null
+        ? { largestSilenceMs: Math.max(this.largestSilenceMs, trailingSilenceMs) }
+        : {}),
     };
     if (result.problem)
       result.problem = {
