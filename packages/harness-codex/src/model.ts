@@ -240,9 +240,22 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
           optIn && processing
             ? observeCodexProcessing(processing, result.appliedOptions.serviceTier)
             : undefined;
+        // The turn belongs to the model that ANSWERED, which is known only once
+        // the terminal response names it. The header is captured before the body
+        // is read, so it carries the requested route until this point; binding it
+        // to the observed model keeps the continuation honest when another model
+        // answered, and an unknown model leaves it unbound so the next request
+        // starts a fresh turn instead of replaying one it cannot vouch for.
+        const turn =
+          nativeContinuation && nativeContinuation.route.model !== result.route.model
+            ? {
+                ...nativeContinuation,
+                route: { ...nativeContinuation.route, model: result.route.model },
+              }
+            : nativeContinuation;
         return {
           ...result,
-          ...(nativeContinuation === undefined ? {} : { nativeContinuation }),
+          ...(nativeContinuation === undefined ? {} : { nativeContinuation: turn }),
           ...(observed
             ? {
                 processing: observed,

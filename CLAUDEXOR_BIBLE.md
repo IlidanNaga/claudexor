@@ -898,7 +898,10 @@ invariant or operator decision before proceeding.
   quota after known-positive headroom but before exhausted (stale quota
   never authorizes routing — D3; an OBSERVED live block — a reactive
   vendor-limit cooldown or spent window, stale-but-live included — ranks a
-  row exhausted with its release instant), deterministic profile-id
+  row exhausted with its release instant), a row that recently answered this
+  model's request with a different model (a live, self-expiring
+  model-substitution observation) ranks after every other selectable row,
+  oldest observation first, and is never excluded by it; deterministic profile-id
   tie-break. The per-harness `limit_action` stored default is the kind-aware
   `auto` — it RESOLVES at decision time to `rotate` for subscription
   (`local_session`) subjects and `fail` for metered API-key or unknown

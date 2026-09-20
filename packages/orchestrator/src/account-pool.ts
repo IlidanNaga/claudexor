@@ -1,4 +1,8 @@
-import type { CredentialProfile, QuotaSnapshot } from "@claudexor/schema";
+import type {
+  CredentialProfile,
+  ModelSubstitutionObservation,
+  QuotaSnapshot,
+} from "@claudexor/schema";
 import { quotaConstraintAppliesToModel } from "@claudexor/budget";
 import { profileQuotaBlock } from "./credential-cooldown.js";
 import { limitSubjectRoute, profileHeadroomBreach } from "./credential-profile-rotation.js";
@@ -16,6 +20,13 @@ import { limitSubjectRoute, profileHeadroomBreach } from "./credential-profile-r
  *   3. exhausted rows (fresh evidence at/over the policy threshold) — never
  *      selected; they only count toward "the pool is exhausted".
  * Ties break deterministically by profile id (ascending).
+ *
+ * One key precedes that order among the SELECTABLE rows (1 and 2): a row with a
+ * live model-substitution observation for the requested model — it recently
+ * answered this model's request with a different model — ranks after every
+ * other selectable row, oldest observation first, so a fully marked pool takes
+ * turns instead of re-picking its top-headroom row. The mark never excludes a
+ * row and never makes a pool exhausted. Only model operations pass it.
  *
  * The pool contains SUBSCRIPTION-kind rows only: an api_key row is a paid
  * route and is never silently selected (INV-061); it remains an explicit pin
@@ -80,7 +91,18 @@ export function rankAccountPool(args: {
   excludedProfileIds?: ReadonlySet<string>;
   headroomThreshold: number;
   model?: string | null;
+  /** Live model-substitution observations; only this harness and model apply. */
+  substitutions?: readonly ModelSubstitutionObservation[];
 }): PoolCandidate[] {
+  const now = Date.now();
+  const substitutedAt = new Map<string, number>();
+  for (const obs of args.substitutions ?? []) {
+    if (obs.harness_id !== args.harnessId || obs.requested_model !== args.model) continue;
+    const observed = Date.parse(obs.observed_at);
+    const expires = Date.parse(obs.expires_at);
+    if (!Number.isFinite(observed) || !Number.isFinite(expires) || expires <= now) continue;
+    substitutedAt.set(obs.profile_id, observed);
+  }
   const candidates: PoolCandidate[] = [];
   for (const profile of accountPoolRows(args.registry, args.harnessId)) {
     if (args.excludedProfileIds?.has(profile.profile_id)) continue;
@@ -132,7 +154,21 @@ export function rankAccountPool(args: {
   }
   const rankOf = (verdict: PoolQuotaVerdict): number =>
     verdict.kind === "fresh_headroom" ? 0 : verdict.kind === "unknown" ? 1 : 2;
+  // Exhausted rows keep their place at the end whatever their mark says.
+  const orderOf = (candidate: PoolCandidate): number =>
+    candidate.verdict.kind === "exhausted"
+      ? 2
+      : substitutedAt.has(candidate.profile.profile_id)
+        ? 1
+        : 0;
   return candidates.sort((a, b) => {
+    const byOrder = orderOf(a) - orderOf(b);
+    if (byOrder !== 0) return byOrder;
+    if (orderOf(a) === 1) {
+      const byAge =
+        substitutedAt.get(a.profile.profile_id)! - substitutedAt.get(b.profile.profile_id)!;
+      if (byAge !== 0) return byAge;
+    }
     const byRank = rankOf(a.verdict) - rankOf(b.verdict);
     if (byRank !== 0) return byRank;
     if (a.verdict.kind === "fresh_headroom" && b.verdict.kind === "fresh_headroom") {

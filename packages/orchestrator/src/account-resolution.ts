@@ -3,6 +3,7 @@ import type {
   CredentialProfile,
   CredentialProfileStatus,
   CredentialUnusableObservation,
+  ModelSubstitutionObservation,
   QuotaSnapshot,
 } from "@claudexor/schema";
 import { accountPoolRows, selectFromAccountPool } from "./account-pool.js";
@@ -85,6 +86,10 @@ export interface AccountResolutionContext {
    * refused at the readiness composition point, never re-discovered by
    * spending an attempt. */
   unusable: readonly CredentialUnusableObservation[];
+  /** Live model-substitution observations, passed by model operations only.
+   * They order the unbound pool choice below; a pin and a usable bound
+   * account are resolved before them and never consult them. */
+  substitutions?: readonly ModelSubstitutionObservation[];
   probe: ((profile: CredentialProfile) => Promise<CredentialProfileStatus>) | undefined;
   /** The explicit pin, already resolved/validated by the caller (null = unpinned). */
   pinnedProfile: CredentialProfile | null;
@@ -466,6 +471,7 @@ export async function resolveAccountForRun(
     excludedProfileIds: ctx.excludedProfileIds,
     headroomThreshold: policy.headroom_threshold,
     model,
+    substitutions: ctx.substitutions,
   });
   if (selection.outcome === "selected") {
     const chosen = selection.candidate.profile;

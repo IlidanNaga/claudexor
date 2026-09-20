@@ -6,7 +6,9 @@
  * and secret set/delete each void exactly the verdicts about the credential
  * they touched), while the whole-ledger clear stays with claudexord's
  * login/logout lifecycle. Clearing is fail-open by contract: over-clearing
- * costs at most one attempt rediscovering a refusal.
+ * costs at most one attempt rediscovering a refusal. The model-substitution
+ * ledger clears at the same sites; its rows are managed-login profiles, so a
+ * secret mutation names none of them.
  */
 import { loadConfig } from "@claudexor/config";
 import { invalidateDoctorCache } from "@claudexor/core";
@@ -16,6 +18,7 @@ import { noProjectRepoRoot } from "@claudexor/util";
 import { forgetClaudeOauthRejections } from "./claude-oauth-usage.js";
 import { invalidateStatusProjections } from "./status-projection-cache.js";
 import { credentialUnusableLedger } from "./run-orchestrator.js";
+import { modelSubstitutionLedger } from "./model-services.js";
 
 /** The credential a control-API mutation touched: one registered profile, or
  * a secret name whose subjects are resolved through the registry. */
@@ -39,6 +42,7 @@ export function bustCredentialStatusCaches(
   if (!subject) return;
   if ("harnessId" in subject) {
     credentialUnusableLedger.clearSubject(subject.harnessId, subject.profileId);
+    modelSubstitutionLedger.clearSubject(subject.harnessId, subject.profileId);
     return;
   }
   // A secret names its subjects indirectly: profiles whose secret_ref IS this
@@ -55,4 +59,5 @@ export function bustCredentialStatusCaches(
 export function bustGlobalCredentialStatusCaches(quotaRegistry: () => QuotaRegistry): void {
   bustCredentialStatusCaches(quotaRegistry);
   credentialUnusableLedger.noteCredentialChange();
+  modelSubstitutionLedger.noteCredentialChange();
 }

@@ -1,5 +1,35 @@
 # @claudexor/cli
 
+## 3.12.5
+
+### Patch Changes
+
+- State a served-model mismatch on a model operation as the typed `modelMismatch` result fact without changing its outcome, rank an account that recently answered a model's request with a different model after the other selectable accounts for later Auto selections (a 30-minute in-memory observation that never excludes an account, a pin or a preferred account), and send a turn the same account served with another model through its canonical content and tool calls instead of refusing the next request with `invalid_continuation`.
+- Updated dependencies
+  - @claudexor/schema@3.12.5
+  - @claudexor/harness-codex@3.12.5
+  - @claudexor/daemon@3.12.5
+  - @claudexor/orchestrator@3.12.5
+  - @claudexor/acp-server@3.12.5
+  - @claudexor/config@3.12.5
+  - @claudexor/control-api@3.12.5
+  - @claudexor/core@3.12.5
+  - @claudexor/delivery@3.12.5
+  - @claudexor/gateway@3.12.5
+  - @claudexor/harness-agy@3.12.5
+  - @claudexor/harness-claude@3.12.5
+  - @claudexor/harness-cursor@3.12.5
+  - @claudexor/harness-fake@3.12.5
+  - @claudexor/harness-opencode@3.12.5
+  - @claudexor/harness-raw-api@3.12.5
+  - @claudexor/mcp-server@3.12.5
+  - @claudexor/review@3.12.5
+  - @claudexor/workspace@3.12.5
+  - @claudexor/artifact-store@3.12.5
+  - @claudexor/journal@3.12.5
+  - @claudexor/secrets@3.12.5
+  - @claudexor/util@3.12.5
+
 ## 3.12.4
 
 ### Patch Changes

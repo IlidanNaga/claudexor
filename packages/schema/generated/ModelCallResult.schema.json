@@ -160,6 +160,30 @@
         "route": {
           "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/nativeContinuation/properties/route"
         },
+        "modelMismatch": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "requested": {
+                  "type": "string"
+                },
+                "observed": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "requested",
+                "observed"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Requested-vs-observed model mismatch on a completed or incomplete terminal response; null or absent when they match or either side is unknown. The outcome is unchanged."
+        },
         "usage": {
           "type": "object",
           "properties": {

@@ -264,20 +264,26 @@ describe("Codex model request translation", () => {
       { type: "function_call_output", call_id: "call_original", output: "result" },
     ]);
   });
+  const canonicalTurn = {
+    role: "assistant",
+    content: "готово 🐍",
+    tool_calls: [
+      { id: "call_original", type: "function", function: { name: "inspect", arguments: "{}" } },
+    ],
+  };
   it.each([
     { ...route, accountFingerprint: "different" },
     { ...route, accountFingerprint: null },
-    { ...route, model: "different" },
     { ...route, credentialProfileId: "different" },
     { ...route, source: "other" },
-  ])("refuses continuation across binding %j", (other) => {
+    { ...route, accountFingerprint: "different", model: "different" },
+  ])("refuses continuation across account binding %j", (other) => {
     expect(() =>
       buildResponsesRequest(
         request({
           messages: [
             {
-              role: "assistant",
-              content: null,
+              ...canonicalTurn,
               nativeContinuation: {
                 format: CODEX_CONTINUATION_FORMAT,
                 route: other,
@@ -289,6 +295,122 @@ describe("Codex model request translation", () => {
         route,
       ),
     ).toThrow("exact account");
+  });
+  it.each(["different", null])(
+    "projects a turn served by model %j structurally instead of replaying it",
+    (model) => {
+      const body = buildResponsesRequest(
+        request({
+          messages: [
+            { role: "user", content: "user" },
+            {
+              ...canonicalTurn,
+              nativeContinuation: {
+                format: CODEX_CONTINUATION_FORMAT,
+                route: { ...route, model },
+                payload: nativeItems,
+              },
+            },
+            { role: "tool", tool_call_id: "call_original", content: "result" },
+          ],
+        }),
+        route,
+      );
+      expect(body.input).toEqual([
+        { type: "message", role: "user", content: [{ type: "input_text", text: "user" }] },
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "готово 🐍" }],
+        },
+        { type: "function_call", call_id: "call_original", name: "inspect", arguments: "{}" },
+        { type: "function_call_output", call_id: "call_original", output: "result" },
+      ]);
+    },
+  );
+  it.each([{ content: null }, { content: "" }, { content: [] }, { content: null, tool_calls: [] }])(
+    "refuses a continuation-only turn served by another model %j",
+    (turn) => {
+      expect(() =>
+        buildResponsesRequest(
+          request({
+            messages: [
+              {
+                role: "assistant",
+                ...turn,
+                nativeContinuation: {
+                  format: CODEX_CONTINUATION_FORMAT,
+                  route: { ...route, model: "different" },
+                  payload: nativeItems,
+                },
+              },
+            ],
+          }),
+          route,
+        ),
+      ).toThrow("exact account");
+    },
+  );
+  it.each([
+    { name: "role", message: { role: "user", content: "user" }, native: {} },
+    { name: "format", message: canonicalTurn, native: { format: "other.v1" } },
+    { name: "payload", message: canonicalTurn, native: { payload: { items: nativeItems } } },
+    { name: "item type", message: canonicalTurn, native: { payload: [{ id: "untyped" }] } },
+  ])(
+    "refuses a malformed continuation $name even when only the model differs",
+    ({ message, native }) => {
+      expect(() =>
+        buildResponsesRequest(
+          request({
+            messages: [
+              {
+                ...message,
+                nativeContinuation: {
+                  format: CODEX_CONTINUATION_FORMAT,
+                  route: { ...route, model: "different" },
+                  payload: nativeItems,
+                  ...native,
+                },
+              },
+            ],
+          }),
+          route,
+        ),
+      ).toThrow("exact account");
+    },
+  );
+  it("dispatches the requested model after a round this account served with another one", async () => {
+    const served = await readResponsesStream(
+      stream(
+        frame({
+          type: "response.completed",
+          response: { model: "model-two", output: nativeItems },
+        }),
+      ),
+      route,
+    );
+    // The stamp stays truthful: the turn is bound to the model that produced it.
+    expect(served.message?.nativeContinuation?.route).toEqual({ ...route, model: "model-two" });
+    const body = buildResponsesRequest(
+      request({
+        messages: [
+          { role: "user", content: "user" },
+          served.message!,
+          { role: "tool", tool_call_id: "call_original", content: "result" },
+        ],
+      }),
+      route,
+    );
+    expect(body.model).toBe("model-one");
+    const input = body.input as Array<Record<string, unknown>>;
+    expect(input.map((item) => item.type)).toEqual([
+      "message",
+      "message",
+      "function_call",
+      "function_call_output",
+    ]);
+    expect(input.some((item) => "id" in item || "encrypted_content" in item)).toBe(false);
+    expect(input.slice(2).map((item) => item.call_id)).toEqual(["call_original", "call_original"]);
   });
   it.each([{ maxOutputTokens: 1 }, { temperature: 0 }])(
     "refuses unsupported options %j",

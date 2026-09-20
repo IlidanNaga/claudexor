@@ -1,5 +1,16 @@
 # @claudexor/daemon
 
+## 3.12.5
+
+### Patch Changes
+
+- State a served-model mismatch on a model operation as the typed `modelMismatch` result fact without changing its outcome, rank an account that recently answered a model's request with a different model after the other selectable accounts for later Auto selections (a 30-minute in-memory observation that never excludes an account, a pin or a preferred account), and send a turn the same account served with another model through its canonical content and tool calls instead of refusing the next request with `invalid_continuation`.
+- Updated dependencies
+  - @claudexor/schema@3.12.5
+  - @claudexor/core@3.12.5
+  - @claudexor/journal@3.12.5
+  - @claudexor/util@3.12.5
+
 ## 3.12.4
 
 ### Patch Changes

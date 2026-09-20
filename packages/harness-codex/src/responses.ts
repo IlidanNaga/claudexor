@@ -113,6 +113,11 @@ function content(value: ModelMessage["content"], role: string): unknown[] {
 function replay(message: ModelMessage, route: ModelRoute): unknown[] | null {
   const native = message.nativeContinuation;
   if (!native) return null;
+  // The same account may answer with another model, or disclose none. That
+  // continuation stays bound to the model that produced it and is never
+  // replayed here; the message uses its canonical projection instead. A message
+  // with nothing but its continuation has no projection and still refuses.
+  const otherModel = native.route.model !== route.model;
   if (
     message.role !== "assistant" ||
     native.format !== CODEX_CONTINUATION_FORMAT ||
@@ -120,16 +125,16 @@ function replay(message: ModelMessage, route: ModelRoute): unknown[] | null {
     native.route.accountFingerprint !== route.accountFingerprint ||
     native.route.source !== route.source ||
     native.route.credentialProfileId !== route.credentialProfileId ||
-    native.route.model !== route.model ||
     !Array.isArray(native.payload) ||
-    !native.payload.every((item) => typeof record(item)?.type === "string")
+    !native.payload.every((item) => typeof record(item)?.type === "string") ||
+    (otherModel && !message.content?.length && !message.tool_calls?.length)
   ) {
     throw new CodexModelError(
       "invalid_continuation",
-      "Native continuation must match the exact account, profile, model, and format.",
+      "Native continuation must match the exact account, profile and format, and a turn another model answered must carry its own content or tool calls.",
     );
   }
-  return native.payload;
+  return otherModel ? null : native.payload;
 }
 
 export function validateCodexModelOptions(options: ModelCallOptions): void {

@@ -184,6 +184,14 @@ export const ModelCallResult = z
     outcome: z.enum(["completed", "incomplete", "failed", "unknown"]),
     message: ModelMessage.nullable(),
     route: ModelRoute,
+    modelMismatch: z
+      .object({ requested: z.string(), observed: z.string() })
+      .strict()
+      .nullable()
+      .optional()
+      .describe(
+        "Requested-vs-observed model mismatch on a completed or incomplete terminal response; null or absent when they match or either side is unknown. The outcome is unchanged.",
+      ),
     usage: ModelUsage,
     cost: ModelCostEvidence,
     appliedOptions: ModelCallOptions,
