@@ -242,16 +242,16 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
             : undefined;
         // The turn belongs to the model that ANSWERED, which is known only once
         // the terminal response names it. The header is captured before the body
-        // is read, so it carries the requested route until this point; binding it
-        // to the observed model keeps the continuation honest when another model
-        // answered, and an unknown model leaves it unbound so the next request
-        // starts a fresh turn instead of replaying one it cannot vouch for.
+        // is read, so it carries the requested route until this point, and a
+        // terminal response that names another model rebinds it there.
+        // A response that names NO model says nothing about whose turn this is:
+        // a refused, torn or aborted body leaves the caller's own token exactly
+        // as it was, so a live turn survives an incomplete answer instead of
+        // being re-rolled into a fresh conversation.
+        const answered = result.route.model;
         const turn =
-          nativeContinuation && nativeContinuation.route.model !== result.route.model
-            ? {
-                ...nativeContinuation,
-                route: { ...nativeContinuation.route, model: result.route.model },
-              }
+          nativeContinuation && answered !== null && nativeContinuation.route.model !== answered
+            ? { ...nativeContinuation, route: { ...nativeContinuation.route, model: answered } }
             : nativeContinuation;
         return {
           ...result,

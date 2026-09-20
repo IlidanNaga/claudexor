@@ -1,5 +1,15 @@
 # @claudexor/harness-codex
 
+## 3.12.6
+
+### Patch Changes
+
+- Keep a live Codex turn across a response that names no model, so a refused or torn body no longer starts a fresh vendor conversation on the next request.
+  - @claudexor/core@3.12.6
+  - @claudexor/schema@3.12.6
+  - @claudexor/secrets@3.12.6
+  - @claudexor/util@3.12.6
+
 ## 3.12.5
 
 ### Patch Changes
