@@ -106,10 +106,6 @@ function schemaAllowsNull(schema: unknown): boolean {
   const value = schema as Record<string, unknown>;
   if (value["const"] === null) return true;
   if (Array.isArray(value["type"]) && value["type"].includes("null")) return true;
-  for (const key of ["anyOf", "oneOf"] as const) {
-    const alternatives = value[key];
-    if (Array.isArray(alternatives) && alternatives.some(schemaAllowsNull)) return true;
-  }
   return false;
 }
 
@@ -119,7 +115,11 @@ function schemaAllowsNull(schema: unknown): boolean {
  * non-nullable field as `required: true` plus `type: [T, "null"]`. A null in
  * exactly that adapter-created position means omission; null in a caller-
  * required or caller-nullable field remains data and is judged by the original
- * schema. The returned value is a copy and the count is receipt telemetry.
+ * schema. The production review contract supports inline object properties and
+ * nested array `items` schemas. Branch-dependent applicators, maps and
+ * conditional schemas stay with the original validator and remain a typed
+ * conformance failure rather than being guessed here. The returned value is a
+ * copy and the count is receipt telemetry.
  */
 export function restoreStrictOptionalNulls(
   schema: Record<string, unknown>,
@@ -171,7 +171,7 @@ export function restoreStrictOptionalNulls(
     );
     const copy = { ...(current as Record<string, unknown>) };
     for (const [key, propertySchema] of Object.entries(sourceProps)) {
-      if (!(key in copy)) continue;
+      if (!Object.prototype.hasOwnProperty.call(copy, key)) continue;
       const constrainedSchema = constrainedProps[key];
       if (
         copy[key] === null &&

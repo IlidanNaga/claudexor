@@ -3020,14 +3020,16 @@ every non-capable route). Structured output is also gated OFF when the spec
 will ride the interactive stream-json transport — that vendor combination
 is unverified; fenced parsing carries interactive runs.
 
-Strict transport optionality is adapter-owned. A caller schema keeps its
-original optional property semantics as the conformance authority; when the
-strict vendor form emits `null` for a property that was optional and
+Strict transport optionality is adapter-owned for the production review
+contract. A caller schema keeps its original optional property semantics as the
+conformance authority; for inline object properties and nested array `items`,
+when the strict vendor form emits `null` for a property that was optional and
 non-nullable in that original schema, the engine restores omission before
 validation. Required or caller-nullable `null` values retain their original
-semantics. The receipt records the number of restored adapter-created nulls as
-`normalized_optional_nulls`, while the raw answer and invalid diagnostic stay
-unchanged.
+semantics. Branch-dependent applicators, maps and conditional schemas remain a
+typed conformance failure rather than being guessed. The receipt records the
+number of restored adapter-created nulls as `normalized_optional_nulls`, while
+the raw answer and invalid diagnostic stay unchanged.
 
 WorkReport envelope (D-16): on a `work_report_transport: constrained` route the
 engine COMPILES a transport ENVELOPE `{ work_report, output }` that wraps any

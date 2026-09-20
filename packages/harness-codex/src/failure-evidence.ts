@@ -21,7 +21,7 @@ export class ResponseFailureCapture {
 
   constructor(
     private readonly enabled = false,
-    now: () => number = Date.now,
+    now: () => number = () => globalThis.performance?.now() ?? Date.now(),
   ) {
     this.now = now;
   }
@@ -78,12 +78,12 @@ export class ResponseFailureCapture {
     const finishedAtMs = this.now();
     const timing = {
       ...(this.responseStartedAtMs !== null && this.firstChunkAtMs !== null
-        ? { timeToFirstByteMs: Math.max(0, this.firstChunkAtMs - this.responseStartedAtMs) }
+        ? { timeToFirstChunkMs: Math.max(0, this.firstChunkAtMs - this.responseStartedAtMs) }
         : {}),
       ...(this.lastChunkAtMs !== null
         ? { silenceMs: Math.max(0, finishedAtMs - this.lastChunkAtMs) }
         : {}),
-      largestSilenceMs: this.largestSilenceMs,
+      ...(this.lastChunkAtMs !== null ? { largestSilenceMs: this.largestSilenceMs } : {}),
     };
     if (result.problem)
       result.problem = {

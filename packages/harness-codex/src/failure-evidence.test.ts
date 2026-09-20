@@ -64,7 +64,7 @@ describe("exact failed Responses evidence", () => {
     };
     capture.finish(result);
     expect(result.problem?.context).toMatchObject({
-      timeToFirstByteMs: 20,
+      timeToFirstChunkMs: 20,
       silenceMs: 40,
       largestSilenceMs: 80,
     });
