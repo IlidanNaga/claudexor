@@ -64,7 +64,11 @@ describe("strictifyOutputSchema", () => {
         {
           type: "object",
           properties: {
-            nested: { type: "object", properties: { note: { type: "string" } }, anyOf: [] },
+            nested: {
+              type: "object",
+              properties: { note: { type: "string" } },
+              anyOf: [{ properties: { note: { type: ["string", "null"] } } }],
+            },
           },
           required: [],
         },
@@ -72,6 +76,7 @@ describe("strictifyOutputSchema", () => {
       ),
     ).toEqual({ value: { nested: { note: null } }, erasedCount: 0 });
   });
+
   it("keeps the dialect declaration out of the native provider transport", () => {
     const source = {
       $schema: "https://json-schema.org/draft/2020-12/schema",
