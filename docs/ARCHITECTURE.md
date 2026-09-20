@@ -1439,8 +1439,8 @@ never claimed captured. Successful completed results carry no duplicate wire.
 The evidence follows the existing result resource, GET, ACK and expiry; only
 compact structural diagnostics enter the problem, journal and status.
 For a failed or unknown stream, compact problem context also carries
-`timeToFirstByteMs`, `silenceMs`, and `largestSilenceMs` when the reader saw
-bytes. These are measurements, not an idle watchdog or retry signal; a missing
+`timeToFirstChunkMs`, `silenceMs`, and `largestSilenceMs` when the reader saw
+bytes. The first value starts at response headers, not request dispatch. These are measurements, not an idle watchdog or retry signal; a missing
 terminal frame remains `transport_unknown` and the existing custody/no-blind-
 retry rule stays authoritative.
 Coherent provider terminal facts precede message conversion: unusable completed
