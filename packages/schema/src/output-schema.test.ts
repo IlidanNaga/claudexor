@@ -47,6 +47,31 @@ describe("strictifyOutputSchema", () => {
       erasedCount: 0,
     });
   });
+
+  it("keeps keyword-looking property names and fails closed for nested applicators", () => {
+    expect(
+      restoreStrictOptionalNulls(
+        {
+          type: "object",
+          properties: { if: { type: "string" }, anyOf: { type: "string" } },
+          required: [],
+        },
+        { if: null, anyOf: null },
+      ),
+    ).toEqual({ value: {}, erasedCount: 2 });
+    expect(
+      restoreStrictOptionalNulls(
+        {
+          type: "object",
+          properties: {
+            nested: { type: "object", properties: { note: { type: "string" } }, anyOf: [] },
+          },
+          required: [],
+        },
+        { nested: { note: null } },
+      ),
+    ).toEqual({ value: { nested: { note: null } }, erasedCount: 0 });
+  });
   it("keeps the dialect declaration out of the native provider transport", () => {
     const source = {
       $schema: "https://json-schema.org/draft/2020-12/schema",

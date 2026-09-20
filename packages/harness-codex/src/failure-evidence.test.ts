@@ -65,6 +65,7 @@ describe("exact failed Responses evidence", () => {
     capture.finish(result);
     expect(result.problem?.context).toMatchObject({
       timeToFirstChunkMs: 20,
+      lastChunkAfterResponseMs: 100,
       silenceMs: 120,
       largestSilenceMs: 120,
     });
@@ -91,6 +92,7 @@ describe("exact failed Responses evidence", () => {
     expect(result.problem?.context).not.toHaveProperty("timeToFirstChunkMs");
     expect(result.problem?.context).not.toHaveProperty("silenceMs");
     expect(result.problem?.context).not.toHaveProperty("largestSilenceMs");
+    expect(result.problem?.context).not.toHaveProperty("lastChunkAfterResponseMs");
   });
 
   it("retains the received prefix when the final UTF-8 decoder flush fails", async () => {
