@@ -93,7 +93,58 @@ describe("exact failed Responses evidence", () => {
     expect(result.problem?.context).not.toHaveProperty("silenceMs");
     expect(result.problem?.context).not.toHaveProperty("largestSilenceMs");
     expect(result.problem?.context).not.toHaveProperty("lastChunkAfterResponseMs");
+    expect(result.problem?.context).not.toHaveProperty("lastEventAfterResponseMs");
+    expect(result.problem?.context).not.toHaveProperty("eventSilenceMs");
   });
+
+  it.each([": heartbeat\n\n", 'data: {"type":"response.output_text.delta"'])(
+    "keeps event silence independent of a later non-event chunk: %s",
+    async (tail) => {
+      let now = 1000;
+      const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
+      const reader = {
+        read: vi
+          .fn()
+          .mockImplementationOnce(async () => {
+            now = 1020;
+            return { done: false, value: Buffer.from('data: {"type":"response.created"}\n\n') };
+          })
+          .mockImplementationOnce(async () => {
+            now = 1100;
+            return { done: false, value: Buffer.from(tail) };
+          })
+          .mockImplementationOnce(async () => {
+            now = 1120;
+            throw Object.assign(new Error("read ETIMEDOUT"), { code: "ETIMEDOUT" });
+          }),
+        cancel: vi.fn().mockResolvedValue(undefined),
+        releaseLock: vi.fn(),
+      };
+      const response = new Response(null);
+      Object.defineProperty(response, "body", { value: { getReader: () => reader } });
+      try {
+        const result = await readResponsesStream(response, route, true);
+        expect(result.outcome).toBe("unknown");
+        expect(result.problem).toMatchObject({
+          code: "transport_unknown",
+          context: {
+            eventCount: 1,
+            lastEventType: "response.created",
+            errorCode: "ETIMEDOUT",
+            timeToFirstChunkMs: 20,
+            lastChunkAfterResponseMs: 100,
+            silenceMs: 20,
+            lastEventAfterResponseMs: 20,
+            eventSilenceMs: 100,
+          },
+        });
+        expect(result.failureEvidence?.bodyComplete).toBe(false);
+        expect(reader.read).toHaveBeenCalledTimes(3);
+      } finally {
+        clock.mockRestore();
+      }
+    },
+  );
 
   it("retains the received prefix when the final UTF-8 decoder flush fails", async () => {
     const bytes = Buffer.from([195]);

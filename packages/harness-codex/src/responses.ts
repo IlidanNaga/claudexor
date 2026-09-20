@@ -361,8 +361,7 @@ export async function readResponsesStream(
     const event = record(JSON.parse(raw));
     capture.stage = "event";
     if (!event) throw new Error("invalid SSE object");
-    capture.eventCount += 1;
-    capture.lastEventType = typeof event.type === "string" ? event.type : null;
+    capture.event(event.type);
     if (event.type === "response.output_item.done") {
       const item = record(event.item),
         index = counter(event.output_index);

@@ -17,6 +17,7 @@ export class ResponseFailureCapture {
   private responseStartedAtMs: number | null = null;
   private firstChunkAtMs: number | null = null;
   private lastChunkAtMs: number | null = null;
+  private lastEventAtMs: number | null = null;
   private largestSilenceMs = 0;
 
   constructor(
@@ -41,6 +42,12 @@ export class ResponseFailureCapture {
     this.lastChunkAtMs = receivedAt;
     this.receivedBytes += chunk.byteLength;
     if (this.enabled) this.chunks.push(Buffer.from(chunk));
+  }
+
+  event(type: unknown): void {
+    this.eventCount += 1;
+    this.lastEventType = typeof type === "string" ? type : null;
+    this.lastEventAtMs = this.now();
   }
 
   caught(error: unknown): void {
@@ -91,6 +98,12 @@ export class ResponseFailureCapture {
         : {}),
       ...(trailingSilenceMs !== null
         ? { largestSilenceMs: Math.max(this.largestSilenceMs, trailingSilenceMs) }
+        : {}),
+      ...(this.responseStartedAtMs !== null && this.lastEventAtMs !== null
+        ? {
+            lastEventAfterResponseMs: Math.max(0, this.lastEventAtMs - this.responseStartedAtMs),
+            eventSilenceMs: Math.max(0, finishedAtMs - this.lastEventAtMs),
+          }
         : {}),
     };
     if (result.problem)
