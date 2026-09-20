@@ -1,5 +1,11 @@
 # @claudexor/arbitration
 
+## 3.12.6
+
+### Patch Changes
+
+- @claudexor/schema@3.12.6
+
 ## 3.12.5
 
 ### Patch Changes

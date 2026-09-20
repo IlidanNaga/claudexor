@@ -454,6 +454,29 @@ describe("single-generation Codex adapter", () => {
     expect(result.message?.nativeContinuation?.format).toBe("codex.responses.v1");
     expect(ModelCallResult.parse(result)).not.toHaveProperty("nativeContinuation");
   });
+  it("keeps a live turn across a body that names no model, instead of re-rolling the conversation", async () => {
+    const fixture = setup(() => withHeader(terminal(), "first-token"));
+    const first = await fixture.adapter.invoke(
+      { ...fixture.request, nativeContinuation: null },
+      fixture.context,
+    );
+    expect(first.nativeContinuation?.route.model).toBe("model-one");
+    // A refused or torn body says nothing about whose turn this is; rebinding
+    // it to an unknown model would start a fresh vendor conversation on every
+    // mid-turn 429, and a fresh conversation is where substitution is decided.
+    fixture.fetcher.mockImplementation(async (_url, init) =>
+      init?.method === "POST"
+        ? new Response("{}", { status: 429, headers: { "content-type": "application/json" } })
+        : Response.json(catalog),
+    );
+    const refused = await fixture.adapter.invoke(
+      { ...fixture.request, nativeContinuation: first.nativeContinuation },
+      fixture.context,
+    );
+    expect(refused.route.model).toBeNull();
+    expect(refused.nativeContinuation).toEqual(first.nativeContinuation);
+  });
+
   it("binds the live turn to the model that ANSWERED, so a substituted turn is not replayed back onto it", async () => {
     const substituted = () =>
       new Response(
