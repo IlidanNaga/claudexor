@@ -2016,8 +2016,7 @@ export class Orchestrator {
       processing_allow_paid: knobs.processingAllowPaid,
       max_turns: knobs.maxTurns,
       ...(intent === "synthesize" ? {} : { instructions: contract.instructions }),
-      // The user's answer contract rides every answer-producing lane INCLUDING
-      // synthesis (its answer can become the final one). The adapter gets the
+      // The answer contract rides every answer-producing lane, including synthesis.
       // vendor-STRICT transport form; the engine validator keeps the ORIGINAL
       // contract as the conformance authority.
       ...(contract.output_schema
