@@ -95,6 +95,31 @@ describe("structured output schema dialects", () => {
     log.dispose();
   });
 
+  it("does not restore caller nulls when strict transport provenance is absent", () => {
+    const schema = { type: "object", properties: { note: { type: "string" } }, required: [] };
+    const root = reapMk(join(tmpdir(), "claudexor-structured-output-"));
+    const store = new ArtifactStore(root, { claudexorDir: join(root, "runtime") });
+    const paths = store.createRun("run-nonstrict-null");
+    const log = new EventLog(paths.eventsPath, "run-nonstrict-null", "task-test");
+    const verdict = finalizeStructuredOutput({
+      store,
+      finalDir: paths.finalDir,
+      log,
+      schema,
+      answerText: JSON.stringify({ note: null }),
+      transportStrictified: false,
+    });
+    expect(verdict).toEqual({
+      status: "failed",
+      reason: "/note: must be string",
+      normalizedOptionalNulls: 0,
+    });
+    expect(JSON.parse(readFileSync(join(paths.finalDir, "output.invalid.json"), "utf8"))).toEqual({
+      note: null,
+    });
+    log.dispose();
+  });
+
   it("keeps required null invalid after optional-null restoration", () => {
     const schema = {
       type: "object",

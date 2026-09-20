@@ -32,6 +32,7 @@ export class ResponseFailureCapture {
   }
 
   receive(chunk: Uint8Array): void {
+    if (chunk.byteLength === 0) return;
     const receivedAt = this.now();
     if (this.firstChunkAtMs === null) this.firstChunkAtMs = receivedAt;
     if (this.lastChunkAtMs !== null) {
@@ -84,6 +85,9 @@ export class ResponseFailureCapture {
         : {}),
       ...(this.lastChunkAtMs !== null
         ? { silenceMs: Math.max(0, finishedAtMs - this.lastChunkAtMs) }
+        : {}),
+      ...(this.responseStartedAtMs !== null && this.lastChunkAtMs !== null
+        ? { lastChunkAfterResponseMs: Math.max(0, this.lastChunkAtMs - this.responseStartedAtMs) }
         : {}),
       ...(trailingSilenceMs !== null
         ? { largestSilenceMs: Math.max(this.largestSilenceMs, trailingSilenceMs) }

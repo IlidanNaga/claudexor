@@ -70,6 +70,29 @@ describe("exact failed Responses evidence", () => {
     });
   });
 
+  it("ignores a zero-length chunk before recording timing", () => {
+    let now = 1000;
+    const capture = new ResponseFailureCapture(false, () => now);
+    capture.response(new Response(null));
+    now += 20;
+    capture.receive(new Uint8Array());
+    const result = emptyModelResult(route);
+    result.outcome = "unknown";
+    result.problem = {
+      code: "transport_unknown",
+      message: "empty",
+      context: {},
+      retryable: false,
+      fieldErrors: {},
+      requiredActions: [],
+      evidenceRefs: [],
+    };
+    capture.finish(result);
+    expect(result.problem?.context).not.toHaveProperty("timeToFirstChunkMs");
+    expect(result.problem?.context).not.toHaveProperty("silenceMs");
+    expect(result.problem?.context).not.toHaveProperty("largestSilenceMs");
+  });
+
   it("retains the received prefix when the final UTF-8 decoder flush fails", async () => {
     const bytes = Buffer.from([195]);
     const result = await readResponsesStream(new Response(bytes), route, true);

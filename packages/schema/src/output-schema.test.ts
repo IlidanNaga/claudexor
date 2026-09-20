@@ -13,6 +13,7 @@ describe("strictifyOutputSchema", () => {
       properties: {
         optionalText: { type: "string" },
         nullableText: { type: ["string", "null"] },
+        legacyNullable: { type: "string", nullable: true },
         requiredText: { type: "string" },
         nested: {
           type: "object",
@@ -25,11 +26,12 @@ describe("strictifyOutputSchema", () => {
     const restored = restoreStrictOptionalNulls(schema, {
       optionalText: null,
       nullableText: null,
+      legacyNullable: null,
       requiredText: null,
       nested: { child: null },
     });
     expect(restored).toEqual({
-      value: { nullableText: null, requiredText: null, nested: {} },
+      value: { nullableText: null, legacyNullable: null, requiredText: null, nested: {} },
       erasedCount: 2,
     });
   });

@@ -105,6 +105,7 @@ function schemaAllowsNull(schema: unknown): boolean {
   if (!schema || typeof schema !== "object") return false;
   const value = schema as Record<string, unknown>;
   if (value["const"] === null) return true;
+  if (value["nullable"] === true) return true;
   if (Array.isArray(value["type"]) && value["type"].includes("null")) return true;
   return false;
 }
@@ -127,7 +128,14 @@ function supportsReviewNullRestore(schema: unknown): boolean {
     "unevaluatedProperties",
     "unevaluatedItems",
   ]);
-  for (const [key, child] of Object.entries(schema as Record<string, unknown>)) {
+  const entries = Object.entries(schema as Record<string, unknown>);
+  for (const [key, child] of entries) {
+    if (key === "properties" && child && typeof child === "object" && !Array.isArray(child)) {
+      if (!Object.values(child as Record<string, unknown>).every(supportsReviewNullRestore))
+        return false;
+      continue;
+    }
+    if (["enum", "const", "default", "examples"].includes(key)) continue;
     if (unsupported.has(key)) return false;
     if (key === "items" && Array.isArray(child)) return false;
     if (!supportsReviewNullRestore(child)) return false;
