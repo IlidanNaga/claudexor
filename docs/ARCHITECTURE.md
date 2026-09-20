@@ -1391,9 +1391,15 @@ Historical assistant `codex.responses.v1` items replay only under the exact
 account, profile and model that produced them, so the binding stays truthful
 when the vendor answers a request with another model. A turn the same account
 served with another or an undisclosed model is not replayed: it is sent through
-its canonical content and tool calls, with the original tool IDs. A message that
-has nothing but its continuation, a changed or unknown account, and a malformed
-continuation still refuse with `invalid_continuation` before dispatch.
+its canonical content and tool calls, with the original tool IDs. A message that has nothing
+to send that way, a changed or unknown account, and a continuation whose format
+or payload shape is wrong still refuse with `invalid_continuation` before
+dispatch. The projection carries the caller's canonical content and tool calls,
+so an assistant turn's native item boundaries, phases and encrypted arguments do
+not survive it; the original payload stays in the caller's own history.
+The live transport continuation is bound to the model the terminal response
+named, so a turn another model answered is not replayed under the requested
+model either, and an unknown model leaves it unbound.
 
 `ModelOperations` uses the existing daemon command store, idempotency lookup,
 queue capacity, cancellation and terminal boundary. Models and Agents share the

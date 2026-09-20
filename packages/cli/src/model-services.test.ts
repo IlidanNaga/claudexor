@@ -60,6 +60,8 @@ async function fixture(options: { lazy?: boolean } = {}) {
   const substitutions = new ModelSubstitutionLedger(() => new Date(clock.now));
   // The model each account's terminal response discloses; absent = the requested one.
   const served: Record<string, string | null> = {};
+  // Accounts whose terminal response ran out of room rather than completing.
+  const incomplete = new Set<string>();
   let resourceStore: ResourceStore | undefined;
   const resources = vi.fn(() => (resourceStore ??= new ResourceStore(join(root, "resources"))));
   const profiles = ["a", "b"].map((id) =>
@@ -113,7 +115,11 @@ async function fixture(options: { lazy?: boolean } = {}) {
     await context.onDispatch(route);
     const code = failures[context.profile.profile_id];
     return ModelCallResult.parse({
-      outcome: code ? "failed" : "completed",
+      outcome: code
+        ? "failed"
+        : incomplete.has(context.profile.profile_id)
+          ? "incomplete"
+          : "completed",
       message: code ? null : { role: "assistant", content: "own model reply" },
       route:
         context.profile.profile_id in served
@@ -207,6 +213,7 @@ async function fixture(options: { lazy?: boolean } = {}) {
     unusable,
     substitutions,
     served,
+    incomplete,
     clock,
     client,
     agentRunner,
@@ -445,7 +452,6 @@ describe("production model service composition", () => {
         harness_id: "codex",
         profile_id: "a",
         requested_model: "test-model",
-        served_model: "other-model",
       },
     ]);
     const next = await f.run();
@@ -475,6 +481,23 @@ describe("production model service composition", () => {
     f.clock.now += 31 * 60_000;
     expect(f.substitutions.live()).toEqual([]);
     expect((await f.run()).dispatch.route?.credentialProfileId).toBe("a");
+  });
+
+  it("states the mismatch on an incomplete terminal response too", async () => {
+    // An answer that ran out of room was still produced by the other model.
+    const f = await fixture();
+    f.served.a = "other-model";
+    f.incomplete.add("a");
+    const run = await f.run({ mode: "pin", profileId: "a" });
+    expect(
+      JSON.parse((await f.services.routes.readModelResult(run.id)).bytes.toString()),
+    ).toMatchObject({
+      outcome: "incomplete",
+      modelMismatch: { requested: "test-model", observed: "other-model" },
+    });
+    expect(f.substitutions.live()).toMatchObject([
+      { profile_id: "a", requested_model: "test-model" },
+    ]);
   });
 
   it("records no mismatch without a known, different model on a terminal response", async () => {

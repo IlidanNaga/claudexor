@@ -131,7 +131,7 @@ function replay(message: ModelMessage, route: ModelRoute): unknown[] | null {
   ) {
     throw new CodexModelError(
       "invalid_continuation",
-      "Native continuation must match the exact account, profile, model, and format.",
+      "Native continuation must match the exact account, profile and format, and a turn another model answered must carry its own content or tool calls.",
     );
   }
   return otherModel ? null : native.payload;

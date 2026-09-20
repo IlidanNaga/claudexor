@@ -2,6 +2,9 @@ import type { ModelSubstitutionObservation } from "@claudexor/schema";
 import { ModelSubstitutionObservation as ModelSubstitutionObservationSchema } from "@claudexor/schema";
 
 /** Observation retention, not a vendor reset time; a false mark costs only ordering. */
+// The requested model is what ranks; what was served instead travels on the
+// result, where the caller reads it. Keeping a second copy here would be a
+// field no reader consults.
 const TTL_MS = 30 * 60_000;
 /** Bounded memory: the ledger holds evidence, not history. */
 const MAX_ROWS = 64;
@@ -20,7 +23,10 @@ const MAX_ROWS = 64;
  * (INV-014).
  *
  * Deliberately IN-MEMORY, like the `CredentialUnusableLedger` beside it: a
- * restart costs at most one rediscovering operation.
+ * restart forgets every mark, so each account rediscovers its own episode at
+ * the cost of one operation. A result that arrives after its subject was
+ * cleared records a fresh mark, because an observation carries no credential
+ * generation; the cost is ordering, never exclusion.
  *
  * Clearing contract:
  * 1. self-expiry — every row is stamped here with the one retention above;

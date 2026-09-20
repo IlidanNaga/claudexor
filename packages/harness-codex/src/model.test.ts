@@ -454,6 +454,44 @@ describe("single-generation Codex adapter", () => {
     expect(result.message?.nativeContinuation?.format).toBe("codex.responses.v1");
     expect(ModelCallResult.parse(result)).not.toHaveProperty("nativeContinuation");
   });
+  it("binds the live turn to the model that ANSWERED, so a substituted turn is not replayed back onto it", async () => {
+    const substituted = () =>
+      new Response(
+        `data: ${JSON.stringify({
+          type: "response.completed",
+          response: {
+            model: "model-two",
+            output: [native],
+            reasoning: { effort: "medium" },
+            service_tier: "standard",
+            usage: { input_tokens: 10, output_tokens: 4 },
+          },
+        })}\n\n`,
+      );
+    const fixture = setup(() => withHeader(substituted(), "substituted-token"));
+    const first = await fixture.adapter.invoke(
+      { ...fixture.request, nativeContinuation: null },
+      fixture.context,
+    );
+    expect(first.route.model).toBe("model-two");
+    // The header was captured before the body named the model; the continuation
+    // still names what answered, so asking for model-one again starts fresh.
+    expect(first.nativeContinuation).toEqual({
+      route: { ...first.route, model: "model-two" },
+      format: "codex.turn.v1",
+      payload: { turnState: "substituted-token" },
+    });
+    fixture.fetcher.mockImplementation(async (_url, init) =>
+      init?.method === "POST" ? withHeader(terminal(), "fresh-token") : Response.json(catalog),
+    );
+    const second = await fixture.adapter.invoke(
+      { ...fixture.request, nativeContinuation: first.nativeContinuation },
+      fixture.context,
+    );
+    const sends = fixture.fetcher.mock.calls.filter(([, init]) => init?.method === "POST");
+    expect(new Headers(sends[1][1]!.headers).get("x-codex-turn-state")).toBeNull();
+    expect(second.nativeContinuation?.payload).toEqual({ turnState: "fresh-token" });
+  });
   it("captures the first header, replays it across explicit tool/steering calls, and resets on a new caller turn", async () => {
     const fixture = setup(() => withHeader(terminal(), "first-token"));
     const request = {

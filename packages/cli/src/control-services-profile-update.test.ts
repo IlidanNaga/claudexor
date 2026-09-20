@@ -813,7 +813,6 @@ describe("A7 per-subject unusable-ledger clearing on control-API credential muta
       harness_id: "codex",
       profile_id: profileId,
       requested_model: "model-a",
-      served_model: "model-b",
     });
     modelSubstitutionLedger.noteCredentialChange();
     registerConfigDirProfile({ harnessId: "codex", profileId: "work" });

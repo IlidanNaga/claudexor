@@ -400,7 +400,6 @@ export function createModelServices(deps: Dependencies) {
                   harness_id: source.credentialHarness,
                   profile_id: profile.profile_id,
                   requested_model: result.modelMismatch.requested,
-                  served_model: result.modelMismatch.observed,
                 });
               await observe(source, profile, result.problem, result.usage, result.route.model);
             } catch (error) {

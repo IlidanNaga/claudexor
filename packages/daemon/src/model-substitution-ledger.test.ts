@@ -14,7 +14,6 @@ function seen(over: Partial<Parameters<ModelSubstitutionLedger["record"]>[0]> = 
     harness_id: "codex",
     profile_id: "work",
     requested_model: "model-a",
-    served_model: "model-b",
     ...over,
   };
 }
@@ -54,14 +53,13 @@ describe("ModelSubstitutionLedger (bounded self-expiring ordering evidence)", ()
     const { ledger, clock } = ledgerAt();
     ledger.record(seen());
     clock.now = T0 + 10 * MINUTE;
-    ledger.record(seen({ served_model: "model-c" }));
+    ledger.record(seen());
     ledger.record(seen({ requested_model: "model-z" }));
     ledger.record(seen({ profile_id: "other" }));
     expect(ledger.live()).toHaveLength(3);
     expect(ledger.live()[0]).toMatchObject({
       profile_id: "work",
       requested_model: "model-a",
-      served_model: "model-c",
       observed_at: new Date(T0 + 10 * MINUTE).toISOString(),
       expires_at: new Date(T0 + 40 * MINUTE).toISOString(),
     });
