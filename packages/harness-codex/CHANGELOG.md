@@ -1,5 +1,15 @@
 # @claudexor/harness-codex
 
+## 3.12.8
+
+### Patch Changes
+
+- Record parsed SSE event timing separately from later byte chunks so heartbeat or unfinished-frame traffic cannot hide event silence after an interrupted Codex response. Preserve unknown custody and the existing no-retry policy.
+  - @claudexor/core@3.12.8
+  - @claudexor/schema@3.12.8
+  - @claudexor/secrets@3.12.8
+  - @claudexor/util@3.12.8
+
 ## 3.12.7
 
 ### Patch Changes

@@ -1440,8 +1440,11 @@ The evidence follows the existing result resource, GET, ACK and expiry; only
 compact structural diagnostics enter the problem, journal and status.
 For a failed or unknown stream, compact problem context also carries
 `timeToFirstChunkMs`, `lastChunkAfterResponseMs`, `silenceMs`, and
-`largestSilenceMs` when the reader saw
-bytes. The first value starts at response headers, not request dispatch. These are measurements, not an idle watchdog or retry signal; a missing
+`largestSilenceMs` when the reader saw bytes. `lastEventAfterResponseMs` and
+`eventSilenceMs` independently measure the last parsed SSE event: a later comment
+heartbeat or unfinished frame advances only the chunk clock. First-chunk,
+last-chunk and last-event offsets start at response headers, not request dispatch.
+These are measurements, not an idle watchdog or retry signal; a missing
 terminal frame remains `transport_unknown` and the existing custody/no-blind-
 retry rule stays authoritative.
 Coherent provider terminal facts precede message conversion: unusable completed
