@@ -88,7 +88,7 @@ const RUN_STRATEGY_PROPERTIES = {
   plan: {
     council: {
       type: "boolean",
-      description: "Draft n (2..4) plans in parallel, then merge one plan and question set.",
+      description: "Draft n plans (2 to the configured cap), then merge one plan and question set.",
     },
   },
   agent: {

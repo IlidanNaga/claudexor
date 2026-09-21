@@ -50,6 +50,7 @@ export * from "./deep-scan.js";
 export * from "./telemetry.js";
 export * from "./attempt-execution.js";
 export * from "./config.js";
+export * from "./runtime-concurrency.js";
 export * from "./workspace.js";
 export * from "./files-manifest.js";
 export * from "./thread.js";

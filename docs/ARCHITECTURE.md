@@ -1067,10 +1067,37 @@ interactive REPL enters through the managed daemon and `/v2`; the CLI starts it
 when needed and fails loudly if it cannot. There is no second in-process CLI
 run/thread authority. The daemon remains the single scheduler and journal
 writer while the mode pipelines below retain their distinct mutability.
-By default, the daemon admits up to twelve regular jobs globally per data root.
-Same-thread turns remain serialized, while one already validated Delegate child
-may use the scheduler's single overflow lane to prevent a waiting parent from
-deadlocking.
+The daemon admits `runtime.max_concurrent` regular jobs per data root (default
+24). Agents and model operations share this pool; internal candidate and review
+processes are not additional daemon jobs. The same startup snapshot owns
+`runtime.max_parallel_candidates` (default 4 active best-of candidates or scouts),
+`runtime.max_deep_scan_width` (default 8 scouts), and `runtime.max_council_members`
+(default 4 distinct members, minimum 2). These settings accept safe integers
+without a product upper ceiling. They limit capacity, not the requested work:
+request widths and their defaults remain separate. Same-thread turns stay
+serialized; nested Delegate retains its eight-child, depth-one, single-overflow
+contracts. Raising regular capacity does not change those contracts or quotas.
+
+Set the four keys under `runtime` in the user-global `config.yaml` (the selected
+`CLAUDEXOR_CONFIG_DIR`), or use the corresponding environment overrides in
+[INTEGRATIONS](INTEGRATIONS.md#environment-reference). Environment wins over YAML.
+Caps are read once at startup; changing the file never resizes or preempts live
+work. `GET /v2/settings` and `settings show` report `runtime.concurrency` with
+configured values resolved from YAML and the current process environment,
+startup-frozen effective values, and `restartRequired`. An older engine omits
+this block; clients must not substitute defaults. Daemon status health reports
+effective `capacity`. Runtime keys remain file/environment settings, not writable
+through `POST /v2/settings`. Use managed replacement after work drains to apply
+changes. An environment change outside the running process is visible only at
+its next launch.
+
+Unrelated settings writes omit newly materialized concurrency defaults, while
+explicit YAML keys survive (including values equal to defaults). For rollback
+to an engine predating these keys, remove the explicit concurrency keys from
+YAML first; older strict parsers reject them. Environment-only overrides do not
+introduce unknown YAML keys. Library embedders omitting `DaemonServer` capacity
+retain the historical twelve-job fallback.
+
 `claudexor doctor`, `models`, and `auth status` are also thin projections of the
 daemon's typed `/v2/harnesses` and `/v2/harnesses/:id/models` readiness services;
 requested harness filters reach the producer instead of probing unrelated adapters.
@@ -1894,7 +1921,7 @@ plans and repo config never carry protected-path approvals — operator approval
 is always supplied on the current run.
 
 Planning is solo by default. The **Council** plan strategy (`plan --council`,
-optionally `--n 2..4`) turns it into a multi-harness draft-then-merge: round 1
+optionally `--n N`) turns it into a multi-harness draft-then-merge: round 1
 runs N members as parallel planner attempts (each the SAME vendor-native
 read-only planner spawn the solo loop drives, in its own lane on a thread turn;
 Cursor uses native read-only Ask so the final-message WorkReport remains available), whose

@@ -19,6 +19,10 @@ describe("loadConfig", () => {
   ): void {
     const prev = process.env.CLAUDEXOR_CONFIG_DIR;
     const prevReviewerTimeout = process.env.CLAUDEXOR_REVIEWER_TIMEOUT_MS;
+    const prevMaxConcurrent = process.env.CLAUDEXOR_MAX_CONCURRENT;
+    const prevMaxParallelCandidates = process.env.CLAUDEXOR_MAX_PARALLEL_CANDIDATES;
+    const prevMaxDeepScanWidth = process.env.CLAUDEXOR_MAX_DEEP_SCAN_WIDTH;
+    const prevMaxCouncilMembers = process.env.CLAUDEXOR_MAX_COUNCIL_MEMBERS;
     const prevRetryMax = process.env.CLAUDEXOR_TRANSIENT_RETRY_MAX;
     const prevRetryInitialDelay = process.env.CLAUDEXOR_TRANSIENT_RETRY_INITIAL_DELAY_MS;
     const prevRetryMaxDelay = process.env.CLAUDEXOR_TRANSIENT_RETRY_MAX_DELAY_MS;
@@ -29,6 +33,10 @@ describe("loadConfig", () => {
     mkdirSync(configDir, { recursive: true });
     process.env.CLAUDEXOR_CONFIG_DIR = configDir;
     delete process.env.CLAUDEXOR_REVIEWER_TIMEOUT_MS;
+    delete process.env.CLAUDEXOR_MAX_CONCURRENT;
+    delete process.env.CLAUDEXOR_MAX_PARALLEL_CANDIDATES;
+    delete process.env.CLAUDEXOR_MAX_DEEP_SCAN_WIDTH;
+    delete process.env.CLAUDEXOR_MAX_COUNCIL_MEMBERS;
     delete process.env.CLAUDEXOR_TRANSIENT_RETRY_MAX;
     delete process.env.CLAUDEXOR_TRANSIENT_RETRY_INITIAL_DELAY_MS;
     delete process.env.CLAUDEXOR_TRANSIENT_RETRY_MAX_DELAY_MS;
@@ -39,6 +47,15 @@ describe("loadConfig", () => {
       else process.env.CLAUDEXOR_CONFIG_DIR = prev;
       if (prevReviewerTimeout === undefined) delete process.env.CLAUDEXOR_REVIEWER_TIMEOUT_MS;
       else process.env.CLAUDEXOR_REVIEWER_TIMEOUT_MS = prevReviewerTimeout;
+      if (prevMaxConcurrent === undefined) delete process.env.CLAUDEXOR_MAX_CONCURRENT;
+      else process.env.CLAUDEXOR_MAX_CONCURRENT = prevMaxConcurrent;
+      if (prevMaxParallelCandidates === undefined)
+        delete process.env.CLAUDEXOR_MAX_PARALLEL_CANDIDATES;
+      else process.env.CLAUDEXOR_MAX_PARALLEL_CANDIDATES = prevMaxParallelCandidates;
+      if (prevMaxDeepScanWidth === undefined) delete process.env.CLAUDEXOR_MAX_DEEP_SCAN_WIDTH;
+      else process.env.CLAUDEXOR_MAX_DEEP_SCAN_WIDTH = prevMaxDeepScanWidth;
+      if (prevMaxCouncilMembers === undefined) delete process.env.CLAUDEXOR_MAX_COUNCIL_MEMBERS;
+      else process.env.CLAUDEXOR_MAX_COUNCIL_MEMBERS = prevMaxCouncilMembers;
       if (prevRetryMax === undefined) delete process.env.CLAUDEXOR_TRANSIENT_RETRY_MAX;
       else process.env.CLAUDEXOR_TRANSIENT_RETRY_MAX = prevRetryMax;
       if (prevRetryInitialDelay === undefined)
@@ -58,6 +75,10 @@ describe("loadConfig", () => {
       expect(cfg.global.routing.goal).toBe("auto");
       expect(cfg.global.routing.paid_fallback).toBe("when_unavailable");
       expect(cfg.global.runtime.reviewer_timeout_ms).toBe(600_000);
+      expect(cfg.global.runtime.max_concurrent).toBe(24);
+      expect(cfg.global.runtime.max_parallel_candidates).toBe(4);
+      expect(cfg.global.runtime.max_deep_scan_width).toBe(8);
+      expect(cfg.global.runtime.max_council_members).toBe(4);
       expect(cfg.global.runtime.transient_retry.max_retries).toBe(2);
     });
   });
@@ -65,12 +86,31 @@ describe("loadConfig", () => {
   it("honors runtime env overrides and validates them loudly", () => {
     withTempConfig(({ repo }) => {
       process.env.CLAUDEXOR_REVIEWER_TIMEOUT_MS = "700000";
+      process.env.CLAUDEXOR_MAX_CONCURRENT = "30";
+      process.env.CLAUDEXOR_MAX_PARALLEL_CANDIDATES = "6";
+      process.env.CLAUDEXOR_MAX_DEEP_SCAN_WIDTH = "10";
+      process.env.CLAUDEXOR_MAX_COUNCIL_MEMBERS = "5";
       process.env.CLAUDEXOR_TRANSIENT_RETRY_MAX = "3";
       const cfg = loadConfig(repo);
       expect(cfg.global.runtime.reviewer_timeout_ms).toBe(700_000);
+      expect(cfg.global.runtime.max_concurrent).toBe(30);
+      expect(cfg.global.runtime.max_parallel_candidates).toBe(6);
+      expect(cfg.global.runtime.max_deep_scan_width).toBe(10);
+      expect(cfg.global.runtime.max_council_members).toBe(5);
       expect(cfg.global.runtime.transient_retry.max_retries).toBe(3);
       process.env.CLAUDEXOR_TRANSIENT_RETRY_MAX = "-1";
       expect(() => loadConfig(repo)).toThrow(ConfigParseError);
+      process.env.CLAUDEXOR_TRANSIENT_RETRY_MAX = "3";
+      for (const name of [
+        "CLAUDEXOR_MAX_CONCURRENT",
+        "CLAUDEXOR_MAX_PARALLEL_CANDIDATES",
+        "CLAUDEXOR_MAX_DEEP_SCAN_WIDTH",
+        "CLAUDEXOR_MAX_COUNCIL_MEMBERS",
+      ]) {
+        process.env[name] = "0";
+        expect(() => loadConfig(repo)).toThrow(ConfigParseError);
+        delete process.env[name];
+      }
     });
   });
 
@@ -428,5 +468,50 @@ describe("A6 limit_action serialize rule (never persist auto)", () => {
         "rotate",
       );
     });
+  });
+});
+
+describe("concurrency default serialization", () => {
+  it("does not materialize new default caps into a durable config", () => {
+    const dir = mkdtempSync(join(tmpdir(), "claudexor-concurrency-defaults-"));
+    const prev = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = dir;
+    try {
+      const { path } = updateGlobalConfig((cfg) => cfg);
+      const written = readFileSync(path, "utf8");
+      expect(written).not.toContain("max_concurrent:");
+      expect(written).not.toContain("max_parallel_candidates:");
+      expect(written).not.toContain("max_deep_scan_width:");
+      expect(written).not.toContain("max_council_members:");
+    } finally {
+      if (prev === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("persists explicit non-default caps and reloads them", () => {
+    const dir = mkdtempSync(join(tmpdir(), "claudexor-concurrency-explicit-"));
+    const prev = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = dir;
+    try {
+      const { path } = updateGlobalConfig((cfg) => ({
+        ...cfg,
+        runtime: {
+          ...cfg.runtime,
+          max_concurrent: 30,
+          max_parallel_candidates: 6,
+          max_deep_scan_width: 10,
+          max_council_members: 5,
+        },
+      }));
+      const written = readFileSync(path, "utf8");
+      expect(written).toContain("max_concurrent: 30");
+      expect(loadConfig(dir).global.runtime.max_council_members).toBe(5);
+    } finally {
+      if (prev === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

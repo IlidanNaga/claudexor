@@ -1,5 +1,14 @@
 # @claudexor/harness-claude
 
+## 3.13.0
+
+### Patch Changes
+
+- @claudexor/core@3.13.0
+- @claudexor/schema@3.13.0
+- @claudexor/secrets@3.13.0
+- @claudexor/util@3.13.0
+
 ## 3.12.10
 
 ### Patch Changes

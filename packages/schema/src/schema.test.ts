@@ -6,6 +6,10 @@ import {
   ActiveTaskContract,
   CredentialProfile,
   HARNESS_INACTIVITY_TIMEOUT_DEFAULT_MS,
+  DAEMON_MAX_CONCURRENT_DEFAULT,
+  MAX_COUNCIL_MEMBERS_DEFAULT,
+  MAX_DEEP_SCAN_WIDTH_DEFAULT,
+  MAX_PARALLEL_CANDIDATES_DEFAULT,
   ControlCredentialProfilesResponse,
   ControlRunDecisionRequest,
   ControlRunSummary,
@@ -16,6 +20,7 @@ import {
   ControlSetupJobEvent,
   ControlSetupJobSnapshot,
   ControlSettingsSnapshot,
+  ControlSettingsUpdateRequest,
   ControlThread,
   ControlThreadTurnRequest,
   ConformanceReport,
@@ -208,6 +213,21 @@ describe("ControlSettingsSnapshot", () => {
     const snapshot = ControlSettingsSnapshot.parse({
       runtime: {
         reviewerTimeoutMs: 2_400_000,
+        concurrency: {
+          configured: {
+            maxConcurrent: 24,
+            maxParallelCandidates: 6,
+            maxDeepScanWidth: 10,
+            maxCouncilMembers: 5,
+          },
+          effective: {
+            maxConcurrent: 12,
+            maxParallelCandidates: 4,
+            maxDeepScanWidth: 8,
+            maxCouncilMembers: 4,
+          },
+          restartRequired: true,
+        },
         transientRetry: {
           maxRetries: 3,
           initialDelayMs: 2_000,
@@ -216,9 +236,25 @@ describe("ControlSettingsSnapshot", () => {
       },
     });
     expect(snapshot.runtime.reviewerTimeoutMs).toBe(2_400_000);
+    expect(snapshot.runtime.concurrency!.restartRequired).toBe(true);
+    expect(snapshot.runtime.concurrency!.configured.maxConcurrent).toBe(24);
+    expect(snapshot.runtime.concurrency!.effective.maxConcurrent).toBe(12);
     expect(snapshot.runtime.transientRetry.maxRetries).toBe(3);
     expect(snapshot.runtime.transientRetry.initialDelayMs).toBe(2_000);
     expect(snapshot.runtime.transientRetry.maxDelayMs).toBe(20_000);
+  });
+});
+
+describe("runtime concurrency settings surface", () => {
+  it("keeps startup-frozen concurrency out of POST settings patches", () => {
+    expect(() =>
+      ControlSettingsUpdateRequest.parse({
+        runtime: { concurrency: { maxConcurrent: 48 } },
+      }),
+    ).toThrow();
+    expect(() =>
+      ControlSettingsUpdateRequest.parse({ concurrency: { maxConcurrent: 48 } }),
+    ).toThrow();
   });
 });
 
@@ -237,6 +273,37 @@ describe("harness inactivity watchdog default", () => {
     expect(ControlSettingsSnapshot.parse({}).runtime.harnessInactivityTimeoutMs).toBe(
       HARNESS_INACTIVITY_TIMEOUT_DEFAULT_MS,
     );
+  });
+});
+
+describe("runtime concurrency caps", () => {
+  it("uses the product defaults and accepts larger finite values", () => {
+    const runtime = GlobalConfig.parse({}).runtime;
+    expect(runtime.max_concurrent).toBe(DAEMON_MAX_CONCURRENT_DEFAULT);
+    expect(runtime.max_parallel_candidates).toBe(MAX_PARALLEL_CANDIDATES_DEFAULT);
+    expect(runtime.max_deep_scan_width).toBe(MAX_DEEP_SCAN_WIDTH_DEFAULT);
+    expect(runtime.max_council_members).toBe(MAX_COUNCIL_MEMBERS_DEFAULT);
+    const larger = GlobalConfig.parse({
+      runtime: {
+        max_concurrent: 64,
+        max_parallel_candidates: 12,
+        max_deep_scan_width: 16,
+        max_council_members: 10,
+      },
+    }).runtime;
+    expect(larger).toMatchObject({
+      max_concurrent: 64,
+      max_parallel_candidates: 12,
+      max_deep_scan_width: 16,
+      max_council_members: 10,
+    });
+  });
+
+  it("rejects invalid values and a Council cap below two", () => {
+    for (const value of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => GlobalConfig.parse({ runtime: { max_concurrent: value } })).toThrow();
+    }
+    expect(() => GlobalConfig.parse({ runtime: { max_council_members: 1 } })).toThrow();
   });
 });
 

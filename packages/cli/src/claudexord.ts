@@ -44,6 +44,8 @@ import {
   recoveryBlockedPartitions,
 } from "./daemon-startup.js";
 import { engineBuildIdentity, noProjectRepoRoot, redactSecrets } from "@claudexor/util";
+import { loadConfig } from "@claudexor/config";
+import { runtimeConcurrencyCaps } from "@claudexor/schema";
 import { scheduleStartupRetention } from "./retention-service.js";
 import { controlServices } from "./control-services.js";
 import { AuthReadinessService } from "@claudexor/gateway";
@@ -93,6 +95,8 @@ export async function main(): Promise<void> {
   );
   try {
     const token = ensureToken();
+    const startupConfig = loadConfig(noProjectRepoRoot()).global;
+    const startupConcurrencyCaps = runtimeConcurrencyCaps(startupConfig);
 
     if (await socketAlive(socketPath)) {
       throw new Error(`a claudexor daemon is already listening on ${socketPath}; stop it first`);
@@ -188,12 +192,14 @@ export async function main(): Promise<void> {
       interactions,
       resources,
       bus,
+      runtimeConcurrencyCaps: startupConcurrencyCaps,
     });
 
     const server = new DaemonServer({
       socketPath,
       token,
       commands: threads,
+      runtimeConcurrencyCaps: startupConcurrencyCaps,
       servingMode: admission.snapshot,
       delegationAuthority: delegationBudgetAuthority,
       onCommandTerminal: (record) => models.operations.onCommandTerminal(record),
@@ -271,6 +277,7 @@ export async function main(): Promise<void> {
       resources,
       () => quotaStoreSlot.current(),
       () => selfClient.list(),
+      startupConcurrencyCaps,
     );
     const runRetention = services.runRetention;
     services.runRetention = models.withRetention(runRetention);

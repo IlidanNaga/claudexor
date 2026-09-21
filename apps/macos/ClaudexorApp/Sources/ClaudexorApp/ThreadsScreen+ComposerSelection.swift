@@ -65,6 +65,10 @@ extension ThreadsScreen {
         )
     }
 
+    var councilMemberLimit: Int {
+        composerCouncilMemberLimit(model.activeSettingsSnapshot)
+    }
+
     var resolvedComposerStrategy: ComposerStrategyResolution {
         resolveComposerStrategy(
             intent: composerMode,
@@ -72,7 +76,8 @@ extension ThreadsScreen {
             delegate: DelegationPresentation.requestedForWire(
                 isOn: delegate, control: delegateControlState),
             councilEnabled: councilEnabled,
-            councilMembers: councilMembers)
+            councilMembers: councilMembers,
+            maxCouncilMembers: councilMemberLimit)
     }
 
     /// The exact options `send()` passes to AppModel. Availability reads this

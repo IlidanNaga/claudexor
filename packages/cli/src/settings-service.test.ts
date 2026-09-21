@@ -39,6 +39,7 @@ const {
   assertRoutingGoalTiersConsistent,
   commitSettingsUpdate,
   mergeSettingsPatch,
+  settingsSnapshot,
 } = await import("./settings-service.js");
 const { loadConfig, updateGlobalConfig } = await import("@claudexor/config");
 
@@ -57,6 +58,34 @@ describe("interaction timeout patch presence", () => {
     expect(
       mergeSettingsPatch(disabled, ControlSettingsUpdateRequest.parse({})).interaction_timeout_ms,
     ).toBeNull();
+  });
+});
+
+describe("startup-frozen concurrency projection", () => {
+  it("shows configured versus effective caps and restartRequired", () => {
+    const dir = reapMk(join(tmpdir(), "claudexor-concurrency-settings-"));
+    const prev = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = dir;
+    try {
+      updateGlobalConfig((cfg) => ({
+        ...cfg,
+        runtime: { ...cfg.runtime, max_concurrent: 30 },
+      }));
+      const snapshot = settingsSnapshot("/tmp/no-project", {
+        max_concurrent: 24,
+        max_parallel_candidates: 4,
+        max_deep_scan_width: 8,
+        max_council_members: 4,
+      });
+      expect(snapshot.runtime.concurrency).toMatchObject({
+        configured: expect.objectContaining({ maxConcurrent: 30 }),
+        effective: expect.objectContaining({ maxConcurrent: 24 }),
+        restartRequired: true,
+      });
+    } finally {
+      if (prev === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = prev;
+    }
   });
 });
 

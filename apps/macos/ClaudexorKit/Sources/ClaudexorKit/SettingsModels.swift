@@ -93,7 +93,23 @@ public struct RuntimeSettings: Codable, Sendable, Equatable {
     public let reviewerTimeoutMs: Int
     /// Optional: daemons older than the watchdog omit it.
     public let harnessInactivityTimeoutMs: Int?
+    /// Optional: older daemons do not disclose their concurrency limits.
+    public let concurrency: RuntimeConcurrencySettings?
     public let transientRetry: RuntimeTransientRetrySettings
+}
+
+/// Read-only projection of configured caps and the daemon's startup snapshot.
+public struct RuntimeConcurrencySettings: Codable, Sendable, Equatable {
+    public let configured: RuntimeConcurrencyCaps
+    public let effective: RuntimeConcurrencyCaps
+    public let restartRequired: Bool
+}
+
+public struct RuntimeConcurrencyCaps: Codable, Sendable, Equatable {
+    public let maxConcurrent: Int
+    public let maxParallelCandidates: Int
+    public let maxDeepScanWidth: Int
+    public let maxCouncilMembers: Int
 }
 
 public struct RuntimeTransientRetrySettings: Codable, Sendable, Equatable {

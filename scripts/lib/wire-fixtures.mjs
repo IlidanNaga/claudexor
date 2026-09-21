@@ -397,6 +397,21 @@ export function buildWireFixtures() {
     runtime: {
       reviewerTimeoutMs: 600_000,
       harnessInactivityTimeoutMs: 1_200_000,
+      concurrency: {
+        configured: {
+          maxConcurrent: 48,
+          maxParallelCandidates: 6,
+          maxDeepScanWidth: 16,
+          maxCouncilMembers: 6,
+        },
+        effective: {
+          maxConcurrent: 24,
+          maxParallelCandidates: 4,
+          maxDeepScanWidth: 8,
+          maxCouncilMembers: 4,
+        },
+        restartRequired: true,
+      },
       transientRetry: { maxRetries: 2, initialDelayMs: 1_000, maxDelayMs: 10_000 },
     },
     harnesses: {

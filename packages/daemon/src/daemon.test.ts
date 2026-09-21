@@ -272,6 +272,12 @@ describe("DaemonServer", () => {
       socketPath,
       token: "token",
       commands: authority.slot,
+      runtimeConcurrencyCaps: {
+        max_concurrent: 24,
+        max_parallel_candidates: 6,
+        max_deep_scan_width: 10,
+        max_council_members: 5,
+      },
       runner: async (params) => {
         ran += 1;
         return { lifecycle: "succeeded", echoed: (params as { value: number }).value * 2 };
@@ -280,7 +286,15 @@ describe("DaemonServer", () => {
     await server.start();
     try {
       const client = new DaemonClient(socketPath, "token");
-      await expect(client.health()).resolves.toMatchObject({ ok: true });
+      await expect(client.health()).resolves.toMatchObject({
+        ok: true,
+        capacity: {
+          maxConcurrent: 24,
+          maxParallelCandidates: 6,
+          maxDeepScanWidth: 10,
+          maxCouncilMembers: 5,
+        },
+      });
       const accepted = await client.enqueue(
         { value: 21 },
         { idempotencyKey: "create-1", clientId: "test" },

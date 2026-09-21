@@ -9,10 +9,11 @@ import ClaudexorKit
 @Suite struct ComposerStrategyTests {
     private func resolve(
         _ intent: RunMode, strategy: AgentStrategy = .single, delegate: Bool = false,
-        council: Bool = false, members: Int = 2
+        council: Bool = false, members: Int = 2, maxMembers: Int = composerCouncilMemberLimit(nil)
     ) -> ComposerStrategyResolution {
         resolveComposerStrategy(intent: intent, agentStrategy: strategy, delegate: delegate,
-                                councilEnabled: council, councilMembers: members)
+                                councilEnabled: council, councilMembers: members,
+                                maxCouncilMembers: maxMembers)
     }
 
     @Test func askCarriesNoStrategy() {
@@ -33,13 +34,63 @@ import ClaudexorKit
 
     @Test func planCouncilCarriesClampedMemberCount() {
         #expect(resolve(.plan, council: true, members: 3).councilN == 3)
-        // wire clamps membership to 2..4
+        // An older daemon without a cap projection keeps the historical range.
         #expect(resolve(.plan, council: true, members: 1).councilN == 2)
         #expect(resolve(.plan, council: true, members: 9).councilN == 4)
         let r = resolve(.plan, council: true, members: 3)
         #expect(r.mode == .plan)
         #expect(r.council)
         #expect(!r.delegate)
+    }
+
+    private func settings(councilConfigured: Int, councilEffective: Int) throws -> SettingsSnapshot {
+        try JSONDecoder().decode(SettingsSnapshot.self, from: Data("""
+        {
+          "sources": [],
+          "routing": { "goal": "auto", "paidFallback": "when_unavailable", "qualityTiers": {}, "primaryHarness": null, "eligibleHarnesses": [], "envInheritance": "mirror_native" },
+          "budget": { "paidBudgetPerRun": { "kind": "unlimited" } },
+          "runtime": {
+            "reviewerTimeoutMs": 600000,
+            "transientRetry": { "maxRetries": 2, "initialDelayMs": 1000, "maxDelayMs": 10000 },
+            "concurrency": {
+              "configured": { "maxConcurrent": 24, "maxParallelCandidates": 4, "maxDeepScanWidth": 8, "maxCouncilMembers": \(councilConfigured) },
+              "effective": { "maxConcurrent": 24, "maxParallelCandidates": 4, "maxDeepScanWidth": 8, "maxCouncilMembers": \(councilEffective) },
+              "restartRequired": \(councilConfigured != councilEffective)
+            }
+          }
+        }
+        """.utf8))
+    }
+
+    @Test func planCouncilAboveFourReachesTheWireWithEffectiveCapSix() throws {
+        let maxMembers = composerCouncilMemberLimit(try settings(councilConfigured: 6, councilEffective: 6))
+        let r = resolve(.plan, council: true, members: 6, maxMembers: maxMembers)
+        #expect(r.councilN == 6)
+        #expect(resolve(.plan, council: true, members: 9, maxMembers: maxMembers).councilN == 6)
+        #expect(resolve(.plan, council: true, members: 1, maxMembers: maxMembers).councilN == 2)
+        #expect(resolve(.plan, council: true, members: 3, maxMembers: maxMembers).councilN == 3)
+        let body = ThreadTurnRequest(prompt: "plan it", mode: r.mode.apiValue, n: r.councilN, council: r.council)
+        let wire = try #require(try JSONSerialization.jsonObject(with: JSONEncoder().encode(body)) as? [String: Any])
+        #expect(wire["n"] as? Int == 6)
+        #expect(wire["council"] as? Bool == true)
+    }
+
+    @Test func pendingCouncilConfigDoesNotExpandTheEffectiveComposerRange() throws {
+        let maxMembers = composerCouncilMemberLimit(try settings(councilConfigured: 24, councilEffective: 4))
+        #expect(maxMembers == 4)
+        #expect(resolve(.plan, council: true, members: 6, maxMembers: maxMembers).councilN == 4)
+    }
+
+    @Test func legacySettingsOmissionKeepsFourMemberRange() throws {
+        let current = try settings(councilConfigured: 6, councilEffective: 6)
+        var wire = try #require(try JSONSerialization.jsonObject(with: JSONEncoder().encode(current)) as? [String: Any])
+        var runtime = try #require(wire["runtime"] as? [String: Any])
+        runtime.removeValue(forKey: "concurrency")
+        wire["runtime"] = runtime
+        let legacy = try JSONDecoder().decode(SettingsSnapshot.self, from: JSONSerialization.data(withJSONObject: wire))
+        #expect(legacy.runtime?.concurrency == nil)
+        #expect(composerCouncilMemberLimit(legacy) == 4)
+        #expect(composerCouncilMemberLimit(nil) == 4)
     }
 
     @Test func agentSingleMapsDelegate() {

@@ -9,6 +9,7 @@ import { assertMandatoryContext } from "@claudexor/context";
 import { noProjectRepoRoot } from "@claudexor/util";
 import { assertOutputSchemaCompiles } from "./structuredOutput.js";
 import { assertWriteIsolation } from "./write-isolation.js";
+import { assertCouncilWidth } from "./council.js";
 
 const NO_PROJECT_ROOT = noProjectRepoRoot();
 
@@ -24,12 +25,15 @@ export interface RunAdmissionInput {
   delegated?: boolean;
   denyPaths?: string[];
   outputSchema?: Record<string, unknown> | null;
+  council?: boolean;
+  n?: number;
 }
 
 export interface RunAdmissionDeps {
   accessDefault: AccessProfile;
   projectProtectedPaths: () => readonly string[];
   mandatoryFiles: () => readonly string[];
+  maxCouncilMembers?: number;
 }
 
 interface AdmissionViolation {
@@ -62,6 +66,7 @@ export function admitRun(
   mode: ModeKind,
   deps: RunAdmissionDeps,
 ): Record<string, unknown> | null | undefined {
+  if (input.council) assertCouncilWidth(input.n, deps.maxCouncilMembers);
   const effectiveAccess = resolveRunAccess(
     { mode, access: input.access },
     deps.accessDefault,

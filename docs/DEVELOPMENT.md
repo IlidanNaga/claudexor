@@ -360,12 +360,17 @@ Tests and local smokes must never touch real user state:
   The build proof has no caller-supplied sentinel: every invocation owns and awaits
   the forced build before battery code can load. Never use the lane on the
   credential-free pristine VM or on a config root with live work.
-- Runtime retry/review knobs are user-global config (`runtime.transient_retry`
-  and `runtime.reviewer_timeout_ms`) with env overrides
+- Runtime retry/review/concurrency knobs are user-global config
+  (`runtime.transient_retry`, `runtime.reviewer_timeout_ms`, and the four
+  `runtime.max_*` concurrency fields) with env overrides
   `CLAUDEXOR_TRANSIENT_RETRY_MAX`,
   `CLAUDEXOR_TRANSIENT_RETRY_INITIAL_DELAY_MS`,
   `CLAUDEXOR_TRANSIENT_RETRY_MAX_DELAY_MS`, and
-  `CLAUDEXOR_REVIEWER_TIMEOUT_MS`.
+  `CLAUDEXOR_REVIEWER_TIMEOUT_MS`, `CLAUDEXOR_MAX_CONCURRENT`,
+  `CLAUDEXOR_MAX_PARALLEL_CANDIDATES`, `CLAUDEXOR_MAX_DEEP_SCAN_WIDTH`, and
+  `CLAUDEXOR_MAX_COUNCIL_MEMBERS`. Concurrency values are read at daemon
+  startup; settings surfaces distinguish configured, effective, and pending
+  replacement state.
 
 ## Schema-First Workflow
 

@@ -10,19 +10,27 @@
  * native error.
  */
 import type {
-  ControlSettingsUpdateRequest,
   GlobalConfig as GlobalConfigT,
   HarnessCapabilities,
   QualityTierSet,
   RoutingGoal,
+  RuntimeConcurrencyCaps,
 } from "@claudexor/schema";
-import { GlobalConfig } from "@claudexor/schema";
+import {
+  ControlSettingsUpdateRequest,
+  GlobalConfig,
+  runtimeConcurrencyCaps,
+  concurrencyState,
+} from "@claudexor/schema";
 import { validateModel } from "@claudexor/core";
 import { effortLevelsForModel } from "@claudexor/schema";
 import { loadConfig, updateGlobalConfig } from "@claudexor/config";
 import { buildRegistry, harnessModels } from "./registry.js";
 
-export function settingsSnapshot(repoRoot: string) {
+export function settingsSnapshot(
+  repoRoot: string,
+  effectiveConcurrencyCaps?: RuntimeConcurrencyCaps,
+) {
   const cfg = loadConfig(repoRoot);
   return {
     sources: cfg.sources,
@@ -40,6 +48,14 @@ export function settingsSnapshot(repoRoot: string) {
     runtime: {
       reviewerTimeoutMs: cfg.global.runtime.reviewer_timeout_ms,
       harnessInactivityTimeoutMs: cfg.global.runtime.harness_inactivity_timeout_ms,
+      ...(effectiveConcurrencyCaps
+        ? {
+            concurrency: concurrencyState(
+              runtimeConcurrencyCaps(cfg.global),
+              effectiveConcurrencyCaps,
+            ),
+          }
+        : {}),
       transientRetry: {
         maxRetries: cfg.global.runtime.transient_retry.max_retries,
         initialDelayMs: cfg.global.runtime.transient_retry.initial_delay_ms,
@@ -433,4 +449,20 @@ export function applyHarnessSettingsPatches(
     };
   }
   return next;
+}
+
+/** Bind both reads and post-write readback to the same daemon-lifetime snapshot. */
+export function settingsControlServices(
+  root: string,
+  effective: RuntimeConcurrencyCaps | undefined,
+  changed: () => void,
+) {
+  return {
+    settings: async () => settingsSnapshot(root, effective),
+    updateSettings: async (patch: unknown) => {
+      await commitSettingsUpdate(root, ControlSettingsUpdateRequest.parse(patch ?? {}));
+      changed();
+      return settingsSnapshot(root, effective);
+    },
+  };
 }
