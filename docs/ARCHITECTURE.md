@@ -547,8 +547,9 @@ the default changes (QA-035); the resolved map is what route-spec building
 reads; per-attempt overrides
 (budget downgrade to `fallback_model`, fallback retry) sit on top. Every
 explicit model — per-run, settings default, fallback, reviewer — must pass
-the harness's model truth source (live `models()` inventory, else manifest
-`known_models`; a harness with neither refuses explicit models): enforced at
+the harness's model truth source wherever that source can prove absence (live
+`models()` inventory, else manifest `known_models`; a harness with neither
+refuses explicit models; an advisory live inventory forwards, see below): enforced at
 settings write (400), run preflight (typed failure with artifacts before any
 CLI spawns), immediately before each routed spawn against that attempt's exact
 profile, state, cwd, and auth preference, and both reviewer-panel paths. A pinned

@@ -89,7 +89,7 @@ describe("GPT-6 Astra on the pinned Codex CLI", () => {
  * same accounts ran astra. The manifest now declares that this inventory
  * proves presence only (INV-104), so the run goes to the vendor.
  */
-describe("a stale codex model/list cannot refuse a model", () => {
+describe("the codex adapter under a stale model/list (the gate itself: modelGovernance.test.ts)", () => {
   const STALE: CodexEffortCatalog = {
     models: Object.fromEntries(
       ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.2"].map((id) => [

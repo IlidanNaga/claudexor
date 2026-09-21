@@ -306,7 +306,7 @@ export async function resolveExplicitReviewerPanel(
             }
             const models = modelInventory.get(inventoryKey);
             const check = validateModel(requestedModel, [...(models ?? [])], "api", absence);
-            if (models && models.size > 0 && check.status !== "ok") {
+            if (models && check.status !== "ok") {
               if (!entry.credentialProfileId && credentialProfile && deps.resolveReviewerProfile) {
                 excludedProfileIds.add(credentialProfile.profile_id);
                 continue;
@@ -444,9 +444,9 @@ export async function resolveAutoReviewerPanel(
           discloseAutoSkip(deps, adapter.id, "readonly review capability unavailable");
           continue familyLoop;
         }
-        // STRICT: the auto panel applies the SAME model truth gate as the
-        // explicit panel — a doomed reviewer model is refused here, never
-        // forwarded to die as an opaque native error mid-review.
+        // STRICT: the auto panel skips a family whose truth source does not
+        // list the model, at zero cost. It does NOT inherit the explicit panel's
+        // advisory forward (INV-104): nobody asked for this family by name.
         if (requestedModel) {
           const route = credentialProfile
             ? credentialProfileAuthRoute(credentialProfile)

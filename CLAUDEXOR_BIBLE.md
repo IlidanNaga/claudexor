@@ -615,11 +615,11 @@ invariant or operator decision before proceeding.
   schema (no `routing.default_model`); canaries
   `[INV-103:scalar-model-primary-only]` and `[INV-103:no-global-model]`;
   routing tests. Locked operator decision.
-- **INV-104** A model outside the harness's model truth source (live
-  inventory or manifest known-good list) is refused at settings-write, run
-  preflight (typed failure WITH artifacts before any CLI spawns), and both
-  reviewer-resolution paths — never forwarded to the vendor CLI to die as an
-  opaque native error. Refusals name the harness, the model, and the truth
+- **INV-104** Wherever absence from the harness's model truth source (live
+  inventory or manifest known-good list) is proof, a model outside it is
+  refused at settings-write, run preflight (typed failure WITH artifacts before
+  any CLI spawns), and both reviewer-resolution paths — never forwarded to the
+  vendor CLI to die as an opaque native error. Refusals name the harness, the model, and the truth
   source; model truth is surfaced to UIs (`source: api | manifest`), and
   known-model hints carry a `verifiedAgainst` freshness note checked by the
   model-hints-freshness gate. A truth source refuses only what it can prove:
@@ -633,7 +633,9 @@ invariant or operator decision before proceeding.
   refuses it, and the per-spawn gate discloses once that the model was not
   listed. No list is ever substituted for another to admit a model, and
   automatic reviewer selection still skips an unlisted family at zero cost.
-  Residuals, disclosed: on the CLI run path a vendor model refusal arrives as an
+  Residuals, disclosed: the explicit reviewer panel forwards without that
+  run-event disclosure (its spawn does not pass the per-spawn gate); on the CLI
+  run path a vendor model refusal arrives as an
   untyped error carrying the vendor's text (only HTTP model operations are
   typed, and they stay strict), and a mistyped explicit model on such a harness
   now costs one spawn instead of failing free at the gate. verify: canaries
