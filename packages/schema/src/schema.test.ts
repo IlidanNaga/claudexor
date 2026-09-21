@@ -312,6 +312,38 @@ describe("RouteProof + HarnessManifest", () => {
     expect(m.capabilities.implement).toBe(true);
     expect(m.capabilities.web_policy).toBe("none");
   });
+
+  it("leaves model_inventory_absence ABSENT by default, which every consumer reads as authoritative", () => {
+    // INV-104: an adapter that says nothing keeps the strict gate. Only a
+    // producer that knows it cannot tell its own answer from a substituted one
+    // declares `advisory`, and it must say so out loud.
+    const bare = HarnessManifest.parse({
+      id: "fake-success",
+      display_name: "Fake",
+      kind: "fake",
+      provider_family: "local",
+      capabilities: {},
+    });
+    expect(bare.capabilities.model_inventory_absence).toBeUndefined();
+    expect(
+      HarnessManifest.parse({
+        id: "codexish",
+        display_name: "Codexish",
+        kind: "local_cli",
+        provider_family: "openai",
+        capabilities: { model_inventory_absence: "advisory" },
+      }).capabilities.model_inventory_absence,
+    ).toBe("advisory");
+    expect(() =>
+      HarnessManifest.parse({
+        id: "codexish",
+        display_name: "Codexish",
+        kind: "local_cli",
+        provider_family: "openai",
+        capabilities: { model_inventory_absence: "maybe" },
+      }),
+    ).toThrow();
+  });
 });
 
 describe("EffortHint is an OPEN vocabulary, bounded by shape only", () => {

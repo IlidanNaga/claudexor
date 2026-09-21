@@ -50,6 +50,87 @@ describe("validateModel (strict model-truth validation)", () => {
   });
 });
 
+/**
+ * An ADVISORY live inventory (INV-104, owner-approved 2026-09-21): a producer
+ * that cannot tell its own answer from a substituted one proves PRESENCE only.
+ * Absence stops being a reason to refuse — the explicit model is forwarded to
+ * the vendor and the note says so. Everything else keeps today's exact text,
+ * including the manifest, which always speaks for itself.
+ */
+describe("validateModel with an advisory live inventory", () => {
+  const stale = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.2"];
+
+  it("FORWARDS a model the live list lacks, with the unverified note", () => {
+    const r = validateModel("gpt-6-astra", stale, "api", "advisory");
+    expect(r.status).toBe("ok");
+    expect(r.unverified).toBe(true);
+    expect(r.message).toBe(
+      "model \"gpt-6-astra\" is not in this account's listed models; this harness's list " +
+        "cannot prove a model is absent, so the request is forwarded to the vendor",
+    );
+  });
+
+  it("FORWARDS on an empty live list (the second live failure mode), saying which case it is", () => {
+    const r = validateModel("gpt-6-astra", [], "api", "advisory");
+    expect(r.status).toBe("ok");
+    expect(r.unverified).toBe(true);
+    expect(r.message).toBe(
+      "the harness returned no model list; this harness's list cannot prove a model is " +
+        "absent, so the request is forwarded to the vendor",
+    );
+  });
+
+  it("stays silent for a LISTED model: presence is proof, so there is nothing to disclose", () => {
+    const r = validateModel("gpt-5.5", stale, "api", "advisory");
+    expect(r.status).toBe("ok");
+    expect(r.message).toBeNull();
+    expect(r.unverified).toBeUndefined();
+    const none = validateModel(null, stale, "api", "advisory");
+    expect(none.status).toBe("ok");
+    expect(none.message).toBeNull();
+    expect(none.unverified).toBeUndefined();
+  });
+
+  it("NEVER weakens manifest truth — the manifest is this repo's own declaration", () => {
+    const miss = validateModel("gpt-6-astra", stale, "manifest", "advisory");
+    expect(miss.status).toBe("rejected");
+    expect(miss.unverified).toBeUndefined();
+    expect(miss.message).toBe(
+      'model "gpt-6-astra" is not in the harness\'s manifest known-model list ' +
+        "(gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5, gpt-5.2)",
+    );
+    const empty = validateModel("gpt-6-astra", [], "manifest", "advisory");
+    expect(empty.status).toBe("rejected");
+    expect(empty.message).toBe(
+      "this harness cannot verify models (no manifest known_models); use the harness " +
+        "default (omit the model) or add known_models to the manifest",
+    );
+  });
+
+  it("keeps the authoritative refusals byte-identical, explicitly and by default", () => {
+    for (const check of [
+      validateModel("gpt-6-astra", stale, "api", "authoritative"),
+      validateModel("gpt-6-astra", stale, "api"),
+    ]) {
+      expect(check.status).toBe("rejected");
+      expect(check.message).toBe(
+        'model "gpt-6-astra" is not in the harness\'s live model inventory ' +
+          "(gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5, gpt-5.2)",
+      );
+    }
+    for (const check of [
+      validateModel("gpt-6-astra", [], "api", "authoritative"),
+      validateModel("gpt-6-astra", [], "api"),
+    ]) {
+      expect(check.status).toBe("rejected");
+      expect(check.message).toBe(
+        "this harness cannot verify models (no live model inventory); repair the live " +
+          "account/auth route or use the harness default (omit the model)",
+      );
+    }
+  });
+});
+
 describe("model inventory credential routes", () => {
   it("keeps legacy enumeration and queries scoped producers only on their declared routes", () => {
     const adapter = { models: async () => [] };

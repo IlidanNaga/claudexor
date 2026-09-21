@@ -549,6 +549,14 @@
                       "minItems": 1,
                       "description": "Credential routes supported by the adapter's live models() producer; omitted preserves all-route support. Other routes use manifest known_models, never another account's live inventory."
                     },
+                    "model_inventory_absence": {
+                      "type": "string",
+                      "enum": [
+                        "authoritative",
+                        "advisory"
+                      ],
+                      "description": "Whether this harness's live models() answer proves a model is ABSENT; omitted = authoritative (an unlisted model is refused). advisory = absence is not proof, so an explicit model is forwarded to the vendor and disclosed instead of refused."
+                    },
                     "known_models": {
                       "type": "array",
                       "items": {

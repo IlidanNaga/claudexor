@@ -1,5 +1,5 @@
 import type { HarnessAdapter, HarnessModelSpec, HarnessProcessingSpec } from "@claudexor/core";
-import type { HarnessRunSpec } from "@claudexor/schema";
+import type { HarnessCapabilities, HarnessRunSpec } from "@claudexor/schema";
 import { canonicalCodexProfileHome } from "./profile.js";
 import { defaultNativeCodexHome } from "./auth.js";
 import {
@@ -15,11 +15,42 @@ import {
 } from "./processing.js";
 import { tomlBasicString } from "./toml.js";
 type Env = Record<string, string | null | undefined>;
+
+/**
+ * The manifest declaration of what `models()` below covers and proves — kept
+ * beside the producer so the two halves cannot drift apart (INV-104).
+ *
+ * `local_session`: the probe reads the selected account's own codex HOME, so an
+ * API-key or unscoped query keeps manifest truth instead of borrowing a
+ * subscription catalog. `advisory`: see the contract on `models()` — the vendor
+ * CLI substitutes a bundled default list when its remote fetch times out and
+ * nothing on the wire marks which list answered, so a model this list omits is
+ * not evidence the account lacks it.
+ */
+export const CODEX_MODEL_INVENTORY = {
+  model_inventory_routes: ["local_session"],
+  model_inventory_absence: "advisory",
+} as const satisfies Pick<
+  HarnessCapabilities,
+  "model_inventory_routes" | "model_inventory_absence"
+>;
 export function codexProcessingMethods(
   runtime: { probeEfforts: CodexEffortProbe; nowMs: () => number },
   envFor: (env?: Env, home?: string) => Env,
 ): Pick<HarnessAdapter, "models" | "prepareProcessing"> {
   return {
+    /**
+     * The account's live `model/list` answer. It proves PRESENCE and nothing
+     * else, which is why the manifest declares this inventory `advisory`: the
+     * vendor CLI substitutes a bundled default list when its own remote fetch
+     * times out, and the wire says nothing about which list answered — the
+     * envelope is `data` + `nextCursor`, the entries carry ids, efforts and
+     * display metadata, and no field anywhere marks freshness or origin. A
+     * previous-generation bundled list is therefore indistinguishable from a
+     * current account list, so a model this answer omits may still be one the
+     * account runs: observed live, the same accounts that were refused
+     * `gpt-6-astra` served it in the same window.
+     */
     async models(input?: HarnessModelSpec) {
       try {
         if (
