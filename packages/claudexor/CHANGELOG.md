@@ -1,5 +1,12 @@
 # claudexor
 
+## 3.12.10
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/cli@3.12.10
+
 ## 3.12.9
 
 ### Patch Changes
