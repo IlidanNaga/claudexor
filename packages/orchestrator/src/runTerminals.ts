@@ -43,6 +43,7 @@ import {
 
 export type { AnnouncedRunContext } from "./runTerminalContext.js";
 export { cancelledResult, declaredFailure, failTerminally, writeFailure };
+export { attemptVendorFailure } from "./harnessFailure.js";
 
 function ownsDelegateDrain(context: AnnouncedRunContext): boolean {
   try {

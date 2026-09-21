@@ -1,0 +1,5 @@
+{"timestamp":"2026-09-12T07:27:38.552Z","type":"session_meta","payload":{"id":"00000000-0000-7000-0000-000000000000","cli_version":"0.153.3","timestamp":"2026-09-12T07:27:38.433Z"}}
+{"timestamp":"2026-09-12T07:27:38.553Z","type":"event_msg","payload":{"type":"task_started","turn_id":"00000000-0000-7000-0000-000000000001","started_at":1789198058,"model_context_window":258400}}
+{"timestamp":"2026-09-12T07:27:41.547Z","type":"turn_context","payload":{"turn_id":"00000000-0000-7000-0000-000000000001","model":"gpt-5.6-sol"}}
+{"timestamp":"2026-09-12T07:27:42.841Z","type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"primary":null,"secondary":null}}}
+{"timestamp":"2026-09-12T07:27:42.843Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"00000000-0000-7000-0000-000000000001","last_agent_message":null,"error":{"message":"Your workspace is out of credits. Ask your workspace owner to refill in order to continue.","codex_error_info":"usage_limit_exceeded"},"started_at":1789198058,"completed_at":1789198062,"duration_ms":4352}}

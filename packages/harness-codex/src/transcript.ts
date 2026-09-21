@@ -1,12 +1,13 @@
 /**
  * Codex rollout-transcript readers: the CLI's own session record
  * (`$CODEX_HOME/sessions/<Y>/<M>/<D>/rollout-*-<threadId>.jsonl`) is the
- * native machine-readable source for the observed model (route proof)
- * and the rate-window quota. One owner for rollout facts.
+ * native machine-readable source for the observed model (route proof),
+ * the rate-window quota, and the vendor's own typed failure for a turn it
+ * ended with an error. One owner for rollout facts.
  */
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import type { HarnessEvent } from "@claudexor/schema";
+import type { HarnessEvent, VendorFailureEvidence } from "@claudexor/schema";
 
 /**
  * Route proof: recover the model codex ACTUALLY ran from its own session
@@ -123,6 +124,89 @@ export function codexTranscriptRateLimits(
     /* unreadable rollout: no quota signal */
   }
   return latest;
+}
+
+/**
+ * Vendor failure: recover codex's OWN typed failure for the turn that just
+ * ended (`event_msg.payload.type == "task_complete"` with an `error` object:
+ * `{message, codex_error_info}`), which the `--json` stream reduces to a
+ * sentence. Read AFTER the process exited. The code is forwarded verbatim and
+ * uninterpreted — there is no mapping table, so a code codex ships tomorrow
+ * flows through unchanged; a tagged-object variant yields its variant name.
+ *
+ * STRUCTURAL, never substring: rollouts quote `codex_error_info` as plain text
+ * inside prompts and tool output, so only the record shape above counts (the
+ * `includes` below is a cheap prefilter, not a match).
+ *
+ * Bound to THIS run's turn, because `exec resume` appends turns to one rollout
+ * and a run killed before writing its own `task_complete` leaves an earlier
+ * turn's record last: the error must sit on the LAST `task_complete`; when the
+ * file carries `task_started` markers that record's `turn_id` must equal the
+ * last started turn; and its `started_at` (whole seconds) must not precede the
+ * second this process was spawned (`notBeforeMs`). Best-effort exactly like the
+ * quota reader: any miss, torn line, or ambiguity returns null, never throws.
+ * Disclosed residual: an earlier turn that failed within the SAME wall-clock
+ * second as this spawn, when this run wrote no turn marker of its own, is
+ * indistinguishable here.
+ */
+export function codexTranscriptVendorFailure(
+  codexHome: string | null | undefined,
+  threadId: string | undefined,
+  notBeforeMs: number,
+): VendorFailureEvidence | null {
+  if (!threadId) return null;
+  // An explicit scoped home is REQUIRED (same rule as the readers above).
+  const home = codexHome && codexHome.trim() ? codexHome : null;
+  if (!home) return null;
+  const rollout = findCodexRollout(join(home, "sessions"), threadId);
+  if (!rollout) return null;
+  let sawStarted = false;
+  let lastStartedTurn: unknown = null;
+  let last: Record<string, unknown> | null = null;
+  try {
+    for (const line of readFileSync(rollout, "utf8").split("\n")) {
+      if (!line.includes("task_complete") && !line.includes("task_started")) continue;
+      let obj: unknown;
+      try {
+        obj = JSON.parse(line);
+      } catch {
+        // A torn record may be the newest turn marker: what came before it no
+        // longer provably speaks for the last turn.
+        last = null;
+        continue;
+      }
+      const rec = obj as { type?: unknown; payload?: unknown } | null;
+      if (rec?.type !== "event_msg" || !rec.payload || typeof rec.payload !== "object") continue;
+      const payload = rec.payload as Record<string, unknown>;
+      if (payload["type"] === "task_started") {
+        sawStarted = true;
+        lastStartedTurn = payload["turn_id"];
+      } else if (payload["type"] === "task_complete") {
+        last = payload; // LAST turn wins (resumed sessions)
+      }
+    }
+  } catch {
+    return null; // unreadable rollout: no vendor failure signal
+  }
+  if (!last) return null;
+  if (sawStarted && (typeof lastStartedTurn !== "string" || last["turn_id"] !== lastStartedTurn))
+    return null; // the last completion belongs to an EARLIER turn
+  const startedAt = last["started_at"];
+  if (typeof startedAt !== "number" || !Number.isFinite(startedAt)) return null;
+  if (startedAt < Math.floor(notBeforeMs / 1000)) return null; // a turn from before this spawn
+  const error = last["error"];
+  if (!error || typeof error !== "object" || Array.isArray(error)) return null; // no error recorded
+  const info = (error as Record<string, unknown>)["codex_error_info"];
+  const variants =
+    info && typeof info === "object" && !Array.isArray(info) ? Object.keys(info) : [];
+  const code = typeof info === "string" ? info : variants.length === 1 ? variants[0] : undefined;
+  const message = (error as Record<string, unknown>)["message"];
+  if (!code && typeof message !== "string") return null;
+  return {
+    code: code ? code.slice(0, 128) : null,
+    message: typeof message === "string" ? message.slice(0, 2000) : null,
+    source: "codex_rollout",
+  };
 }
 
 /** Locate the rollout file whose name binds to this run's threadId (the id is unique per session). */

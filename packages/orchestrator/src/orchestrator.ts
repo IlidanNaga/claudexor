@@ -177,6 +177,7 @@ import {
   failTerminally,
   guardAnnouncedRun,
   writeFailure,
+  attemptVendorFailure,
   cancelReasonFromSignalToken,
 } from "./runTerminals.js";
 import { type BudgetDenial, budgetFailureRecord, classifyBudgetFailure } from "./budgetFailure.js";
@@ -2655,7 +2656,6 @@ export class Orchestrator {
         }
 
         const newTransients = telemetry.transientFailures.slice(transientStart);
-        const transient = newTransients.at(-1) ?? null;
         // #31: the centralized retry gate reads the classified `retryable` verdict.
         const sawRetryable = newTransients.some((f) => f.retryable);
         const sawTypedLimit = telemetry.rateLimits.length > rateLimitStart;
@@ -2738,7 +2738,7 @@ export class Orchestrator {
           (t, p) => log?.emit(t, p),
           adapter.id,
           attemptId,
-          transient,
+          telemetry,
           nativeTry,
           retryPolicy,
         );
@@ -6764,7 +6764,6 @@ export class Orchestrator {
 
           if (streamBudgetDenied) break;
           const newTransients = telemetry.transientFailures.slice(transientStart);
-          const transient = newTransients.at(-1) ?? null;
           const sawRetryable = newTransients.some((f) => f.retryable);
           const sawTypedLimit = telemetry.rateLimits.length > rateLimitStart;
           const reportSoFar = answer.text();
@@ -6839,7 +6838,7 @@ export class Orchestrator {
             (t, p) => log.emit(t, p),
             adapter.id,
             attemptId,
-            transient,
+            telemetry,
             nativeTry,
             retryPolicy,
           );
@@ -7233,6 +7232,7 @@ export class Orchestrator {
           eventRefs: roEventRefs,
           runDir: paths.root,
           resetsAt: roDeclared?.resetsAt ?? null,
+          vendorFailure: attemptVendorFailure(attemptTelemetries, last?.attemptId),
           nextActions: harnessFailureNextActions(roCategory),
         });
       }

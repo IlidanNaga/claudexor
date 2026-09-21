@@ -1766,7 +1766,8 @@ Endpoint semantics beyond the inventory:
   risk-overridable block, and the non-overridable `provide_required_input` /
   `complete_incomplete_work` for a work_state veto). Clean, already-decided, and
   failed runs carry none — a failed run's remediation rides the failure
-  `nextActions`.
+  `nextActions`, and the vendor's own typed failure, when the harness keeps one,
+  rides `failure.vendorFailure` as opaque evidence that carries no remedy.
 - `POST /v2/runs/:id/decision` records a typed operator decision on a blocked run:
   `accept_risk` / `override_needs_human` append an auditable patch-hash-bound
   record to the owning global/project journal before ACK. The run artifact
@@ -3006,15 +3007,51 @@ fine-grained `kind`, with the safe provider metadata preserved (retry delay,
 vendor HTTP/adapter code, kill signal). The classifier reads only typed event
 fields — an adapter-declared `transient`/`rate_limit` signal, the vendor's typed
 `status.error_category`, and the run loop's typed exit disclosure (signal /
-spawn-failure) — never prose. The centralized retry policy gates on the
-category's `retryable` verdict rather than a bare "saw a transient" boolean:
-adapter-disclosed transients and rate limits retry with backoff (rate limits also
-feed W5.4 profile rotation), while deterministic refusals (auth/capability/config)
-and give-ups (a crashed child, an inactivity-watchdog abort) terminate. The typed
+spawn-failure / exit code / `harness_reported_error`) — never prose. The
+centralized retry policy gates on each observation's `retryable` verdict rather
+than a bare "saw a transient" boolean. The per-category table is the default for
+signals an adapter disclosed mid-stream: adapter-disclosed transients and rate
+limits retry with backoff (rate limits also feed W5.4 profile rotation), while
+deterministic refusals (auth/capability/config) terminate. Give-ups — terminal
+exit evidence, an adapter throw, an inactivity-watchdog abort — always carry an
+explicit `retryable: false` whatever their category: they never schedule a retry
+themselves (a typed mid-stream transient on the same try still decides as before).
+A signal kill keeps `process_crash` and carries no vendor evidence. The typed
 category rides `route.transient.detected`/`exhausted`, is persisted on the attempt
 telemetry's `transient_failures`, and drives required-actions — authentication
 guidance appears ONLY on a classified `auth_failed`, never on a timeout, rate
-limit, or crash.
+limit, or crash. `route.transient.exhausted` reports `retries` as the number of
+same-profile retries that actually ran (zero when the failure was never
+retryable) beside the configured ceiling `max_retries`.
+
+A harness that voiced its own error and then exited non-zero did not crash. The
+shared CLI run loop marks the terminal `completed` payload
+`harness_reported_error: true` only when an `error` event was translated from the
+harness's own stdout frames (the adapter's parse or its session handler) — never
+for a spawn failure, an unconfirmed termination, a stderr-only failure, or the
+loop's own synthesized "exited with code N". The classifier labels such a
+non-zero exit `unknown_harness_error` (neutral next actions) and keeps
+`process_crash` for a signal kill — whatever preceded it — and for a silent
+non-zero exit. This is a label, not a policy: retry, account rotation, cooldown
+and credential verdicts read exactly the inputs they read for a crash.
+
+Vendor failure evidence: where a vendor keeps its own machine-readable failure
+record, the adapter reads it after the process exited and attaches it to that
+same `completed` payload as `vendor_failure`. Codex is the one producer: its
+session rollout's last `task_complete.error` (`codex_error_info` + message), read
+fail-soft from the run's own `CODEX_HOME` and bound to the turn this process ran
+(the record must be the last completion, match the last started turn when the
+rollout carries turn markers, and not predate the spawn second; any doubt yields
+nothing — disclosed residual: an earlier turn that failed within the same second
+as a resumed spawn that wrote no turn marker of its own). The orchestrator
+forwards it to the terminal failure record as
+`vendorFailure: { code, message, source }` for the attempt that record speaks
+for (candidate lane: the first candidate; read-only lane: the last attempt;
+budget, plan and deep-scan terminals carry `null`). The code is OPAQUE evidence,
+forwarded verbatim with no mapping table: no Claudexor code path branches on
+its value, it is never an input to retry, rotation, cooldown or credential
+verdicts, and it never changes the record's `category`/`code`. Every other
+harness, and any missing or unreadable record, yields `null`.
 
 On every terminal path (zero exit, nonzero exit, abort), the shared CLI run
 loop attaches a bounded, adapter-redacted `stderr_tail` to the terminal

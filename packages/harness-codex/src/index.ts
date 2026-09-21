@@ -7,6 +7,7 @@ import {
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 export { createCodexModelAdapter } from "./model.js";
 import { codexTranscriptModel, codexTranscriptRateLimits } from "./transcript.js";
+import { withCodexVendorFailure } from "./vendor-failure.js";
 import { resolveSecret } from "@claudexor/secrets";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -781,7 +782,7 @@ async function* runCodex(
   }; // finality + #19816 + required MCP startup proof
 
   try {
-    yield* runtime.runCliHarness({
+    const stream = runtime.runCliHarness({
       bin: BIN,
       args,
       spec,
@@ -854,12 +855,10 @@ async function* runCodex(
             const rl = codexTranscriptRateLimits(env["CODEX_HOME"], codexThreadId);
             if (rl) ev.quota = rl;
           }
+          // A profiled run's quota is THE PROFILE's (round-17 #2); unstamped = engine default.
           if (ev.quota && profile && ev.quota.subject_id == null) {
             ev.quota = { ...ev.quota, subject_id: profile.profile_id };
           }
-          // A profiled run's quota windows belong to THE PROFILE's account
-          // (round-17 #2): the rollout record carries no subject, and an
-          // unstamped null would register as the engine-default subject.
         }
         return out;
       },
@@ -873,6 +872,7 @@ async function* runCodex(
         return event;
       },
     });
+    yield* withCodexVendorFailure(stream, spec, env, () => codexThreadId);
   } finally {
     if (tempCodexHome) {
       try {

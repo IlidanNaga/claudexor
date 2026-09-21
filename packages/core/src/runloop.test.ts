@@ -382,3 +382,131 @@ describe("runCliHarness stderr tail on every exit path", () => {
     expect(completed?.payload?.["stderr_tail"]).toContain("fatal: broke badly");
   }, 15_000);
 });
+
+// A harness that VOICED its own error on stdout and then exited non-zero did not
+// crash. `harness_reported_error` is the typed fact that says so, and it is set
+// ONLY for error events translated from the harness's own stdout frames (adapter
+// parse or adapter session handler) — never for an error this loop or its
+// process layer produced.
+describe("runCliHarness harness_reported_error terminal fact", () => {
+  const errorEvent = (text: string): HarnessEvent => ({
+    type: "error",
+    session_id: "ses-loop",
+    ts: new Date().toISOString(),
+    error: text,
+  });
+  const parseErrorFrame = (obj: unknown): HarnessEvent[] | null => {
+    const o = obj as Record<string, unknown>;
+    if (o["type"] === "error") return [errorEvent(String(o["message"]))];
+    if (o["type"] === "ok") return [];
+    return null;
+  };
+  const run = async (
+    opts: Partial<Parameters<typeof runCliHarness>[0]> & { args: string[] },
+    runSpec: HarnessRunSpec = spec(),
+  ): Promise<HarnessEvent[]> => {
+    const events: HarnessEvent[] = [];
+    for await (const ev of runCliHarness({
+      bin: process.execPath,
+      spec: runSpec,
+      parseEvent: parseErrorFrame,
+      ...opts,
+    })) {
+      events.push(ev);
+    }
+    return events;
+  };
+  const reported = (events: HarnessEvent[]): boolean => {
+    const payload = events.at(-1)?.payload;
+    return payload !== undefined && "harness_reported_error" in payload;
+  };
+
+  it("fires when the adapter parse turned a stdout frame into an error and the CLI exited non-zero", async () => {
+    const events = await run({
+      args: [
+        "-e",
+        "console.log(JSON.stringify({ type: 'error', message: 'model is at capacity' })); process.exitCode = 1",
+      ],
+    });
+    const completed = events.at(-1);
+    expect(completed?.type).toBe("completed");
+    expect(completed?.payload?.["harness_reported_error"]).toBe(true);
+    expect(completed?.payload?.["exit_code"]).toBe(1);
+    // The harness's own words are the only error: nothing was synthesized on top.
+    expect(events.filter((e) => e.type === "error").map((e) => e.error)).toEqual([
+      "model is at capacity",
+    ]);
+  }, 15_000);
+
+  it("fires when the adapter SESSION handler yielded the error", async () => {
+    const events = await run({
+      args: [
+        "-e",
+        "console.log(JSON.stringify({ type: 'control_request' })); process.stdin.on('end', () => process.exit(1)); process.stdin.resume()",
+      ],
+      session: {
+        matches: (obj) => (obj as Record<string, unknown>)["type"] === "control_request",
+        handle: async function* (_obj, io) {
+          yield errorEvent("session refused");
+          io.end();
+        },
+      },
+    });
+    expect(events.at(-1)?.payload?.["harness_reported_error"]).toBe(true);
+    expect(events.at(-1)?.payload?.["exit_code"]).toBe(1);
+  }, 15_000);
+
+  it("stays quiet on a SILENT non-zero exit: the loop's synthesized error is not the harness speaking", async () => {
+    const events = await run({ args: ["-e", "process.exit(3)"] });
+    expect(events.find((e) => e.type === "error")?.error).toMatch(/exited with code 3/);
+    expect(events.at(-1)?.payload?.["exit_code"]).toBe(3);
+    expect(reported(events)).toBe(false);
+  }, 15_000);
+
+  it("stays quiet on a STDERR-ONLY failure even when the adapter translates the stderr tail", async () => {
+    const events = await run({
+      args: ["-e", "require('node:fs').writeSync(2, 'fatal: not logged in\\n'); process.exit(2)"],
+      parseStderrFailure: (stderr) => errorEvent(`translated: ${stderr}`),
+    });
+    expect(events.find((e) => e.type === "error")?.error).toContain("translated: fatal");
+    expect(events.at(-1)?.payload?.["exit_code"]).toBe(2);
+    expect(reported(events)).toBe(false);
+  }, 15_000);
+
+  it("stays quiet on a SPAWN failure", async () => {
+    const events = await run({ bin: "/nonexistent/claudexor-no-such-binary", args: [] });
+    expect(events.find((e) => e.type === "error")?.error).toMatch(/failed to start/);
+    expect(events.at(-1)?.payload?.["spawn_failed"]).toBe(true);
+    expect(reported(events)).toBe(false);
+  }, 15_000);
+
+  it("stays quiet on an UNCONFIRMED termination", async () => {
+    const ac = new AbortController();
+    const runSpec = spec();
+    runSpec.extra["abortSignal"] = ac.signal;
+    const events = await run(
+      {
+        args: [
+          "-e",
+          "console.log(JSON.stringify({ type: 'ok' })); process.on('SIGINT', () => process.exit(0)); setTimeout(() => {}, 5000)",
+        ],
+        parseEvent: (obj) => {
+          if ((obj as Record<string, unknown>)["type"] === "ok") ac.abort();
+          return [];
+        },
+        reap: async () => ({ state: "unconfirmed", survivors: [424242], unresolved: [] }),
+      },
+      runSpec,
+    );
+    expect(events.find((e) => e.type === "error")?.error).toMatch(/could not confirm/i);
+    expect(events.at(-1)?.payload?.["termination_unconfirmed"]).toBeTruthy();
+    expect(reported(events)).toBe(false);
+  }, 15_000);
+
+  it("stays quiet on a clean exit", async () => {
+    const events = await run({ args: ["-e", "console.log(JSON.stringify({ type: 'ok' }))"] });
+    expect(events.some((e) => e.type === "error")).toBe(false);
+    expect(events.at(-1)?.payload?.["exit_code"]).toBe(0);
+    expect(reported(events)).toBe(false);
+  }, 15_000);
+});

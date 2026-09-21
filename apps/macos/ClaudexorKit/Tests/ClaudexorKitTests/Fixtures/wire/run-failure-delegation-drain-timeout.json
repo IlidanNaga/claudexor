@@ -14,6 +14,7 @@
     ],
     "runDir": null,
     "resetsAt": null,
+    "vendorFailure": null,
     "nextActions": [
       "Inspect child run terminals and retry the parent after recovery."
     ]

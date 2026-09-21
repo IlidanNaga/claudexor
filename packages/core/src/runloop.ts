@@ -96,6 +96,10 @@ export async function* runCliHarness(opts: CliRunLoopOptions): AsyncGenerator<Ha
   let droppedUnparsedLines = 0;
   let droppedUnrecognizedEvents = 0;
   let sawError = false;
+  // The harness's OWN stdout frames produced an `error` event (adapter parse or
+  // adapter session handler). Never set for a spawn failure, an unconfirmed
+  // termination, a stderr-only failure, or the loop's synthesized exit error.
+  let harnessReportedError = false;
   let spawnFailed = false;
   let exitCode: number | null = null;
   let exitSignal: NodeJS.Signals | null = null;
@@ -160,7 +164,7 @@ export async function* runCliHarness(opts: CliRunLoopOptions): AsyncGenerator<Ha
       }
       if (opts.session && session.io && opts.session.matches(obj)) {
         for await (const out of opts.session.handle(obj, session.io)) {
-          if (out.type === "error") sawError = true;
+          if (out.type === "error") sawError = harnessReportedError = true;
           yield out;
         }
         continue;
@@ -178,7 +182,7 @@ export async function* runCliHarness(opts: CliRunLoopOptions): AsyncGenerator<Ha
       }
       let stop = false;
       for (const out of events) {
-        if (out.type === "error") sawError = true;
+        if (out.type === "error") sawError = harnessReportedError = true;
         yield out;
         if (opts.stopAfterEvent?.(out)) {
           stop = true;
@@ -253,6 +257,11 @@ export async function* runCliHarness(opts: CliRunLoopOptions): AsyncGenerator<Ha
   // a process crash the orchestrator classifies without parsing prose.
   if (!aborted && exitSignal) payload["exit_signal"] = exitSignal;
   if (spawnFailed) payload["spawn_failed"] = true;
+  // Typed "the harness voiced its own error" fact: lets the orchestrator tell a
+  // CLI that reported a failed turn and exited non-zero from a crashed process,
+  // without parsing prose. Only this loop can tell a harness frame from its own
+  // synthesized exit error.
+  if (harnessReportedError) payload["harness_reported_error"] = true;
   // Raw stderr diagnostics ride EVERY terminal payload (GH #120) — zero-exit and
   // aborted runs previously discarded the ring. Bounded + redacted here, redacted
   // again by the orchestrator before persistence; surfaced only through the raw

@@ -56,15 +56,21 @@ export function dropDeltaPastBudget(
 }
 
 /** Discloses one scheduled same-profile transient retry (`detected` +
- * `retry_scheduled`) and returns the backoff delay the caller must sleep. */
+ * `retry_scheduled`), counts it as OBSERVED on the attempt, and returns the
+ * backoff delay the caller must sleep. The failure that scheduled it is the
+ * attempt's latest classified one (a retry is scheduled only after a retryable
+ * observation in this try). A dedicated counter, not `nativeTry`: that index
+ * also advances on credential rotation. */
 export function emitTransientRetryPlan(
   emit: Emit,
   harnessId: string,
   attemptId: string,
-  transient: { kind: string; category: string; retryDelayMs: number | null } | null,
+  telemetry: AttemptTelemetry,
   nativeTry: number,
   policy: TransientRetryPolicy,
 ): number {
+  const transient = telemetry.transientFailures.at(-1) ?? null;
+  telemetry.transientRetries += 1;
   const delayMs = transientRetryDelayMs(transient?.retryDelayMs ?? null, policy, nativeTry);
   emit("route.transient.detected", {
     harness_id: harnessId,
@@ -102,19 +108,22 @@ export function observeReadonlySpend(
 }
 
 /** The transient machinery's terminal disclosure for an attempt that still
- * ended errored; silent when no transient failure was ever classified. */
+ * ended errored; silent when no transient failure was ever classified.
+ * `retries` is the number of same-profile retries that actually RAN (zero when
+ * the failure was never retryable); `max_retries` is the configured ceiling. */
 export function emitTransientExhausted(
   emit: Emit,
   harnessId: string,
   attemptId: string,
   telemetry: AttemptTelemetry,
-  retries: number,
+  maxRetries: number,
 ): void {
   if (telemetry.transientFailures.length === 0) return;
   emit("route.transient.exhausted", {
     harness_id: harnessId,
     attempt_id: attemptId,
     category: telemetry.transientFailures.at(-1)?.category ?? "unknown_harness_error",
-    retries,
+    retries: telemetry.transientRetries,
+    max_retries: maxRetries,
   });
 }
