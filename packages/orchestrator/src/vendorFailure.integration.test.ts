@@ -227,7 +227,15 @@ for (const lane of ["ask", "agent"] as const) {
         yield started(spec, ts);
         yield toolCall(spec, ts);
         yield voicedError(spec, ts);
-        yield completed(spec, ts, { exit_signal: "SIGKILL", harness_reported_error: true });
+        yield completed(spec, ts, {
+          exit_signal: "SIGKILL",
+          harness_reported_error: true,
+          vendor_failure: {
+            code: "server_overloaded",
+            message: "at capacity",
+            source: "codex_rollout",
+          },
+        });
       });
       expect(o.spawns).toHaveLength(1);
       expect(o.failure?.vendorFailure).toBeNull();

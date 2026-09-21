@@ -824,8 +824,8 @@ sentence, while codex's own session rollout keeps the typed record
 run loop disclosed that codex voiced its own error, the adapter reads that
 record once after exit and attaches it to the terminal `completed` payload as
 `vendor_failure` (`source: "codex_rollout"`), verbatim and uninterpreted; a
-tagged-object variant yields its variant name. Skipped under
-`evidence_policy: stream_only`. Pin: `fixtures/rollout/recorded-*.jsonl`
+tagged-object variant yields its variant name. Skipped for an aborted run and
+under `evidence_policy: stream_only`. Pin: `fixtures/rollout/recorded-*.jsonl`
 (session-rollout records, not stream captures).
 
 **Cursor** — wire: `cursor-agent -p --output-format stream-json <sandbox

@@ -150,7 +150,8 @@ export function classifyCompletedCrash(
         adapterCode: exitCode !== null ? `exit_${exitCode}` : null,
       }),
       retryable: false,
-      vendorFailure: vendor.success ? vendor.data : null,
+      // A signal kill is a crash whatever preceded it: its record carries no vendor evidence.
+      vendorFailure: voiced && vendor.success ? vendor.data : null,
     };
   }
   return null;

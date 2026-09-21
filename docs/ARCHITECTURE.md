@@ -3014,7 +3014,9 @@ signals an adapter disclosed mid-stream: adapter-disclosed transients and rate
 limits retry with backoff (rate limits also feed W5.4 profile rotation), while
 deterministic refusals (auth/capability/config) terminate. Give-ups — terminal
 exit evidence, an adapter throw, an inactivity-watchdog abort — always carry an
-explicit `retryable: false` whatever their category and terminate. The typed
+explicit `retryable: false` whatever their category: they never schedule a retry
+themselves (a typed mid-stream transient on the same try still decides as before).
+A signal kill keeps `process_crash` and carries no vendor evidence. The typed
 category rides `route.transient.detected`/`exhausted`, is persisted on the attempt
 telemetry's `transient_failures`, and drives required-actions — authentication
 guidance appears ONLY on a classified `auth_failed`, never on a timeout, rate
