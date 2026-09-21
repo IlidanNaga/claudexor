@@ -558,6 +558,20 @@ route is enumerated with the same `auto` the adapter will resolve and the spec
 reaches the adapter unrewritten: the gate reads the run's identity, it never
 decides it, and an undecidable route is the vendor's refusal to make, not the
 gate's.
+The same rule decides what a list may refuse with. A live inventory always
+proves PRESENCE; it proves ABSENCE only when its producer declares that it can.
+`model_inventory_absence: "advisory"` (codex, because `model/list` carries no
+provenance and the CLI substitutes a bundled default list when its remote fetch
+times out) makes an unlisted EXPLICIT model undecidable here, so the gate
+forwards it byte-identical, the vendor decides, and the per-spawn gate discloses
+once — as a status event — that the model was not listed. Preflight stays
+silent, so one spawn speaks once. Manifest truth is never advisory and is never
+substituted to admit a model; the unscoped `/harnesses/:id/models` query, the
+settings-write gate, the doctor's configured-model check and the automatic
+reviewer panel are unaffected, since they read manifest truth or keep their own
+skip-at-zero-cost contract. The residual is disclosed rather than guessed at: a
+vendor CLI refusing a forwarded model surfaces as an untyped error carrying the
+vendor's text, and a mistyped model on such a harness costs one spawn.
 Thread ask/plan readiness and inventory use the same durable lane HOME as the
 eventual spawn, while non-thread read-only runs retain disposable state.
 `/harnesses/:id/models` reports
@@ -1343,6 +1357,10 @@ manifest truth applies. Codex account enumeration is native-session-specific,
 so API-key and unscoped legacy queries retain their manifest source instead of
 borrowing a subscription catalog. A failed supported live inventory remains
 unverifiable; it never falls back to a convenient manifest to admit a model.
+Where its producer declared absences advisory, an unverifiable answer instead
+sends the explicit model to the vendor unchanged (above). The authenticated
+account catalog read below is a different source and stays strict: a model it
+does not carry is a typed `model_unavailable` refusal.
 
 The engine also accepts one raw model generation independently of Agent Runs.
 `ModelAdapter` in core and the model-operation schemas define caller-owned

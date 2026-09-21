@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { CredentialProfile, ModelCallRequest, ModelCallResult } from "@claudexor/schema";
 import { createCodexModelAdapter, parseCodexModelCatalog } from "./model.js";
+import { CODEX_MODEL_INVENTORY } from "./processing-session.js";
 
 const catalog = {
   models: [
@@ -864,6 +865,21 @@ describe("single-generation Codex adapter", () => {
       expect(fixture.fetcher).toHaveBeenCalledTimes(1);
     },
   );
+  it("stays STRICT even though the codex manifest declares its CLI inventory advisory", async () => {
+    // Two different inventories: the CLI's `model/list` (advisory — a bundled
+    // default list is indistinguishable from the account's own, INV-104) and
+    // THIS catalog, a live authenticated HTTP read of the selected account.
+    // The advisory fact belongs to the first and must never reach the second.
+    expect(CODEX_MODEL_INVENTORY.model_inventory_absence).toBe("advisory");
+    const fixture = setup();
+    const result = await fixture.adapter.invoke(
+      { ...fixture.request, model: "gpt-6-astra" },
+      fixture.context,
+    );
+    expect(result.problem?.code).toBe("model_unavailable");
+    expect(result.outcome).toBe("failed");
+    expect(fixture.onDispatch).not.toHaveBeenCalled();
+  });
   it("refuses unadvertised effort and does not clamp or silently retry", async () => {
     const fixture = setup();
     const result = await fixture.adapter.invoke(

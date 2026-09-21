@@ -20,6 +20,12 @@
  * A fallback model is checked by the authoritative per-spawn gate only after
  * its own quota/profile preflight; checking it against the primary profile
  * here would reject a valid cross-profile fallback.
+ *
+ * One truth source cannot refuse: a live inventory whose adapter declared
+ * `model_inventory_absence: "advisory"` proves presence but not absence, so an
+ * unlisted explicit model is forwarded to the vendor unchanged and disclosed
+ * once by the per-spawn gate. Manifest truth stays strict, and no gate ever
+ * swaps one list for another to admit a model.
  */
 import type { HarnessAdapter } from "@claudexor/core";
 import {
@@ -36,13 +42,21 @@ import {
   type HarnessEvent,
   type HarnessRunSpec,
   type KnownModelEntry,
+  type ModelInventoryAbsence,
 } from "@claudexor/schema";
 
 export interface ModelGovernedRoute {
   adapter: HarnessAdapter;
   /** Manifest model truth source (used when the adapter has no live models()). */
   knownModels: readonly KnownModelEntry[];
-  modelInventoryRoutes?: Readonly<HarnessCapabilities["model_inventory_routes"]>;
+  /** The adapter's declared live-inventory contract, read from its manifest:
+   * WHICH credential routes its `models()` producer answers for, and WHAT its
+   * answer proves about a model it does not list (`model_inventory_absence`;
+   * omitted = `authoritative` = today's refusal). Both halves travel together
+   * so a caller cannot supply one and silently lose the other. */
+  modelInventory?: Readonly<
+    Pick<HarnessCapabilities, "model_inventory_routes" | "model_inventory_absence">
+  >;
   /** Pre-spawn credential-route estimate: route-annotated manifest models are
    * filtered by it, and stay EXCLUDED when it is null (fail-closed — a
    * route-scoped model never passes the gate on an undecidable route). */
@@ -58,6 +72,9 @@ type ModelTruth = {
   list: readonly string[];
   source: "api" | "manifest";
   route: "local_session" | "api_key" | null;
+  /** Only a live producer can be advisory; manifest truth always speaks for
+   * itself, so it is never substituted to admit (or to forward) a model. */
+  absence: ModelInventoryAbsence;
 };
 
 /** A pinned profile decides the route by its credential kind; without one the
@@ -80,27 +97,46 @@ async function modelTruthForRoute(
   },
 ): Promise<ModelTruth> {
   const route = authRouteForProfile(query.profile, routed.authRouteEstimate);
-  if (hasModelInventoryForRoute(routed.adapter, routed.modelInventoryRoutes, route)) {
+  if (
+    hasModelInventoryForRoute(routed.adapter, routed.modelInventory?.model_inventory_routes, route)
+  ) {
     const inventory = await routed.adapter.models({
       cwd: query.cwd,
       ...(query.env ? { env: query.env } : {}),
       ...(query.authPreference ? { authPreference: query.authPreference } : {}),
       ...(query.profile ? { credentialProfile: query.profile } : {}),
     });
-    return { list: inventory.map((model) => model.id), source: "api", route };
+    return {
+      list: inventory.map((model) => model.id),
+      source: "api",
+      route,
+      absence: routed.modelInventory?.model_inventory_absence ?? "authoritative",
+    };
   }
-  return { list: knownModelIdsForRoute(routed.knownModels, route), source: "manifest", route };
+  return {
+    list: knownModelIdsForRoute(routed.knownModels, route),
+    source: "manifest",
+    route,
+    absence: "authoritative",
+  };
 }
 
+/** Throws on a refused candidate; returns the notes of the candidates a truth
+ * source admitted WITHOUT being able to verify them, so the caller that can
+ * disclose does it once. */
 function assertModelsAllowed(
   routed: ModelGovernedRoute,
   candidates: readonly ModelCandidate[],
   truth: ModelTruth,
   profile: CredentialProfile | null,
-): void {
+): string[] {
+  const unverified: string[] = [];
   for (const { role, model } of candidates) {
-    const check = validateModel(model, truth.list, truth.source);
-    if (check.status === "ok") continue;
+    const check = validateModel(model, truth.list, truth.source, truth.absence);
+    if (check.status === "ok") {
+      if (check.unverified && check.message) unverified.push(check.message);
+      continue;
+    }
     // A pinned profile OWNS this inventory: sending the operator to the
     // profile-less `claudexor models` would print a different account's list.
     const remedy = profile
@@ -111,6 +147,7 @@ function assertModelsAllowed(
         remedy,
     );
   }
+  return unverified;
 }
 
 export async function assertRouteModelsAllowed(
@@ -168,6 +205,7 @@ export async function* runModelGovernedRoute(
     spec = { ...spec, processing: prepared.receipt, processing_cost_basis: prepared.costBasis };
   }
   const model = spec.model_hint?.trim();
+  const unverified: string[] = [];
   if (model) {
     const profile = spec.credential_profile ?? null;
     const truth = await modelTruthForRoute(routed, {
@@ -176,13 +214,15 @@ export async function* runModelGovernedRoute(
       authPreference: spec.auth_preference,
       profile,
     });
-    assertModelsAllowed(routed, [{ role: "model", model }], truth, profile);
+    unverified.push(...assertModelsAllowed(routed, [{ role: "model", model }], truth, profile));
     if (nativeModel && nativeModel !== model) {
-      assertModelsAllowed(
-        routed,
-        [{ role: "native processing model", model: nativeModel }],
-        truth,
-        profile,
+      unverified.push(
+        ...assertModelsAllowed(
+          routed,
+          [{ role: "native processing model", model: nativeModel }],
+          truth,
+          profile,
+        ),
       );
     }
   }
@@ -196,6 +236,17 @@ export async function* runModelGovernedRoute(
       session_id: spec.session_id,
       processing: spec.processing,
       text: "Processing preference is unavailable; using ordinary native execution.",
+    };
+  }
+  // A model this gate could not verify is DISCLOSED once, here, instead of
+  // refused: the run log and the receipt say the vendor, not the gate, decided.
+  // Preflight stays silent so one spawn speaks once.
+  if (unverified.length > 0) {
+    yield {
+      type: "status",
+      ts: new Date().toISOString(),
+      session_id: spec.session_id,
+      text: unverified.join("; "),
     };
   }
   yield* routed.adapter.run(spec);

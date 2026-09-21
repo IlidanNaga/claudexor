@@ -653,7 +653,7 @@ export interface RoutedAdapter {
   effortLevels: readonly EffortHint[];
   /** Manifest model truth source (used when the adapter has no live models()). */
   knownModels: readonly KnownModelEntry[];
-  modelInventoryRoutes?: HarnessCapabilities["model_inventory_routes"];
+  modelInventory?: Pick<HarnessCapabilities, "model_inventory_routes" | "model_inventory_absence">;
   /** Pre-spawn credential-route estimate (INV-061 projection of preference x
    * doctor source readiness); null = undecidable, model gates stay fail-closed. */
   authRouteEstimate: "local_session" | "api_key" | null;
@@ -1439,7 +1439,7 @@ export class Orchestrator {
           }),
           effortLevels: manifest.capabilities.effort_levels,
           knownModels: manifest.capabilities.known_models,
-          modelInventoryRoutes: manifest.capabilities.model_inventory_routes,
+          modelInventory: manifest.capabilities,
           // A selected profile's credential_kind IS the route (round-18 #2);
           // the default store's sources apply only to profile-less runs.
           authRouteEstimate:

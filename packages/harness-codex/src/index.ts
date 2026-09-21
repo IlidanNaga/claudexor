@@ -1,4 +1,5 @@
 import {
+  CODEX_MODEL_INVENTORY,
   codexProcessingMethods,
   codexProcessingArgs,
   applyCodexRunProcessing,
@@ -402,7 +403,7 @@ export function createCodexAdapter(deps: Partial<CodexRuntimeDeps> = {}): Harnes
         provider_family: "openai",
         capabilities: {
           processing_preferences: ["standard", "fast", "economy"],
-          model_inventory_routes: ["local_session"],
+          ...CODEX_MODEL_INVENTORY,
           plan: true,
           implement: true,
           create_from_scratch: true,
@@ -428,8 +429,7 @@ export function createCodexAdapter(deps: Partial<CodexRuntimeDeps> = {}): Harnes
           effort_levels_verified_against: efforts.live
             ? version
             : CODEX_EFFORT_SNAPSHOT_VERIFIED_AGAINST,
-          // Explicit models must belong to this union of current and historical
-          // account-visible captures; hidden vendor models are not supported hints.
+          // Manifest truth for routes the live probe does not answer; no hidden models.
           known_models: [
             "gpt-6-astra",
             "gpt-5.6",

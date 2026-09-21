@@ -2,11 +2,18 @@
  * Explicit reviewer-panel resolution (owner-configured panels). Every entry
  * must pass the SAME gates auto-selection uses — registered real harness,
  * enabled in settings, doctor-ok on the review route, readonly-review
- * capable — plus the STRICT model truth gate (INV-104: live inventory
- * when the adapter has `models()`, else manifest `known_models`; empty truth
+ * capable — plus the model truth gate (INV-104: live inventory when the
+ * adapter has `models()`, else manifest `known_models`; empty manifest truth
  * refuses) and the declared effort ladder. Violations throw typed
  * HarnessUnavailableError; the orchestrator turns them into review_preflight
  * failure ARTIFACTS after run-dir creation, before candidates spend money.
+ *
+ * The one thing this gate does not decide is an absence its truth source
+ * cannot prove: where the adapter declared `model_inventory_absence:
+ * "advisory"`, a live list that lacks the requested model (or answers with
+ * nothing at all) forwards the explicit model to the vendor unchanged rather
+ * than refusing it here. Manifest truth stays strict, and no list is ever
+ * substituted for another.
  */
 import type {
   AuthPreference,
@@ -16,6 +23,7 @@ import type {
   EffortHint,
   Intent,
   ModelEffortCapability,
+  ModelInventoryAbsence,
   ProviderFamily,
 } from "@claudexor/schema";
 import {
@@ -276,6 +284,11 @@ export async function resolveExplicitReviewerPanel(
               );
             }
           } else {
+            // The LIVE path asks the SAME question the run gate asks: what does
+            // this inventory actually prove? An advisory producer proves
+            // presence only, so a miss (and an empty answer) forwards the
+            // explicit model to the vendor instead of refusing it here.
+            const absence = manifest.capabilities.model_inventory_absence ?? "authoritative";
             const inventoryKey = `${entry.harness}\0${authPreference}\0${credentialProfile?.profile_id ?? "default"}`;
             if (!modelInventory.has(inventoryKey)) {
               modelInventory.set(
@@ -287,11 +300,13 @@ export async function resolveExplicitReviewerPanel(
                   env: reviewModelEnv,
                   harnessId: entry.harness,
                   requestedModel,
+                  absence,
                 }),
               );
             }
             const models = modelInventory.get(inventoryKey);
-            if (models && models.size > 0 && !models.has(requestedModel)) {
+            const check = validateModel(requestedModel, [...(models ?? [])], "api", absence);
+            if (models && models.size > 0 && check.status !== "ok") {
               if (!entry.credentialProfileId && credentialProfile && deps.resolveReviewerProfile) {
                 excludedProfileIds.add(credentialProfile.profile_id);
                 continue;
@@ -519,7 +534,12 @@ export async function resolveAutoReviewerPanel(
 
 /** One retry with a short delay: transient inventory hiccups (cold auth,
  * slow first call) must not fail a panel that would succeed a moment later —
- * but a persistently empty/erroring inventory still refuses loudly. */
+ * but a persistently empty/erroring inventory still refuses loudly, UNLESS the
+ * producer declared its absences advisory: an empty answer from such a source
+ * proves nothing, so it is returned as the empty set and the caller's shared
+ * decision forwards the explicit model to the vendor (a second probe would ask
+ * the same source the same unanswerable question). A thrown call is still a
+ * failure, not an answer, and still refuses. */
 async function listModelIdsWithRetry(
   listModels: NonNullable<HarnessAdapter["models"]>,
   input: {
@@ -529,6 +549,7 @@ async function listModelIdsWithRetry(
     env: () => Record<string, string>;
     harnessId: string;
     requestedModel: string;
+    absence: ModelInventoryAbsence;
   },
 ): Promise<Set<string>> {
   let lastError: unknown = null;
@@ -541,6 +562,7 @@ async function listModelIdsWithRetry(
         ...(input.credentialProfile ? { credentialProfile: input.credentialProfile } : {}),
       });
       if (models.length === 0) {
+        if (input.absence === "advisory") return new Set();
         throw new Error("model inventory was empty");
       }
       return new Set(models.map((m) => m.id));

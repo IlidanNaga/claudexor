@@ -622,17 +622,37 @@ invariant or operator decision before proceeding.
   opaque native error. Refusals name the harness, the model, and the truth
   source; model truth is surfaced to UIs (`source: api | manifest`), and
   known-model hints carry a `verifiedAgainst` freshness note checked by the
-  model-hints-freshness gate. verify: canaries
+  model-hints-freshness gate. A truth source refuses only what it can prove:
+  the strict rule above holds wherever absence from the list is evidence, which
+  is every manifest list and every live inventory whose producer declares it.
+  A producer that cannot tell its own answer from a vendor-substituted one
+  declares `model_inventory_absence: "advisory"` (codex: a `model/list` reply
+  carries no provenance and the CLI serves a bundled default list when its
+  remote fetch times out), and then presence still admits while absence decides
+  nothing: the EXPLICIT model is forwarded byte-identical, the vendor accepts or
+  refuses it, and the per-spawn gate discloses once that the model was not
+  listed. No list is ever substituted for another to admit a model, and
+  automatic reviewer selection still skips an unlisted family at zero cost.
+  Residuals, disclosed: on the CLI run path a vendor model refusal arrives as an
+  untyped error carrying the vendor's text (only HTTP model operations are
+  typed, and they stay strict), and a mistyped explicit model on such a harness
+  now costs one spawn instead of failing free at the gate. verify: canaries
   `[INV-104:model-truth-refusal]`, `[INV-104:models-manifest-fallback]`,
   `[INV-104:settings-write-strict]`; settings-service tests;
-  modelGovernance preflight tests. Locked operator decision: strict
-  everywhere.
+  modelGovernance preflight tests; `packages/core/src/model.test.ts`;
+  `packages/orchestrator/src/reviewerPanel.test.ts`;
+  `packages/harness-codex/src/astra.test.ts`. Operator decision 2026-09-21:
+  strict wherever the truth source can prove absence.
 - **INV-105** Per-harness knobs a manifest does not support are disclosed as
   `ignored_settings` on `harness.started` — never silently dropped. This
   covers max_turns, tool lists, and effort (an empty declared ladder); an
-  explicit MODEL never reaches an unsupporting route at all — the strict
-  truth-source preflight refuses it first (INV-104). verify: knob
-  disclosure tests incl. the INV-105 effort-disclosure test.
+  explicit MODEL reaches a route only where its truth source could not refuse
+  it (INV-104), and then the run says so: the per-spawn gate discloses the
+  unverified model, and the effort a model absent from the probed list resolves
+  against the sibling ladders is sent verbatim, clamped-and-disclosed, or
+  dropped-and-disclosed — never silently changed. verify: knob
+  disclosure tests incl. the INV-105 effort-disclosure test;
+  `packages/harness-codex/src/astra.test.ts` stale-list effort resolution.
 
 ## 11. Delivery Is Server-Owned
 
