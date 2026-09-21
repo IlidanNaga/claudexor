@@ -208,7 +208,7 @@ invariant or operator decision before proceeding.
   own: best-of-N (`--n`), capped repair (`--attempts`), repair-to-clean
   (`--until-clean`), research sweep (`ask --deep-scan`), create-from-scratch
   (`agent --create`), delegation belt (`agent --delegate`), council planning
-  (`plan --council`, with `--n 2..4` legal only under council). verify: CLI
+  (`plan --council`, with `--n` of at least two, bounded by the operator-configured Council capacity, legal only under council). verify: CLI
   help + docs-truth flag check.
 - **INV-032** Old mode ids are not compatibility aliases; they hard-error at
   every wire boundary unless explicitly reintroduced in schema and docs.

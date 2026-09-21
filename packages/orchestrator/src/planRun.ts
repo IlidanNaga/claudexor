@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import {
   PlanQuestionsArtifact,
+  MAX_COUNCIL_MEMBERS_DEFAULT,
   type ActiveTaskContract,
   derivePlanReadiness,
   makeOutcomeFacts,
@@ -56,6 +57,8 @@ export interface PlanRunDeps {
   /** The solo planner prompt (native plan-mode template with the tagged Open
    * Questions block); council members draft with the same prompt. */
   planPrompt(goal: string): string;
+  /** Startup-frozen cap for Council membership. */
+  maxCouncilMembers?: number;
 }
 
 /**
@@ -96,7 +99,11 @@ export async function runCouncilPlan(
   // Distinct pool members, primary first (adapters are already ordered +
   // deduped by resolveCandidateAdapters with n=undefined). Council never
   // duplicates a harness into two members.
-  const { requested, members: memberCount } = resolveCouncilWidth(input.n, adapters.length);
+  const { requested, members: memberCount } = resolveCouncilWidth(
+    input.n,
+    adapters.length,
+    deps.maxCouncilMembers ?? MAX_COUNCIL_MEMBERS_DEFAULT,
+  );
   const memberAdapters = adapters.slice(0, memberCount);
   log.emit("council.started", {
     requested,

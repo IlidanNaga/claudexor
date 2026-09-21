@@ -100,6 +100,7 @@ import type {
   ActiveTaskContract,
   TestCommandInvocation,
   ProviderFamily,
+  RuntimeConcurrencyCaps,
   AuthPreference,
   CredentialProfile,
   ImplementationTransport,
@@ -122,6 +123,7 @@ import {
 export type { PlannerAttemptArgs, PlannerAttemptOutcome } from "./plannerAttempt.js";
 import {
   HarnessRunSpec,
+  MAX_COUNCIL_MEMBERS_DEFAULT,
   type ExtraMcpServer,
   FinalVerifyRecord,
   ModeKind as ModeKindSchema,
@@ -163,7 +165,7 @@ import { DelegationBudgetAuthority } from "./delegationBudgetAuthority.js";
 import { activateDelegationParent } from "./delegation-parent-activation.js";
 import { writeRoutingFailureTerminal } from "./routing-failure.js";
 export { routingFailureClassification } from "./routing-failure.js";
-import { runBounded } from "./run-bounded.js";
+import { resolveReadOnlyCandidates, runParallelCandidates } from "./strategyConcurrency.js";
 import { planPrompt } from "./plan-prompt.js";
 import { verifiedPlanBrief, withPlanBrief } from "./planBrief.js";
 import { resolveRunInputDefaults } from "./run-input-resolution.js";
@@ -366,6 +368,8 @@ export interface OrchestratorDeps {
   reviewerModels?: Partial<Record<ProviderFamily, string>>;
   /** Optional per-provider-family reviewer effort override where the harness supports it. */
   reviewerEfforts?: Partial<Record<ProviderFamily, EffortHint>>;
+  /** Startup-frozen regular/strategy concurrency caps from the daemon owner. */
+  runtimeConcurrencyCaps?: RuntimeConcurrencyCaps;
 }
 
 /**
@@ -436,7 +440,7 @@ export interface RunInput {
   create?: boolean;
   /** plan strategy (INV-031): N harnesses draft plans in parallel, the primary
    * merges them into one unified plan + one question set. Plan mode only;
-   * `n` sets the member count (2..4). */
+   * `n` sets the member count (at least two, up to the startup cap). */
   council?: boolean;
   /** agent flag (D32): the harness may spawn bounded isolated sub-runs through
    * the injected delegation belt. Requires a lane with
@@ -697,8 +701,6 @@ export interface RoutedAdapter {
 }
 const LABELS = "ABCDEFGHIJ".split("");
 const NO_PROJECT_ROOT = noProjectRepoRoot();
-/** Concurrency cap for parallel candidates/explorers (locked decision: min(n, 4)). */
-const MAX_PARALLEL_CANDIDATES = 4;
 /** Default wait for one interactive answer before a benign decline. */
 const DEFAULT_INTERACTION_TIMEOUT_MS = 900_000;
 
@@ -774,6 +776,7 @@ export class Orchestrator {
       };
     }
     resolved.outputSchema = admitRun(resolved, mode, {
+      maxCouncilMembers: this.deps.runtimeConcurrencyCaps?.max_council_members,
       accessDefault: this.config(resolved.repoRoot).trust.access_default,
       projectProtectedPaths: () =>
         this.projectConfig(resolved.repoRoot).constraints.protected_paths,
@@ -3576,7 +3579,7 @@ export class Orchestrator {
         if (envelope) await wsm.dispose(envelope); // no worktree leak even on create/run error
       }
     };
-    await runBounded(slots, Math.min(slots.length, MAX_PARALLEL_CANDIDATES), runSlot);
+    await runParallelCandidates(slots, this.deps.runtimeConcurrencyCaps, runSlot);
     const runs: CandidateRun[] = runsBySlot.filter((r): r is CandidateRun => r !== undefined);
     // Fail-closed terminal: a delegated mutating run whose attempts state
     // neither historical proof nor deliberate absence refuses instead of passing.
@@ -6058,6 +6061,8 @@ export class Orchestrator {
         ),
       execRootOf: (input) => this.execRootOf(input),
       planPrompt,
+      maxCouncilMembers:
+        this.deps.runtimeConcurrencyCaps?.max_council_members ?? MAX_COUNCIL_MEMBERS_DEFAULT,
     };
   }
 
@@ -6250,12 +6255,6 @@ export class Orchestrator {
     // no lazy ContextPack section is attached here.
     const contextSection = "";
 
-    const externalContextPolicy = contract.external_context.policy;
-    const width = opts.deepScan
-      ? Math.min(Math.max(input.n ?? 4, 1), 8)
-      : externalContextPolicy === "off"
-        ? 1
-        : Math.min(Math.max(input.n ?? 2, 1), 3);
     // W3.3: ONE resolved read-only context — the routing point-probe and every
     // read-only attempt spawn consume the SAME scoped env (see routeContext.ts).
     // A thread ASK turn is a chat turn: its native session is recorded per lane
@@ -6268,27 +6267,26 @@ export class Orchestrator {
         ? (id) => this.laneHomeEnvFor(input, id, input.credentialProfileId ?? null)
         : undefined,
     );
-    let adapters: RoutedAdapter[];
+    let adapters: RoutedAdapter[], width: number;
     try {
-      adapters = await this.resolveCandidateAdapters(
-        { ...input, prompt, n: width },
-        opts.intent,
-        ledger,
+      ({ adapters, width } = await resolveReadOnlyCandidates({
+        input,
+        prompt,
+        deepScan: opts.deepScan,
         log,
-        roHome,
-        runId,
-        // Deep-scan repeats a surviving harness to reach scout width; a dropped
-        // lane must not clamp coverage (QA-043 clamp is best-of-only).
-        opts.deepScan === true,
-      );
-      if (!opts.deepScan) {
-        const seen = new Set<string>();
-        adapters = adapters.filter((routed) => {
-          if (seen.has(routed.adapter.id)) return false;
-          seen.add(routed.adapter.id);
-          return true;
-        });
-      }
+        externalContextPolicy: contract.external_context.policy,
+        caps: this.deps.runtimeConcurrencyCaps,
+        resolve: (request, allowDuplicateFill) =>
+          this.resolveCandidateAdapters(
+            request,
+            opts.intent,
+            ledger,
+            log,
+            roHome,
+            runId,
+            allowDuplicateFill,
+          ),
+      }));
     } catch (err) {
       roHome.dispose();
       const message = safeErrorMessage(err);
@@ -6982,9 +6980,9 @@ export class Orchestrator {
         // Explorer swarm runs in parallel (bounded), mirroring parallel
         // candidates. The swarm has no continuation lane, so the launched/denied
         // return is unused here.
-        await runBounded(
+        await runParallelCandidates(
           adapters,
-          Math.min(adapters.length, MAX_PARALLEL_CANDIDATES),
+          this.deps.runtimeConcurrencyCaps,
           async (routed, idx) => {
             await runReadonlyAttempt(routed, idx);
           },

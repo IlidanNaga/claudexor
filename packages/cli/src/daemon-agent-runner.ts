@@ -7,11 +7,15 @@ import type {
   RunEventBus,
   RunnerFn,
 } from "@claudexor/daemon";
-import type { DelegationBudgetAuthority } from "@claudexor/orchestrator";
+import { assertCouncilWidth, type DelegationBudgetAuthority } from "@claudexor/orchestrator";
 import { normalizeRunStartRequest } from "@claudexor/control-api";
 import { loadConfig } from "@claudexor/config";
 import { noProjectRepoRoot } from "@claudexor/util";
-import { restoreRecordedRunReviewRequest, type ResourceAttachmentRef } from "@claudexor/schema";
+import {
+  restoreRecordedRunReviewRequest,
+  type ResourceAttachmentRef,
+  RuntimeConcurrencyCaps,
+} from "@claudexor/schema";
 import { assertPlanImplementReady } from "./plan-implement-readiness.js";
 import { buildRunOrchestrator } from "./run-orchestrator.js";
 import { delegationBeltForRun } from "./delegation-belt-descriptor.js";
@@ -32,8 +36,17 @@ export function createDaemonAgentRunner(deps: {
   interactions: InteractionRegistry;
   resources: () => ResourceStore;
   bus: RunEventBus;
+  runtimeConcurrencyCaps?: RuntimeConcurrencyCaps;
 }): RunnerFn {
-  const { delegationBudgetAuthority, quotaStore, threads, interactions, resources, bus } = deps;
+  const {
+    delegationBudgetAuthority,
+    quotaStore,
+    threads,
+    interactions,
+    resources,
+    bus,
+    runtimeConcurrencyCaps = RuntimeConcurrencyCaps.parse({}),
+  } = deps;
   const NO_PROJECT_ROOT = noProjectRepoRoot();
   return async (params, ctx) => {
     const p = restoreRecordedRunReviewRequest(normalizeRunStartRequest(params));
@@ -41,6 +54,7 @@ export function createDaemonAgentRunner(deps: {
     const noProjectAsk = mode === "ask" && p.scope.kind === "none";
     const repoRoot = p.scope.kind === "project" ? p.scope.root : NO_PROJECT_ROOT;
     const runConfig = loadConfig(repoRoot);
+    if (p.council) assertCouncilWidth(p.n, runtimeConcurrencyCaps.max_council_members);
     if (noProjectAsk) mkdirSync(NO_PROJECT_ROOT, { recursive: true, mode: 0o700 });
     const orchestrator = buildRunOrchestrator({
       p,
@@ -49,6 +63,7 @@ export function createDaemonAgentRunner(deps: {
       // Typed per-harness refusal while a unified-accounts migration is
       // incomplete (a crash between phases) — other harnesses keep working.
       accountsMigrationGate,
+      runtimeConcurrencyCaps,
     });
     const { threadId, turnId } = threads.assertKnownIds(p.threadId, p.turnId);
     // Plan readiness gate (QA-045 / D17): refuse an Implement whose frozen

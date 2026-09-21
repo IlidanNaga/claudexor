@@ -1,3 +1,5 @@
+import { ConfigParseError } from "./config-error.js";
+import { concurrencyEnv, omitImplicitConcurrency } from "./concurrency.js";
 import { readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { z } from "zod/v3";
@@ -23,33 +25,7 @@ export function globalConfigDir(): string {
   return userConfigDir();
 }
 
-export class ConfigParseError extends Error {
-  /** Typed problem projection (INV-021 fail-loudly, without a generic 500):
-   * the control-api problemBody duck-types these fields, and the MCP bridge's
-   * code-prefix rendering carries them to agent hosts. */
-  public readonly status = 422;
-  public readonly code = "config_invalid";
-  public readonly retryable = false;
-  public readonly requiredActions: string[];
-
-  constructor(
-    public readonly path: string,
-    cause: unknown,
-  ) {
-    super(
-      `invalid Claudexor YAML config at ${path}: ${cause instanceof Error ? cause.message : String(cause)}`,
-    );
-    this.name = "ConfigParseError";
-    this.requiredActions = [
-      `inspect and fix ${path} against the current schema`,
-      // Only swept config files ever get sibling backups; trust files and env
-      // pseudo-paths must not advertise a .bak-* that cannot exist.
-      ...(path.endsWith("config.yaml")
-        ? [`or restore it from the newest sibling backup (${path}.bak-*)`]
-        : []),
-    ];
-  }
-}
+export { ConfigParseError } from "./config-error.js";
 
 /** Short stable hash of a repo root path, used to key user-local trust files. */
 export function repoHash(repoRoot: string): string {
@@ -353,12 +329,14 @@ function nonnegativeIntEnv(name: string): number | null {
 function applyEnvOverrides(global: GlobalConfig): GlobalConfig {
   const reviewerTimeout = positiveIntEnv("CLAUDEXOR_REVIEWER_TIMEOUT_MS");
   const inactivityTimeout = positiveIntEnv("CLAUDEXOR_HARNESS_INACTIVITY_TIMEOUT_MS");
+  const concurrency = concurrencyEnv();
   const maxRetries = nonnegativeIntEnv("CLAUDEXOR_TRANSIENT_RETRY_MAX");
   const initialDelay = nonnegativeIntEnv("CLAUDEXOR_TRANSIENT_RETRY_INITIAL_DELAY_MS");
   const maxDelay = nonnegativeIntEnv("CLAUDEXOR_TRANSIENT_RETRY_MAX_DELAY_MS");
   if (
     reviewerTimeout === null &&
     inactivityTimeout === null &&
+    Object.keys(concurrency).length === 0 &&
     maxRetries === null &&
     initialDelay === null &&
     maxDelay === null
@@ -370,6 +348,7 @@ function applyEnvOverrides(global: GlobalConfig): GlobalConfig {
       ...global.runtime,
       ...(reviewerTimeout !== null ? { reviewer_timeout_ms: reviewerTimeout } : {}),
       ...(inactivityTimeout !== null ? { harness_inactivity_timeout_ms: inactivityTimeout } : {}),
+      ...concurrency,
       transient_retry: {
         ...global.runtime.transient_retry,
         ...(maxRetries !== null ? { max_retries: maxRetries } : {}),
@@ -532,14 +511,11 @@ export function updateGlobalConfig(mutator: (config: GlobalConfig) => GlobalConf
   const path = globalConfigPath();
   ensureDir(globalConfigDir());
   return withConfigLock(path, () => {
-    const current = parseStrict(
-      GlobalConfig,
-      stripRetiredKeys(readYaml(path), RETIRED_CONFIG_KEYS) ?? {},
-      path,
-    );
+    const raw = stripRetiredKeys(readYaml(path), RETIRED_CONFIG_KEYS) ?? {};
+    const current = parseStrict(GlobalConfig, raw, path);
     const next = GlobalConfig.parse(mutator(current));
     const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-    writeText(tmp, yamlStringify(stripAutoLimitActions(next)));
+    writeText(tmp, yamlStringify(omitImplicitConcurrency(stripAutoLimitActions(next), raw)));
     renameSync(tmp, path);
     return { path, config: next };
   });

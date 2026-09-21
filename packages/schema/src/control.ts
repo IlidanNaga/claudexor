@@ -33,6 +33,7 @@ import { makeControlRunRetrySchemas } from "./control-run-retry.js";
 import { ControlAuthRoute } from "./control-auth-route.js";
 import { DelegatedChildRunIds, RunDelegationInfo } from "./delegation.js";
 import { HARNESS_INACTIVITY_TIMEOUT_DEFAULT_MS, InteractionTimeoutValue } from "./config.js";
+import { RuntimeConcurrencyState } from "./runtime-concurrency.js";
 import { ProcessingPreference } from "./processing.js";
 export { RunExecution } from "./control-run-execution.js";
 export { ControlTimelineEvent } from "./control-timeline.js";
@@ -138,6 +139,7 @@ export const ControlRunStartRequest = z
     n: z
       .number()
       .int()
+      .safe()
       .positive()
       .optional()
       .describe("Race width: number of best-of-N candidates."),
@@ -163,8 +165,8 @@ export const ControlRunStartRequest = z
     create: z.boolean().optional().describe("Agent flag: create-from-scratch intent."),
     /** plan strategy (D31/INV-031): N harnesses draft plans in parallel, the
      * primary merges them into ONE unified plan whose open questions reach the
-     * user as one set. `n` (2..4) sets the member count; default = distinct
-     * available harnesses up to 3. Legal only on mode=plan (and `n` on a plan
+     * user as one set. `n` must be at least two and cannot exceed the
+     * startup-frozen Council cap. Legal only on mode=plan (and `n` on a plan
      * run is legal ONLY with council). */
     council: z
       .boolean()
@@ -1433,6 +1435,7 @@ export const ControlSettingsSnapshot = z
           .positive()
           .default(HARNESS_INACTIVITY_TIMEOUT_DEFAULT_MS)
           .describe("Inactivity watchdog for harness streams, in milliseconds."),
+        concurrency: RuntimeConcurrencyState.optional(),
         transientRetry: z
           .object({
             maxRetries: z

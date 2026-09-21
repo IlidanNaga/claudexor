@@ -31,7 +31,7 @@ with a vendor usage source (Antigravity, Claude, and Codex); Cursor has none
 yet. Everything runs on your machine, files are the source of truth, and there
 is no telemetry.
 
-Current status: **v3.12.10**. See "Stability at 2.0" below for what is a stable
+Current status: **v3.13.0**. See "Stability at 2.0" below for what is a stable
 contract and what remains experimental; retired verbs and mode ids hard-error
 with the new spelling instead of silently aliasing.
 
@@ -342,7 +342,7 @@ Canonical mode ids (engine strategies are FLAGS, not modes):
   fallback intent (Agent is the default on a project thread).
 - `plan` - read-only planning; the plan lifecycle surfaces typed open questions
   and Implement freezes the plan as a content-hashed contract. Solo is the
-  default; `--council` (optionally `--n 2..4`) drafts plans across N harnesses in
+  default; `--council` (optionally `--n N`) drafts plans across N harnesses in
   parallel, then the primary merges them into ONE unified plan whose open
   questions reach you as a single set (see below).
 - `agent` - default `claudexor agent` route. Strategy flags: `--n N` (best-of-N
@@ -389,7 +389,7 @@ points at the draft and attempt evidence files by absolute path (never embedding
 synthesizes ONE unified plan. The tagged `## Open Questions` parser runs on the
 MERGE output only, so you always answer a single question set — the downstream
 readiness/freeze/Implement flow is byte-for-byte identical to a solo plan.
-`--n 2..4` sets the member count (default: distinct available harnesses, up to 3,
+`--n N` sets the member count (default: distinct available harnesses, up to 3,
 primary first); `--n` on a plan is legal ONLY with `--council`. Degradation is
 honest: a failed member is disclosed (event + `council/membership.yaml`) and the
 merge proceeds with the usable inputs (one input still merges). A useful draft

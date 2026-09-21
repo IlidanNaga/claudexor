@@ -207,6 +207,53 @@
               "default": 3600000,
               "description": "Inactivity watchdog for harness streams, in milliseconds."
             },
+            "concurrency": {
+              "type": "object",
+              "properties": {
+                "configured": {
+                  "type": "object",
+                  "properties": {
+                    "maxConcurrent": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991,
+                      "exclusiveMinimum": 0
+                    },
+                    "maxParallelCandidates": {
+                      "$ref": "#/definitions/ControlSettingsSnapshot/properties/runtime/properties/concurrency/properties/configured/properties/maxConcurrent"
+                    },
+                    "maxDeepScanWidth": {
+                      "$ref": "#/definitions/ControlSettingsSnapshot/properties/runtime/properties/concurrency/properties/configured/properties/maxConcurrent"
+                    },
+                    "maxCouncilMembers": {
+                      "type": "integer",
+                      "minimum": 2,
+                      "maximum": 9007199254740991,
+                      "exclusiveMinimum": 0
+                    }
+                  },
+                  "required": [
+                    "maxConcurrent",
+                    "maxParallelCandidates",
+                    "maxDeepScanWidth",
+                    "maxCouncilMembers"
+                  ],
+                  "additionalProperties": false
+                },
+                "effective": {
+                  "$ref": "#/definitions/ControlSettingsSnapshot/properties/runtime/properties/concurrency/properties/configured"
+                },
+                "restartRequired": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "configured",
+                "effective",
+                "restartRequired"
+              ],
+              "additionalProperties": false
+            },
             "transientRetry": {
               "type": "object",
               "properties": {

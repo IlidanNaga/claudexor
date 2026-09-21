@@ -36,6 +36,21 @@
     "runtime": {
       "reviewerTimeoutMs": 600000,
       "harnessInactivityTimeoutMs": 1200000,
+      "concurrency": {
+        "configured": {
+          "maxConcurrent": 48,
+          "maxParallelCandidates": 6,
+          "maxDeepScanWidth": 16,
+          "maxCouncilMembers": 6
+        },
+        "effective": {
+          "maxConcurrent": 24,
+          "maxParallelCandidates": 4,
+          "maxDeepScanWidth": 8,
+          "maxCouncilMembers": 4
+        },
+        "restartRequired": true
+      },
       "transientRetry": {
         "maxRetries": 2,
         "initialDelayMs": 1000,

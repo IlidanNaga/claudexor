@@ -1,5 +1,15 @@
 # claudexor
 
+## 3.13.0
+
+### Minor Changes
+
+- Make daemon regular-job and independent strategy concurrency caps configurable through user-global runtime settings, with startup-frozen effective values and honest configured-versus-effective diagnostics.
+
+### Patch Changes
+
+- @claudexor/cli@3.13.0
+
 ## 3.12.10
 
 ### Patch Changes

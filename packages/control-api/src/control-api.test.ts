@@ -262,16 +262,16 @@ describe("normalizeRunStart prompt validation", () => {
       normalizeRunStartRequest({ ...projectScope(), prompt: "plan it", mode: "plan", n: 3 }),
     ).toThrowError(/council membership width|pass --council/);
   });
-  it("rejects an out-of-range council membership n", () => {
-    expect(() =>
+  it("leaves council width above the default to the startup-frozen config cap", () => {
+    expect(
       normalizeRunStartRequest({
         ...projectScope(),
         prompt: "plan it",
         mode: "plan",
         council: true,
         n: 9,
-      }),
-    ).toThrowError(/between 2 and 4/);
+      }).n,
+    ).toBe(9);
   });
 });
 

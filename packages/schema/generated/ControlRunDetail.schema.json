@@ -2899,7 +2899,7 @@
                 "requested": {
                   "type": "integer",
                   "exclusiveMinimum": 0,
-                  "description": "Requested member count (n; 2..4)."
+                  "description": "Requested member count (n; at least 2, up to the configured Council cap)."
                 },
                 "drafted": {
                   "type": "integer",
