@@ -344,6 +344,12 @@ reconstructing outcome, deliverable, presentation, participant, gate, review,
 or required-action facts. Its optional `presentation` member is the shared
 terminal authority for output-ready state and the primary artifact; only older
 receipts without that member use the legacy artifact/failure fallback.
+A failed run's `summary.failure` may carry `vendorFailure`: the vendor's own
+typed failure as `{ code, message, source }` (any of `code`/`message` may be
+null), or `null` — also the meaning of an absent key from an older engine —
+when no vendor-typed evidence exists. Display the code beside the message as a
+fact; never branch on its value or map it to a remedy, so codes a vendor adds
+later flow through with no release on either side.
 Web/tool evidence is projected from the engine-owned
 `final/telemetry.yaml`; runs that predate it report `available: false`. Unknown
 quota or spend remains unknown; do not render missing values as `$0`. The optional
@@ -812,6 +818,15 @@ Consumers MUST thread `CodexParseState` through the parser or finality never
 exists. Deltas: none (no partial-output flag is wired). Rate limits surface
 as `error`/`turn.failed` with typed `rate_limit` (`resets_at`) and
 `transient` enrichment — there is no separate status event.
+Post-terminal side channel: the `--json` stream reduces a failed turn to a
+sentence, while codex's own session rollout keeps the typed record
+(`event_msg` / `task_complete` / `error.{message, codex_error_info}`). When the
+run loop disclosed that codex voiced its own error, the adapter reads that
+record once after exit and attaches it to the terminal `completed` payload as
+`vendor_failure` (`source: "codex_rollout"`), verbatim and uninterpreted; a
+tagged-object variant yields its variant name. Skipped under
+`evidence_policy: stream_only`. Pin: `fixtures/rollout/recorded-*.jsonl`
+(session-rollout records, not stream captures).
 
 **Cursor** — wire: `cursor-agent -p --output-format stream-json <sandbox
 args> [--stream-partial-output]` with the composed prompt on piped stdin (no
@@ -916,6 +931,17 @@ Known traps (class → CURRENT rule → pin):
   unrecognized still collapses to `unknown`, never free-form text. Pin:
   `session-resume-rate-limit.jsonl` declares `retry_class: "rate_limit"` (the
   F5 deliberate update of the former `"unknown"` declaration).
+- A harness-reported failure labelled a crash / a vendor failure code recovered
+  from prose: a CLI that printed its own error and exited non-zero read as "the
+  process crashed", and the vendor's machine code survived only as a sentence.
+  Rule: the run loop types "the harness voiced its own error"
+  (`harness_reported_error`) and only a signal kill or a silent non-zero exit is
+  a crash; a vendor's machine code is read from a vendor-owned record and
+  forwarded verbatim with its source; nothing branches on it, and prose is
+  never matched to recover it. Pins: `rollout/recorded-*.jsonl`, the
+  text-mention decoy and turn-binding tests in
+  `packages/harness-codex/src/transcript.test.ts`, the
+  `harness_reported_error` cases in `packages/core/src/runloop.test.ts`.
 - Control-protocol leakage: handshake/permission frames surfacing as
   timeline events. Rule: recognized plumbing (`control_response`,
   `control_cancel_request`) is consumed, producing ZERO events; only the

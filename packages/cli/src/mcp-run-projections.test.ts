@@ -27,6 +27,7 @@ const failure = {
   safeMessage: "Authentication expired",
   rawDetailRef: null,
   resetsAt: null,
+  vendorFailure: null,
   logRefs: [],
   eventRefs: [],
   runDir: "/tmp/run",

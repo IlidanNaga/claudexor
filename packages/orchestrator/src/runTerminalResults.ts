@@ -4,7 +4,13 @@ import { join } from "node:path";
 import { cancelReasonFromSignalToken } from "./runTerminals.js";
 import type { ArtifactStore } from "@claudexor/artifact-store";
 import type { EventLog } from "@claudexor/event-log";
-import { RunFailure, RunFailureCode, type ModeKind, type RunOutcomeFacts } from "@claudexor/schema";
+import {
+  RunFailure,
+  RunFailureCode,
+  type ModeKind,
+  type RunOutcomeFacts,
+  type VendorFailureEvidence,
+} from "@claudexor/schema";
 import { redactSecrets } from "@claudexor/util";
 import type { OrchestratorResult } from "./orchestrator.js";
 import { terminalOutcomeFacts } from "./terminalOutcome.js";
@@ -29,9 +35,13 @@ export function writeFailure(
     /** Structural reopen time for a windowed refusal (spent subscription
      * quota); null/omitted when the failure has no such time. */
     resetsAt?: string | null;
+    /** The vendor's own typed failure for the attempt this record speaks for;
+     * null/omitted when no vendor-typed evidence exists. Opaque evidence. */
+    vendorFailure?: VendorFailureEvidence | null;
     nextActions?: string[];
   },
 ): void {
+  const vendor = failure.vendorFailure ?? null;
   store.writeYaml(join(paths.finalDir, "failure.yaml"), {
     phase: failure.phase,
     category: failure.category,
@@ -44,6 +54,12 @@ export function writeFailure(
     eventRefs: failure.eventRefs ?? [],
     runDir: failure.runDir ?? paths.root,
     resetsAt: failure.resetsAt ?? null,
+    // Vendor text was redacted at event ingress; redact again like safeMessage (INV-062).
+    vendorFailure: vendor && {
+      code: vendor.code === null ? null : redactSecrets(vendor.code),
+      message: vendor.message === null ? null : redactSecrets(vendor.message),
+      source: vendor.source,
+    },
     nextActions: failure.nextActions ?? [],
   });
 }

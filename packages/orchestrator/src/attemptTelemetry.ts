@@ -113,6 +113,7 @@ export interface AttemptTelemetry extends ProcessingTelemetry {
   requestedModel: string | null;
   /** Adapter-declared transients, classified into the GH #31 taxonomy the retry policy gates on. */
   transientFailures: TransientFailureObservation[];
+  transientRetries: number; // same-profile transient retries that actually RAN (observed)
   /** TYPED vendor rate-limit signals seen this attempt (W5.4): the rotation predicate's input. */
   rateLimits: { retryDelayMs: number | null; resetsAt: string | null }[];
   /** A2: agent-progress / file-change markers for the structural rotation predicate. */
@@ -188,6 +189,7 @@ export function createAttemptTelemetry(
     profileId: null,
     requestedModel,
     transientFailures: [],
+    transientRetries: 0,
     rateLimits: [],
     outputMarkers: marks.newAttemptOutputMarkers(),
     delegationBelt: {
@@ -311,12 +313,11 @@ export function observeAttemptTelemetry(t: AttemptTelemetry, ev: HarnessEvent): 
   // native tries of ONE attempt, and the receipt must name the try that
   // produced the deliverable.
   if (ev.credential_profile_id) t.profileId = ev.credential_profile_id;
-  // #31: classify every disclosed transient into the typed taxonomy (see
-  // transientClassify.ts). An adapter `transient` and a `rate_limit` are
-  // retryable failures; the vendor's typed `status.error_category` surfaces only
-  // the deterministic FAILURE classes (auth/capability/config) so required-
-  // actions attach the right remediation. Rate limits ALSO stay in rateLimits
-  // for the W5.4 rotation predicate.
+  // #31: classify every disclosed transient into the typed taxonomy
+  // (transientClassify.ts). An adapter `transient` and a `rate_limit` are retryable
+  // failures; the vendor's typed `status.error_category` surfaces only the
+  // deterministic FAILURE classes (auth/capability/config) so required-actions attach
+  // the right remediation. Rate limits ALSO stay in rateLimits for W5.4 rotation.
   if (ev.transient) t.transientFailures.push(classifyTransientSignal(ev.transient));
   if (ev.rate_limit) {
     t.rateLimits.push({
@@ -357,7 +358,7 @@ export function observeAttemptTelemetry(t: AttemptTelemetry, ev: HarnessEvent): 
       Number(ev.payload?.["dropped_unparsed_lines"] ?? 0) +
       Number(ev.payload?.["dropped_unrecognized_events"] ?? 0);
     if (Number.isFinite(dropped) && dropped > 0) t.droppedEvents += dropped;
-    // #31 process crash: the run loop discloses a non-aborted signal kill, a
+    // #31 exit evidence: the run loop discloses a non-aborted signal kill, a
     // non-zero exit, or a spawn failure as TYPED payload fields (never prose).
     const crash = classifyCompletedCrash(ev.payload);
     if (crash) t.transientFailures.push(crash);

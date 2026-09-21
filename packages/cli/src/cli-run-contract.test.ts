@@ -222,6 +222,37 @@ describe("run-command pre-daemon machine contract", () => {
     expect(human.stdout).toContain("lifecycle: failed");
     expect(human.stdout).toContain("failure: harness_unavailable phase=harness");
     expect(human.stdout).toContain("next action: Choose another harness and retry.");
+    // No vendor-typed evidence on the record: the failure line says nothing extra.
+    expect(human.stdout).not.toContain("vendor_code=");
+    expect(JSON.parse(json.stdout).failure.vendorFailure).toBeNull();
+
+    // The vendor's own typed failure is shown as a fact token beside the
+    // engine's classification, labelled with the channel it was read from.
+    const vendorFailure = {
+      code: "server_overloaded",
+      message: "Selected model is at capacity. Please try a different model.",
+      source: "codex_rollout",
+    };
+    store.writeYaml(
+      join(paths.finalDir, "failure.yaml"),
+      RunFailure.parse({ ...failure, harnessId: "codex", vendorFailure }),
+    );
+    const humanVendor = spawnSync(
+      process.execPath,
+      [tsxCli, cliSource, "inspect", "run-failed-inspect"],
+      { cwd: project, encoding: "utf8", env },
+    );
+    expect(humanVendor.status, humanVendor.stderr).toBe(0);
+    expect(humanVendor.stdout).toContain(
+      "failure: harness_unavailable phase=harness harness=codex vendor_code=server_overloaded (codex_rollout)",
+    );
+    const jsonVendor = spawnSync(
+      process.execPath,
+      [tsxCli, cliSource, "inspect", "run-failed-inspect", "--json"],
+      { cwd: project, encoding: "utf8", env },
+    );
+    expect(jsonVendor.status, jsonVendor.stderr).toBe(0);
+    expect(JSON.parse(jsonVendor.stdout).failure.vendorFailure).toEqual(vendorFailure);
   });
 
   it("inspect classifies unrecovered tools by attempt outcome instead of web kind", () => {

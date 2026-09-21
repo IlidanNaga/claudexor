@@ -143,3 +143,37 @@ fixtures:
     cli_version: "0.153.3"
     recorded_at: "2026-09-05"
     sanitized: "none"
+  # SESSION-ROLLOUT records (`$CODEX_HOME/sessions/.../rollout-*.jsonl`), not
+  # `--json` stream captures: the post-terminal side channel the adapter reads
+  # for codex's OWN typed failure of a turn it ended with an error
+  # (`event_msg` / `task_complete` / `error.codex_error_info`), which the stream
+  # reduces to a sentence. They live in rollout/ (NOT top-level) because the
+  # conformance loop parses top-level files as stream fixtures; no
+  # `expectations` block. Consumed by transcript.test.ts and
+  # vendor-failure.test.ts. Reduced to the turn markers the reader binds to:
+  # every prompt, instruction, tool-output, world-state and cwd line was
+  # dropped, and the remaining lines keep only ids, numbers, the model name and
+  # the vendor's own error record.
+  rollout/recorded-server-overloaded-0.153.3.jsonl:
+    source: recorded
+    cli_version: "0.153.3"
+    recorded_at: "2026-09-15"
+    sanitized: "thread_id and turn_id placeholders; session_meta reduced to id/cli_version/timestamp; turn_context to turn_id/model; token_count to numeric windows; all prompt/tool/world-state lines dropped"
+  rollout/recorded-usage-limit-exceeded-0.153.3.jsonl:
+    source: recorded
+    cli_version: "0.153.3"
+    recorded_at: "2026-09-12"
+    sanitized: "thread_id and turn_id placeholders; session_meta reduced to id/cli_version/timestamp; turn_context to turn_id/model; token_count to numeric windows; all prompt/tool/world-state lines dropped"
+  # A code Claudexor knows nothing about (`other`): pins "no mapping table".
+  rollout/recorded-other-0.153.3.jsonl:
+    source: recorded
+    cli_version: "0.153.3"
+    recorded_at: "2026-09-16"
+    sanitized: "thread_id and turn_id placeholders; the request id inside the vendor message zeroed; session_meta reduced to id/cli_version/timestamp; turn_context to turn_id/model; token_count to numeric windows; all prompt/tool/world-state lines dropped"
+  # A RESUMED session: one successful turn, then a second turn the vendor ended
+  # with `server_overloaded`. Pins "the LAST turn speaks".
+  rollout/recorded-resumed-overloaded-0.153.3.jsonl:
+    source: recorded
+    cli_version: "0.153.3"
+    recorded_at: "2026-09-20"
+    sanitized: "thread_id and turn_id placeholders; last_agent_message replaced; session_meta reduced to id/cli_version/timestamp; turn_context to turn_id/model; token_count to numbers; all prompt/tool/reasoning/world-state lines dropped"

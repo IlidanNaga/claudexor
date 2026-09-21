@@ -40,6 +40,42 @@ export const RunFailureCode = z
   );
 export type RunFailureCode = z.infer<typeof RunFailureCode>;
 
+/** A vendor's OWN typed failure, forwarded as evidence. `code` is opaque: no
+ * Claudexor code path may branch on its value; retry, rotation, cooldown and
+ * credential verdicts never read it. `source` is an open vocabulary rather than
+ * an enum because every surface projects the whole `RunFailure` parse-or-null:
+ * a closed member list would make an older client drop the entire failure
+ * record the day a second producer appears. */
+export const VendorFailureEvidence = z
+  .object({
+    code: z
+      .string()
+      .min(1)
+      .max(128)
+      .nullable()
+      .describe(
+        "The vendor's own machine-readable failure code, verbatim; null when the vendor recorded an error without one.",
+      ),
+    message: z
+      .string()
+      .max(4000)
+      .nullable()
+      .describe(
+        "The vendor's own words from the same record, verbatim (redacted); null when absent.",
+      ),
+    source: z
+      .string()
+      .min(1)
+      .max(64)
+      .describe(
+        "Evidence channel the code was read from (codex: `codex_rollout`). An open vocabulary: consumers display it, never branch on it.",
+      ),
+  })
+  .describe(
+    "Vendor-typed failure evidence read from a vendor-owned machine-readable record, never parsed from prose.",
+  );
+export type VendorFailureEvidence = z.infer<typeof VendorFailureEvidence>;
+
 export const RunFailure = z
   .object({
     phase: z.string().default("unknown").describe("Pipeline phase where the failure happened."),
@@ -101,6 +137,11 @@ export const RunFailure = z
       .default(null)
       .describe(
         "When the refused window reopens (a spent subscription quota window), or null when the failure has no such time. Callers schedule a retry off this field, never off safeMessage.",
+      ),
+    vendorFailure: VendorFailureEvidence.nullable()
+      .default(null)
+      .describe(
+        "The vendor's own typed failure for the attempt this record speaks for, or null when no vendor-typed evidence exists (every harness without such a channel, and any unreadable record). Facts only: carries no remedy.",
       ),
     nextActions: z.array(z.string()).default([]).describe("Suggested operator next actions."),
   })
