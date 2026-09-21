@@ -353,7 +353,8 @@ Routing is `Pool + Primary + Routing Goal`:
 The single-route read-only mode (`ask`) chooses one route from the eligible
 pool, primary first. `Agent` is a one-candidate envelope run. `ask --deep-scan`
 (the old `audit --swarm` / `explore`) expands a bounded read-only pool (default
-width 4, capped at 8). Best-of-N expands the eligible pool over N candidates. Convergence rotates compatible
+width 4, capped by `runtime.max_deep_scan_width`, default 8; see
+[Main Execution Paths](#6-main-execution-paths)). Best-of-N expands the eligible pool over N candidates. Convergence rotates compatible
 harnesses when a stall signature persists.
 
 Route resolution is honest about membership. An EXPLICITLY selected lane that
@@ -1125,8 +1126,9 @@ its answer and the ordinary harness/contract axes.
 
 ### Ask --deep-scan (research sweep)
 
-Runs a bounded read-only swarm (`intent: audit`, default width 4, cap 8; the
-CLI `claudexor ask --deep-scan` maps here). Each explorer writes a per-attempt
+Runs a bounded read-only swarm (`intent: audit`, default width 4, capped by
+`runtime.max_deep_scan_width`, default 8; see [Main Execution Paths](#6-main-execution-paths)).
+The CLI `claudexor ask --deep-scan` maps here. Each explorer writes a per-attempt
 event stream and a findings markdown artifact (`findings/<attempt>.md`). Sweep
 final artifacts include `final/report.md`, `final/explore-findings.yaml`, and
 `final/omissions.md`. Partial explorer failures are recorded as omissions when
