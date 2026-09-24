@@ -4,9 +4,10 @@
 # moved on (stale recordings are a freshness smell, not a build breaker).
 # Recorded fixtures are SANITIZED: request/message ids, thinking signatures,
 # and the recording machine's environment fingerprint (installed skills /
-# slash commands / memory paths) are replaced with neutral placeholders;
+# slash commands / agents / plugins / memory and output-style paths) are
+# replaced with neutral placeholders;
 # frame shapes and event ordering are untouched.
-# The 2.1.261 help capture is help-2.1.261.txt. Controlled endpoint recordings
+# The 2.1.281 help capture is help-2.1.281.txt. Controlled endpoint recordings
 # below use the unmodified native CLI with public synthetic inputs, local
 # Anthropic-compatible responses, and synthetic local auth markers. The CLI
 # itself emits every recorded stdout frame; these probes make no vendor call.
@@ -51,8 +52,8 @@ fixtures:
       typed_rate_limit: false
   recorded-real-cli.jsonl:
     source: recorded
-    cli_version: "2.1.261"
-    recorded_at: "2026-09-05"
+    cli_version: "2.1.281"
+    recorded_at: "2026-09-24"
     capture: "controlled loopback Messages endpoint; native Read missing file, Read existing file, final result"
     sanitized: "ids, signatures, environment fingerprint"
     expectations:
@@ -79,8 +80,8 @@ fixtures:
       typed_rate_limit: true
   protocol/control-handshake.jsonl:
     source: recorded
-    cli_version: "2.1.261"
-    recorded_at: "2026-09-05"
+    cli_version: "2.1.281"
+    recorded_at: "2026-09-24"
     capture: "controlled loopback Messages endpoint; native AskUserQuestion with stdio permission round trip"
     sanitized: "ids, signatures, environment fingerprint"
     expectations:
@@ -88,14 +89,34 @@ fixtures:
       # the control frames themselves (control_response / control_cancel_request)
       # are recognized plumbing and leak NOTHING into the timeline — the only
       # events are the session's own (started, the AskUserQuestion tool pair,
-      # the answer, usage, and the terminal result).
+      # the answer, usage, and the terminal result). 2.1.281 also emits a
+      # system/informational notice here because the loopback base URL is a
+      # non-first-party gateway; system frames are recognized plumbing.
       final_messages: 1
       final_source: "result"
       final_is_last_message: true
       thinking_events: 0
       delta_messages: 0
       typed_rate_limit: false
-  # D-16 TYPED-SIGNAL EVIDENCE (claude 2.1.261). These live in signals/ (NOT
+  # BINARY-ONLY PICKER CAPTURE (claude 2.1.280, 2026-09-24). ONE stdout line:
+  # the CLI's answer to the prompt-free `initialize` control_request the model
+  # probe sends (src/model-probe.ts), parsed by model-probe.test.ts alongside
+  # the API-key handshake above (2.1.281; its line 3 carries a 6-row picker).
+  # Declared `synthetic`, NOT `recorded`, ON PURPOSE: the strict vendor gate
+  # (`release:verify:vendors`) compares every recorded fixture with the ONE
+  # installed CLI, and this package's recordings are pinned to 2.1.281 (the
+  # paid-subscription capture stays 2.1.261) — a
+  # second recorded cli_version can never be fresh on one release machine.
+  # Its real provenance is stated in `capture` instead.
+  protocol/initialize-picker-2.1.280.jsonl:
+    source: synthetic
+    capture: "claude 2.1.280 (native installer), argv: -p --input-format stream-json --output-format stream-json --verbose --setting-sources '' --strict-mcp-config (never --model); stdin = one initialize control_request then EOF; scratch HOME + CLAUDE_CONFIG_DIR; CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1; logged out (account.tokenSource none, apiProvider firstParty); exit 0 in 0.2 s"
+    sanitized: "pid, commands/agents inventories (the CLI's bundled-skill fingerprint), output-styles path; models/account/flags untouched"
+    # Re-probed 2026-09-24 with a scratch npm install of 2.1.281 (same argv,
+    # same scratch scope): identical five rows, resolutions and response keys,
+    # so this capture stands for the managed pin too.
+  # D-16 TYPED-SIGNAL EVIDENCE (claude 2.1.281 controlled-endpoint probes; the
+  # live-subscription capture stays 2.1.261). These live in signals/ (NOT
   # top-level) on purpose: the top-level conformance loop asserts
   # tool_call/tool_result/error/usage on every fixture, while these captures
   # target individual lifecycle and quota signals. They carry no `expectations`
@@ -109,6 +130,8 @@ fixtures:
   # returns its sum through the production adapter. Native result carries
   # terminal_reason:"completed" and full usage/modelUsage; routine allowed
   # rate_limit_event frames include the current unifiedWindows telemetry.
+  # NOT re-recorded for the 2.1.281 pin: a fresh capture needs a paid live
+  # subscription run, so it keeps the version it was actually captured from.
   signals/terminal-completed-rate-limit-event.jsonl:
     source: recorded
     cli_version: "2.1.261"
@@ -121,18 +144,19 @@ fixtures:
   # heartbeat must not arm account cooldown or profile rotation.
   signals/allowed-warning-rate-limit-event.jsonl:
     source: recorded
-    cli_version: "2.1.261"
-    recorded_at: "2026-09-05"
+    cli_version: "2.1.281"
+    recorded_at: "2026-09-24"
     sanitized: "ids"
   # CONTROLLED ENDPOINT. An interactive native session loads a local stdio
   # server named claudexor whose initialize response is delayed three seconds.
-  # These 2.1.261 probes wait for handshake and emit connected. The historical
+  # The 2.1.261 and 2.1.281 probes wait for handshake and emit connected (2.1.281
+  # adds the receipt's `source: "dynamic"` for an --mcp-config server). The historical
   # 2.1.165 pending frame remains an explicit inline regression in signals.test.ts;
   # this current recording does not claim that pending is impossible.
   signals/required-mcp-connected.jsonl:
     source: recorded
-    cli_version: "2.1.261"
-    recorded_at: "2026-09-05"
+    cli_version: "2.1.281"
+    recorded_at: "2026-09-24"
     sanitized: "ids, environment fingerprint"
   # CONTROLLED ENDPOINT. A local HTTP 400 invalid_request_error reports a
   # prompt-too-long error. Native CLI generates the assistant error and
@@ -141,8 +165,8 @@ fixtures:
   # Fable 5.1 context ceiling; the request and the reported sizes are synthetic.
   signals/terminal-prompt-too-long.jsonl:
     source: recorded
-    cli_version: "2.1.261"
-    recorded_at: "2026-09-05"
+    cli_version: "2.1.281"
+    recorded_at: "2026-09-24"
     sanitized: "ids, environment fingerprint"
   # SYNTHETIC — to be replaced at the next paid smoke that trips a real
   # auto-compaction. A cheap live compact_boundary was not reachable (a

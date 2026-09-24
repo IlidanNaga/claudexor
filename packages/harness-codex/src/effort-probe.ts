@@ -44,13 +44,12 @@ export interface CodexEffortCatalog {
   nativeModels?: HarnessModel[];
 }
 /**
- * Recorded fallback coverage: the pinned CLI's visible `model/list` capture,
- * plus unchanged ladders retained from historical account captures. Presence
- * is a union, not a claim that every account advertises every model: the
- * freshness gate checks live entries while permitting snapshot-only entries.
- * Used ONLY when the live probe cannot answer; it is vendor evidence, never an
- * allow-list this repo maintains by hand. `defaultModel` comes from the pinned
- * CLI capture; historical defaults do not override its `isDefault: true`.
+ * Recorded fallback: the pinned CLI's visible `model/list` capture plus ladders
+ * retained from historical account captures — a union, not a claim that every
+ * account advertises every model (the freshness gate checks live entries and
+ * permits snapshot-only ones). Used ONLY when the live probe cannot answer;
+ * vendor evidence, never a hand-kept allow-list. `defaultModel` is the pinned
+ * capture's `isDefault: true`; historical defaults never override it.
  */
 export const CODEX_EFFORT_SNAPSHOT: CodexEffortCatalog = {
   models: {
@@ -58,6 +57,8 @@ export const CODEX_EFFORT_SNAPSHOT: CodexEffortCatalog = {
       levels: ["low", "medium", "high", "xhigh", "max", "ultra"],
       default: "medium",
     },
+    "gpt-6-sol": { levels: ["low", "medium", "high", "xhigh", "max", "ultra"], default: "medium" },
+    "gpt-6-luna": { levels: ["low", "medium", "high", "xhigh", "max"], default: "medium" },
     "gpt-5.6-sol": {
       levels: ["low", "medium", "high", "xhigh", "max", "ultra"],
       default: "low",
@@ -77,9 +78,8 @@ export const CODEX_EFFORT_SNAPSHOT: CodexEffortCatalog = {
 };
 
 /** Vendor CLI version `CODEX_EFFORT_SNAPSHOT` was captured from. Aliases the
- * per-package vendor-version SSOT (vendor-cli-version.ts), the same constant
- * the remote installer pins — the freshness gate and the installed bytes can
- * never disagree about which version this release vouches for. */
+ * vendor-version SSOT (vendor-cli-version.ts) the remote installer pins, so the
+ * freshness gate and the installed bytes vouch for one version. */
 export const CODEX_EFFORT_SNAPSHOT_VERIFIED_AGAINST: string = CODEX_VENDOR_CLI_VERSION;
 
 /**

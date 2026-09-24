@@ -29,7 +29,11 @@ import {
   text,
   validateCodexModelOptions,
 } from "./responses.js";
-import { CODEX_VENDOR_CLI_VERSION } from "./vendor-cli-version.js";
+import {
+  codexCatalogClientVersion,
+  describeCodexClientVersion,
+  type CodexCatalogClientVersion,
+} from "./http-client-version.js";
 import { processingAdmissionProblem } from "./processing-refusal.js";
 import { ResponseFailureCapture } from "./failure-evidence.js";
 
@@ -70,6 +74,8 @@ function prepareTurnContinuation(
 
 export interface CodexModelAdapterDeps extends CodexModelAuthDeps {
   fetch?: typeof fetch;
+  /** The client version the catalog read declares (see http-client-version.ts). */
+  clientVersion?: () => Promise<CodexCatalogClientVersion>;
 }
 
 function headers(auth: CodexModelAuth): Record<string, string> {
@@ -168,11 +174,17 @@ async function catalogFor(
   context: Omit<ModelAdapterContext, "onDispatch">,
   fetcher: typeof fetch,
   now: () => number,
+  clientVersion: () => Promise<CodexCatalogClientVersion>,
 ): Promise<ControlModelCatalogResponse> {
   context.signal.throwIfAborted();
+  // The backend lists only models whose minimum client version is at or below
+  // the declared one; the declaration is this transport's own level, raised to
+  // a newer installed CLI, never the installer pin (issue #339).
+  const declared = await clientVersion();
   let response: Response;
   try {
-    response = await fetcher(`${ENDPOINT}/models?client_version=${CODEX_VENDOR_CLI_VERSION}`, {
+    const query = `client_version=${encodeURIComponent(declared.version)}`;
+    response = await fetcher(`${ENDPOINT}/models?${query}`, {
       headers: headers(auth),
       signal: context.signal,
       redirect: "error",
@@ -208,6 +220,8 @@ async function catalogFor(
     accountFingerprint: auth.accountFingerprint,
     observedAt: new Date(now()).toISOString(),
     provenance: "provider_http",
+    clientVersion: declared.version,
+    clientVersionSource: declared.source,
     models,
   };
 }
@@ -216,11 +230,12 @@ async function catalogFor(
 export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): ModelAdapter {
   const fetcher = deps.fetch ?? globalThis.fetch;
   const now = deps.now ?? Date.now;
+  const clientVersion = deps.clientVersion ?? (() => codexCatalogClientVersion());
   return {
     id: "codex",
     async catalog(context) {
       const auth = await prepareCodexModelAuth(context.profile, context.signal, deps);
-      return catalogFor(auth, context, fetcher, now);
+      return catalogFor(auth, context, fetcher, now, clientVersion);
     },
     async invoke(request, context) {
       let route: ModelRoute = {
@@ -296,17 +311,27 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
         // obtain fresh metadata rather than inventing a fingerprint or a limit.
         const catalog = discovered?.accountFingerprint
           ? discovered
-          : await catalogFor(auth, context, fetcher, now);
+          : await catalogFor(auth, context, fetcher, now, clientVersion);
+        // The account catalog is a complete enumeration for the declared
+        // client version, so absence IS proof here (INV-104): authoritative.
         const checked = validateModel(
           request.model,
           catalog.models.map((model) => model.id),
           "api",
+          "authoritative",
         );
         const model = catalog.models.find((entry) => entry.id === request.model);
+        // Strict on purpose: the catalog row is the request contract (efforts,
+        // service tiers, windows). The refusal names the declared client
+        // version, because that filter — not the account — decides the list.
         if (checked.status !== "ok" || !model)
           throw new CodexModelError(
             "model_unavailable",
-            "The requested model is not in this account's Codex model catalog.",
+            `The requested model is not in this account's Codex model catalog as served to ${describeCodexClientVersion(catalog)}.`,
+            {
+              clientVersion: catalog.clientVersion,
+              clientVersionSource: catalog.clientVersionSource,
+            },
           );
         if (
           request.options.reasoningEffort &&

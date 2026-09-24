@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { HarnessAdapter, HarnessModelSpec } from "@claudexor/core";
 import { createFakeHarness } from "@claudexor/harness-fake";
-import { CredentialProfile, GlobalConfig } from "@claudexor/schema";
+import { CredentialProfile, GlobalConfig, type HarnessModel } from "@claudexor/schema";
 import { harnessAccountModels } from "./registry.js";
 
 function fixture() {
@@ -16,7 +16,7 @@ function fixture() {
     }),
   );
   const config = GlobalConfig.parse({ credential_profiles: profiles });
-  const models = vi.fn(async (spec?: HarnessModelSpec) => [
+  const models = vi.fn(async (spec?: HarnessModelSpec): Promise<HarnessModel[]> => [
     {
       id: `model-${spec?.credentialProfile?.profile_id}`,
       label: null,
@@ -91,6 +91,35 @@ describe("account-scoped harness model inventory", () => {
       availability: "available",
       problem: null,
       catalog: { models: [{ id: "model-b" }] },
+    });
+  });
+
+  it("reports an account whose probe answered only hint rows as manifest truth, and a live answer as api", async () => {
+    // A total producer (claude) answers the frozen hints when it could not read
+    // the vendor; that row must not read as a live enumeration of this account.
+    const f = fixture();
+    const manifest = await f.adapter.discover();
+    f.models.mockImplementation(async (spec) =>
+      spec?.credentialProfile?.profile_id === "a"
+        ? [{ id: "hint-only", label: null, context_window: null, routes: null, origin: "hint" }]
+        : [
+            { id: "live-b", label: null, context_window: null, routes: null, origin: "live" },
+            { id: "hint-b", label: null, context_window: null, routes: null, origin: "hint" },
+          ],
+    );
+    const response = await harnessAccountModels(f.input);
+    expect(response.partial).toBe(false);
+    expect(response.accounts[0]?.catalog).toMatchObject({
+      source: "manifest",
+      verifiedAgainst: manifest.capabilities.known_models_verified_against ?? null,
+      provenance: "manifest",
+      models: [{ id: "hint-only", origin: "hint" }],
+    });
+    // One live row is a vendor answer; the hint rows beside it do not demote it.
+    expect(response.accounts[1]?.catalog).toMatchObject({
+      source: "api",
+      verifiedAgainst: null,
+      provenance: "adapter_models",
     });
   });
 

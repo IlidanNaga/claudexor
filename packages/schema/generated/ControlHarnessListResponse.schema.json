@@ -560,7 +560,7 @@
                               "authoritative",
                               "advisory"
                             ],
-                            "description": "Whether this harness's live models() answer proves a model is ABSENT; omitted = authoritative (an unlisted model is refused). advisory = absence is not proof, so an explicit model is forwarded to the vendor and disclosed instead of refused."
+                            "description": "Whether an absence from this harness's model lists (the live models() answer and the manifest known_models alike) proves a model is ABSENT; omitted = authoritative (an unlisted model is refused). advisory = absence is not proof, so an explicit model is forwarded to the vendor and disclosed instead of refused."
                           },
                           "known_models": {
                             "type": "array",
@@ -599,7 +599,7 @@
                               ]
                             },
                             "default": [],
-                            "description": "Manifest-declared model ids/aliases this harness accepts (bare string = every credential route; object form scopes a model to specific routes), used as the model truth source when the adapter has no live inventory; explicit models outside the truth source are refused."
+                            "description": "Manifest-declared model ids/aliases this harness accepts (bare string = every credential route; object form scopes a model to specific routes), used as the model truth source when the adapter has no live inventory and judged under model_inventory_absence: an authoritative harness refuses an explicit model outside it, an advisory harness forwards it with a note."
                           },
                           "known_models_verified_against": {
                             "type": [
@@ -840,7 +840,7 @@
                           "ok",
                           "rejected"
                         ],
-                        "description": "Whether the configured model passes the strict truth-source check."
+                        "description": "Whether the configured model is admitted (listed, or unlisted on an advisory harness) or refused by an authoritative list."
                       },
                       "message": {
                         "type": [
@@ -861,7 +861,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Strict truth-source check of configuredModel; null when no model is configured."
+                "description": "Truth-source check of configuredModel under the harness's own absence declaration; ok with a message is an advisory admission; null when no model is configured."
               },
               "delegation": {
                 "anyOf": [

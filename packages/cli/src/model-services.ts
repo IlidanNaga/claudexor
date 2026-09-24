@@ -9,7 +9,7 @@ import {
   type ModelOperationDependencies,
   type QuotaRegistry,
 } from "@claudexor/daemon";
-import { createCodexModelAdapter } from "@claudexor/harness-codex";
+import { createCodexModelAdapter, describeCodexClientVersion } from "@claudexor/harness-codex";
 import {
   differentialSubjectVerdict,
   probeCredentialProfileStatus,
@@ -306,7 +306,7 @@ export function createModelServices(deps: Dependencies) {
       if (account.mode === "pin")
         throw modelError(
           "model_unavailable",
-          "The pinned account does not advertise the requested model",
+          `The pinned account does not advertise the requested model in its catalog as served to ${describeCodexClientVersion(catalog)}`,
         );
       excluded.add(profile.profile_id);
     }

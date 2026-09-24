@@ -95,7 +95,7 @@ describe("codex adapter conformance fixtures", () => {
     });
   }
 
-  it("maps the recorded 0.153.3 SSE timeout reconnect frame to nonterminal retry status", () => {
+  it("maps the recorded 0.156.1 SSE timeout reconnect frame to nonterminal retry status", () => {
     const raw = readFileSync(join(FIXTURES, "signals", "reconnect-timeout.jsonl"), "utf8");
     const { events, invalidLines, recognizedLines } = parseLines(raw);
     expect(invalidLines).toBe(0);

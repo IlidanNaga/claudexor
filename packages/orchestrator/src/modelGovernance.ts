@@ -21,11 +21,13 @@
  * its own quota/profile preflight; checking it against the primary profile
  * here would reject a valid cross-profile fallback.
  *
- * One truth source cannot refuse: a live inventory whose adapter declared
- * `model_inventory_absence: "advisory"` proves presence but not absence, so an
- * unlisted explicit model is forwarded to the vendor unchanged and disclosed
- * once by the per-spawn gate. Manifest truth stays strict, and no gate ever
- * swaps one list for another to admit a model.
+ * What a list may refuse with is the HARNESS's declaration: where the adapter
+ * declared `model_inventory_absence: "advisory"`, its live inventory and its
+ * manifest hints alike prove presence but not absence, so an unlisted explicit
+ * model is forwarded to the vendor unchanged and disclosed once by the
+ * per-spawn gate. An authoritative harness (the declaration a silent manifest
+ * gets) refuses as before, and no gate ever swaps one list for another to
+ * admit a model.
  */
 import type { HarnessAdapter } from "@claudexor/core";
 import {
@@ -72,8 +74,8 @@ type ModelTruth = {
   list: readonly string[];
   source: "api" | "manifest";
   route: "local_session" | "api_key" | null;
-  /** Only a live producer can be advisory; manifest truth always speaks for
-   * itself, so it is never substituted to admit (or to forward) a model. */
+  /** The harness's own declaration (INV-104), honoured for the live list and
+   * the manifest hints alike; no list is ever substituted to admit a model. */
   absence: ModelInventoryAbsence;
 };
 
@@ -113,11 +115,14 @@ async function modelTruthForRoute(
       absence: routed.modelInventory?.model_inventory_absence ?? "authoritative",
     };
   }
+  // The manifest hint list is judged under the SAME declaration as the live
+  // answer: it is one day's memory of the vendor menu that producer reads,
+  // so it can refuse no more than the producer can (owner decision 2026-09-24).
   return {
     list: knownModelIdsForRoute(routed.knownModels, route),
     source: "manifest",
     route,
-    absence: "authoritative",
+    absence: routed.modelInventory?.model_inventory_absence ?? "authoritative",
   };
 }
 
@@ -139,8 +144,10 @@ function assertModelsAllowed(
     }
     // A pinned profile OWNS this inventory: sending the operator to the
     // profile-less `claudexor models` would print a different account's list.
+    // Observations only — which account supplied which list — never a cause
+    // guess ("re-authenticate", "plan", "entitlement") the gate cannot know.
     const remedy = profile
-      ? `the selected credential profile '${profile.profile_id}' supplied this inventory; verify or re-authenticate that profile, then inspect its live vendor model list`
+      ? `the selected credential profile '${profile.profile_id}' supplied this ${truth.source === "api" ? "live inventory" : "manifest list"} (${truth.list.length} models); inspect that profile's own vendor model list`
       : `run \`claudexor models --harness ${routed.adapter.id}\``;
     throw new HarnessUnavailableError(
       `harness '${routed.adapter.id}' refused ${role} '${model}' (truth source: ${truth.source}${truth.source === "manifest" ? `, route: ${truth.route ?? "undecided"}` : ""}): ${check.message}; ` +

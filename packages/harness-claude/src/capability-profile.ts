@@ -1,14 +1,14 @@
 import type { HarnessCapabilityProfile } from "@claudexor/schema";
 import { HarnessCapabilityProfile as HarnessCapabilityProfileSchema } from "@claudexor/schema";
-import { CLAUDE_VENDOR_CLI_VERSION } from "./vendor-cli-version.js";
 
 /** One manifest-owned declaration of the managed login's stdin contract. */
 export const CLAUDE_MANAGED_LOGIN = { stdin: "pipe" } as const;
 
 /**
- * Manifest model truth source (strict model-truth validation: an explicit
- * model outside this list is refused, never forwarded to die as a native
- * error). Stable aliases plus current full ids; verified against the vendor
+ * Manifest model hint list: the frozen floor every `models()` answer carries
+ * (`origin: "hint"`), judged under the adapter's ADVISORY declaration — an
+ * explicit model outside it is forwarded to the vendor with a note, never
+ * refused (INV-104). Stable aliases plus current full ids; verified against the vendor
  * model-config docs and the INSTALLED CLI recorded in
  * `CLAUDE_KNOWN_MODELS_VERIFIED_AGAINST`.
  */
@@ -19,7 +19,7 @@ export const CLAUDE_KNOWN_MODELS: readonly string[] = [
   "fable",
   "best",
   // Fable 5.1 requires Claude Code >= 2.1.251. Re-verified through the
-  // pinned 2.1.261 CLI with observed_model claude-fable-5-1.
+  // then-pinned 2.1.261 CLI with observed_model claude-fable-5-1.
   "claude-fable-5-1",
   "claude-fable-5",
   "claude-sonnet-5",
@@ -50,11 +50,15 @@ export function claudeQuotaModelAliases(displayName: string): string[] {
   return [...new Set([...(aliases.length > 0 ? aliases : [family]), "best"])];
 }
 
-/** Installed vendor CLI the known-model list above was last live-verified
- * against (the strict freshness gate compares this against the live CLI).
- * Aliases the per-package vendor-version SSOT so the freshness gate and the
- * remote installer's pin read the SAME value (vendor-cli-version.ts). */
-export const CLAUDE_KNOWN_MODELS_VERIFIED_AGAINST: string = CLAUDE_VENDOR_CLI_VERSION;
+/**
+ * Installed vendor CLI the known-model list above was last ACTUALLY verified
+ * against. A frozen literal on purpose, no longer an alias of the installer pin
+ * (vendor-cli-version.ts): aliasing let a pin bump silently re-stamp this list
+ * as "verified on the new CLI" when nobody re-checked it. The list is now a
+ * hint seed behind the live `models()` producer (model-probe.ts), it never
+ * grows again, and its stamp only moves when someone re-verifies the ids.
+ */
+export const CLAUDE_KNOWN_MODELS_VERIFIED_AGAINST: string = "2.1.261";
 
 export const CLAUDE_CAPABILITY_PROFILE: HarnessCapabilityProfile =
   HarnessCapabilityProfileSchema.parse({

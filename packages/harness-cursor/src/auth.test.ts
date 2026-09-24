@@ -658,6 +658,28 @@ describe("cursor adapter auth route wiring", () => {
     expect(nativeProbes).toBe(0);
   });
 
+  it("declares its model list advisory: --list-models proves presence, never absence (INV-104)", async () => {
+    const adapter = createCursorAdapter({
+      detectVersion: async () => "cursor-test",
+      nativeAuthOk: async () => nativeProbe(false),
+      cursorApiKey: () => "cursor-key",
+      listCursorModels: async () => [],
+      smokeIsolatedApiKey: async () => ({ ok: true, detail: "ok" }),
+      runCliHarness: async function* (opts: CliRunLoopOptions): AsyncGenerator<HarnessEvent> {
+        yield {
+          type: "completed",
+          session_id: opts.spec.session_id,
+          ts: "2026-01-01T00:00:00.000Z",
+        };
+      },
+    });
+    const manifest = await adapter.discover();
+    expect(manifest.capabilities.model_inventory_absence).toBe("advisory");
+    // Every route: the fail-soft menu answers for API-key and native alike.
+    expect(manifest.capabilities.model_inventory_routes).toBeUndefined();
+    expect(typeof adapter.models).toBe("function");
+  });
+
   it("reuses a successful API-key smoke across repeated scoped runs", async () => {
     let smokeCalls = 0;
     const adapter = createCursorAdapter({

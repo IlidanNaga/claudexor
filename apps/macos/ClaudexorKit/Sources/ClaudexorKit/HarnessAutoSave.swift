@@ -5,8 +5,10 @@ import Foundation
 public enum ModelFieldState: Equatable {
     /// Truth source answered and enumerates: show the strict Picker.
     case picker
-    /// Truth source ANSWERED "none" and a legacy override is stored: it will
-    /// be refused at preflight — show it with the only useful action (Clear).
+    /// Truth source ANSWERED "none" and a legacy override is stored: the
+    /// picker cannot offer it (an authoritative harness refuses it at
+    /// preflight; an advisory one forwards it and says so) — show it with the
+    /// only useful action (Clear).
     case refusedLegacy
     /// Catalog fetch failed (offline/transient) with a stored override: we
     /// could NOT check it — neutral copy + Retry, never a refusal claim.

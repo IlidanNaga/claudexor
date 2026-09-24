@@ -1532,6 +1532,7 @@ export const ControlSettingsSnapshot = z
       )
       .default({})
       .describe("Per-harness settings keyed by harness id."),
+    notes: z.array(z.string()).default([]).describe("Admission notes of this write (INV-104)."),
   })
   .describe("Effective settings snapshot served by GET /settings.");
 export type ControlSettingsSnapshot = z.infer<typeof ControlSettingsSnapshot>;

@@ -6,6 +6,7 @@ import {
 } from "./processing-session.js";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 export { createCodexModelAdapter } from "./model.js";
+export { describeCodexClientVersion } from "./http-client-version.js";
 import { codexTranscriptModel, codexTranscriptRateLimits } from "./transcript.js";
 import { withCodexVendorFailure } from "./vendor-failure.js";
 import { resolveSecret } from "@claudexor/secrets";
@@ -34,11 +35,10 @@ import {
   type CodexEffortProbe,
 } from "./effort-probe.js";
 import { codexRunEffortResolution } from "./effort-gate.js";
-export { codexConfigHasNodeRepl } from "./toml.js";
 import { codexConfigHasNodeRepl, tomlBasicString } from "./toml.js";
 import { CODEX_VENDOR_CLI_VERSION } from "./vendor-cli-version.js";
 export { CODEX_EFFORT_SNAPSHOT, clearCodexEffortCache, unionEffortLevels } from "./effort-probe.js";
-export { CODEX_VENDOR_CLI_VERSION };
+export { CODEX_VENDOR_CLI_VERSION, codexConfigHasNodeRepl };
 import type { DoctorSpec, HarnessAdapter } from "@claudexor/core";
 import {
   abortSignalFromSpec,
@@ -416,15 +416,13 @@ export function createCodexAdapter(deps: Partial<CodexRuntimeDeps> = {}): Harnes
           browser_tool: true,
           // LIVE-VERIFIED (codex 0.137): `codex exec --output-schema <FILE>`.
           json_schema_output: true,
-          // D-16: `--output-schema` constrains the FINAL MESSAGE, so a no-caller
-          // WorkReport envelope must wrap the markdown deliverable as
-          // `output: string` (final_message).
+          // D-16: `--output-schema` constrains the FINAL MESSAGE, so a no-caller WorkReport
+          // envelope must wrap the markdown deliverable as `output: string` (final_message).
           work_report_transport: "constrained",
           structured_output_channel: "final_message",
           web_policy: "native",
-          // Effort is per MODEL here (`model/list` → supportedReasoningEfforts),
-          // so the harness-wide list is the UNION and `model_effort_levels`
-          // carries the truth a specific model is held to.
+          // Effort is per MODEL (`model/list` → supportedReasoningEfforts): the harness-wide
+          // list is the UNION; `model_effort_levels` holds the truth a model is held to.
           effort_levels: unionEffortLevels(efforts.catalog.models),
           model_effort_levels: efforts.catalog.models,
           effort_levels_verified_against: efforts.live
@@ -433,6 +431,8 @@ export function createCodexAdapter(deps: Partial<CodexRuntimeDeps> = {}): Harnes
           // Manifest truth for routes the live probe does not answer; no hidden models.
           known_models: [
             "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-6-luna",
             "gpt-5.6",
             "gpt-5.6-sol",
             "gpt-5.6-terra",

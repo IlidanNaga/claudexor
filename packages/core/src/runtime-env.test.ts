@@ -12,6 +12,8 @@ import { delimiter, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   brokenInstallAdvisory,
+  harnessBinaryIdentity,
+  harnessBinaryIdentityOnPath,
   managedRunnerNodeDir,
   normalizedHarnessPath,
   resolveHarnessBinary,
@@ -115,12 +117,87 @@ describe("resolveHarnessBinary", () => {
     const env = { HOME: home, PATH: binDir, PATHEXT: ".COM;.EXE;.BAT;.CMD" } as NodeJS.ProcessEnv;
     // Pin a non-launchable runner so the managed-runner prepend stays out of the way.
     expect(resolveHarnessBinary("tool-w", env, "/no/such/node", "win32")).toBeNull();
+    // The exact-PATH resolver applies the same image rule (no shim, no bare name).
+    expect(harnessBinaryIdentityOnPath("tool-w", binDir, "win32")).toBeNull();
     const image = fakeBin(binDir, "tool-w.exe");
     expect(resolveHarnessBinary("tool-w", env, "/no/such/node", "win32")).toBe(image);
+    expect(harnessBinaryIdentityOnPath("tool-w", binDir, "win32")?.path).toBe(realpathSync(image));
+    expect(harnessBinaryIdentityOnPath("tool-w.exe", binDir, "win32")?.path).toBe(
+      realpathSync(image),
+    );
     // An explicit spelling is honored as written; POSIX keeps the bare name.
     expect(resolveHarnessBinary("tool-w.exe", env, "/no/such/node", "win32")).toBe(image);
     expect(resolveHarnessBinary("tool-w", env, "/no/such/node", "darwin")).toBe(
       join(binDir, "tool-w"),
+    );
+  });
+
+  it("harnessBinaryIdentity stats the realpath the resolver picks and changes with the bytes", () => {
+    const home = join(root, "id-home");
+    const binDir = join(root, "id-bin");
+    const versions = join(root, "id-versions");
+    const v1 = fakeBin(versions, "tool-1.0");
+    mkdirSync(binDir, { recursive: true });
+    const link = join(binDir, "tool-id");
+    symlinkSync(v1, link);
+    const env = { HOME: home, PATH: binDir } as NodeJS.ProcessEnv;
+
+    const first = harnessBinaryIdentity("tool-id", env);
+    expect(first).not.toBeNull();
+    // Identity is the REAL file, not the launcher symlink.
+    expect(first?.path).toBe(realpathSync(v1));
+    expect(first?.size).toBeGreaterThan(0);
+    expect(first?.ino).toBeGreaterThan(0);
+    // Same bytes, same identity (stable across calls).
+    expect(harnessBinaryIdentity("tool-id", env)).toEqual(first);
+
+    // The native-installer update shape: the launcher re-points to a new
+    // per-version file — realpath changes even though the launcher path is the same.
+    const v2 = fakeBin(versions, "tool-2.0");
+    rmSync(link);
+    symlinkSync(v2, link);
+    const second = harnessBinaryIdentity("tool-id", env);
+    expect(second?.path).toBe(realpathSync(v2));
+    expect(second?.path).not.toBe(first?.path);
+
+    // The npm-reinstall shape: same realpath, rewritten in place (size/mtime move).
+    writeFileSync(v2, "#!/bin/sh\n# rewritten with more bytes\nexit 0\n");
+    const third = harnessBinaryIdentity("tool-id", env);
+    expect(third?.path).toBe(second?.path);
+    expect(third?.size).not.toBe(second?.size);
+
+    // An absolute override resolves the same way; an unresolvable name is null.
+    expect(harnessBinaryIdentity(link, env)).toEqual(third);
+    expect(harnessBinaryIdentity("tool-id-missing", env)).toBeNull();
+    expect(harnessBinaryIdentity(join(root, "nope", "tool"), env)).toBeNull();
+  });
+
+  it("harnessBinaryIdentityOnPath resolves on the EXACT path string, never a normalized one", () => {
+    const a = join(root, "exact-a");
+    const b = join(root, "exact-b");
+    for (const dir of [a, b]) {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "tool-exact"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    }
+    // First entry wins; the managed prefixes are NOT prepended (a managed
+    // `tool-exact` could not shadow the caller's own PATH here).
+    expect(harnessBinaryIdentityOnPath("tool-exact", b)?.path).toBe(
+      realpathSync(join(b, "tool-exact")),
+    );
+    expect(harnessBinaryIdentityOnPath("tool-exact", [a, b].join(delimiter))?.path).toBe(
+      realpathSync(join(a, "tool-exact")),
+    );
+    // An absolute name is honoured as written; a name absent from the path is null.
+    expect(harnessBinaryIdentityOnPath(join(b, "tool-exact"), a)?.path).toBe(
+      realpathSync(join(b, "tool-exact")),
+    );
+    expect(harnessBinaryIdentityOnPath("tool-exact", join(root, "empty-dir"))).toBeNull();
+    // Same bytes as the normalized resolver reports for the same file.
+    expect(harnessBinaryIdentityOnPath("tool-exact", a)).toEqual(
+      harnessBinaryIdentity("tool-exact", {
+        HOME: join(root, "no-home"),
+        PATH: a,
+      } as NodeJS.ProcessEnv),
     );
   });
 

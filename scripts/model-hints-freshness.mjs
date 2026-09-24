@@ -28,6 +28,36 @@ const { buildRegistry } = await import(
 // First semver-looking token ("codex-cli 0.137.0" / "2.1.165 (Claude Code)").
 const semver = (s) => /(\d+\.\d+\.\d+)/.exec(s ?? "")?.[1] ?? null;
 
+/**
+ * The stamp check is ONE pure decision: does the installed vendor CLI differ
+ * from the version the hint set was last verified against? It applies whether
+ * or not the adapter also has a live `models()` producer — the hint set is
+ * then the fallback floor every answer carries, and a stale stamp on it is
+ * exactly the drift this gate exists to surface (a live producer used to skip
+ * the check, which let a frozen Claude stamp go unwatched).
+ */
+export function hintStampDrift(installedVersion, verifiedAgainst) {
+  const installed = semver(installedVersion);
+  const verified = semver(verifiedAgainst);
+  if (installed === null || verified === null) return null;
+  return installed !== verified;
+}
+
+// Negative control: the decision must discriminate before it judges anything.
+{
+  const cases = [
+    [["2.1.281 (Claude Code)", "2.1.261"], true],
+    [["codex-cli 0.156.1", "0.156.1"], false],
+    [["not a version", "0.156.1"], null],
+  ];
+  for (const [[installed, verified], expected] of cases) {
+    if (hintStampDrift(installed, verified) !== expected) {
+      console.error(`model-hints self-test FAILED for ${JSON.stringify([installed, verified])}`);
+      process.exit(1);
+    }
+  }
+}
+
 const warnings = [];
 const failures = [];
 for (const adapter of buildRegistry({ includeFakes: false }).values()) {
@@ -40,7 +70,8 @@ for (const adapter of buildRegistry({ includeFakes: false }).values()) {
   const caps = manifest.capabilities ?? {};
   const known = caps.known_models ?? [];
   const verified = caps.known_models_verified_against ?? null;
-  if (typeof adapter.models === "function") continue; // live inventory is the truth source
+  // A live models() producer does not exempt the hint set: it stays the
+  // fallback floor of every answer, so its stamp is kept fresh like any other.
   if (known.length === 0) continue; // no hint set to keep fresh
   if (!verified) {
     failures.push(
@@ -57,7 +88,7 @@ for (const adapter of buildRegistry({ includeFakes: false }).values()) {
     );
     continue;
   }
-  if (installed !== semver(verified)) {
+  if (hintStampDrift(installed, verified)) {
     warnings.push(
       `${adapter.id}: installed CLI ${installed} != known_models verified against ${verified} — re-verify the manifest hint set against the current CLI`,
     );

@@ -154,7 +154,16 @@ export function resolveHarnessBinary(
     for (const name of names) if (isLaunchableExecutable(name, platform)) return name;
     return null;
   }
-  for (const dir of normalizedHarnessPath(source, execPath, platform).split(delimiter)) {
+  return resolveOnPath(names, normalizedHarnessPath(source, execPath, platform), platform);
+}
+
+/** First launchable candidate on an EXACT PATH string, no normalization. */
+function resolveOnPath(
+  names: string[],
+  pathValue: string,
+  platform: NodeJS.Platform,
+): string | null {
+  for (const dir of pathValue.split(delimiter)) {
     if (!dir) continue;
     for (const name of names) {
       const candidate = join(dir, name);
@@ -162,6 +171,68 @@ export function resolveHarnessBinary(
     }
   }
   return null;
+}
+
+/**
+ * Which exact bytes a harness child will execute, as a stat-only identity:
+ * the realpath of the binary `resolveHarnessBinary` picks, plus its inode,
+ * size and mtime. No spawn, no read — one `realpath` and one `stat`.
+ *
+ * Every probe memo keyed by this identity re-reads the binary the moment it
+ * changes on disk WITHOUT a daemon restart, which is what the release-free
+ * model/effort discovery needs: the native installer re-points a `versions/`
+ * symlink (realpath changes), an npm reinstall rewrites the file in place
+ * (size/mtime change), a Homebrew upgrade moves to a new cellar dir. `ino` is
+ * 0 on some Windows volumes and stays in the key only as a tie-breaker; the
+ * memos' own TTLs bound what a shim layout can hide from a stat.
+ *
+ * Null when the binary does not resolve (nothing to spawn) or cannot be
+ * stat'd (raced away between resolve and stat).
+ */
+export interface HarnessBinaryIdentity {
+  path: string;
+  ino: number;
+  size: number;
+  mtimeMs: number;
+}
+
+export function harnessBinaryIdentity(
+  bin: string,
+  source: NodeJS.ProcessEnv = process.env,
+): HarnessBinaryIdentity | null {
+  return identityOfResolved(resolveHarnessBinary(bin, source));
+}
+
+/**
+ * The same identity for a child whose env patch REPLACED the PATH: the spawn
+ * layer composes the normalized host PATH and then applies the caller's patch
+ * verbatim, so such a child resolves the binary on the patch value alone. A
+ * probe that keys its memo by identity must resolve exactly that way, or it
+ * describes a different binary than the run executes.
+ */
+export function harnessBinaryIdentityOnPath(
+  bin: string,
+  pathValue: string,
+  platform: NodeJS.Platform = process.platform,
+): HarnessBinaryIdentity | null {
+  const names = binaryNameCandidates(bin, platform);
+  if (isAbsolute(bin)) {
+    for (const name of names)
+      if (isLaunchableExecutable(name, platform)) return identityOfResolved(name);
+    return null;
+  }
+  return identityOfResolved(resolveOnPath(names, pathValue, platform));
+}
+
+function identityOfResolved(resolved: string | null): HarnessBinaryIdentity | null {
+  if (resolved === null) return null;
+  try {
+    const path = realpathSync(resolved);
+    const stat = statSync(path);
+    return { path, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs };
+  } catch {
+    return null;
+  }
 }
 
 /**

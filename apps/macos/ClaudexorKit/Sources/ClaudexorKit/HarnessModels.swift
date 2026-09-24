@@ -74,8 +74,8 @@ public struct HarnessStatus: Codable, Sendable, Identifiable, Equatable {
     public let readiness: [ReadinessCheck]
     /// The user's configured per-harness default model, if any.
     public let configuredModel: String?
-    /// Strict truth-source verdict for `configuredModel` ("ok"/"rejected" +
-    /// actionable message) — the UI renders the doctor's honesty.
+    /// Truth-source verdict for `configuredModel` under the harness's own declaration
+    /// ("ok" with a message = advisory admission; "rejected" + actionable message).
     public let configuredModelCheck: HarnessModelCheck?
     /// Engine-owned readiness for the selected runtime/harness Delegate belt.
     /// Absence means an older runtime and therefore fails closed in the UI.

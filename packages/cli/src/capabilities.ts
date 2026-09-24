@@ -17,7 +17,12 @@ import { validateModel } from "@claudexor/core";
 import { defaultClaudexorTools } from "@claudexor/mcp-server";
 import { CLAUDEXOR_VERSION } from "@claudexor/util";
 import { CLI_COMMANDS } from "./command-registry.js";
-import { buildGateway, buildRegistry, harnessModels } from "./registry.js";
+import {
+  buildGateway,
+  buildRegistry,
+  checkHarnessModelTruth,
+  harnessModelTruth,
+} from "./registry.js";
 import { delegationCapabilityFor } from "./delegation-capability.js";
 import { probeGitCapability } from "@claudexor/workspace";
 import { effectiveSetupLoginCapability } from "./setup-login-capability.js";
@@ -51,24 +56,26 @@ export async function buildAgentCapabilityCatalog(): Promise<AgentCapabilityCata
       // Model truth degrades soft: a catalog is a status surface, so an
       // unreachable vendor CLI yields source=none instead of throwing the
       // whole catalog away. The fallback is the full typed response shape.
-      const truth: ControlHarnessModelsResponse = await harnessModels(
-        s.id,
-        NO_PROJECT_ROOT,
-        false,
-      ).catch((): ControlHarnessModelsResponse => ({
-        harnessId: s.id,
-        models: [],
-        source: "none",
-        verifiedAgainst: null,
-      }));
       const configured = cfg.global.harnesses[s.id]?.default_model ?? null;
-      const check = configured
-        ? validateModel(
-            configured,
-            truth.models.map((m) => m.id),
-            truth.source === "api" ? "api" : "manifest",
-          )
-        : null;
+      // One truth read serves the catalog's model summary and the
+      // configured-model verdict, which honours the harness's own absence
+      // declaration (INV-104) through the shared registry gate.
+      const { truth, check } = await harnessModelTruth(s.id, NO_PROJECT_ROOT, false)
+        .then((read) => ({
+          truth: read.response,
+          check: configured ? checkHarnessModelTruth(read, configured) : null,
+        }))
+        .catch(() => ({
+          truth: {
+            harnessId: s.id,
+            models: [],
+            source: "none",
+            verifiedAgainst: null,
+          } satisfies ControlHarnessModelsResponse,
+          // An unreachable vendor CLI verifies nothing: the stored model is
+          // reported invalid exactly as before, never admitted on a guess.
+          check: configured ? validateModel(configured, [], "manifest", "authoritative") : null,
+        }));
       const profile = s.manifest?.capability_profile;
       // Settings can disable a harness outright (harnesses.<id>.enabled=false);
       // routing drops it, so the catalog must not advertise it as available.

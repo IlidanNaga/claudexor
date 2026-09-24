@@ -27,6 +27,10 @@ public struct SettingsSnapshot: Codable, Sendable, Equatable {
     /// Presence-aware wire value: old daemon omission, explicit no-expiry null,
     /// or a finite positive millisecond duration are distinct states.
     public let interactionTimeout: InteractionTimeoutSnapshotValue
+    /// Admission notes of the write that produced this snapshot (INV-104): a
+    /// model the harness's list could not verify was persisted and will be
+    /// sent to the vendor as-is. Empty on reads and from older daemons.
+    public let notes: [String]
 
     /// Compatibility projection for existing finite-value consumers. Disabled
     /// and old-daemon absence are both nil; new settings UI reads the typed
@@ -37,7 +41,7 @@ public struct SettingsSnapshot: Codable, Sendable, Equatable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case sources, routing, budget, runtime, harnesses, interactionTimeoutMs
+        case sources, routing, budget, runtime, harnesses, interactionTimeoutMs, notes
     }
 
     public init(from decoder: Decoder) throws {
@@ -47,6 +51,7 @@ public struct SettingsSnapshot: Codable, Sendable, Equatable {
         budget = try c.decode(BudgetSettings.self, forKey: .budget)
         runtime = try c.decodeIfPresent(RuntimeSettings.self, forKey: .runtime)
         harnesses = try c.decodeIfPresent([String: HarnessSettings].self, forKey: .harnesses)
+        notes = try c.decodeIfPresent([String].self, forKey: .notes) ?? []
         if !c.contains(.interactionTimeoutMs) {
             interactionTimeout = .absent
         } else if try c.decodeNil(forKey: .interactionTimeoutMs) {
@@ -63,6 +68,7 @@ public struct SettingsSnapshot: Codable, Sendable, Equatable {
         try c.encode(budget, forKey: .budget)
         try c.encodeIfPresent(runtime, forKey: .runtime)
         try c.encodeIfPresent(harnesses, forKey: .harnesses)
+        try c.encode(notes, forKey: .notes)
         switch interactionTimeout {
         case .absent:
             break

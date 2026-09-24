@@ -13,6 +13,15 @@
 # `thread.started` + `turn.started` PAIR for one run, and the adapter must
 # collapse that pair to exactly one normalized `started` (turn.started stays a
 # fallback for a partial stream that omits the thread frame).
+#
+# Codex 0.156.1 pin (2026-09-24): only the credential-free loopback probes
+# (context/exec-oversized-input, signals/reconnect-timeout) were re-recorded
+# from 0.156.1; the committed files are byte-identical to their 0.153.3
+# captures (0.156.1 also printed a stderr warning about the recorder's temp-dir
+# CODEX_HOME, an environment note outside the terminal, not kept). The live
+# account runs (recorded-astra, recorded-real-cli, recorded-plan-progress) and
+# the real vendor-failure rollouts need a paid run or a real vendor incident,
+# so they were NOT re-recorded and keep the version they were captured from.
 cli: codex
 fixtures:
   recorded-astra-0.153.3.jsonl:
@@ -110,7 +119,9 @@ fixtures:
       started_events: 1
       delta_messages: 0
       typed_rate_limit: false
-  # D-16 OVERSIZED-INPUT EVIDENCE (live, codex-cli 0.153.3, 2026-09-05).
+  # D-16 OVERSIZED-INPUT EVIDENCE (codex-cli 0.153.3 live 2026-09-05; re-recorded
+  # from 0.156.1 on 2026-09-24 without credentials against a loopback provider
+  # that received zero requests — the input check runs before any request).
   # Lives in context/ (NOT top-level) because the top-level conformance loop
   # asserts tool_call/tool_result/usage on every fixture and this capture has
   # NONE of those — it is a terminal-shape probe, not a normal run. No
@@ -128,20 +139,21 @@ fixtures:
   # determinism, matching the claude fixtures' id policy).
   context/exec-oversized-input.jsonl:
     source: recorded
-    cli_version: "0.153.3"
-    recorded_at: "2026-09-05"
+    cli_version: "0.156.1"
+    recorded_at: "2026-09-24"
     sanitized: "thread_id"
     terminal_out_of_band: "stderr (see exec-oversized-input.stderr.txt): turn/start failed, JSON-RPC code -32602, input_error_code=input_too_large, max_chars=1048576"
-  # Exact 0.153.3 native error frame recorded against an auth-free loopback
-  # Responses endpoint that accepts the SSE request and leaves it idle.
+  # Exact native error frame (byte-identical in 0.153.3 and 0.156.1) recorded
+  # against an auth-free loopback Responses endpoint that accepts the SSE
+  # request and leaves it idle.
   # stream_idle_timeout_ms=100 and stream_max_retries=5 produce all five
   # reconnect notices before a terminal failure; this is the fourth notice.
   # Stored below the complete-run roster because it is a one-frame signal
   # probe. Historical request-timed-out wording remains in parse.test.ts.
   signals/reconnect-timeout.jsonl:
     source: recorded
-    cli_version: "0.153.3"
-    recorded_at: "2026-09-05"
+    cli_version: "0.156.1"
+    recorded_at: "2026-09-24"
     sanitized: "none"
   # SESSION-ROLLOUT records (`$CODEX_HOME/sessions/.../rollout-*.jsonl`), not
   # `--json` stream captures: the post-terminal side channel the adapter reads

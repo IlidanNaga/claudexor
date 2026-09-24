@@ -86,9 +86,13 @@ export function normalizeReadiness(
       kind: "model",
       title: "Configured model",
       status: input.configuredModelCheck.status === "ok" ? "pass" : "fail",
+      // An `ok` that carries a message is an advisory harness's unverified
+      // admission (INV-104): pass, with the note beside the model.
       detail:
         input.configuredModelCheck.status === "ok"
-          ? input.configuredModel
+          ? input.configuredModelCheck.message
+            ? `${input.configuredModel}: ${input.configuredModelCheck.message}`
+            : input.configuredModel
           : (input.configuredModelCheck.message ?? null),
     });
   }

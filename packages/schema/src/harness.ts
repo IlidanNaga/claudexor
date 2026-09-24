@@ -235,27 +235,27 @@ export const HarnessCapabilities = z
         "Credential routes supported by the adapter's live models() producer; omitted preserves all-route support. Other routes use manifest known_models, never another account's live inventory.",
       ),
     /**
-     * What the adapter's LIVE inventory proves (INV-104). It always proves
-     * PRESENCE; this says whether it also proves ABSENCE. `authoritative` (the
-     * default when omitted) keeps the strict gate: a model the list lacks is
-     * refused. `advisory` means the producer cannot tell its own answer from a
-     * substituted one, so the gate forwards the explicit model to the vendor
-     * byte-identical and discloses it. It NEVER substitutes the manifest.
+     * What this harness's model lists prove (INV-104) — the live `models()`
+     * answer and the manifest `known_models` hints alike. A list always proves
+     * PRESENCE; this says whether an absence from it is proof too. `authoritative`
+     * (the default when omitted) keeps the strict gate: a model the list lacks is
+     * refused. `advisory` means the harness cannot enumerate what its runtime
+     * accepts, so the gate forwards the explicit model byte-identical and discloses it.
      */
     model_inventory_absence: z
       .enum(["authoritative", "advisory"])
       .optional()
       .describe(
-        "Whether this harness's live models() answer proves a model is ABSENT; omitted = authoritative (an unlisted model is refused). advisory = absence is not proof, so an explicit model is forwarded to the vendor and disclosed instead of refused.",
+        "Whether an absence from this harness's model lists (the live models() answer and the manifest known_models alike) proves a model is ABSENT; omitted = authoritative (an unlisted model is refused). advisory = absence is not proof, so an explicit model is forwarded to the vendor and disclosed instead of refused.",
       ),
     /**
      * Known model ids/aliases this harness accepts — the manifest-declared model
      * truth source when no live `models()` producer applies to the credential route.
-     * STRICT: an explicit model outside the active truth source is refused
-     * at settings-write, run preflight, and reviewer resolution; a harness with
-     * NO truth source (no `models()` and an empty list) refuses every explicit
-     * model. Data-driven like `effort_levels` — no model id is hardcoded in
-     * routing logic.
+     * Judged under `model_inventory_absence`: an authoritative harness refuses an
+     * explicit model outside the active list at settings-write, run preflight and
+     * reviewer resolution (an empty list refuses every explicit model); an
+     * advisory harness forwards it with a note. Data-driven like `effort_levels`
+     * — no model id is hardcoded in routing logic.
      */
     known_models: z
       .array(
@@ -276,7 +276,7 @@ export const HarnessCapabilities = z
       )
       .default([])
       .describe(
-        "Manifest-declared model ids/aliases this harness accepts (bare string = every credential route; object form scopes a model to specific routes), used as the model truth source when the adapter has no live inventory; explicit models outside the truth source are refused.",
+        "Manifest-declared model ids/aliases this harness accepts (bare string = every credential route; object form scopes a model to specific routes), used as the model truth source when the adapter has no live inventory and judged under model_inventory_absence: an authoritative harness refuses an explicit model outside it, an advisory harness forwards it with a note.",
       ),
     /**
      * Vendor CLI version this `known_models` hint set was last verified against
@@ -298,8 +298,8 @@ export type HarnessCapabilities = z.infer<typeof HarnessCapabilities>;
 
 export type KnownModelEntry = HarnessCapabilities["known_models"][number];
 
-/** What a live inventory proves about a model it does NOT list (INV-104). ONE
- * owner for the vocabulary; absent on a manifest means `authoritative`. */
+/** What a harness's model lists prove about a model they do NOT list (INV-104).
+ * ONE owner for the vocabulary; absent on a manifest means `authoritative`. */
 export type ModelInventoryAbsence = NonNullable<HarnessCapabilities["model_inventory_absence"]>;
 
 /** Model ids from a known_models list that are valid on `route`. ONE owner for

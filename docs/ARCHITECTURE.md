@@ -440,8 +440,10 @@ consumer is a staged field). Capabilities are data-driven and declared by the
 adapter: `effort_levels` + `model_effort_levels` (+ the
 `effort_levels_verified_against` freshness note) and `known_models` (+ the
 `known_models_verified_against` freshness note) as the manifest model truth
-source under the STRICT semantics described in the model-governance section
-above — there is no warn-and-pass-through tier.
+source, judged under the harness's own `model_inventory_absence` declaration
+described in the model-governance section above: strict where the harness
+declares its lists complete, forward-and-disclose where it declares them
+advisory — there is no silent pass-through tier either way.
 
 Reasoning effort is an OPEN vocabulary, mirroring the vendors: codex types its
 own `ReasoningEffort` as any non-empty value the model advertises, and Claude
@@ -549,9 +551,9 @@ reads; per-attempt overrides
 (budget downgrade to `fallback_model`, fallback retry) sit on top. Every
 explicit model — per-run, settings default, fallback, reviewer — must pass
 the harness's model truth source wherever that source can prove absence (live
-`models()` inventory, else manifest `known_models`; a harness with neither
-refuses explicit models; an advisory live inventory forwards, see below): enforced at
-settings write (400), run preflight (typed failure with artifacts before any
+`models()` inventory, else manifest `known_models`; an authoritative harness
+with neither refuses explicit models; an advisory harness forwards, see below):
+enforced at settings write (400), run preflight (typed failure with artifacts before any
 CLI spawns), immediately before each routed spawn against that attempt's exact
 profile, state, cwd, and auth preference, and both reviewer-panel paths. A pinned
 profile answers its OWN inventory through the same route resolver the run path
@@ -560,26 +562,36 @@ route is enumerated with the same `auto` the adapter will resolve and the spec
 reaches the adapter unrewritten: the gate reads the run's identity, it never
 decides it, and an undecidable route is the vendor's refusal to make, not the
 gate's.
-The same rule decides what a list may refuse with. A live inventory always
-proves PRESENCE; it proves ABSENCE only when its producer declares that it can.
-`model_inventory_absence: "advisory"` (codex, because `model/list` carries no
-provenance and the CLI substitutes a bundled default list when its remote fetch
-times out) makes an unlisted EXPLICIT model undecidable here, so the gate
-forwards it byte-identical, the vendor decides, and the per-spawn gate discloses
-once — as a status event — that the model was not listed. Preflight stays
-silent, so one spawn speaks once. Manifest truth is never advisory and is never
-substituted to admit a model; the unscoped `/harnesses/:id/models` query, the
-settings-write gate, the doctor's configured-model check and the automatic
-reviewer panel are unaffected, since they read manifest truth or keep their own
-skip-at-zero-cost contract. The residual is disclosed rather than guessed at: a
-vendor CLI refusing a forwarded model surfaces as an untyped error carrying the
-vendor's text, and a mistyped model on such a harness costs one spawn.
+The same rule decides what a list may refuse with. A list always proves
+PRESENCE; whether an absence from it is proof too is the HARNESS's declaration
+(`model_inventory_absence`), and it governs the live inventory and the manifest
+hint list alike — the hints are one day's memory of the same vendor menu, so
+they can refuse no more than the producer can. `advisory` (claude: the picker
+is an alias menu of one binary version plus the account's bootstrap rows;
+codex: `model/list` carries no provenance and the CLI substitutes a bundled
+default list when its remote fetch times out; cursor: `--list-models` is a
+fail-soft menu blind to routing variants) makes an unlisted EXPLICIT model
+undecidable, so every gate forwards it byte-identical and the vendor decides.
+Each admitting consumer says so once: the settings write persists the model
+and its read-back carries the admission in `notes` (the CLI prints it), the
+doctor's configured-model row passes with the note in its detail, and the
+per-spawn gate discloses a status event; preflight stays silent, so one spawn
+speaks once. `validateModel` takes the list, its source and the declaration
+with no defaults, and `checkHarnessModel` in the CLI registry is the one owner
+of that triple for the settings, doctor and catalog gates. No list is ever
+substituted to admit a model, and the automatic reviewer panel keeps its own
+skip-at-zero-cost contract whatever the harness declares. The residual is
+disclosed rather than guessed at: a vendor CLI refusing a forwarded model
+surfaces as an untyped error carrying the vendor's text, and a mistyped model
+on an advisory harness costs one spawn.
 Thread ask/plan readiness and inventory use the same durable lane HOME as the
 eventual spawn, while non-thread read-only runs retain disposable state.
 `/harnesses/:id/models` reports
-the truth source honestly (`source: api|manifest|none`, with the manifest's
-`verifiedAgainst` CLI-version freshness note), and the model-hints-freshness
-gate warns when the installed vendor CLI drifts from the verified version.
+the truth source honestly (`source: api|manifest|none` — a producer that
+answered only hint rows reports `manifest`; rows may carry `origin` and
+`resolved_model` — with the manifest's `verifiedAgainst` CLI-version freshness
+note), and the model-hints-freshness gate warns when the installed vendor CLI
+drifts from the verified version.
 Candidate diffs additionally pass a typed policy gate: protected-path changes
 and critical-risk diffs escalate as `NEEDS_HUMAN` findings. An accepted
 escalation blocks the run only when it belongs to the WINNING candidate
@@ -1387,10 +1399,41 @@ manifest truth applies. Codex account enumeration is native-session-specific,
 so API-key and unscoped legacy queries retain their manifest source instead of
 borrowing a subscription catalog. A failed supported live inventory remains
 unverifiable; it never falls back to a convenient manifest to admit a model.
-Where its producer declared absences advisory, an unverifiable answer instead
-sends the explicit model to the vendor unchanged (above). The authenticated
+Where the harness declared absences advisory, an unverifiable answer — and a
+manifest miss — instead sends the explicit model to the vendor unchanged
+(above). The authenticated
 account catalog read below is a different source and stays strict: a model it
 does not carry is a typed `model_unavailable` refusal.
+
+Claude's producer is the prompt-free `initialize` handshake of the installed
+`claude` binary (`harness-claude/src/model-probe.ts`): one stdin frame, the
+picker rows of the `control_response` (`value`, `displayName`, `resolvedModel`),
+exit on EOF, never `--model` (the CLI echoes it as a row), `--setting-sources
+""` and `--strict-mcp-config` (no hooks, no settings echo), model-override env
+scrubbed. Scopes (owner decision 2026-09-24): a `config_dir_login` profile is
+probed under its own config dir and keychain bridge, an `api_key` /
+`oauth_token` profile with its own credential in the env var its runs use
+under a scratch HOME (cache keyed by profile id, never by a secret), so the
+account view carries the account's own rows; the unscoped listing runs
+credential-free under a scratch HOME with non-essential traffic off and
+describes the binary alone. The probe resolves the binary exactly as the spawn
+layer does (a caller's PATH patch replaces the normalized PATH). Rows carry `origin` (`live`: the
+picker selectors and their resolutions as pinnable exact ids; `hint`: the frozen
+`CLAUDE_KNOWN_MODELS` ids appended so presence never shrinks below the manifest)
+and `resolved_model` (diagnostic; the row id is what travels). The answer is
+total: any failure yields the hint rows alone, and the registry then reports
+the list as `source: manifest` with its frozen `verifiedAgainst` stamp rather
+than a live `api` claim. One cached single-flight capture per (scope, binary
+identity — realpath, inode, size, mtime; `harnessBinaryIdentity` in core) lives
+an hour, a failure a minute, so an in-place CLI update is re-read without a
+daemon restart. The `--help` effort memo is keyed by the same identity and
+follows a run's PATH patch the same way, as do the readonly-flag probe and the
+`--version` read behind the snapshot-trust gate, so every question about "the
+binary this run executes" is asked of that binary. Two stated bounds: the memo
+is one slot (a patched run alternating with host-keyed callers re-reads
+`--help`, one bounded spawn per alternation), and a relative entry in a patch
+PATH is resolved as the daemon sees it, so a binary reachable only through a
+project-relative entry falls back to the snapshot ladder.
 
 The engine also accepts one raw model generation independently of Agent Runs.
 `ModelAdapter` in core and the model-operation schemas define caller-owned
@@ -1401,7 +1444,17 @@ review loop, model fallback or internal compaction is created for this capabilit
 
 The Codex transport lives in `harness-codex`. It uses a selected managed ChatGPT
 profile, the official CLI for an expired-token refresh, and the raw account's
-model catalog. In-process refresh work is serialized by canonical managed home;
+model catalog. The backend filters that catalog by the client version the
+caller declares (a model is listed only for clients at or above its own
+minimum), so the transport declares ITS OWN verified level,
+`CODEX_HTTP_CLIENT_VERSION` (`http-client-version.ts`), raised to the installed
+Codex CLI's version when that is newer and never below the constant — not the
+managed-installer pin, which is a different fact (a release that only moves
+the installer must never decide which models an account can see). The account
+view carries the declared `clientVersion` and its source per catalog (the
+legacy query keeps its shape), every membership refusal names it, and the constant moves together with a recorded catalog
+fixture pair (`fixtures/models-http-*.json`) whose shared rows must stay
+identical. In-process refresh work is serialized by canonical managed home;
 cancelled callers cannot release another caller past a still-live refresh. Each
 caller rereads current authorization. Selection hands its exact-profile catalog
 to this operation's invocation, which rechecks the current account fingerprint;
@@ -3151,13 +3204,13 @@ the typed `context` field of `HarnessEvent`: result `terminal_reason` (`prompt_t
 the rapid-refill breaker `rapid_refill_breaker` → `capacity_exhausted` with a
 typed cause), the `compact_boundary` system frame → a compaction event, and the
 top-level typed `rate_limit_event` → the existing `rate_limit` signal (a routine
-`allowed` heartbeat surfaces nothing and never arms rotation). Codex exec
-0.153.3's recorded oversized-input case surfaces a stderr JSON-RPC error
-(`input_error_code: input_too_large`) before model execution, without a typed
-context stream frame. The Codex adapter has no token-window context mapping;
-this character-limit capture does not establish a token-window limit. A
-terminal `capacity_exhausted` with no completed WorkReport maps to
-`interrupted / context_capacity_exhausted`.
+`allowed` heartbeat surfaces nothing and never arms rotation). Codex exec's
+recorded oversized-input case (0.153.3 and 0.156.1, byte-identical) surfaces
+a stderr JSON-RPC error (`input_error_code: input_too_large`) before model
+execution, without a typed context stream frame. The Codex adapter has no
+token-window context mapping; this character-limit capture does not establish
+a token-window limit. A terminal `capacity_exhausted` with no completed
+WorkReport maps to `interrupted / context_capacity_exhausted`.
 
 One-shot continuation (D-16d): when an eligible terminal `capacity_exhausted`
 (cause `repeated_refill` only — `prompt_too_long` may be an irreducible packet)
@@ -3550,9 +3603,13 @@ Vendor harness CLIs land on a host only through the disclosed installer
 connected host). The npm-distributed harnesses (claude, codex, opencode)
 install one EXACT pinned version — each pin aliases that harness package's
 vendor-version constant, and npm checks the registry integrity checksum for
-that exact version; `@latest` is never used. For claude and codex that
-constant is the same value the model-hints and effort freshness gates read,
-so the installed CLI is the version this release was verified against; the
+that exact version; `@latest` is never used. For codex that constant is the
+same value the model-hints and effort freshness gates read; for claude it is
+the effort-snapshot stamp, while the Claude known-model hint list keeps the
+literal version it was last actually re-verified against (a pin bump never
+restamps unrechecked ids). So the installed CLI is the version this release's
+effort ladders were verified against (a recording that needs a paid live run
+keeps the version it was captured from, as its fixture manifest states); the
 opencode pin is a deterministic install target, not a verification claim —
 no recorded fixture covers it yet, as its `vendor-cli-version.ts` discloses.
 Cursor ships no npm artifact and cannot be pinned:
