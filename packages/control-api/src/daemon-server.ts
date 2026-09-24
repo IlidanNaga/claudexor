@@ -330,6 +330,7 @@ export interface DaemonControlApiOptions {
         id: string,
         patch: {
           title?: string;
+          folder?: string | null;
           state?: string;
           primaryHarness?: string | null;
           credentialProfileId?: string | null;
@@ -895,6 +896,7 @@ export class DaemonControlApiServer {
         }
         const thread = await svc({
           title: parsed.title,
+          folder: parsed.folder,
           repoRoot,
           // Carried explicitly through the SAME predicate the run route and the
           // partition router use: dropping it here would register a root the
@@ -981,6 +983,7 @@ export class DaemonControlApiServer {
         const patch = ControlThreadUpdateRequest.parse(raw);
         const thread = await svc(decodeURIComponent(threadDetailMatch[1] as string), {
           title: patch.title,
+          folder: patch.folder,
           state: patch.state,
           primaryHarness: patch.primaryHarness,
           credentialProfileId: patch.credentialProfileId,

@@ -232,6 +232,7 @@ export function controlServices(
       id: string,
       patch: {
         title?: string;
+        folder?: string | null;
         state?: string;
         primaryHarness?: string | null;
         credentialProfileId?: string | null;
@@ -262,6 +263,7 @@ export function controlServices(
       }
       return threads.updateThread(id, {
         title: patch.title,
+        folder: patch.folder,
         state: patch.state as any,
         primaryHarness: patch.primaryHarness,
         credentialProfileId: patch.credentialProfileId,
