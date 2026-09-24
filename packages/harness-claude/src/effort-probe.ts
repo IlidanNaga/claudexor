@@ -102,19 +102,49 @@ export async function claudeRunEffortResolution(
   spec: Pick<HarnessRunSpec, "session_id" | "effort_hint"> & { env?: HarnessRunSpec["env"] },
   deps: {
     probeEffortLevels: typeof probeClaudeEffortLevels;
-    detectVersion: (abortSignal?: AbortSignal) => Promise<string | null>;
+    detectVersion: typeof detectClaudeVersion;
   },
   abortSignal?: AbortSignal,
 ): Promise<{ advertised: readonly EffortHint[]; disclosure: HarnessEvent | null }> {
-  // The ladder must come from the binary THIS run will execute: a PATH in the
-  // run's env patch replaces the normalized PATH at spawn (see helpProbeIdentity).
-  const patchPath = typeof spec.env?.PATH === "string" ? spec.env.PATH : undefined;
+  // Both answers must come from the binary THIS run will execute: a PATH in the
+  // run's env patch replaces the normalized PATH at spawn (see helpProbeIdentity),
+  // and a host binary's version must never vouch for the snapshot on the patch's.
+  const patchPath = claudeRunPatchPath(spec);
   const efforts = await deps.probeEffortLevels(abortSignal, patchPath);
   const advertised =
     efforts.live || !spec.effort_hint
       ? efforts.levels
-      : claudeAdvertisedEffortsForRun(efforts, await deps.detectVersion(abortSignal));
+      : claudeAdvertisedEffortsForRun(efforts, await deps.detectVersion(abortSignal, patchPath));
   return { advertised, disclosure: claudeEffortDisclosureEvent(spec, advertised) };
+}
+
+/** The PATH a run's env patch selects the binary on, when it carries one. */
+export function claudeRunPatchPath(spec: { env?: HarnessRunSpec["env"] }): string | undefined {
+  return typeof spec.env?.PATH === "string" ? spec.env.PATH : undefined;
+}
+
+/**
+ * `claude --version` of the binary a caller will execute — resolved and spawned
+ * exactly as the `--help` memo is (host PATH, or the caller's PATH patch), so the
+ * snapshot-trust gate (INV-105) judges the binary whose ladder it fell back
+ * from, never a different host install's. Null when nothing could be spawned.
+ */
+export async function detectClaudeVersion(
+  abortSignal?: AbortSignal,
+  patchPath?: string,
+): Promise<string | null> {
+  try {
+    const r = await runCapture(helpProbeIdentity(patchPath).spawn, ["--version"], {
+      ...(patchPath !== undefined ? { env: { PATH: patchPath } } : {}),
+      timeoutMs: 10_000,
+      abortSignal,
+      cancelSignal: "SIGTERM",
+      cancelKillDelayMs: 0,
+    });
+    return r.stdout.trim() || `${BIN} (version unknown)`;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -231,7 +261,13 @@ const HELP_PROBE_TIMEOUT_MS = 10_000;
  * is forgotten below anyway, so the next call looks again. A run whose env
  * patch carries a PATH executes the binary on THAT path (the spawn layer applies
  * the patch verbatim over the normalized PATH), so its ladder is read from the
- * same bytes: resolved on the exact patch PATH, spawned by absolute path.
+ * same bytes: resolved on the exact patch PATH, spawned by absolute path. Two
+ * bounds of that, stated rather than engineered away: the memo is ONE slot, so
+ * a patched caller that alternates with host-keyed ones re-reads `--help` (one
+ * bounded spawn per alternation, never a wrong answer); and a RELATIVE entry
+ * in a patch PATH is resolved as the daemon sees it (its own cwd), so a binary
+ * reachable only through a project-relative entry is invisible to the probe
+ * and that run falls back to the snapshot ladder — use absolute directories.
  */
 let helpProbe: { key: string; promise: Promise<ClaudeHelpProbe> } | null = null;
 

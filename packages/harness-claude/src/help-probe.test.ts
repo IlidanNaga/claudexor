@@ -13,7 +13,7 @@
  * one alone.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -145,38 +145,113 @@ describe("the shared --help capture belongs to the process, not to its first cal
 
 /**
  * A run whose env patch carries a PATH executes `claude` on that path (the spawn
- * layer applies the patch verbatim over the normalized PATH), so its ladder must
- * be read from the same bytes — not from whichever managed `claude` the host
- * PATH resolves first.
+ * layer applies the patch verbatim over the normalized PATH), so everything the
+ * run asks about "the installed binary" — the effort ladder, the readonly flag
+ * set, the `--version` behind the snapshot-trust gate — must be read from the
+ * same bytes, not from whichever managed `claude` the host PATH resolves first.
  */
-describe("the --help memo follows a run's PATH patch", () => {
-  it("reads the ladder of the binary on the patch PATH and keys it separately", async () => {
-    // A bare `claude`, resolved on PATH, as production spawns it.
-    vi.stubEnv("CLAUDEXOR_CLAUDE_BIN", "");
-    const pathDir = join(dir, "patch-bin");
+describe("the --help memo and its consumers follow a run's PATH patch", () => {
+  const HELP_2_1_165 = [
+    "  --effort <level>                      Effort level for the current session",
+    "                                        (low, medium, high, xhigh, max)",
+    "  --fallback-model <model>              Fallback model",
+  ].join("\n");
+  /** A help text with no `--effort` line at all: the live parse cannot answer. */
+  const HELP_UNPARSEABLE = "Usage: claude [options] [command] [prompt]";
+
+  /** A stub `claude` in its own directory, answering `--version` and `--help`. */
+  function installPatchBinary(name: string, help: string, version: string): string {
+    const pathDir = join(dir, name);
     mkdirSync(pathDir, { recursive: true });
-    const counter = join(dir, "spawns");
     writeFileSync(
       join(pathDir, "claude"),
-      `#!/bin/sh\necho spawn >> "${counter}"\n/bin/cat <<'CLAUDE_HELP_EOF'\n${HELP_2_1_89}\nCLAUDE_HELP_EOF\n`,
+      `#!/bin/sh\necho spawn >> "${join(pathDir, "spawns")}"\n` +
+        `if [ "$1" = "--version" ]; then echo "${version}"; exit 0; fi\n` +
+        `/bin/cat <<'CLAUDE_HELP_EOF'\n${help}\nCLAUDE_HELP_EOF\n`,
       { mode: 0o755 },
     );
+    return pathDir;
+  }
+  const spawns = (pathDir: string): number =>
+    readFileSync(join(pathDir, "spawns"), "utf8").split("spawn").length - 1;
+
+  beforeEach(() => {
+    // A bare `claude`, resolved on PATH, as production spawns it.
+    vi.stubEnv("CLAUDEXOR_CLAUDE_BIN", "");
+  });
+
+  it("reads the ladder of the binary on the patch PATH, memoises it there, and a second patch binary answers its own", async () => {
+    const older = installPatchBinary("patch-older", HELP_2_1_89, "2.1.89 (Claude Code)");
+    const newer = installPatchBinary("patch-newer", HELP_2_1_165, "2.1.165 (Claude Code)");
     const { probeClaudeEffortLevels, claudeRunEffortResolution } =
       await import("./effort-probe.js");
-    expect(await probeClaudeEffortLevels(undefined, pathDir)).toEqual({
+    expect(await probeClaudeEffortLevels(undefined, older)).toEqual({
       levels: LADDER_2_1_89,
       live: true,
     });
     // The run-time resolution threads the spec's PATH through the same seam.
     const resolution = await claudeRunEffortResolution(
-      { session_id: "ses", effort_hint: "xhigh", env: { PATH: pathDir } },
+      { session_id: "ses", effort_hint: "xhigh", env: { PATH: older } },
       { probeEffortLevels: probeClaudeEffortLevels, detectVersion: async () => null },
     );
     expect(resolution.advertised).toEqual(LADDER_2_1_89);
     expect(resolution.disclosure?.text).toContain("effort=xhigh (not accepted");
     // Same patch PATH again: the memo answers, no second spawn.
-    await probeClaudeEffortLevels(undefined, pathDir);
-    const { readFileSync } = await import("node:fs");
-    expect(readFileSync(counter, "utf8").split("spawn").length - 1).toBe(1);
+    await probeClaudeEffortLevels(undefined, older);
+    expect(spawns(older)).toBe(1);
+    // A different patch PATH is a different binary: its own ladder, its own spawn.
+    expect(await probeClaudeEffortLevels(undefined, newer)).toEqual({
+      levels: ["low", "medium", "high", "xhigh", "max"],
+      live: true,
+    });
+    expect(spawns(newer)).toBe(1);
+  });
+
+  it("reads the readonly flag set from the binary on the patch PATH", async () => {
+    const complete = installPatchBinary("patch-readonly", HELP_READONLY, "2.1.281 (Claude Code)");
+    const lacking = installPatchBinary("patch-lacking", HELP_2_1_89, "2.1.89 (Claude Code)");
+    const { probeClaudeReadonlyProfile } = await import("./index.js");
+    expect(await probeClaudeReadonlyProfile(undefined, complete)).toMatchObject({
+      supported: true,
+      missingFlags: [],
+    });
+    const refused = await probeClaudeReadonlyProfile(undefined, lacking);
+    expect(refused.supported).toBe(false);
+    expect(refused.missingFlags).toContain("--strict-mcp-config");
+  });
+
+  it("lets only the patch binary's own --version vouch for the snapshot when its help cannot be parsed", async () => {
+    const { CLAUDE_EFFORT_SNAPSHOT, CLAUDE_EFFORT_SNAPSHOT_VERIFIED_AGAINST } =
+      await import("./effort-probe.js");
+    const other = installPatchBinary(
+      "patch-other-version",
+      HELP_UNPARSEABLE,
+      "2.1.89 (Claude Code)",
+    );
+    const stamped = installPatchBinary(
+      "patch-stamped-version",
+      HELP_UNPARSEABLE,
+      `${CLAUDE_EFFORT_SNAPSHOT_VERIFIED_AGAINST} (Claude Code)`,
+    );
+    const { probeClaudeEffortLevels, claudeRunEffortResolution, detectClaudeVersion } =
+      await import("./effort-probe.js");
+    expect(await detectClaudeVersion(undefined, other)).toBe("2.1.89 (Claude Code)");
+    const deps = { probeEffortLevels: probeClaudeEffortLevels, detectVersion: detectClaudeVersion };
+    // A patch binary on another version: the snapshot is distrusted for it even
+    // if the HOST install sits on the stamped version — no effort flag is sent.
+    const distrusted = await claudeRunEffortResolution(
+      { session_id: "ses", effort_hint: "xhigh", env: { PATH: other } },
+      deps,
+    );
+    expect(distrusted.advertised).toEqual([]);
+    expect(distrusted.disclosure?.text).toContain("could not be verified");
+    // A patch binary on exactly the stamped version: the snapshot is its own
+    // ladder, so `xhigh` is advertised and travels without a disclosure.
+    const trusted = await claudeRunEffortResolution(
+      { session_id: "ses", effort_hint: "xhigh", env: { PATH: stamped } },
+      deps,
+    );
+    expect(trusted.advertised).toEqual(CLAUDE_EFFORT_SNAPSHOT);
+    expect(trusted.disclosure).toBeNull();
   });
 });

@@ -10,14 +10,16 @@ import { createClaudeAdapter } from "./index.js";
 import { claudeModelRows } from "./model-probe.js";
 
 /**
- * Manifest model-truth pinning (INV-104): `known_models` is the strict truth
- * source — an explicit model outside it is refused up front, never forwarded
- * to die as an opaque native error. These tests pin the CURRENT catalog
- * entries end to end: the manifest advertises the id, the stamp names the
- * exact installed CLI the list was verified against, and the truth owner
- * (`validateModel`) accepts the id round-trip. A model added to the vendor
- * catalog but missing here is exactly the PR #54 defect shape: the newest
- * Opus was unpinnable while the bare `opus` alias silently floated.
+ * Manifest model-truth pinning (INV-104): `known_models` is the frozen hint
+ * list the manifest advertises, judged under the harness's own absence
+ * declaration (Claude declares `advisory`: a foreign id is forwarded with a
+ * note, never refused up front). These tests pin the CURRENT catalog entries
+ * end to end: the manifest advertises the id, the stamp names the exact
+ * installed CLI the list was verified against, and the truth owner
+ * (`validateModel`) accepts the id round-trip and judges a foreign one by the
+ * declaration. A model added to the vendor catalog but missing here is the
+ * PR #54 defect shape: the newest Opus was unpinnable while the bare `opus`
+ * alias silently floated.
  */
 const stubAdapter = (probeModels?: () => Promise<never[]>) =>
   createClaudeAdapter({
@@ -85,7 +87,7 @@ describe("the claude manifest model truth source", () => {
     );
   });
 
-  it("round-trips through the truth owner: validateModel accepts a manifest id and refuses a foreign one", async () => {
+  it("round-trips through the truth owner: validateModel accepts a manifest id and judges a foreign one by the declaration", async () => {
     // The EXACT production path (modelGovernance.ts): the schema's one owner
     // flattens the route-scoped list, then `validateModel` judges against it.
     const manifest = await stubAdapter().discover();

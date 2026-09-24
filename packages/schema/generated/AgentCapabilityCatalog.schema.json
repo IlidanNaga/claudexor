@@ -145,7 +145,7 @@
                   "boolean",
                   "null"
                 ],
-                "description": "Admission of configuredModel under the harness's own absence declaration (INV-104): false = refused by an authoritative list; true = listed, or unlisted on an advisory harness (forwarded to the vendor; the settings write and doctor readiness carry that note); null when no model is configured."
+                "description": "Admission of configuredModel under the harness's own absence declaration (INV-104): false = refused by an authoritative list, or no list could be read; true = listed, or unlisted on an advisory harness (forwarded to the vendor; the settings write and doctor readiness carry that note); null when no model is configured."
               },
               "models": {
                 "type": "object",

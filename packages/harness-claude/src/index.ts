@@ -70,6 +70,8 @@ import {
   CLAUDE_EFFORT_SNAPSHOT,
   CLAUDE_EFFORT_SNAPSHOT_VERIFIED_AGAINST,
   claudeRunEffortResolution,
+  claudeRunPatchPath,
+  detectClaudeVersion,
   probeClaudeEffortLevels,
   probeClaudeHelp,
 } from "./effort-probe.js";
@@ -143,12 +145,14 @@ const CLAUDE_READONLY_REQUIRED_FLAGS = [
  * a probe that failed once (or that a cancelled run read) stayed failed for the
  * process lifetime, so a long-lived daemon reported readonly enforcement
  * unavailable forever. It bought nothing either: the spawn is already memoized,
- * and what is left is a handful of `includes` over text we already hold.
+ * and what is left is a handful of `includes` over text we already hold. A
+ * run's PATH patch selects the binary the flags are read from, as for the ladder.
  */
 export async function probeClaudeReadonlyProfile(
   abortSignal?: AbortSignal,
+  patchPath?: string,
 ): Promise<ClaudeReadonlyProfileProbe> {
-  const probe = await probeClaudeHelp(abortSignal);
+  const probe = await probeClaudeHelp(abortSignal, patchPath);
   if (!probe.ok) {
     return {
       supported: false,
@@ -170,20 +174,6 @@ export async function probeClaudeReadonlyProfile(
       ? "installed Claude CLI exposes the complete restrictive readonly flag set"
       : `readonly enforcement unavailable; missing ${missingFlags.join(", ") || `help exited ${probe.code}`}`,
   };
-}
-
-async function detectVersion(abortSignal?: AbortSignal): Promise<string | null> {
-  try {
-    const r = await runCapture(BIN, ["--version"], {
-      timeoutMs: 10_000,
-      abortSignal,
-      cancelSignal: "SIGTERM",
-      cancelKillDelayMs: 0,
-    });
-    return r.stdout.trim() || `${BIN} (version unknown)`;
-  } catch {
-    return null;
-  }
 }
 
 /** Options for probing the default or explicitly selected native Claude store. */
@@ -264,7 +254,7 @@ export type ClaudeProfileRuntimeDeps = Pick<
 >;
 
 type ClaudeRuntimeDeps = {
-  detectVersion: typeof detectVersion;
+  detectVersion: typeof detectClaudeVersion;
   probeAuthStatus: typeof probeAuthStatus;
   anthropicApiKey: typeof anthropicApiKey;
   claudeOAuthToken: typeof claudeOAuthToken;
@@ -283,7 +273,7 @@ type ClaudeRuntimeDeps = {
 
 export function createClaudeAdapter(deps: Partial<ClaudeRuntimeDeps> = {}): HarnessAdapter {
   const runtime: ClaudeRuntimeDeps = {
-    detectVersion,
+    detectVersion: detectClaudeVersion,
     probeAuthStatus,
     anthropicApiKey,
     claudeOAuthToken,
@@ -788,7 +778,10 @@ async function* runClaude(
 ): AsyncIterable<HarnessEvent> {
   const abortSignal = abortSignalFromSpec(spec);
   if (spec.access === "readonly") {
-    const readonlyProfile = await runtime.probeReadonlyProfile(abortSignal);
+    const readonlyProfile = await runtime.probeReadonlyProfile(
+      abortSignal,
+      claudeRunPatchPath(spec),
+    );
     if (!readonlyProfile.supported) {
       yield {
         type: "error",

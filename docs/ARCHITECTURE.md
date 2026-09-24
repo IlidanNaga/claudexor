@@ -1426,7 +1426,14 @@ the list as `source: manifest` with its frozen `verifiedAgainst` stamp rather
 than a live `api` claim. One cached single-flight capture per (scope, binary
 identity — realpath, inode, size, mtime; `harnessBinaryIdentity` in core) lives
 an hour, a failure a minute, so an in-place CLI update is re-read without a
-daemon restart; the `--help` effort memo is keyed by the same identity.
+daemon restart. The `--help` effort memo is keyed by the same identity and
+follows a run's PATH patch the same way, as do the readonly-flag probe and the
+`--version` read behind the snapshot-trust gate, so every question about "the
+binary this run executes" is asked of that binary. Two stated bounds: the memo
+is one slot (a patched run alternating with host-keyed callers re-reads
+`--help`, one bounded spawn per alternation), and a relative entry in a patch
+PATH is resolved as the daemon sees it, so a binary reachable only through a
+project-relative entry falls back to the snapshot ladder.
 
 The engine also accepts one raw model generation independently of Agent Runs.
 `ModelAdapter` in core and the model-operation schemas define caller-owned

@@ -64,10 +64,10 @@ struct HarnessModelOverrideField: View {
                 Picker("Model override", selection: $modelDraft) {
                     Text("Harness default").tag("")
                     // A stored override the truth source no longer lists (legacy
-                    // value) stays visible so the user can SEE and clear it — the
-                    // engine refuses it at run preflight either way. Rendered
-                    // through the shared cap so a pathological stored id cannot
-                    // widen the open menu (the tag keeps the FULL id).
+                    // value) stays visible so the user can SEE and clear it — run
+                    // preflight judges it by the harness's own declaration (refused
+                    // on an authoritative list, forwarded with a note on an advisory
+                    // one). Shared cap: a long stored id cannot widen the open menu.
                     if !modelDraft.isEmpty, !models.models.contains(where: { $0.id == modelDraft }) {
                         Text("\(HarnessModelPresentation.menuTitle(label: nil, id: modelDraft)) (not in \(models.source) list)")
                             .tag(modelDraft)
