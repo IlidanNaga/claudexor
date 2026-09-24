@@ -807,28 +807,29 @@ block/lifecycle frames never do — the complete message always follows.
 Plumbing: other `system` subtypes and `control_response`/`control_cancel_request`
 frames are recognized and consumed, never timeline events.
 
-**Codex** — wire: `codex exec --json … [-i <img>… --] -` with the one-shot
-prompt on stdin (resume: `codex exec resume <id> --json … -`; sandbox rides
-`-c sandbox_mode` on resume).
-Events: `thread.started` → `started` (thread id = `native_session_id`);
-`turn.started` → `started` (a lifecycle boundary — deliberately NOT
-`thinking`: mapping it there once planted junk blocks at the top of every
-transcript); `item.*` for `reasoning` → `thinking`, `command_execution`/
-`mcp_tool_call`/`web_search` → `tool_call`+`tool_result` (exit-code aware),
-`file_change` → `file_change`, `agent_message` → `message`, `todo_list` →
-plan progress; `turn.completed` → `usage` + the FINAL `message`. Finality:
-codex has NO typed final marker on the wire — the adapter tracks the turn's
-last `agent_message` and finalizes it (`final: true`,
-`payload.final_source: "last_agent_message"`) on `turn.completed`; a failed
-turn never finalizes its partial message and a new turn clears stale state.
-Consumers MUST thread `CodexParseState` through the parser or finality never
-exists. Deltas: none (no partial-output flag is wired). Rate limits surface
-as `error`/`turn.failed` with typed `rate_limit` (`resets_at`) and
-`transient` enrichment — there is no separate status event.
-Post-terminal side channel: the `--json` stream reduces a failed turn to a
-sentence, while codex's own session rollout keeps the typed record
+**Codex** — wire: one `codex app-server --stdio` JSON-RPC child per Claudexor
+run. Fresh lanes use `thread/start`; later lane turns use `thread/resume`; input,
+verified local images and output schema ride `turn/start`. `turn/started`
+provides the exact active turn id. `item/*` maps `reasoning` → `thinking`,
+`commandExecution`/`mcpToolCall`/`webSearch` → `tool_call`+`tool_result`,
+`fileChange` → `file_change`, `agentMessage` → `message`; `turn/plan/updated`
+maps plan progress and `thread/tokenUsage/updated` maps usage.
+
+Finality is quiescence-based: an individual `turn/completed` is intermediate
+while the native thread is active, its goal is active, or a background terminal
+belongs to a command item observed in this Claudexor run. The last assistant
+message becomes `final: true` only after the thread is idle, the goal is
+non-active and the owned terminal inventory is empty. A goal-driven next
+`turn/started` replaces the stored turn id without terminalizing the Claudexor
+run. Stop pauses the goal, interrupts that exact turn id, terminates only owned
+background process ids, verifies quiescence, and then reaps app-server; missing
+acknowledgement is typed `codex_control_loss`, never success. Deltas remain
+unwired. Consumers of the retained exec-event mapper still thread
+`CodexParseState` for message finality.
+
+Post-terminal side channel: codex's own session rollout keeps the typed record
 (`event_msg` / `task_complete` / `error.{message, codex_error_info}`). When the
-run loop disclosed that codex voiced its own error, the adapter reads that
+adapter disclosed that codex voiced its own error, it reads that
 record once after exit and attaches it to the terminal `completed` payload as
 `vendor_failure` (`source: "codex_rollout"`), verbatim and uninterpreted; a
 tagged-object variant yields its variant name. Skipped for an aborted run and

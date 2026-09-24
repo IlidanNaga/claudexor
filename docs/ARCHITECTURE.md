@@ -609,10 +609,15 @@ the argv prompt only instructs the harness to read it, and the file is removed
 before every diff/gate/review (including native retries). This prevents
 `spawn E2BIG` without truncating evidence or polluting the candidate patch.
 
-One-shot Codex and Cursor prompts use the vendors' stdin contracts through the
-shared CLI run loop; prompt bytes never ride their process argv. One-shot stdin
-and a bidirectional session are exclusive owners of the same pipe. Adapters
-without a verified prompt-stdin contract retain their vendor-specific transport.
+Cursor prompts use the vendor's one-shot stdin contract through the shared CLI
+run loop; prompt bytes never ride process argv. Codex instead owns one native
+`app-server --stdio` JSON-RPC child per Claudexor run. The adapter keeps the run
+active while a native turn, active goal continuation, or run-owned background
+terminal exists. Native thread/turn ids are control handles, not durable engine
+truth; the daemon journal remains authoritative. Stop pauses an active goal,
+interrupts the exact stored turn id, terminates only background terminals whose
+item ids were observed in that run, verifies quiescence, then reaps app-server.
+Adapters without a verified prompt transport retain their vendor-specific path.
 
 Git-backed candidate envelopes also preserve bounded raster previews before
 cleanup (PNG/JPEG/WebP/GIF, 16 MiB each / 32 MiB total) under the attempt's
@@ -1283,9 +1288,10 @@ run. A read-only turn of a THREAD instead gets a DURABLE per-lane home under
 `projects/<project-sha256>/lanes/<threadId>/<harness>-<profileOrDefault>/home`
 (a lane = thread + harness + credential profile), a sibling of `workspaces/`
 and outside every worktree (INV-063). The lane home persists across turns so
-the harness's recorded native session is reachable for `codex exec resume` /
-`claude --resume` on the next lane turn (INV-034); it is removed only by thread
-purge, credential-profile deletion, or the orphan-lane retention sweep.
+the harness's recorded native session is reachable for Codex app-server
+`thread/resume` / `claude --resume` on the next lane turn (INV-034); it is
+removed only by thread purge, credential-profile deletion, or the orphan-lane
+retention sweep.
 
 Convergence modes also default to isolated envelopes. The CLI-only `--in-place`
 is reserved for explicit stateful external adapters, such as Terminal-Bench
@@ -3149,7 +3155,7 @@ run's final answer must conform to (agent race / ask answers), normalized and
 strictified
 for vendor strict modes (every object: `required` = all keys,
 `additionalProperties: false`; inline root — both live-verified: codex
-`--output-schema <FILE>` written into the scoped CODEX_HOME, claude
+app-server `turn/start.outputSchema`, claude
 `--json-schema <inline JSON>`). The conformance validator selects draft-07
 (the compatibility default when `$schema` is omitted) or draft 2020-12 from
 the caller declaration; the metadata declaration is removed only from the
