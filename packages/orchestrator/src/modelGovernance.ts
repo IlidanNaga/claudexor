@@ -21,11 +21,13 @@
  * its own quota/profile preflight; checking it against the primary profile
  * here would reject a valid cross-profile fallback.
  *
- * One truth source cannot refuse: a live inventory whose adapter declared
- * `model_inventory_absence: "advisory"` proves presence but not absence, so an
- * unlisted explicit model is forwarded to the vendor unchanged and disclosed
- * once by the per-spawn gate. Manifest truth stays strict, and no gate ever
- * swaps one list for another to admit a model.
+ * What a list may refuse with is the HARNESS's declaration: where the adapter
+ * declared `model_inventory_absence: "advisory"`, its live inventory and its
+ * manifest hints alike prove presence but not absence, so an unlisted explicit
+ * model is forwarded to the vendor unchanged and disclosed once by the
+ * per-spawn gate. An authoritative harness (the declaration a silent manifest
+ * gets) refuses as before, and no gate ever swaps one list for another to
+ * admit a model.
  */
 import type { HarnessAdapter } from "@claudexor/core";
 import {

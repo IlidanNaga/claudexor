@@ -8,12 +8,13 @@
  * HarnessUnavailableError; the orchestrator turns them into review_preflight
  * failure ARTIFACTS after run-dir creation, before candidates spend money.
  *
- * The one thing this gate does not decide is an absence its truth source
+ * The one thing the EXPLICIT gate does not decide is an absence its harness
  * cannot prove: where the adapter declared `model_inventory_absence:
- * "advisory"`, a live list that lacks the requested model (or answers with
- * nothing at all) forwards the explicit model to the vendor unchanged rather
- * than refusing it here. Manifest truth stays strict, and no list is ever
- * substituted for another.
+ * "advisory"`, a live list or a manifest hint list that lacks the requested
+ * model (or a live answer with nothing at all) forwards the explicit model to
+ * the vendor unchanged rather than refusing it here. An authoritative harness
+ * refuses as before, the AUTOMATIC panel always skips an unlisted family at
+ * zero cost, and no list is ever substituted for another.
  */
 import type {
   AuthPreference,

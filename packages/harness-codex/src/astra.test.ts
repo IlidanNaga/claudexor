@@ -138,11 +138,12 @@ describe("the codex adapter under a stale model/list (the gate itself: modelGove
     );
   });
 
-  it("keeps UNSCOPED consumers on manifest truth, where the gate stays strict", async () => {
+  it("keeps UNSCOPED consumers on manifest truth (route scoping only; admission there follows the harness declaration)", async () => {
     // settings-service (quality tiers + per-harness defaults), the doctor's
     // configuredModelCheck and the capabilities catalog all call
     // `harnessModels(id, cwd, true)` with NO route, so the live producer is not
-    // applicable to them and they keep judging against `known_models`.
+    // applicable to them and they judge against `known_models` — under codex's
+    // advisory declaration (cli/src/model-truth.test.ts pins the admission).
     const adapter = staleAdapter();
     const routes = (await adapter.discover()).capabilities.model_inventory_routes;
     expect(hasModelInventoryForRoute(adapter, routes, null)).toBe(false);

@@ -113,11 +113,7 @@ export async function harnessModelTruth(
       ...model,
       routes: model.routes ?? null,
     }));
-    // A producer that labels its rows (`origin`) and answered ONLY hint rows
-    // could not read the vendor: that is manifest truth with its frozen
-    // freshness stamp, never a live `api` claim (INV-104). Producers that
-    // emit no `origin` are live by definition.
-    const hintsOnly = rows.length > 0 && rows.every((row) => row.origin === "hint");
+    const hintsOnly = answeredOnlyHints(rows);
     return {
       response: {
         harnessId,
@@ -147,6 +143,14 @@ export async function harnessModelTruth(
     },
     absence,
   };
+}
+
+/** A producer that labels its rows (`origin`) and answered ONLY hint rows could
+ * not read the vendor: that is manifest truth with its frozen freshness stamp,
+ * never a live `api` claim (INV-104) — on the unscoped listing and on every
+ * account row alike. Producers that emit no `origin` are live by definition. */
+function answeredOnlyHints(rows: readonly { origin?: string | undefined }[]): boolean {
+  return rows.length > 0 && rows.every((row) => row.origin === "hint");
 }
 
 /** The unscoped model list alone (the wire shape of `/harnesses/:id/models`). */
@@ -237,15 +241,18 @@ export async function harnessAccountModels(
         // The legacy array API also returns [] on transport failures; it is
         // not a receipt proving this account has an empty vendor inventory.
         if (models.length === 0) return null;
+        // A profile probe that could not read the vendor answers hint rows
+        // only; that account row is manifest truth, not a live enumeration.
+        const hintsOnly = answeredOnlyHints(models);
         return {
           harnessId: input.harnessId,
           credentialProfileId: profile.profile_id,
           models: models.map((model) => ({ ...model, routes: model.routes ?? null })),
-          source: "api" as const,
-          verifiedAgainst: null,
+          source: hintsOnly ? ("manifest" as const) : ("api" as const),
+          verifiedAgainst: hintsOnly ? manifest.capabilities.known_models_verified_against : null,
           // models() may reuse a provider-owned cache and carries no observation receipt.
           observedAt: null,
-          provenance: "adapter_models",
+          provenance: hintsOnly ? "manifest" : "adapter_models",
         };
       }
       const known = manifest.capabilities.known_models.filter(
