@@ -5,7 +5,7 @@ import {
   type SpawnOptions,
 } from "@claudexor/core";
 import type { HarnessEvent, HarnessRunSpec } from "@claudexor/schema";
-import { CLAUDEXOR_VERSION, nowIso } from "@claudexor/util";
+import { CLAUDEXOR_VERSION, nowIso, redactSecrets } from "@claudexor/util";
 import { codexAppServerInput } from "./attachments.js";
 import { CODEX_EFFORT_SNAPSHOT, codexEffortFor, type CodexEffortCatalog } from "./effort-probe.js";
 import { parseCodexEvent, type CodexParseState } from "./parse.js";
@@ -367,6 +367,28 @@ export async function* runCodexAppServer(
       ? result["data"].map(asObject).filter((item): item is JsonObject => item !== null)
       : [];
   };
+  const readLifecycle = async (): Promise<{
+    threadIdle: boolean;
+    goalActive: boolean;
+    ownedBackground: JsonObject[];
+  }> => {
+    if (!nativeThreadId) return { threadIdle: false, goalActive: false, ownedBackground: [] };
+    const [threadResult, goalResult, terminals] = await Promise.all([
+      request("thread/read", { threadId: nativeThreadId, includeTurns: false }),
+      request("thread/goal/get", { threadId: nativeThreadId }),
+      backgroundTerminals(),
+    ]);
+    const status = asObject(asObject(threadResult["thread"])?.["status"]);
+    const goal = asObject(goalResult["goal"]);
+    return {
+      threadIdle: status?.["type"] === "idle",
+      goalActive: goal?.["status"] === "active",
+      ownedBackground: terminals.filter(
+        (terminal) =>
+          typeof terminal["itemId"] === "string" && ownedCommandItemIds.has(terminal["itemId"]),
+      ),
+    };
+  };
   let cancelPromise: Promise<void> | null = null;
   const cancel = (): Promise<void> => {
     if (cancelPromise) return cancelPromise;
@@ -393,19 +415,12 @@ export async function* runCodexAppServer(
               });
           }
           for (;;) {
-            const [threadResult, latestGoal, terminals] = await Promise.all([
-              request("thread/read", { threadId: nativeThreadId, includeTurns: false }),
-              request("thread/goal/get", { threadId: nativeThreadId }),
-              backgroundTerminals(),
-            ]);
-            const status = asObject(asObject(threadResult["thread"])?.["status"]);
-            const goal = asObject(latestGoal["goal"]);
-            const owned = terminals.some(
-              (terminal) =>
-                typeof terminal["itemId"] === "string" &&
-                ownedCommandItemIds.has(terminal["itemId"]),
-            );
-            if (status?.["type"] === "idle" && goal?.["status"] !== "active" && !owned) {
+            const lifecycle = await readLifecycle();
+            if (
+              lifecycle.threadIdle &&
+              !lifecycle.goalActive &&
+              lifecycle.ownedBackground.length === 0
+            ) {
               cancellationQuiescent = true;
               return;
             }
@@ -486,30 +501,6 @@ export async function* runCodexAppServer(
     };
     activeTurnId = turnId;
     let pendingTerminal: JsonObject | null = null;
-    const snapshot = async (): Promise<{
-      threadIdle: boolean;
-      goalActive: boolean;
-      ownedBackground: JsonObject[];
-    }> => {
-      const [threadResult, goalResult, terminalResult] = await Promise.all([
-        request("thread/read", { threadId, includeTurns: false }),
-        request("thread/goal/get", { threadId }),
-        request("thread/backgroundTerminals/list", { threadId }),
-      ]);
-      const status = asObject(asObject(threadResult["thread"])?.["status"]);
-      const goal = asObject(goalResult["goal"]);
-      const terminals = Array.isArray(terminalResult["data"])
-        ? terminalResult["data"].map(asObject).filter((item): item is JsonObject => item !== null)
-        : [];
-      return {
-        threadIdle: status?.["type"] === "idle",
-        goalActive: goal?.["status"] === "active",
-        ownedBackground: terminals.filter(
-          (terminal) =>
-            typeof terminal["itemId"] === "string" && ownedCommandItemIds.has(terminal["itemId"]),
-        ),
-      };
-    };
     for (;;) {
       const notification = await takeNotification();
       const method = notification["method"];
@@ -528,15 +519,18 @@ export async function* runCodexAppServer(
       }
       const mapped = codexAppServerEvents(notification, input.spec.session_id, parseState);
       if (mapped) for (const event of mapped) yield event;
-      if (method !== "turn/completed") continue;
-      pendingTerminal = asObject(params?.["turn"]);
-      activeTurnId = null;
+      if (method === "turn/completed") {
+        pendingTerminal = asObject(params?.["turn"]);
+        activeTurnId = null;
+      } else if (!pendingTerminal) {
+        continue;
+      }
 
       for (;;) {
         const current =
           cancellationRequested && cancellationQuiescent
             ? { threadIdle: true, goalActive: false, ownedBackground: [] }
-            : await snapshot();
+            : await readLifecycle();
         if (notifications.some((item) => item["method"] === "turn/started")) break;
         if (!current.threadIdle || current.goalActive || current.ownedBackground.length) {
           if (current.ownedBackground.length && !current.goalActive) {
@@ -594,7 +588,7 @@ export async function* runCodexAppServer(
       type: "error",
       session_id: input.spec.session_id,
       ts: nowIso(),
-      error: errorText(error),
+      error: redactSecrets(errorText(error)),
       payload: {
         code: cancellationFailure ? "codex_control_loss" : "codex_app_server_failure",
       },
