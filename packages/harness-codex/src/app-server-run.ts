@@ -21,6 +21,8 @@ export interface CodexAppServerRunInput {
   controller?: CodexAppServerController;
   /** Test seam; production polls owned background terminals four times per second. */
   pollIntervalMs?: number;
+  /** Test seam for the bounded cooperative-stop deadline. */
+  cancelDeadlineMs?: number;
 }
 
 export class CodexAppServerController {
@@ -229,6 +231,13 @@ export async function* runCodexAppServer(
   });
   let nextId = 1;
   let processFailure: Error | null = null;
+  let processStopped = false;
+  let nativeThreadId: string | null = null;
+  let activeTurnId: string | null = null;
+  const ownedCommandItemIds = new Set<string>();
+  let cancellationRequested = false;
+  let cancellationQuiescent = false;
+  let cancellationFailure: Error | null = null;
 
   const rejectPending = (error: Error): void => {
     for (const request of pending.values()) request.reject(error);
@@ -292,9 +301,13 @@ export async function* runCodexAppServer(
     } catch (error) {
       processFailure = error instanceof Error ? error : new Error(String(error));
       rejectPending(processFailure);
+      throw processFailure;
+    } finally {
+      processStopped = true;
+      if (abort.signal.aborted)
+        rejectPending(cancellationFailure ?? new Error("Codex app-server stopped"));
       notificationWaiter.wake?.();
       notificationWaiter.wake = undefined;
-      throw processFailure;
     }
   })();
   void process.catch(() => {});
@@ -332,16 +345,93 @@ export async function* runCodexAppServer(
       const next = notifications.shift();
       if (next) return next;
       if (processFailure) throw processFailure;
+      if (processStopped) throw cancellationFailure ?? new Error("Codex app-server disconnected");
       await new Promise<void>((resolve) => {
         notificationWaiter.wake = resolve;
       });
     }
   };
-  const cancel = async (): Promise<void> => {
+  const stopProcess = async (): Promise<void> => {
     if (abort.signal.aborted) return;
     abort.abort();
     io?.end();
     await process.catch(() => {});
+  };
+  const backgroundTerminals = async (): Promise<JsonObject[]> => {
+    if (!nativeThreadId) return [];
+    const result = await request("thread/backgroundTerminals/list", {
+      threadId: nativeThreadId,
+    });
+    return Array.isArray(result["data"])
+      ? result["data"].map(asObject).filter((item): item is JsonObject => item !== null)
+      : [];
+  };
+  let cancelPromise: Promise<void> | null = null;
+  const cancel = (): Promise<void> => {
+    if (cancelPromise) return cancelPromise;
+    cancellationRequested = true;
+    cancelPromise = (async () => {
+      try {
+        const cooperative = async (): Promise<void> => {
+          await spawned;
+          if (!nativeThreadId) return;
+          const goalResult = await request("thread/goal/get", { threadId: nativeThreadId });
+          if (asObject(goalResult["goal"])?.["status"] === "active")
+            await request("thread/goal/set", { threadId: nativeThreadId, status: "paused" });
+          const turnId = activeTurnId;
+          if (turnId) await request("turn/interrupt", { threadId: nativeThreadId, turnId });
+          for (const terminal of await backgroundTerminals()) {
+            if (
+              typeof terminal["itemId"] === "string" &&
+              ownedCommandItemIds.has(terminal["itemId"]) &&
+              typeof terminal["processId"] === "string"
+            )
+              await request("thread/backgroundTerminals/terminate", {
+                threadId: nativeThreadId,
+                processId: terminal["processId"],
+              });
+          }
+          for (;;) {
+            const [threadResult, latestGoal, terminals] = await Promise.all([
+              request("thread/read", { threadId: nativeThreadId, includeTurns: false }),
+              request("thread/goal/get", { threadId: nativeThreadId }),
+              backgroundTerminals(),
+            ]);
+            const status = asObject(asObject(threadResult["thread"])?.["status"]);
+            const goal = asObject(latestGoal["goal"]);
+            const owned = terminals.some(
+              (terminal) =>
+                typeof terminal["itemId"] === "string" &&
+                ownedCommandItemIds.has(terminal["itemId"]),
+            );
+            if (status?.["type"] === "idle" && goal?.["status"] !== "active" && !owned) {
+              cancellationQuiescent = true;
+              return;
+            }
+            await new Promise<void>((resolve) => setTimeout(resolve, input.pollIntervalMs ?? 250));
+          }
+        };
+        let timer: NodeJS.Timeout | undefined;
+        try {
+          await Promise.race([
+            cooperative(),
+            new Promise<never>((_resolve, reject) => {
+              timer = setTimeout(
+                () => reject(new Error("Codex cooperative cancellation was not acknowledged")),
+                input.cancelDeadlineMs ?? 5_000,
+              );
+            }),
+          ]);
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+      } catch (error) {
+        cancellationFailure = error instanceof Error ? error : new Error(String(error));
+      } finally {
+        await stopProcess();
+      }
+    })();
+    return cancelPromise;
   };
   input.controller?.bind(cancel);
   const onAbort = (): void => void cancel();
@@ -366,6 +456,7 @@ export async function* runCodexAppServer(
     const thread = asObject(threadResult["thread"]);
     const threadId = thread?.["id"];
     if (typeof threadId !== "string") throw new Error("Codex app-server omitted thread id");
+    nativeThreadId = threadId;
     await request("turn/start", {
       threadId,
       input: codexAppServerInput(input.spec),
@@ -389,8 +480,7 @@ export async function* runCodexAppServer(
         .map((server) => server.name),
       startedEmitted: true,
     };
-    const ownedCommandItemIds = new Set<string>();
-    let activeTurnId: string | null = turnId;
+    activeTurnId = turnId;
     let pendingTerminal: JsonObject | null = null;
     const snapshot = async (): Promise<{
       threadIdle: boolean;
@@ -439,7 +529,10 @@ export async function* runCodexAppServer(
       activeTurnId = null;
 
       for (;;) {
-        const current = await snapshot();
+        const current =
+          cancellationRequested && cancellationQuiescent
+            ? { threadIdle: true, goalActive: false, ownedBackground: [] }
+            : await snapshot();
         if (notifications.some((item) => item["method"] === "turn/started")) break;
         if (!current.threadIdle || current.goalActive || current.ownedBackground.length) {
           if (current.ownedBackground.length && !current.goalActive) {
@@ -482,24 +575,42 @@ export async function* runCodexAppServer(
       }
     }
   } catch (error) {
+    if (cancellationRequested && cancellationQuiescent) {
+      yield {
+        type: "completed",
+        session_id: input.spec.session_id,
+        ts: nowIso(),
+        aborted: true,
+        payload: { code: "user_cancelled", native_session_id: nativeThreadId },
+      };
+      return;
+    }
     const aborted = abort.signal.aborted;
     yield {
       type: "error",
       session_id: input.spec.session_id,
       ts: nowIso(),
       error: errorText(error),
-      payload: { code: "codex_app_server_failure" },
+      payload: {
+        code: cancellationFailure ? "codex_control_loss" : "codex_app_server_failure",
+      },
     };
     yield {
       type: "completed",
       session_id: input.spec.session_id,
       ts: nowIso(),
       ...(aborted ? { aborted: true } : {}),
-      payload: { code: aborted ? "user_cancelled" : "codex_app_server_failure" },
+      payload: {
+        code: cancellationFailure
+          ? "codex_control_loss"
+          : aborted
+            ? "user_cancelled"
+            : "codex_app_server_failure",
+      },
     };
   } finally {
     if (externalAbort instanceof AbortSignal) externalAbort.removeEventListener("abort", onAbort);
     input.controller?.clear(cancel);
-    await cancel();
+    await stopProcess();
   }
 }

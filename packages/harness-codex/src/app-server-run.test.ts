@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { codexAppServerInput } from "./attachments.js";
 import {
+  CodexAppServerController,
   codexAppServerEvents,
   codexAppServerThreadParams,
   runCodexAppServer,
@@ -467,5 +468,314 @@ describe("Codex app-server transport", () => {
     expect(snapshots).toBe(2);
     expect(events.filter((event) => event.final)).toHaveLength(1);
     expect(events.at(-1)?.type).toBe("completed");
+  });
+
+  it("Stop pauses the goal, interrupts the exact turn, and terminates only owned terminals", async () => {
+    const writes: Array<{ id?: number; method: string; params?: Record<string, unknown> }> = [];
+    const replies: string[] = [];
+    let wake: (() => void) | undefined;
+    let stop = false;
+    let paused = false;
+    let interrupted = false;
+    let terminated = false;
+    const push = (message: unknown): void => {
+      replies.push(JSON.stringify(message));
+      wake?.();
+      wake = undefined;
+    };
+    const spawn: typeof spawnProcess = async function* (_bin, _args, options = {}) {
+      options.onSpawn?.({
+        write(data) {
+          const request = JSON.parse(data) as (typeof writes)[number];
+          writes.push(request);
+          if (request.method === "initialize") push({ id: request.id, result: {} });
+          if (request.method === "thread/start")
+            push({ id: request.id, result: { thread: { id: "thread-stop" } } });
+          if (request.method === "turn/start") {
+            push({ id: request.id, result: { turn: { id: "turn-stop" } } });
+            push({
+              method: "turn/started",
+              params: { turn: { id: "turn-stop" } },
+            });
+            push({
+              method: "item/started",
+              params: {
+                item: {
+                  type: "commandExecution",
+                  id: "cmd-stop",
+                  command: "sleep 60",
+                  status: "inProgress",
+                },
+              },
+            });
+          }
+          if (request.method === "thread/goal/get")
+            push({ id: request.id, result: { goal: { status: paused ? "paused" : "active" } } });
+          if (request.method === "thread/goal/set") {
+            paused = true;
+            push({ id: request.id, result: { goal: { status: "paused" } } });
+          }
+          if (request.method === "turn/interrupt") {
+            interrupted = true;
+            push({ id: request.id, result: {} });
+            push({
+              method: "turn/completed",
+              params: { turn: { id: "turn-stop", status: "interrupted", items: [] } },
+            });
+          }
+          if (request.method === "thread/backgroundTerminals/list")
+            push({
+              id: request.id,
+              result: {
+                data: [
+                  ...(terminated ? [] : [{ itemId: "cmd-stop", processId: "process-owned" }]),
+                  { itemId: "other", processId: "process-unrelated" },
+                ],
+              },
+            });
+          if (request.method === "thread/backgroundTerminals/terminate") {
+            terminated = true;
+            push({ id: request.id, result: {} });
+          }
+          if (request.method === "thread/read")
+            push({
+              id: request.id,
+              result: {
+                thread: { status: { type: interrupted && terminated ? "idle" : "active" } },
+              },
+            });
+        },
+        end() {
+          stop = true;
+          wake?.();
+        },
+        closed: Promise.resolve(),
+      });
+      options.abortSignal?.addEventListener(
+        "abort",
+        () => {
+          stop = true;
+          wake?.();
+        },
+        { once: true },
+      );
+      while (!stop || replies.length) {
+        if (replies.length) yield { type: "stdout", line: replies.shift()! };
+        else
+          await new Promise<void>((resolve) => {
+            wake = resolve;
+          });
+      }
+    };
+    const spec = HarnessRunSpec.parse({
+      session_id: "session-stop",
+      intent: "implement",
+      prompt: "work",
+      cwd: process.cwd(),
+    });
+    const controller = new CodexAppServerController();
+    const events: HarnessEvent[] = [];
+    for await (const event of runCodexAppServer({
+      bin: "codex",
+      args: [],
+      spec,
+      env: {},
+      spawn,
+      controller,
+      pollIntervalMs: 0,
+      cancelDeadlineMs: 100,
+    })) {
+      events.push(event);
+      if (event.type === "tool_call") await Promise.all([controller.cancel(), controller.cancel()]);
+    }
+
+    expect(writes.filter((request) => request.method === "thread/goal/set")).toHaveLength(1);
+    expect(writes.filter((request) => request.method === "turn/interrupt")).toEqual([
+      expect.objectContaining({ params: { threadId: "thread-stop", turnId: "turn-stop" } }),
+    ]);
+    expect(
+      writes.filter((request) => request.method === "thread/backgroundTerminals/terminate"),
+    ).toEqual([
+      expect.objectContaining({
+        params: { threadId: "thread-stop", processId: "process-owned" },
+      }),
+    ]);
+    expect(events.at(-1)).toMatchObject({ type: "completed", aborted: true });
+  });
+
+  it("Stop pauses a goal between continuation turns without guessing a turn id", async () => {
+    const methods: string[] = [];
+    const replies: string[] = [];
+    let wake: (() => void) | undefined;
+    let stop = false;
+    let paused = false;
+    let resolveGap!: () => void;
+    const gap = new Promise<void>((resolve) => {
+      resolveGap = resolve;
+    });
+    const push = (message: unknown): void => {
+      replies.push(JSON.stringify(message));
+      wake?.();
+      wake = undefined;
+    };
+    const spawn: typeof spawnProcess = async function* (_bin, _args, options = {}) {
+      options.onSpawn?.({
+        write(data) {
+          const request = JSON.parse(data) as { id?: number; method: string };
+          methods.push(request.method);
+          if (request.method === "initialize") push({ id: request.id, result: {} });
+          if (request.method === "thread/start")
+            push({ id: request.id, result: { thread: { id: "thread-gap" } } });
+          if (request.method === "turn/start") {
+            push({ id: request.id, result: { turn: { id: "turn-gap" } } });
+            push({ method: "turn/started", params: { turn: { id: "turn-gap" } } });
+            push({
+              method: "turn/completed",
+              params: { turn: { id: "turn-gap", status: "completed", items: [] } },
+            });
+          }
+          if (request.method === "thread/read")
+            push({
+              id: request.id,
+              result: { thread: { status: { type: paused ? "idle" : "active" } } },
+            });
+          if (request.method === "thread/goal/get")
+            push({ id: request.id, result: { goal: { status: paused ? "paused" : "active" } } });
+          if (request.method === "thread/goal/set") {
+            paused = true;
+            push({ id: request.id, result: { goal: { status: "paused" } } });
+          }
+          if (request.method === "thread/backgroundTerminals/list") {
+            push({ id: request.id, result: { data: [] } });
+            if (!paused) resolveGap();
+          }
+        },
+        end() {
+          stop = true;
+          wake?.();
+        },
+        closed: Promise.resolve(),
+      });
+      options.abortSignal?.addEventListener(
+        "abort",
+        () => {
+          stop = true;
+          wake?.();
+        },
+        { once: true },
+      );
+      while (!stop || replies.length) {
+        if (replies.length) yield { type: "stdout", line: replies.shift()! };
+        else
+          await new Promise<void>((resolve) => {
+            wake = resolve;
+          });
+      }
+    };
+    const controller = new CodexAppServerController();
+    const spec = HarnessRunSpec.parse({
+      session_id: "session-gap",
+      intent: "implement",
+      prompt: "work",
+      cwd: process.cwd(),
+    });
+    const events: HarnessEvent[] = [];
+    const collect = (async () => {
+      for await (const event of runCodexAppServer({
+        bin: "codex",
+        args: [],
+        spec,
+        env: {},
+        spawn,
+        controller,
+        pollIntervalMs: 0,
+        cancelDeadlineMs: 100,
+      }))
+        events.push(event);
+    })();
+    await gap;
+    await controller.cancel();
+    await collect;
+
+    expect(methods.filter((method) => method === "thread/goal/set")).toHaveLength(1);
+    expect(methods).not.toContain("turn/interrupt");
+    expect(events.at(-1)).toMatchObject({ type: "completed", aborted: true });
+  });
+
+  it("fails closed when native interrupt acknowledgement misses the deadline", async () => {
+    const replies: string[] = [];
+    let wake: (() => void) | undefined;
+    let stop = false;
+    const push = (message: unknown): void => {
+      replies.push(JSON.stringify(message));
+      wake?.();
+      wake = undefined;
+    };
+    const spawn: typeof spawnProcess = async function* (_bin, _args, options = {}) {
+      options.onSpawn?.({
+        write(data) {
+          const request = JSON.parse(data) as { id?: number; method: string };
+          if (request.method === "initialize") push({ id: request.id, result: {} });
+          if (request.method === "thread/start")
+            push({ id: request.id, result: { thread: { id: "thread-timeout" } } });
+          if (request.method === "turn/start") {
+            push({ id: request.id, result: { turn: { id: "turn-timeout" } } });
+            push({ method: "turn/started", params: { turn: { id: "turn-timeout" } } });
+          }
+          if (request.method === "thread/goal/get")
+            push({ id: request.id, result: { goal: null } });
+          // Deliberately never answer turn/interrupt.
+        },
+        end() {
+          stop = true;
+          wake?.();
+        },
+        closed: Promise.resolve(),
+      });
+      options.abortSignal?.addEventListener(
+        "abort",
+        () => {
+          stop = true;
+          wake?.();
+        },
+        { once: true },
+      );
+      while (!stop || replies.length) {
+        if (replies.length) yield { type: "stdout", line: replies.shift()! };
+        else
+          await new Promise<void>((resolve) => {
+            wake = resolve;
+          });
+      }
+    };
+    const controller = new CodexAppServerController();
+    const spec = HarnessRunSpec.parse({
+      session_id: "session-timeout",
+      intent: "implement",
+      prompt: "work",
+      cwd: process.cwd(),
+    });
+    const events: HarnessEvent[] = [];
+    for await (const event of runCodexAppServer({
+      bin: "codex",
+      args: [],
+      spec,
+      env: {},
+      spawn,
+      controller,
+      cancelDeadlineMs: 1,
+    })) {
+      events.push(event);
+      if (event.type === "started") await controller.cancel();
+    }
+
+    expect(events.find((event) => event.type === "error")?.payload?.["code"]).toBe(
+      "codex_control_loss",
+    );
+    expect(events.at(-1)).toMatchObject({
+      type: "completed",
+      aborted: true,
+      payload: { code: "codex_control_loss" },
+    });
   });
 });
