@@ -5,9 +5,10 @@ import { HarnessCapabilityProfile as HarnessCapabilityProfileSchema } from "@cla
 export const CLAUDE_MANAGED_LOGIN = { stdin: "pipe" } as const;
 
 /**
- * Manifest model truth source (strict model-truth validation: an explicit
- * model outside this list is refused, never forwarded to die as a native
- * error). Stable aliases plus current full ids; verified against the vendor
+ * Manifest model hint list: the frozen floor every `models()` answer carries
+ * (`origin: "hint"`), judged under the adapter's ADVISORY declaration — an
+ * explicit model outside it is forwarded to the vendor with a note, never
+ * refused (INV-104). Stable aliases plus current full ids; verified against the vendor
  * model-config docs and the INSTALLED CLI recorded in
  * `CLAUDE_KNOWN_MODELS_VERIFIED_AGAINST`.
  */

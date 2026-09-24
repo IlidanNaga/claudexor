@@ -115,7 +115,9 @@ export const CatalogHarness = z
     configuredModelValid: z
       .boolean()
       .nullable()
-      .describe("Strict truth-source check of configuredModel (null when no model is configured)."),
+      .describe(
+        "Admission of configuredModel under the harness's own absence declaration (INV-104): false = refused by an authoritative list; true = listed, or unlisted on an advisory harness (forwarded to the vendor; the settings write and doctor readiness carry that note); null when no model is configured.",
+      ),
     models: CatalogModelSummary,
     webPolicy: z
       .enum(["native", "tools", "uncontrolled", "none"])

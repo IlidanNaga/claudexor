@@ -2,10 +2,11 @@ import SwiftUI
 import ClaudexorKit
 
 /// Model override control for one harness row (ADP4). A Picker over the
-/// harness's model TRUTH SOURCE (live inventory or manifest known-good
-/// hints). STRICT: there is no free-text entry — a harness with no
-/// truth source runs its default only, and a model outside the source would
-/// be refused by the engine anyway. The view owns catalog loading so a
+/// harness's model list (live inventory or manifest known-good hints); there
+/// is no free-text entry — a harness with no list runs its default only. What
+/// an id outside the list means is the harness's own declaration (INV-104):
+/// refused by an authoritative harness, forwarded and disclosed by an advisory
+/// one. The view owns catalog loading so a
 /// transport failure is distinguishable from an ANSWERED "no truth source".
 @MainActor
 struct HarnessModelOverrideField: View {
