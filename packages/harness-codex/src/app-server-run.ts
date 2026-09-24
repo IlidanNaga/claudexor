@@ -19,6 +19,7 @@ export interface CodexAppServerRunInput {
   env: Record<string, string | null | undefined>;
   spawn?: typeof spawnProcess;
   controller?: CodexAppServerController;
+  effortCatalog?: CodexEffortCatalog;
   /** Test seam; production polls owned background terminals four times per second. */
   pollIntervalMs?: number;
   /** Test seam for the bounded cooperative-stop deadline. */
@@ -450,8 +451,11 @@ export async function* runCodexAppServer(
     const threadResult = await request(
       input.spec.resume_session_id ? "thread/resume" : "thread/start",
       input.spec.resume_session_id
-        ? { threadId: input.spec.resume_session_id }
-        : codexAppServerThreadParams(input.spec),
+        ? {
+            ...codexAppServerThreadParams(input.spec, input.effortCatalog),
+            threadId: input.spec.resume_session_id,
+          }
+        : codexAppServerThreadParams(input.spec, input.effortCatalog),
     );
     const thread = asObject(threadResult["thread"]);
     const threadId = thread?.["id"];

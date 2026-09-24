@@ -12,6 +12,7 @@ import {
   runCodexAppServer,
 } from "./app-server-run.js";
 import type { CodexParseState } from "./parse.js";
+import { createCodexAdapter } from "./index.js";
 
 describe("Codex app-server transport", () => {
   it("initializes, starts a thread and turn, and exposes the native thread id", async () => {
@@ -777,5 +778,60 @@ describe("Codex app-server transport", () => {
       aborted: true,
       payload: { code: "codex_control_loss" },
     });
+  });
+
+  it("routes adapter runs and Stop through the matching app-server controller", async () => {
+    let appServerRuns = 0;
+    let execRuns = 0;
+    let cancels = 0;
+    let release!: () => void;
+    const stopped = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const adapter = createCodexAdapter({
+      detectVersion: async () => "codex-cli 0.156.1",
+      probeLogin: async () => ({ authed: true, method: "chatgpt", probeError: null }),
+      hasApiKey: () => false,
+      probeEfforts: async () => null,
+      runCliHarness: async function* (): AsyncGenerator<HarnessEvent> {
+        execRuns++;
+        throw new Error("legacy exec path must not run");
+      },
+      runAppServer: async function* (input): AsyncGenerator<HarnessEvent> {
+        appServerRuns++;
+        input.controller?.bind(async () => {
+          cancels++;
+          release();
+        });
+        yield {
+          type: "started",
+          session_id: input.spec.session_id,
+          ts: "2026-09-24T00:00:00.000Z",
+          payload: { native_session_id: "native-1" },
+        };
+        await stopped;
+        yield {
+          type: "completed",
+          session_id: input.spec.session_id,
+          ts: "2026-09-24T00:00:01.000Z",
+          aborted: true,
+        };
+      },
+    });
+    const spec = HarnessRunSpec.parse({
+      session_id: "session-adapter",
+      intent: "implement",
+      prompt: "work",
+      cwd: process.cwd(),
+    });
+    const iterator = adapter.run(spec)[Symbol.asyncIterator]();
+    expect((await iterator.next()).value).toMatchObject({ type: "started" });
+    await adapter.cancel?.("session-adapter");
+    expect((await iterator.next()).value).toMatchObject({ type: "completed", aborted: true });
+    expect((await iterator.next()).done).toBe(true);
+    await adapter.cancel?.("session-adapter");
+    expect(appServerRuns).toBe(1);
+    expect(execRuns).toBe(0);
+    expect(cancels).toBe(1);
   });
 });
