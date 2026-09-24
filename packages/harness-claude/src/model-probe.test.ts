@@ -393,7 +393,7 @@ describe("scope", () => {
   });
 
   it("profile-bound env: the profile's CLAUDE_CONFIG_DIR, every provider secret scrubbed, bootstrap allowed", async () => {
-    vi.stubEnv("ANTHROPIC_API_KEY", "sk-must-not-reach-the-probe");
+    vi.stubEnv("ANTHROPIC_API_KEY", "placeholder-key-must-not-reach-the-probe");
     vi.stubEnv("ANTHROPIC_MODEL", "bogus-env-model");
     vi.stubEnv("ANTHROPIC_DEFAULT_OPUS_MODEL", "claude-opus-9-9");
     const { calls, runCapture } = fakeCapture(PICKER_2_1_280);
