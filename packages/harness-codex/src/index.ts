@@ -6,6 +6,7 @@ import {
 } from "./processing-session.js";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 export { createCodexModelAdapter } from "./model.js";
+export { describeCodexClientVersion } from "./http-client-version.js";
 import { codexTranscriptModel, codexTranscriptRateLimits } from "./transcript.js";
 import { withCodexVendorFailure } from "./vendor-failure.js";
 import { resolveSecret } from "@claudexor/secrets";
@@ -34,11 +35,10 @@ import {
   type CodexEffortProbe,
 } from "./effort-probe.js";
 import { codexRunEffortResolution } from "./effort-gate.js";
-export { codexConfigHasNodeRepl } from "./toml.js";
 import { codexConfigHasNodeRepl, tomlBasicString } from "./toml.js";
 import { CODEX_VENDOR_CLI_VERSION } from "./vendor-cli-version.js";
 export { CODEX_EFFORT_SNAPSHOT, clearCodexEffortCache, unionEffortLevels } from "./effort-probe.js";
-export { CODEX_VENDOR_CLI_VERSION };
+export { CODEX_VENDOR_CLI_VERSION, codexConfigHasNodeRepl };
 import type { DoctorSpec, HarnessAdapter } from "@claudexor/core";
 import {
   abortSignalFromSpec,

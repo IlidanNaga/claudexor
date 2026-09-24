@@ -178,6 +178,8 @@ describe("raw model operation HTTP surface", () => {
       accountFingerprint: null,
       observedAt: "2026-09-06T00:00:00.000Z",
       provenance,
+      clientVersion: "0.156.1",
+      clientVersionSource: "verified_transport",
       models: [],
     }));
     const f = await fixture({ modelSources, modelCatalog });
@@ -198,6 +200,9 @@ describe("raw model operation HTTP surface", () => {
       accountFingerprint: null,
       observedAt: "2026-09-06T00:00:00.000Z",
       provenance: "provider_http",
+      // The declared client version travels through the route untouched.
+      clientVersion: "0.156.1",
+      clientVersionSource: "verified_transport",
       models: [],
     });
     expect(modelCatalog).toHaveBeenLastCalledWith("codex", "chosen", undefined);
@@ -254,6 +259,8 @@ describe("raw model operation HTTP surface", () => {
       accountFingerprint: null,
       observedAt: "2026-09-12T00:00:00.000Z",
       provenance: "provider_http",
+      clientVersion: "0.156.1",
+      clientVersionSource: "installed_cli",
       models: [model],
     };
     const accountView = {

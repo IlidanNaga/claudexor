@@ -1401,7 +1401,17 @@ review loop, model fallback or internal compaction is created for this capabilit
 
 The Codex transport lives in `harness-codex`. It uses a selected managed ChatGPT
 profile, the official CLI for an expired-token refresh, and the raw account's
-model catalog. In-process refresh work is serialized by canonical managed home;
+model catalog. The backend filters that catalog by the client version the
+caller declares (a model is listed only for clients at or above its own
+minimum), so the transport declares ITS OWN verified level,
+`CODEX_HTTP_CLIENT_VERSION` (`http-client-version.ts`), raised to the installed
+Codex CLI's version when that is newer and never below the constant — not the
+managed-installer pin, which is a different fact (a release that only moves
+the installer must never decide which models an account can see). The catalog
+response carries the declared `clientVersion` and its source, every membership
+refusal names it, and the constant moves together with a recorded catalog
+fixture pair (`fixtures/models-http-*.json`) whose shared rows must stay
+identical. In-process refresh work is serialized by canonical managed home;
 cancelled callers cannot release another caller past a still-live refresh. Each
 caller rereads current authorization. Selection hands its exact-profile catalog
 to this operation's invocation, which rechecks the current account fingerprint;

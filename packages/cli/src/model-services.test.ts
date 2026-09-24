@@ -98,6 +98,8 @@ async function fixture(options: { lazy?: boolean } = {}) {
     accountFingerprint: profile.profile_id,
     observedAt: new Date().toISOString(),
     provenance: "fixture exact catalog",
+    clientVersion: "0.156.1",
+    clientVersionSource: "verified_transport",
     models: catalogModels[profile.profile_id]!,
   }));
   const invoke = vi.fn<ModelAdapter["invoke"]>(async (request, context) => {
@@ -284,6 +286,8 @@ describe("production model service composition", () => {
         accountFingerprint: "a",
         observedAt,
         provenance: "existing_cache",
+        clientVersion: null,
+        clientVersionSource: null,
         models: [model()],
       };
     });
@@ -412,6 +416,9 @@ describe("production model service composition", () => {
     expect(f.invoke).toHaveBeenCalledTimes(1);
     const pinned = await f.run({ mode: "pin", profileId: "b" });
     expect(pinned.problem?.code).toBe("model_unavailable");
+    // The first gate a pinned caller hits names the declared client version
+    // too (issue #339): the version filter, not the account, decided the list.
+    expect(pinned.problem?.message).toContain("client_version 0.156.1");
     expect(pinned.dispatch.state).toBe("not_started");
     f.catalogModels.a = [];
     const unsupported = await f.run();
