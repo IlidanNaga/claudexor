@@ -3194,13 +3194,13 @@ the typed `context` field of `HarnessEvent`: result `terminal_reason` (`prompt_t
 the rapid-refill breaker `rapid_refill_breaker` → `capacity_exhausted` with a
 typed cause), the `compact_boundary` system frame → a compaction event, and the
 top-level typed `rate_limit_event` → the existing `rate_limit` signal (a routine
-`allowed` heartbeat surfaces nothing and never arms rotation). Codex exec
-0.153.3's recorded oversized-input case surfaces a stderr JSON-RPC error
-(`input_error_code: input_too_large`) before model execution, without a typed
-context stream frame. The Codex adapter has no token-window context mapping;
-this character-limit capture does not establish a token-window limit. A
-terminal `capacity_exhausted` with no completed WorkReport maps to
-`interrupted / context_capacity_exhausted`.
+`allowed` heartbeat surfaces nothing and never arms rotation). Codex exec's
+recorded oversized-input case (0.153.3 and 0.156.1, byte-identical) surfaces
+a stderr JSON-RPC error (`input_error_code: input_too_large`) before model
+execution, without a typed context stream frame. The Codex adapter has no
+token-window context mapping; this character-limit capture does not establish
+a token-window limit. A terminal `capacity_exhausted` with no completed
+WorkReport maps to `interrupted / context_capacity_exhausted`.
 
 One-shot continuation (D-16d): when an eligible terminal `capacity_exhausted`
 (cause `repeated_refill` only — `prompt_too_long` may be an irreducible packet)
@@ -3593,9 +3593,13 @@ Vendor harness CLIs land on a host only through the disclosed installer
 connected host). The npm-distributed harnesses (claude, codex, opencode)
 install one EXACT pinned version — each pin aliases that harness package's
 vendor-version constant, and npm checks the registry integrity checksum for
-that exact version; `@latest` is never used. For claude and codex that
-constant is the same value the model-hints and effort freshness gates read,
-so the installed CLI is the version this release was verified against; the
+that exact version; `@latest` is never used. For codex that constant is the
+same value the model-hints and effort freshness gates read; for claude it is
+the effort-snapshot stamp, while the Claude known-model hint list keeps the
+literal version it was last actually re-verified against (a pin bump never
+restamps unrechecked ids). So the installed CLI is the version this release's
+effort ladders were verified against (a recording that needs a paid live run
+keeps the version it was captured from, as its fixture manifest states); the
 opencode pin is a deterministic install target, not a verification claim —
 no recorded fixture covers it yet, as its `vendor-cli-version.ts` discloses.
 Cursor ships no npm artifact and cannot be pinned:

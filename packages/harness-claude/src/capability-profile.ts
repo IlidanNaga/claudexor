@@ -18,7 +18,7 @@ export const CLAUDE_KNOWN_MODELS: readonly string[] = [
   "fable",
   "best",
   // Fable 5.1 requires Claude Code >= 2.1.251. Re-verified through the
-  // pinned 2.1.261 CLI with observed_model claude-fable-5-1.
+  // then-pinned 2.1.261 CLI with observed_model claude-fable-5-1.
   "claude-fable-5-1",
   "claude-fable-5",
   "claude-sonnet-5",

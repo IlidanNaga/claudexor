@@ -39,14 +39,15 @@ const FIXTURES = fileURLToPath(new URL("../fixtures/protocol", import.meta.url))
 
 /** The 2.1.280 binary-only capture: ONE raw stdout line. */
 const PICKER_2_1_280 = readFileSync(join(FIXTURES, "initialize-picker-2.1.280.jsonl"), "utf8");
-/** The 2.1.261 API-key handshake recording: line 3 is the initialize answer,
- * wrapped as a directional wire frame with a sanitized request id. */
-const HANDSHAKE_2_1_261 = readFileSync(join(FIXTURES, "control-handshake.jsonl"), "utf8")
+/** The API-key handshake recording (2.1.281 since the pin catch-up; see
+ * fixtures/manifest.yaml): line 3 is the initialize answer, wrapped as a
+ * directional wire frame with a sanitized request id. */
+const HANDSHAKE_API_KEY = readFileSync(join(FIXTURES, "control-handshake.jsonl"), "utf8")
   .split("\n")
   .filter(Boolean);
-const PICKER_2_1_261_FRAME = (JSON.parse(HANDSHAKE_2_1_261[2] ?? "{}") as { frame: unknown }).frame;
-const PICKER_2_1_261 = JSON.stringify(PICKER_2_1_261_FRAME) + "\n";
-const PICKER_2_1_261_REQUEST_ID = "fixture-id-1";
+const PICKER_API_KEY_FRAME = (JSON.parse(HANDSHAKE_API_KEY[2] ?? "{}") as { frame: unknown }).frame;
+const PICKER_API_KEY = JSON.stringify(PICKER_API_KEY_FRAME) + "\n";
+const PICKER_API_KEY_REQUEST_ID = "fixture-id-1";
 
 const HINT_IDS = [...CLAUDE_KNOWN_MODELS];
 
@@ -249,17 +250,17 @@ describe("claudeModelRows", () => {
     expect(rows).toHaveLength(5 + 3 + 12);
   });
 
-  it("maps the 2.1.261 API-key handshake (6 rows incl. sonnet[1m]; haiku without effort fields)", () => {
-    const rows = claudeModelRows(parseClaudeInitialize(PICKER_2_1_261, PICKER_2_1_261_REQUEST_ID));
+  it("maps the API-key handshake recording (2.1.281: 6 rows incl. sonnet[1m]; haiku without effort fields)", () => {
+    const rows = claudeModelRows(parseClaudeInitialize(PICKER_API_KEY, PICKER_API_KEY_REQUEST_ID));
     const live = rows.filter((r) => r.origin === "live");
     expect(live.map((r) => [r.id, r.resolved_model])).toEqual([
-      ["default", "claude-opus-5[1m]"],
-      ["opus[1m]", "claude-opus-5[1m]"],
+      ["default", "claude-opus-5-5[1m]"],
+      ["opus[1m]", "claude-opus-5-5[1m]"],
       ["claude-fable-5-1", "claude-fable-5-1"],
       ["sonnet", "claude-sonnet-5"],
       ["sonnet[1m]", "claude-sonnet-5[1m]"],
       ["haiku", "claude-haiku-4-5-20251001"],
-      ["claude-opus-5[1m]", null],
+      ["claude-opus-5-5[1m]", null],
       ["claude-sonnet-5", null],
       ["claude-sonnet-5[1m]", null],
       ["claude-haiku-4-5-20251001", null],
@@ -331,7 +332,7 @@ describe("probeClaudeModels failure paths answer the hint rows only", () => {
         type: "control_response",
         response: { subtype: "error", request_id: CLAUDE_INIT_REQUEST_ID, error: "no" },
       }) + "\n",
-      PICKER_2_1_261, // request_id fixture-id-1, not ours
+      PICKER_API_KEY, // request_id fixture-id-1, not ours
     ]) {
       clearClaudeModelProbeCache();
       const { runCapture } = fakeCapture(stdout);

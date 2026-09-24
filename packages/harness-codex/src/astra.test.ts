@@ -6,7 +6,7 @@ import { CODEX_VENDOR_CLI_VERSION, clearCodexEffortCache, createCodexAdapter } f
 import { readModelListEfforts, type CodexEffortCatalog } from "./effort-probe.js";
 
 const captured = JSON.parse(
-  readFileSync(new URL("../fixtures/models-0.153.3.json", import.meta.url), "utf8"),
+  readFileSync(new URL("../fixtures/models-0.156.1.json", import.meta.url), "utf8"),
 ) as { data: unknown[] };
 const capturedCatalog = readModelListEfforts(captured.data);
 
@@ -24,7 +24,7 @@ describe("GPT-6 Astra on the pinned Codex CLI", () => {
   it.each(["live", "snapshot"] as const)(
     "admits Astra and sends ultra unchanged with the %s catalog",
     async (source) => {
-      expect(CODEX_VENDOR_CLI_VERSION).toBe("0.153.3");
+      expect(CODEX_VENDOR_CLI_VERSION).toBe("0.156.1");
       expect(capturedCatalog).not.toBeNull();
       let cliArgs: string[] | undefined;
       const adapter = createCodexAdapter({
