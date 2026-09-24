@@ -18,7 +18,7 @@
  */
 import type { HarnessEvent, HarnessRunSpec } from "@claudexor/schema";
 import { EffortHint } from "@claudexor/schema";
-import { normalizeEffort, resolveEffort, runCapture } from "@claudexor/core";
+import { harnessBinaryIdentity, normalizeEffort, resolveEffort, runCapture } from "@claudexor/core";
 import { nowIso, redactSecrets } from "@claudexor/util";
 import { CLAUDE_VENDOR_CLI_VERSION } from "./vendor-cli-version.js";
 
@@ -213,7 +213,20 @@ type ClaudeHelpProbe =
  */
 const HELP_PROBE_TIMEOUT_MS = 10_000;
 
-let helpProbePromise: Promise<ClaudeHelpProbe> | null = null;
+/**
+ * The memo is keyed by the BINARY IDENTITY (`harnessBinaryIdentity`: realpath,
+ * inode, size, mtime — one stat, no spawn), so a CLI updated at the same path
+ * is re-read on the next call instead of served the old ladder for the life
+ * of the daemon (live defect 2026-09-18: a stale `xhigh`-less ladder after an
+ * in-place update). An unresolvable binary keys as such; its capture fails and
+ * is forgotten below anyway, so the next call looks again.
+ */
+let helpProbe: { key: string; promise: Promise<ClaudeHelpProbe> } | null = null;
+
+function helpProbeKey(): string {
+  const id = harnessBinaryIdentity(BIN);
+  return JSON.stringify(id ? [id.path, id.ino, id.size, id.mtimeMs] : ["unresolved", BIN]);
+}
 
 /** What an abandoned caller reads, without the shared capture ever seeing it. */
 function abandonedProbe(): ClaudeHelpProbe {
@@ -244,7 +257,8 @@ function abandonedProbe(): ClaudeHelpProbe {
  * forwards `xhigh` to a binary that rejects it, for the life of the daemon.
  */
 function sharedHelpCapture(): Promise<ClaudeHelpProbe> {
-  if (helpProbePromise) return helpProbePromise;
+  const key = helpProbeKey();
+  if (helpProbe?.key === key) return helpProbe.promise;
   const pending = (async (): Promise<ClaudeHelpProbe> => {
     try {
       const result = await runCapture(BIN, ["--help"], {
@@ -260,11 +274,12 @@ function sharedHelpCapture(): Promise<ClaudeHelpProbe> {
       };
     }
   })();
-  helpProbePromise = pending;
+  const memo = { key, promise: pending };
+  helpProbe = memo;
   // Identity-guarded so a late settle can only ever clear its OWN memo, never a
   // re-probe another caller has already started.
   const forget = (): void => {
-    if (helpProbePromise === pending) helpProbePromise = null;
+    if (helpProbe === memo) helpProbe = null;
   };
   void pending.then((probe) => {
     if (!probe.ok || probe.code === null) forget();

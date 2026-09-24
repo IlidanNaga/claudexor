@@ -374,7 +374,10 @@ export async function modelsCommand(args: ParsedArgs, json: boolean): Promise<nu
       const ctx = m.context_window ? ` (${m.context_window} ctx)` : "";
       const label = m.label && m.label !== m.id ? ` — ${m.label}` : "";
       const routes = m.routes ? ` [routes: ${m.routes.join(", ")}]` : "";
-      print(`    ${m.id}${label}${ctx}${routes}`);
+      const resolved =
+        m.resolved_model && m.resolved_model !== m.id ? ` → ${m.resolved_model}` : "";
+      const hint = m.origin === "hint" ? " (hint)" : "";
+      print(`    ${m.id}${label}${resolved}${ctx}${routes}${hint}`);
     }
   }
   return 0;

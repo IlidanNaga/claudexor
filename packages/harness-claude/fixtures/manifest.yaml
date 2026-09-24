@@ -95,6 +95,22 @@ fixtures:
       thinking_events: 0
       delta_messages: 0
       typed_rate_limit: false
+  # BINARY-ONLY PICKER CAPTURE (claude 2.1.280, 2026-09-24). ONE stdout line:
+  # the CLI's answer to the prompt-free `initialize` control_request the model
+  # probe sends (src/model-probe.ts), parsed by model-probe.test.ts alongside
+  # the 2.1.261 API-key handshake above (its line 3 carries a 6-row picker).
+  # Declared `synthetic`, NOT `recorded`, ON PURPOSE: the strict vendor gate
+  # (`release:verify:vendors`) compares every recorded fixture with the ONE
+  # installed CLI, and this package's recordings are pinned to 2.1.261 — a
+  # second recorded cli_version can never be fresh on one release machine.
+  # Its real provenance is stated in `capture` instead.
+  protocol/initialize-picker-2.1.280.jsonl:
+    source: synthetic
+    capture: "claude 2.1.280 (native installer), argv: -p --input-format stream-json --output-format stream-json --verbose --setting-sources '' --strict-mcp-config (never --model); stdin = one initialize control_request then EOF; scratch HOME + CLAUDE_CONFIG_DIR; CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1; logged out (account.tokenSource none, apiProvider firstParty); exit 0 in 0.2 s"
+    sanitized: "pid, commands/agents inventories (the CLI's bundled-skill fingerprint), output-styles path; models/account/flags untouched"
+    # Re-probed 2026-09-24 with a scratch npm install of 2.1.281 (same argv,
+    # same scratch scope): identical five rows, resolutions and response keys,
+    # so this capture stands for the managed pin too.
   # D-16 TYPED-SIGNAL EVIDENCE (claude 2.1.261). These live in signals/ (NOT
   # top-level) on purpose: the top-level conformance loop asserts
   # tool_call/tool_result/error/usage on every fixture, while these captures

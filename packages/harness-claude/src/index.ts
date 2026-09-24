@@ -87,6 +87,7 @@ import {
   isControlRequestFrame,
   isResultFrame,
 } from "./interactive.js";
+import { CLAUDE_MODEL_INVENTORY, probeClaudeModels } from "./model-probe.js";
 
 export const CLAUDE_PROVIDER_ENV_DENYLIST = PROVIDER_SECRET_ENV.filter(
   (k) => k !== "ANTHROPIC_API_KEY",
@@ -275,6 +276,8 @@ type ClaudeRuntimeDeps = {
   probeReadonlyProfile: typeof probeClaudeReadonlyProfile;
   /** Effort ladder of the installed binary; falls back to the recorded snapshot. */
   probeEffortLevels: typeof probeClaudeEffortLevels;
+  /** Cached prompt-free initialize picker (model-probe.ts); total, never empty. */
+  probeModels: typeof probeClaudeModels;
   runCliHarness: typeof runCliHarness;
 };
 
@@ -289,6 +292,7 @@ export function createClaudeAdapter(deps: Partial<ClaudeRuntimeDeps> = {}): Harn
     smokeIsolatedOAuthToken,
     probeReadonlyProfile: probeClaudeReadonlyProfile,
     probeEffortLevels: probeClaudeEffortLevels,
+    probeModels: probeClaudeModels,
     runCliHarness,
     ...deps,
   };
@@ -326,6 +330,7 @@ export function createClaudeAdapter(deps: Partial<ClaudeRuntimeDeps> = {}): Harn
         adapter_version: CLAUDEXOR_VERSION,
         provider_family: "anthropic",
         capabilities: {
+          ...CLAUDE_MODEL_INVENTORY,
           processing_preferences: ["standard", "fast", "economy"],
           plan: true,
           implement: true,
@@ -605,6 +610,10 @@ export function createClaudeAdapter(deps: Partial<ClaudeRuntimeDeps> = {}): Harn
 
     review(spec: HarnessRunSpec): AsyncIterable<HarnessEvent> {
       return runClaude(spec, runtime);
+    },
+
+    models(spec) {
+      return runtime.probeModels(spec);
     },
 
     probeCredentialProfile(

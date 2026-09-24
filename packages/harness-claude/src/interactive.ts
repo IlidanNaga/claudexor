@@ -29,6 +29,14 @@ type Json = any;
  * without it the headless CLI auto-denies interactive tools itself.
  */
 
+/**
+ * Request id of the ONE initialize handshake this adapter sends. Interactive
+ * runs write it as the first stdin frame; the prompt-free model probe sends the
+ * same frame alone and selects the CLI's answer by this id (hook frames may
+ * precede it), so both must share one literal.
+ */
+export const CLAUDE_INIT_REQUEST_ID = "req_claudexor_init";
+
 export function isControlRequestFrame(obj: Json): boolean {
   return obj?.type === "control_request";
 }
@@ -99,7 +107,7 @@ export function initialSessionFrames(
 ): string {
   const initialize = JSON.stringify({
     type: "control_request",
-    request_id: "req_claudexor_init",
+    request_id: CLAUDE_INIT_REQUEST_ID,
     request: { subtype: "initialize" },
   });
   return initialize + "\n" + initialUserMessageFrame(prompt, attachments);

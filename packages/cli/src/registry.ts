@@ -109,15 +109,21 @@ export async function harnessModelTruth(
         ? { authPreference: route === "api_key" ? ("api_key" as const) : ("subscription" as const) }
         : {}),
     });
+    const rows = models.map(({ processing: _processing, ...model }) => ({
+      ...model,
+      routes: model.routes ?? null,
+    }));
+    // A producer that labels its rows (`origin`) and answered ONLY hint rows
+    // could not read the vendor: that is manifest truth with its frozen
+    // freshness stamp, never a live `api` claim (INV-104). Producers that
+    // emit no `origin` are live by definition.
+    const hintsOnly = rows.length > 0 && rows.every((row) => row.origin === "hint");
     return {
       response: {
         harnessId,
-        models: models.map(({ processing: _processing, ...model }) => ({
-          ...model,
-          routes: model.routes ?? null,
-        })),
-        source: "api",
-        verifiedAgainst: null,
+        models: rows,
+        source: hintsOnly ? "manifest" : "api",
+        verifiedAgainst: hintsOnly ? manifest.capabilities.known_models_verified_against : null,
       },
       absence,
     };

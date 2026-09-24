@@ -587,9 +587,11 @@ on an advisory harness costs one spawn.
 Thread ask/plan readiness and inventory use the same durable lane HOME as the
 eventual spawn, while non-thread read-only runs retain disposable state.
 `/harnesses/:id/models` reports
-the truth source honestly (`source: api|manifest|none`, with the manifest's
-`verifiedAgainst` CLI-version freshness note), and the model-hints-freshness
-gate warns when the installed vendor CLI drifts from the verified version.
+the truth source honestly (`source: api|manifest|none` — a producer that
+answered only hint rows reports `manifest`; rows may carry `origin` and
+`resolved_model` — with the manifest's `verifiedAgainst` CLI-version freshness
+note), and the model-hints-freshness gate warns when the installed vendor CLI
+drifts from the verified version.
 Candidate diffs additionally pass a typed policy gate: protected-path changes
 and critical-risk diffs escalate as `NEEDS_HUMAN` findings. An accepted
 escalation blocks the run only when it belongs to the WINNING candidate
@@ -1402,6 +1404,26 @@ manifest miss — instead sends the explicit model to the vendor unchanged
 (above). The authenticated
 account catalog read below is a different source and stays strict: a model it
 does not carry is a typed `model_unavailable` refusal.
+
+Claude's producer is the prompt-free `initialize` handshake of the installed
+`claude` binary (`harness-claude/src/model-probe.ts`): one stdin frame, the
+picker rows of the `control_response` (`value`, `displayName`, `resolvedModel`),
+exit on EOF, never `--model` (the CLI echoes it as a row), `--setting-sources
+""` and `--strict-mcp-config` (no hooks, no settings echo), model-override env
+scrubbed. Two scopes (owner decision 2026-09-24): a `config_dir_login` profile
+is probed under its own config dir and keychain bridge, so the account view
+carries the account's own rows; every other query (unscoped, `oauth_token` /
+`api_key` profiles) runs credential-free under a scratch HOME with non-essential
+traffic off and describes the binary alone. Rows carry `origin` (`live`: the
+picker selectors and their resolutions as pinnable exact ids; `hint`: the frozen
+`CLAUDE_KNOWN_MODELS` ids appended so presence never shrinks below the manifest)
+and `resolved_model` (diagnostic; the row id is what travels). The answer is
+total: any failure yields the hint rows alone, and the registry then reports
+the list as `source: manifest` with its frozen `verifiedAgainst` stamp rather
+than a live `api` claim. One cached single-flight capture per (scope, binary
+identity — realpath, inode, size, mtime; `harnessBinaryIdentity` in core) lives
+an hour, a failure a minute, so an in-place CLI update is re-read without a
+daemon restart; the `--help` effort memo is keyed by the same identity.
 
 The engine also accepts one raw model generation independently of Agent Runs.
 `ModelAdapter` in core and the model-operation schemas define caller-owned

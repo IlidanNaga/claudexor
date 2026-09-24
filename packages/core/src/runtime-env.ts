@@ -165,6 +165,44 @@ export function resolveHarnessBinary(
 }
 
 /**
+ * Which exact bytes a harness child will execute, as a stat-only identity:
+ * the realpath of the binary `resolveHarnessBinary` picks, plus its inode,
+ * size and mtime. No spawn, no read — one `realpath` and one `stat`.
+ *
+ * Every probe memo keyed by this identity re-reads the binary the moment it
+ * changes on disk WITHOUT a daemon restart, which is what the release-free
+ * model/effort discovery needs: the native installer re-points a `versions/`
+ * symlink (realpath changes), an npm reinstall rewrites the file in place
+ * (size/mtime change), a Homebrew upgrade moves to a new cellar dir. `ino` is
+ * 0 on some Windows volumes and stays in the key only as a tie-breaker; the
+ * memos' own TTLs bound what a shim layout can hide from a stat.
+ *
+ * Null when the binary does not resolve (nothing to spawn) or cannot be
+ * stat'd (raced away between resolve and stat).
+ */
+export interface HarnessBinaryIdentity {
+  path: string;
+  ino: number;
+  size: number;
+  mtimeMs: number;
+}
+
+export function harnessBinaryIdentity(
+  bin: string,
+  source: NodeJS.ProcessEnv = process.env,
+): HarnessBinaryIdentity | null {
+  const resolved = resolveHarnessBinary(bin, source);
+  if (resolved === null) return null;
+  try {
+    const path = realpathSync(resolved);
+    const stat = statSync(path);
+    return { path, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Windows executable IMAGES only — the same call Claudexor already makes for
  * `git.exe` (v3.3.9): Node refuses to launch `.cmd`/`.bat` without a shell,
  * and Claudexor never spawns a harness through one, so offering those

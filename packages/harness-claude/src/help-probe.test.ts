@@ -117,4 +117,28 @@ describe("the shared --help capture belongs to the process, not to its first cal
       missingFlags: [],
     });
   });
+
+  it("re-reads a binary rewritten at the same path, and keeps serving an unchanged one", async () => {
+    // The live defect (2026-09-18): a CLI updated in place kept the OLD ladder
+    // for the life of the daemon because the memo was keyed by nothing. The
+    // memo is now keyed by the binary's identity (realpath, inode, size,
+    // mtime), so the next caller after an update reads the new binary — with
+    // NO `vi.resetModules()` between the two probes below.
+    installStub(HELP_2_1_89);
+    const { probeClaudeEffortLevels } = await import("./effort-probe.js");
+    expect(await probeClaudeEffortLevels()).toEqual({ levels: LADDER_2_1_89, live: true });
+    // Unchanged bytes: still the memo, still the same answer.
+    expect(await probeClaudeEffortLevels()).toEqual({ levels: LADDER_2_1_89, live: true });
+
+    const HELP_NEWER = [
+      "  --effort <level>                      Effort level for the current session",
+      "                                        (low, medium, high, xhigh, max)",
+      "  --fallback-model <model>              Fallback model",
+    ].join("\n");
+    installStub(HELP_NEWER);
+    expect(await probeClaudeEffortLevels()).toEqual({
+      levels: ["low", "medium", "high", "xhigh", "max"],
+      live: true,
+    });
+  });
 });
