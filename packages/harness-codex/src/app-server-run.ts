@@ -19,6 +19,8 @@ export interface CodexAppServerRunInput {
   env: Record<string, string | null | undefined>;
   spawn?: typeof spawnProcess;
   controller?: CodexAppServerController;
+  /** Test seam; production polls owned background terminals four times per second. */
+  pollIntervalMs?: number;
 }
 
 export class CodexAppServerController {
@@ -325,6 +327,16 @@ export async function* runCodexAppServer(
       });
     }
   };
+  const takeNotification = async (): Promise<JsonObject> => {
+    for (;;) {
+      const next = notifications.shift();
+      if (next) return next;
+      if (processFailure) throw processFailure;
+      await new Promise<void>((resolve) => {
+        notificationWaiter.wake = resolve;
+      });
+    }
+  };
   const cancel = async (): Promise<void> => {
     if (abort.signal.aborted) return;
     abort.abort();
@@ -370,7 +382,105 @@ export async function* runCodexAppServer(
       ts: nowIso(),
       payload: { native_session_id: threadId, native_turn_id: turnId },
     };
-    await process;
+    const parseState: CodexParseState = {
+      envelopeActive: !!input.spec.output_schema,
+      requiredMcpServers: input.spec.extra_mcp_servers
+        .filter((server) => server.required)
+        .map((server) => server.name),
+      startedEmitted: true,
+    };
+    const ownedCommandItemIds = new Set<string>();
+    let activeTurnId: string | null = turnId;
+    let pendingTerminal: JsonObject | null = null;
+    const snapshot = async (): Promise<{
+      threadIdle: boolean;
+      goalActive: boolean;
+      ownedBackground: JsonObject[];
+    }> => {
+      const [threadResult, goalResult, terminalResult] = await Promise.all([
+        request("thread/read", { threadId, includeTurns: false }),
+        request("thread/goal/get", { threadId }),
+        request("thread/backgroundTerminals/list", { threadId }),
+      ]);
+      const status = asObject(asObject(threadResult["thread"])?.["status"]);
+      const goal = asObject(goalResult["goal"]);
+      const terminals = Array.isArray(terminalResult["data"])
+        ? terminalResult["data"].map(asObject).filter((item): item is JsonObject => item !== null)
+        : [];
+      return {
+        threadIdle: status?.["type"] === "idle",
+        goalActive: goal?.["status"] === "active",
+        ownedBackground: terminals.filter(
+          (terminal) =>
+            typeof terminal["itemId"] === "string" && ownedCommandItemIds.has(terminal["itemId"]),
+        ),
+      };
+    };
+    for (;;) {
+      const notification = await takeNotification();
+      const method = notification["method"];
+      const params = asObject(notification["params"]);
+      if (method === "turn/started") {
+        const nextTurn = asObject(params?.["turn"]);
+        if (typeof nextTurn?.["id"] === "string") activeTurnId = nextTurn["id"];
+        pendingTerminal = null;
+        parseState.lastAgentMessage = undefined;
+        continue;
+      }
+      if (method === "item/started") {
+        const item = asObject(params?.["item"]);
+        if (item?.["type"] === "commandExecution" && typeof item["id"] === "string")
+          ownedCommandItemIds.add(item["id"]);
+      }
+      const mapped = codexAppServerEvents(notification, input.spec.session_id, parseState);
+      if (mapped) for (const event of mapped) yield event;
+      if (method !== "turn/completed") continue;
+      pendingTerminal = asObject(params?.["turn"]);
+      activeTurnId = null;
+
+      for (;;) {
+        const current = await snapshot();
+        if (notifications.some((item) => item["method"] === "turn/started")) break;
+        if (!current.threadIdle || current.goalActive || current.ownedBackground.length) {
+          if (current.ownedBackground.length && !current.goalActive) {
+            await new Promise<void>((resolve) => setTimeout(resolve, input.pollIntervalMs ?? 250));
+            continue;
+          }
+          break;
+        }
+        const status = pendingTerminal?.["status"];
+        if (status === "failed") {
+          const error = asObject(pendingTerminal?.["error"]);
+          const failed = parseCodexEvent(
+            { type: "turn.failed", error: { message: error?.["message"] ?? "turn failed" } },
+            input.spec.session_id,
+            parseState,
+          );
+          if (failed) for (const event of failed) yield event;
+        } else if (status === "completed") {
+          const final = parseCodexEvent(
+            { type: "turn.completed", usage: {} },
+            input.spec.session_id,
+            parseState,
+          );
+          if (final)
+            for (const event of final) {
+              if (event.type !== "usage") yield event;
+            }
+        }
+        yield {
+          type: "completed",
+          session_id: input.spec.session_id,
+          ts: nowIso(),
+          ...(status === "interrupted" ? { aborted: true } : {}),
+          payload: {
+            native_session_id: threadId,
+            native_turn_id: pendingTerminal?.["id"] ?? activeTurnId,
+          },
+        };
+        return;
+      }
+    }
   } catch (error) {
     const aborted = abort.signal.aborted;
     yield {
