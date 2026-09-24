@@ -3632,7 +3632,8 @@ credential variables.
 
 The installer recipe producer also accepts the explicit `local` target used by
 host integrations. Npm harnesses then install under the existing managed Node
-root (`~/.claudexor/node/bin`), which is already shared by local resolution and
+root (`~/.claudexor/node`, launchers in its `bin` on POSIX), which is already
+shared by local resolution and
 native harness PATH resolution; Cursor keeps its vendor-selected destination,
 and normalized harness discovery covers both `~/.local/bin` and
 `~/.cursor/bin`. An explicit `--target local --yes` is suitable for an
@@ -3655,8 +3656,24 @@ pathname because a new owner could have replaced it between observation and
 mutation. An unexpected filesystem or child-process exception is normalized by
 the canonical CLI projector as `harness_install_failed`; JSON mode still emits
 one object containing the full pre-execution disclosure.
-Local Windows installation is a typed `unsupported_platform` refusal before
-filesystem or child-process side effects. The omitted target remains `remote`,
+On Windows an npm global prefix holds only `.cmd`/sh/ps1 shims and no
+executable image, and Claudexor never spawns a harness through a shell (issue
+#191), so the local target is supported exactly where the pinned package
+yields a verified package-native image: `@openai/codex` resolves its optional
+`@openai/codex-win32-<arch>` platform package and executes
+`vendor/<triple>/bin/codex.exe` from it. Core's `runtime-env.ts` is the one
+owner of that layout (`npmGlobalPackagesDir`, `embeddedNpmCli`,
+`windowsNativeImageDir`): the installer runs the embedded
+`node_modules/npm/bin/npm-cli.js` beside `node.exe`, proves the image inside
+the prefix, and the normalized harness PATH carries that image dir on win32
+(`managedWindowsNativeImageDirs`) so doctor, login, runs and quota resolve the
+same `codex.exe` by bare name. The prefix is anchored on the same `HOME` the
+PATH producer reads (the user profile when unset). Every other vendor — an npm
+pin without a verified image (claude, opencode), an unsupported architecture,
+or a script vendor — is a typed `unsupported_platform` refusal before
+filesystem or child-process side effects, and the Windows CI lane installs the
+real pinned package with no ambient node/npm as the proof
+(`scripts/windows-local-install-smoke.mjs`). The omitted target remains `remote`,
 so the SSH installer's
 visible disclosure, confirmation, command, destination, and precedence
 contract are unchanged. After any successful local install, the embedding host
@@ -3730,7 +3747,8 @@ A host owns the install directory, config root, process, rollback, and exact
 reviewed pin. Its full Node toolchain is the exact version proven by that pin's
 closure smoke; POSIX consumers using local harness install must provide both
 `<node-root>/bin/node` and
-`<node-root>/lib/node_modules/npm/bin/npm-cli.js`, with no ambient-PATH npm
+`<node-root>/lib/node_modules/npm/bin/npm-cli.js` (Windows: `node.exe` and its
+adjacent `node_modules\npm\bin\npm-cli.js`), with no ambient-PATH npm
 fallback. The root package's
 `engines.node >=20.19.0` promise covers the npm distribution and does not by
 itself prove a release-built `--target=node22` closure on Node 20. The pin also

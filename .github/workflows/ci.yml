@@ -309,6 +309,44 @@ jobs:
           packages/daemon/src/command-retention.test.ts
           packages/control-api/src/model-routes.test.ts
 
+      # The local Codex installer on Windows, proven against the REAL pinned
+      # package: the exact embedded Node toolchain (the official zip's
+      # `node.exe` beside its own `node_modules/npm/bin/npm-cli.js`, SHA-256
+      # pinned below for the `.node-version` release), no node/npm on PATH,
+      # an isolated profile/config root, and the package-native `codex.exe`
+      # the shared harness PATH resolves for doctor/login/run. Auth is a
+      # separate lane; this proves install, receipt, version and doctor
+      # readiness only. `scripts/windows-local-install-smoke.mjs` is the proof.
+      - name: Stage the exact embedded Node toolchain (node.exe + its own npm-cli.js)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = (Get-Content .node-version -Raw).Trim()
+          $expected = "edaca9bd58ec8e92037dac4e877d52f6b8f430b81c18b57e264b4e2fb111cd56"
+          $archive = "node-v$version-win-x64.zip"
+          $stage = Join-Path $env:RUNNER_TEMP "claudexor-embedded-node"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          $zip = Join-Path $stage $archive
+          Invoke-WebRequest -Uri "https://nodejs.org/dist/v$version/$archive" -OutFile $zip
+          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) {
+            throw "$archive SHA-256 $actual does not match the pinned $expected (nodejs.org SHASUMS256.txt for v$version)"
+          }
+          Expand-Archive -LiteralPath $zip -DestinationPath $stage -Force
+          $node = Join-Path $stage "node-v$version-win-x64\node.exe"
+          $npm = Join-Path (Split-Path -Parent $node) "node_modules\npm\bin\npm-cli.js"
+          if (-not (Test-Path -LiteralPath $node -PathType Leaf)) { throw "embedded node.exe missing at $node" }
+          if (-not (Test-Path -LiteralPath $npm -PathType Leaf)) { throw "embedded npm-cli.js missing at $npm" }
+          & $node --version
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "CLAUDEXOR_EMBEDDED_NODE=$node" -Encoding utf8
+
+      - name: Local Codex install proof (exact npm pin, embedded npm, no ambient node/npm, isolated profile)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & $env:CLAUDEXOR_EMBEDDED_NODE scripts/windows-local-install-smoke.mjs
+          if ($LASTEXITCODE -ne 0) { throw "windows-local-install-smoke exited $LASTEXITCODE" }
+
   swift:
     runs-on: macos-26
     steps:
