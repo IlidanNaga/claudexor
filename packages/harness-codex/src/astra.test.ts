@@ -47,13 +47,20 @@ describe("GPT-6 Astra on the pinned Codex CLI", () => {
       });
       const manifest = await adapter.discover();
       const known = knownModelIdsForRoute(manifest.capabilities.known_models, "local_session");
-      expect(validateModel("gpt-6-astra", known, "manifest").status).toBe("ok");
+      expect(validateModel("gpt-6-astra", known, "manifest", "authoritative").status).toBe("ok");
       expect(manifest.capabilities.model_effort_levels["gpt-6-astra"]).toEqual({
         levels: ["low", "medium", "high", "xhigh", "max", "ultra"],
         default: "medium",
       });
-      for (const hidden of ["gpt-reserve", "codex-auto-review"])
-        expect(validateModel(hidden, known, "manifest").status).toBe("rejected");
+      // The hint list itself lacks these; codex's advisory declaration then
+      // forwards them (presence is not required), authoritative would refuse.
+      for (const hidden of ["gpt-reserve", "codex-auto-review"]) {
+        expect(known).not.toContain(hidden);
+        expect(validateModel(hidden, known, "manifest", "authoritative").status).toBe("rejected");
+        expect(
+          validateModel(hidden, known, "manifest", manifest.capabilities.model_inventory_absence!),
+        ).toMatchObject({ status: "ok", unverified: true });
+      }
 
       const spec = HarnessRunSpec.parse({
         session_id: `astra-${source}`,

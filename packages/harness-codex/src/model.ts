@@ -312,10 +312,13 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
         const catalog = discovered?.accountFingerprint
           ? discovered
           : await catalogFor(auth, context, fetcher, now, clientVersion);
+        // The account catalog is a complete enumeration for the declared
+        // client version, so absence IS proof here (INV-104): authoritative.
         const checked = validateModel(
           request.model,
           catalog.models.map((model) => model.id),
           "api",
+          "authoritative",
         );
         const model = catalog.models.find((entry) => entry.id === request.model);
         // Strict on purpose: the catalog row is the request contract (efforts,

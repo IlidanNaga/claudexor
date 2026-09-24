@@ -81,13 +81,15 @@ struct HarnessModelOverrideField: View {
         }
     }
 
-    /// The harness ANSWERED with no truth source: a stored legacy override
-    /// will be refused at preflight, so SHOW it and offer the only
-    /// meaningful action — clearing it (explicit null on save).
+    /// The harness ANSWERED with no truth source while a legacy override is
+    /// stored: an authoritative harness refuses it at preflight, an advisory
+    /// one sends it to the vendor as-is and says so (INV-104). Either way the
+    /// picker cannot offer it, so SHOW it with the one meaningful action —
+    /// clearing it (explicit null on save).
     private var refusedLegacy: some View {
         LabeledContent("Model") {
                 HStack(spacing: Theme.Spacing.xs) {
-                    Text("\(modelDraft) — refused (no truth source)")
+                    Text("\(modelDraft) — not in this harness's model list")
                         .font(.caption).foregroundStyle(.orange)
                     Button("Clear") { modelDraft = "" }
                         .controlSize(.small)

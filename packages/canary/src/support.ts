@@ -73,12 +73,22 @@ export function makeSandbox(): Sandbox {
     '#!/bin/sh\ncase "$1" in\n  --version) echo "codex-cli 0.0.0-stub" ;;\n  *) exit 1 ;;\nesac\n',
   );
   chmodSync(codexStub, 0o755);
+  // Same shape for agy: its manifest hint list is the AUTHORITATIVE truth
+  // source the settings-write-strict canary needs (codex declares absence
+  // advisory since the per-harness declaration, so it can no longer refuse).
+  const agyStub = join(base, "agy-stub");
+  writeFileSync(
+    agyStub,
+    '#!/bin/sh\ncase "$1" in\n  --version) echo "agy 0.0.0-stub" ;;\n  *) exit 1 ;;\nesac\n',
+  );
+  chmodSync(agyStub, 0o755);
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     HOME: home,
     CLAUDEXOR_CONFIG_DIR: configDir,
     CLAUDEXOR_DISABLE_STORED_SECRETS: "1",
     CLAUDEXOR_CODEX_BIN: codexStub,
+    CLAUDEXOR_AGY_BIN: agyStub,
     // Keep daemon state inside the sandbox too (config dir owns it).
   };
   return {

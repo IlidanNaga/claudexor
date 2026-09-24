@@ -266,13 +266,15 @@ export async function resolveExplicitReviewerPanel(
           if (
             !hasModelInventoryForRoute(adapter, manifest.capabilities.model_inventory_routes, route)
           ) {
-            // STRICT: the manifest list is the truth source here; an empty
-            // list means the harness cannot verify models and the explicit
-            // model is refused (validateModel phrases both refusals).
+            // The manifest list is the truth source here, judged under the
+            // harness's own absence declaration (INV-104): an authoritative
+            // harness refuses a miss and an empty list (validateModel phrases
+            // both); an advisory harness forwards the explicit model instead.
             const check = validateModel(
               requestedModel,
               knownModelIdsForRoute(manifest.capabilities.known_models, route),
               "manifest",
+              manifest.capabilities.model_inventory_absence ?? "authoritative",
             );
             if (check.status !== "ok") {
               if (!entry.credentialProfileId && credentialProfile && deps.resolveReviewerProfile) {
@@ -479,7 +481,14 @@ export async function resolveAutoReviewerPanel(
             discloseAutoSkip(deps, adapter.id, inventory.reason);
             continue familyLoop;
           }
-          const check = validateModel(requestedModel, [...inventory.ids], inventory.source);
+          // Locked: automatic selection never spawns on a guess, whatever the
+          // harness declares, so absence is judged authoritative here.
+          const check = validateModel(
+            requestedModel,
+            [...inventory.ids],
+            inventory.source,
+            "authoritative",
+          );
           if (check.status !== "ok") {
             if (credentialProfile && deps.resolveReviewerProfile) {
               excludedProfileIds.add(credentialProfile.profile_id);

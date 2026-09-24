@@ -440,8 +440,10 @@ consumer is a staged field). Capabilities are data-driven and declared by the
 adapter: `effort_levels` + `model_effort_levels` (+ the
 `effort_levels_verified_against` freshness note) and `known_models` (+ the
 `known_models_verified_against` freshness note) as the manifest model truth
-source under the STRICT semantics described in the model-governance section
-above — there is no warn-and-pass-through tier.
+source, judged under the harness's own `model_inventory_absence` declaration
+described in the model-governance section above: strict where the harness
+declares its lists complete, forward-and-disclose where it declares them
+advisory — there is no silent pass-through tier either way.
 
 Reasoning effort is an OPEN vocabulary, mirroring the vendors: codex types its
 own `ReasoningEffort` as any non-empty value the model advertises, and Claude
@@ -549,9 +551,9 @@ reads; per-attempt overrides
 (budget downgrade to `fallback_model`, fallback retry) sit on top. Every
 explicit model — per-run, settings default, fallback, reviewer — must pass
 the harness's model truth source wherever that source can prove absence (live
-`models()` inventory, else manifest `known_models`; a harness with neither
-refuses explicit models; an advisory live inventory forwards, see below): enforced at
-settings write (400), run preflight (typed failure with artifacts before any
+`models()` inventory, else manifest `known_models`; an authoritative harness
+with neither refuses explicit models; an advisory harness forwards, see below):
+enforced at settings write (400), run preflight (typed failure with artifacts before any
 CLI spawns), immediately before each routed spawn against that attempt's exact
 profile, state, cwd, and auth preference, and both reviewer-panel paths. A pinned
 profile answers its OWN inventory through the same route resolver the run path
@@ -560,20 +562,28 @@ route is enumerated with the same `auto` the adapter will resolve and the spec
 reaches the adapter unrewritten: the gate reads the run's identity, it never
 decides it, and an undecidable route is the vendor's refusal to make, not the
 gate's.
-The same rule decides what a list may refuse with. A live inventory always
-proves PRESENCE; it proves ABSENCE only when its producer declares that it can.
-`model_inventory_absence: "advisory"` (codex, because `model/list` carries no
-provenance and the CLI substitutes a bundled default list when its remote fetch
-times out) makes an unlisted EXPLICIT model undecidable here, so the gate
-forwards it byte-identical, the vendor decides, and the per-spawn gate discloses
-once — as a status event — that the model was not listed. Preflight stays
-silent, so one spawn speaks once. Manifest truth is never advisory and is never
-substituted to admit a model; the unscoped `/harnesses/:id/models` query, the
-settings-write gate, the doctor's configured-model check and the automatic
-reviewer panel are unaffected, since they read manifest truth or keep their own
-skip-at-zero-cost contract. The residual is disclosed rather than guessed at: a
-vendor CLI refusing a forwarded model surfaces as an untyped error carrying the
-vendor's text, and a mistyped model on such a harness costs one spawn.
+The same rule decides what a list may refuse with. A list always proves
+PRESENCE; whether an absence from it is proof too is the HARNESS's declaration
+(`model_inventory_absence`), and it governs the live inventory and the manifest
+hint list alike — the hints are one day's memory of the same vendor menu, so
+they can refuse no more than the producer can. `advisory` (claude: the picker
+is an alias menu of one binary version plus the account's bootstrap rows;
+codex: `model/list` carries no provenance and the CLI substitutes a bundled
+default list when its remote fetch times out; cursor: `--list-models` is a
+fail-soft menu blind to routing variants) makes an unlisted EXPLICIT model
+undecidable, so every gate forwards it byte-identical and the vendor decides.
+Each admitting consumer says so once: the settings write persists the model
+and its read-back carries the admission in `notes` (the CLI prints it), the
+doctor's configured-model row passes with the note in its detail, and the
+per-spawn gate discloses a status event; preflight stays silent, so one spawn
+speaks once. `validateModel` takes the list, its source and the declaration
+with no defaults, and `checkHarnessModel` in the CLI registry is the one owner
+of that triple for the settings, doctor and catalog gates. No list is ever
+substituted to admit a model, and the automatic reviewer panel keeps its own
+skip-at-zero-cost contract whatever the harness declares. The residual is
+disclosed rather than guessed at: a vendor CLI refusing a forwarded model
+surfaces as an untyped error carrying the vendor's text, and a mistyped model
+on an advisory harness costs one spawn.
 Thread ask/plan readiness and inventory use the same durable lane HOME as the
 eventual spawn, while non-thread read-only runs retain disposable state.
 `/harnesses/:id/models` reports
@@ -1387,8 +1397,9 @@ manifest truth applies. Codex account enumeration is native-session-specific,
 so API-key and unscoped legacy queries retain their manifest source instead of
 borrowing a subscription catalog. A failed supported live inventory remains
 unverifiable; it never falls back to a convenient manifest to admit a model.
-Where its producer declared absences advisory, an unverifiable answer instead
-sends the explicit model to the vendor unchanged (above). The authenticated
+Where the harness declared absences advisory, an unverifiable answer — and a
+manifest miss — instead sends the explicit model to the vendor unchanged
+(above). The authenticated
 account catalog read below is a different source and stays strict: a model it
 does not carry is a typed `model_unavailable` refusal.
 

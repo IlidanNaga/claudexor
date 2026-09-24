@@ -78,7 +78,11 @@ export async function settingsCommand(args: ParsedArgs, json: boolean): Promise<
     }
     const snapshot = await settingsRequest(addr, "POST", patch);
     if (json) printJson(snapshot);
-    else print(`updated ${key}`);
+    else {
+      print(`updated ${key}`);
+      // An advisory harness admitted a model its list lacks: say so once.
+      for (const note of snapshot.notes) print(`note: ${note}`);
+    }
     return 0;
   } catch (error) {
     return renderCliFailure(json, error, { messagePrefix: "claudexor settings:" });

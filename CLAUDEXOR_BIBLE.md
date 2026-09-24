@@ -615,36 +615,45 @@ invariant or operator decision before proceeding.
   schema (no `routing.default_model`); canaries
   `[INV-103:scalar-model-primary-only]` and `[INV-103:no-global-model]`;
   routing tests. Locked operator decision.
-- **INV-104** Wherever absence from the harness's model truth source (live
-  inventory or manifest known-good list) is proof, a model outside it is
-  refused at settings-write, run preflight (typed failure WITH artifacts before
-  any CLI spawns), and both reviewer-resolution paths — never forwarded to the
-  vendor CLI to die as an opaque native error. Refusals name the harness, the model, and the truth
-  source; model truth is surfaced to UIs (`source: api | manifest`), and
-  known-model hints carry a `verifiedAgainst` freshness note checked by the
-  model-hints-freshness gate. A truth source refuses only what it can prove:
-  the strict rule above holds wherever absence from the list is evidence, which
-  is every manifest list and every live inventory whose producer declares it.
-  A producer that cannot tell its own answer from a vendor-substituted one
-  declares `model_inventory_absence: "advisory"` (codex: a `model/list` reply
-  carries no provenance and the CLI serves a bundled default list when its
-  remote fetch times out), and then presence still admits while absence decides
-  nothing: the EXPLICIT model is forwarded byte-identical, the vendor accepts or
-  refuses it, and the per-spawn gate discloses once that the model was not
-  listed. No list is ever substituted for another to admit a model, and
-  automatic reviewer selection still skips an unlisted family at zero cost.
-  Residuals, disclosed: the explicit reviewer panel forwards without that
+- **INV-104** A model list is evidence of PRESENCE at one runtime identity,
+  account and time. Whether an absence from it is evidence too is the
+  HARNESS's own declaration (`model_inventory_absence`), honoured wherever its
+  lists are read — the live inventory and the manifest known-good list alike,
+  at settings-write, run preflight (typed failure WITH artifacts before any
+  CLI spawns), doctor readiness, `claudexor models` and both reviewer-resolution
+  paths. `authoritative` (the declaration a silent manifest gets) keeps the
+  strict rule: a model outside the list is refused with the harness, the model
+  and the truth source named, never forwarded to the vendor CLI to die as an
+  opaque native error, and a harness with no list refuses every explicit model.
+  `advisory` (claude: the picker is an alias menu of one binary version plus the
+  account's bootstrap rows; codex: a `model/list` reply carries no provenance
+  and the CLI serves a bundled default list when its remote fetch times out;
+  cursor: `--list-models` is a fail-soft menu blind to routing variants) means
+  presence still admits while absence decides nothing: the EXPLICIT model is
+  forwarded byte-identical, the vendor accepts or refuses it, and the consumer
+  that admitted it says so once — the settings read-back carries `notes`, the
+  readiness row carries the note in its detail, the per-spawn gate discloses a
+  status event. Hint ids count as present. No list is ever substituted for
+  another to admit a model; model truth is surfaced to UIs (`source: api |
+  manifest`); known-model hints carry a `verifiedAgainst` freshness note
+  checked by the model-hints-freshness gate; automatic reviewer selection still
+  skips an unlisted family at zero cost; HTTP model operations stay strict
+  against the account catalog read at a named client version; raw-api, agy and
+  opencode stay authoritative by declaration, not by proof of completeness.
+  Residuals, disclosed: the explicit reviewer panel forwards without the
   run-event disclosure (its spawn does not pass the per-spawn gate); on the CLI
-  run path a vendor model refusal arrives as an
-  untyped error carrying the vendor's text (only HTTP model operations are
-  typed, and they stay strict), and a mistyped explicit model on such a harness
-  now costs one spawn instead of failing free at the gate. verify: canaries
+  run path a vendor model refusal arrives as an untyped error carrying the
+  vendor's text; a mistyped explicit model on an advisory harness costs one
+  spawn, and bounded account failover may spend one start per account before a
+  typed account-independent stop exists. verify: canaries
   `[INV-104:model-truth-refusal]`, `[INV-104:models-manifest-fallback]`,
-  `[INV-104:settings-write-strict]`; settings-service tests;
-  modelGovernance preflight tests; `packages/core/src/model.test.ts`;
+  `[INV-104:settings-write-strict]`, `[INV-104:settings-write-advisory]`;
+  settings-service tests; modelGovernance preflight tests;
+  `packages/core/src/model.test.ts`; `packages/cli/src/model-truth.test.ts`;
   `packages/orchestrator/src/reviewerPanel.test.ts`;
-  `packages/harness-codex/src/astra.test.ts`. Operator decision 2026-09-21:
-  strict wherever the truth source can prove absence.
+  `packages/harness-codex/src/astra.test.ts`. Operator decisions 2026-09-21
+  (strict wherever a truth source can prove absence) and 2026-09-24 (absence is
+  the harness's declaration; claude, codex and cursor declare advisory).
 - **INV-105** Per-harness knobs a manifest does not support are disclosed as
   `ignored_settings` on `harness.started` — never silently dropped. This
   covers max_turns, tool lists, and effort (an empty declared ladder); an

@@ -59,13 +59,19 @@ describe("the claude manifest model truth source", () => {
     // flattens the route-scoped list, then `validateModel` judges against it.
     const manifest = await stubAdapter().discover();
     const known = knownModelIdsForRoute(manifest.capabilities.known_models, "local_session");
-    expect(validateModel("claude-fable-5-1", known, "manifest").status).toBe("ok");
-    expect(validateModel("claude-opus-5", known, "manifest").status).toBe("ok");
-    expect(validateModel("claude-opus-4-5", known, "manifest").status).toBe("ok");
-    // STRICT semantics: outside the list → rejected, naming the truth source.
-    const rejected = validateModel("claude-opus-9-9", known, "manifest");
-    expect(rejected.status).toBe("rejected");
-    expect(rejected.message).toContain("manifest known-model list");
+    const absence = manifest.capabilities.model_inventory_absence ?? "authoritative";
+    expect(validateModel("claude-fable-5-1", known, "manifest", absence).status).toBe("ok");
+    expect(validateModel("claude-opus-5", known, "manifest", absence).status).toBe("ok");
+    expect(validateModel("claude-opus-4-5", known, "manifest", absence).status).toBe("ok");
+    // Outside the list: judged under the harness's own declaration, which the
+    // manifest carries (both directions pinned here so the declaration is a
+    // fact of this file, never a default the gate assumed).
+    const foreign = validateModel("claude-opus-9-9", known, "manifest", absence);
+    expect(foreign.message).toContain("manifest known-model list");
+    expect(foreign.status).toBe(absence === "advisory" ? "ok" : "rejected");
+    expect(validateModel("claude-opus-9-9", known, "manifest", "authoritative").status).toBe(
+      "rejected",
+    );
   });
 
   it("projects vendor quota family names onto the manifest aliases", () => {
