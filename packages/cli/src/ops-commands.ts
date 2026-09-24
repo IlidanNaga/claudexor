@@ -325,6 +325,10 @@ export async function doctorCommand(args: ParsedArgs, json: boolean): Promise<nu
     if (status.reasons.length) print(`    reasons: ${status.reasons.join(", ")}`);
     if (status.configuredModelCheck?.status === "rejected") {
       print(`    model: INVALID — ${status.configuredModelCheck.message}`);
+    } else if (status.configuredModelCheck?.message) {
+      // An advisory harness admitted a model its list lacks: the human form
+      // says so too, not only the JSON readiness row.
+      print(`    model: ${status.configuredModel ?? ""} — ${status.configuredModelCheck.message}`);
     }
   }
   if (advisory) print(`advisory: ${advisory}`);

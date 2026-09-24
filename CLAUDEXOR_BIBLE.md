@@ -620,8 +620,10 @@ invariant or operator decision before proceeding.
   HARNESS's own declaration (`model_inventory_absence`), honoured wherever its
   lists are read — the live inventory and the manifest known-good list alike,
   at settings-write, run preflight (typed failure WITH artifacts before any
-  CLI spawns), doctor readiness, `claudexor models` and both reviewer-resolution
-  paths. `authoritative` (the declaration a silent manifest gets) keeps the
+  CLI spawns), doctor readiness and the explicit reviewer-resolution path,
+  while `claudexor models` shows each list's source and hint marks and
+  automatic reviewer selection keeps the zero-cost skip stated below.
+  `authoritative` (the declaration a silent manifest gets) keeps the
   strict rule: a model outside the list is refused with the harness, the model
   and the truth source named, never forwarded to the vendor CLI to die as an
   opaque native error, and a harness with no list refuses every explicit model.

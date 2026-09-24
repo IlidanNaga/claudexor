@@ -21,15 +21,20 @@
  * gets the frozen `CLAUDE_KNOWN_MODELS` ids appended as `origin: "hint"` rows —
  * presence never shrinks below today's manifest, even when the binary is gone.
  *
- * Two scopes (owner decision 2026-09-24, Q5=A):
- *  - PROFILE-BOUND (`config_dir_login` profile): the profile's own
- *    `CLAUDE_CONFIG_DIR` and keychain bridge exactly as its runs use, bootstrap
- *    allowed, so the account's own rows (server-provided options, org default,
- *    entitlement filtering) appear in account views.
- *  - BINARY-ONLY (no profile, or an `oauth_token`/`api_key` profile): a
- *    disposable scratch `HOME` + `CLAUDE_CONFIG_DIR` under the Claudexor-owned
- *    state root and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` — no
- *    credential is read, nothing outside the scratch dir is written.
+ * Scopes (owner decision 2026-09-24, Q5=A: an account view reads the account):
+ *  - PROFILE-BOUND, `config_dir_login`: the profile's own `CLAUDE_CONFIG_DIR`
+ *    and keychain bridge exactly as its runs use, bootstrap allowed, so the
+ *    account's own rows (server-provided options, org default, entitlement
+ *    filtering) appear in account views.
+ *  - PROFILE-BOUND, `api_key` / `oauth_token`: the profile's own credential in
+ *    the env var its runs use (`ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN`),
+ *    under a scratch `HOME` + `CLAUDE_CONFIG_DIR`, bootstrap allowed — the
+ *    picker an API-key account sees (`sonnet[1m]`, …) is not the logged-out
+ *    menu. The cache key is the profile id; no secret byte ever keys anything.
+ *  - BINARY-ONLY (no profile — the unscoped listing): a disposable scratch
+ *    `HOME` + `CLAUDE_CONFIG_DIR` under the Claudexor-owned state root and
+ *    `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` — no credential is read,
+ *    nothing outside the scratch dir is written.
  *
  * One cached single-flight capture per (scope, binary identity): concurrent
  * callers share one child, a caller's abort never reaches it, answers live for
@@ -42,11 +47,13 @@ import type { HarnessModelSpec } from "@claudexor/core";
 import {
   composeBaseEnv,
   harnessBinaryIdentity,
+  harnessBinaryIdentityOnPath,
   providerScrubEnv,
   runCapture,
   type HarnessBinaryIdentity,
 } from "@claudexor/core";
 import type { HarnessCapabilities, HarnessModel } from "@claudexor/schema";
+import { resolveSecret } from "@claudexor/secrets";
 import { ensureDir, nativeHarnessStateRoot } from "@claudexor/util";
 import { CLAUDE_KNOWN_MODELS } from "./capability-profile.js";
 import { BIN } from "./effort-probe.js";
@@ -206,20 +213,37 @@ export function claudeModelRows(answer: ClaudeInitializeAnswer | null): HarnessM
 }
 
 export type ClaudeModelProbeScope =
-  { kind: "profile"; key: string; configDir: string } | { kind: "binary"; key: "binary" };
+  | { kind: "profile"; key: string; configDir: string }
+  | {
+      kind: "credential";
+      key: string;
+      envKey: "ANTHROPIC_API_KEY" | "CLAUDE_CODE_OAUTH_TOKEN";
+      secretRef: string | null;
+    }
+  | { kind: "binary"; key: "binary" };
 
 /**
  * Which store the probe reads. A `config_dir_login` profile is probed under
- * its OWN config dir (the account's rows); everything else — no profile, an
- * `oauth_token` or `api_key` profile, an unscoped route query — gets the
- * credential-free binary probe. The scope key is the account half of the
- * cache key; it never carries secret bytes (a config dir path, not a token).
+ * its OWN config dir; an `api_key` / `oauth_token` profile with its OWN
+ * credential in the env var its runs use; no profile (the unscoped listing)
+ * gets the credential-free binary probe. The scope key is the account half of
+ * the cache key; it never carries secret bytes (a config dir path or a profile
+ * id, not a token).
  */
 export function claudeModelProbeScope(spec?: HarnessModelSpec): ClaudeModelProbeScope {
   const profile = spec?.credentialProfile;
   if (profile?.credential_kind === "config_dir_login") {
     const configDir = canonicalProfileConfigDir(profile.isolation_locator ?? "");
     return { kind: "profile", key: `config:${configDir}`, configDir };
+  }
+  if (profile?.credential_kind === "api_key" || profile?.credential_kind === "oauth_token") {
+    return {
+      kind: "credential",
+      key: `credential:${profile.profile_id}`,
+      envKey:
+        profile.credential_kind === "api_key" ? "ANTHROPIC_API_KEY" : "CLAUDE_CODE_OAUTH_TOKEN",
+      secretRef: profile.secret_ref ?? null,
+    };
   }
   return { kind: "binary", key: "binary" };
 }
@@ -235,16 +259,18 @@ function isModelOverrideEnvKey(key: string): boolean {
 
 /**
  * The env PATCH the probe child spawns under (applied by `runCapture` over the
- * normalized host env; `null` deletes). Provider secrets are scrubbed on both
- * scopes; the profile scope re-adds nothing (the keychain bridge IS the
- * credential transport), the binary scope points HOME/config at the scratch
- * dir. Every model-override key present anywhere in the effective env is
- * deleted explicitly so the answer describes the binary, not this host.
+ * normalized host env; `null` deletes). Provider secrets are scrubbed on every
+ * scope; the profile scope re-adds nothing (the keychain bridge IS the
+ * credential transport), the credential scope re-adds exactly the profile's
+ * own variable, and both credential-free scopes point HOME/config at the
+ * scratch dir. Every model-override key present anywhere in the effective env
+ * is deleted explicitly so the answer describes the binary, not this host.
  */
 export function claudeModelProbeEnv(
   scope: ClaudeModelProbeScope,
   base: Env | undefined,
   scratchDir: string,
+  secret: string | null = null,
 ): Env {
   const patch: Env =
     scope.kind === "profile"
@@ -255,7 +281,11 @@ export function claudeModelProbeEnv(
           HOME: scratchDir,
           USERPROFILE: scratchDir,
           CLAUDE_CONFIG_DIR: scratchDir,
-          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+          // A credential scope needs the bootstrap (its rows come from the
+          // account); the binary scope must not talk to anyone.
+          ...(scope.kind === "credential"
+            ? { [scope.envKey]: secret }
+            : { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" }),
         };
   for (const key of [...Object.keys(composeBaseEnv("mirror_native")), ...Object.keys(patch)]) {
     if (isModelOverrideEnvKey(key)) patch[key] = null;
@@ -264,27 +294,32 @@ export function claudeModelProbeEnv(
 }
 
 /**
- * Which bytes the probe will run: resolved the way the spawn layer resolves
- * a bare `claude` — the normalized host env plus the caller's PATH override
- * only. The probe's own HOME overrides (scratch dir, keychain-bridge home) are
- * deliberately NOT applied here: the spawn layer composes PATH from the host
- * env BEFORE applying any patch, so re-normalizing under a substituted HOME
- * would let the probe resolve a different binary than the run does.
+ * Which bytes the probe will run, resolved exactly the way the spawn layer
+ * resolves a bare `claude`: the normalized host env, unless the caller's env
+ * patch carries a PATH — the spawn layer applies that patch verbatim over the
+ * normalized env, so such a child resolves on the patch PATH alone and the
+ * probe must not re-normalize it (it would key and capture the managed binary
+ * while the run executes the override). The probe's own HOME overrides are
+ * never applied here either.
  */
 function probeBinaryIdentity(
   base: Env | undefined,
-  binaryIdentity: typeof harnessBinaryIdentity,
+  deps: ClaudeModelProbeDeps,
 ): HarnessBinaryIdentity | null {
-  const source = composeBaseEnv("mirror_native");
-  const path = base?.["PATH"];
-  if (typeof path === "string") source.PATH = path;
-  return binaryIdentity(BIN, source);
+  const patchPath = base?.["PATH"];
+  if (typeof patchPath === "string") {
+    return (deps.binaryIdentityOnPath ?? harnessBinaryIdentityOnPath)(BIN, patchPath);
+  }
+  return (deps.binaryIdentity ?? harnessBinaryIdentity)(BIN, composeBaseEnv("mirror_native"));
 }
 
-/** Injection seams (tests only; production callers pass nothing). */
+/** Injection seams (tests only; production callers pass the adapter's secret resolver). */
 export interface ClaudeModelProbeDeps {
   runCapture?: typeof runCapture;
   binaryIdentity?: typeof harnessBinaryIdentity;
+  binaryIdentityOnPath?: typeof harnessBinaryIdentityOnPath;
+  /** The profile's credential for a credential scope (never logged, never keyed). */
+  resolveProfileSecret?: (ref: string) => string | null;
   nowMs?: () => number;
 }
 
@@ -295,9 +330,10 @@ interface CacheEntry {
 const cache = new Map<string, CacheEntry>();
 const pending = new Map<string, Promise<HarnessModel[]>>();
 
-/** Drop every cached answer and forget in-flight probes (tests; a login or
- * logout changes the account half of the profile scope, so the daemon's
- * credential-mutation path should call this too). */
+/** Drop every cached answer and forget in-flight probes (tests). A login or
+ * logout changes the account half of a profile scope, and nothing calls this
+ * on that path today: such a profile can serve its previous rows for up to
+ * the hour-long TTL, and `fresh: true` on the query is the bypass. */
 export function clearClaudeModelProbeCache(): void {
   cache.clear();
   pending.clear();
@@ -330,13 +366,14 @@ async function captureOnce(
   base: Env | undefined,
   identity: HarnessBinaryIdentity,
   capture: typeof runCapture,
+  secret: string | null,
 ): Promise<ClaudeInitializeAnswer | null> {
   const root = join(nativeHarnessStateRoot(), "claude", "model-probe");
   ensureDir(root);
   const scratch = mkdtempSync(join(root, "probe-"));
   try {
     const result = await capture(identity.path, [...CLAUDE_MODEL_PROBE_ARGS], {
-      env: claudeModelProbeEnv(scope, base, scratch),
+      env: claudeModelProbeEnv(scope, base, scratch, secret),
       cwd: scratch,
       input: claudeInitializeFrame(),
       timeoutMs: CLAUDE_MODEL_PROBE_TIMEOUT_MS,
@@ -370,7 +407,14 @@ export async function probeClaudeModels(
   let flight: Promise<HarnessModel[]>;
   try {
     const scope = claudeModelProbeScope(spec);
-    const identity = probeBinaryIdentity(spec?.env, deps.binaryIdentity ?? harnessBinaryIdentity);
+    // A credential profile whose secret is not stored cannot be probed as that
+    // account (its runs refuse too): hints, no spawn, nothing cached.
+    const secret =
+      scope.kind === "credential" && scope.secretRef
+        ? (deps.resolveProfileSecret ?? resolveSecret)(scope.secretRef)
+        : null;
+    if (scope.kind === "credential" && !secret) return fallback();
+    const identity = probeBinaryIdentity(spec?.env, deps);
     if (identity === null) return fallback();
     key = cacheKey(scope, identity);
     if (!spec?.fresh) {
@@ -382,7 +426,7 @@ export async function probeClaudeModels(
     // The capture owns its own bound; no caller's signal reaches it, so one
     // cancelled caller cannot hand every later caller a killed capture.
     const started = nowMs();
-    flight = captureOnce(scope, spec?.env, identity, deps.runCapture ?? runCapture)
+    flight = captureOnce(scope, spec?.env, identity, deps.runCapture ?? runCapture, secret)
       .catch((): ClaudeInitializeAnswer | null => null)
       .then((answer) => {
         const rows = claudeModelRows(answer);

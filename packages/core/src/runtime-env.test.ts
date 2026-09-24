@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   brokenInstallAdvisory,
   harnessBinaryIdentity,
+  harnessBinaryIdentityOnPath,
   managedRunnerNodeDir,
   normalizedHarnessPath,
   resolveHarnessBinary,
@@ -163,6 +164,35 @@ describe("resolveHarnessBinary", () => {
     expect(harnessBinaryIdentity(link, env)).toEqual(third);
     expect(harnessBinaryIdentity("tool-id-missing", env)).toBeNull();
     expect(harnessBinaryIdentity(join(root, "nope", "tool"), env)).toBeNull();
+  });
+
+  it("harnessBinaryIdentityOnPath resolves on the EXACT path string, never a normalized one", () => {
+    const a = join(root, "exact-a");
+    const b = join(root, "exact-b");
+    for (const dir of [a, b]) {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "tool-exact"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    }
+    // First entry wins; the managed prefixes are NOT prepended (a managed
+    // `tool-exact` could not shadow the caller's own PATH here).
+    expect(harnessBinaryIdentityOnPath("tool-exact", b)?.path).toBe(
+      realpathSync(join(b, "tool-exact")),
+    );
+    expect(harnessBinaryIdentityOnPath("tool-exact", [a, b].join(delimiter))?.path).toBe(
+      realpathSync(join(a, "tool-exact")),
+    );
+    // An absolute name is honoured as written; a name absent from the path is null.
+    expect(harnessBinaryIdentityOnPath(join(b, "tool-exact"), a)?.path).toBe(
+      realpathSync(join(b, "tool-exact")),
+    );
+    expect(harnessBinaryIdentityOnPath("tool-exact", join(root, "empty-dir"))).toBeNull();
+    // Same bytes as the normalized resolver reports for the same file.
+    expect(harnessBinaryIdentityOnPath("tool-exact", a)).toEqual(
+      harnessBinaryIdentity("tool-exact", {
+        HOME: join(root, "no-home"),
+        PATH: a,
+      } as NodeJS.ProcessEnv),
+    );
   });
 
   it("brokenInstallAdvisory returns null when the binary resolves or nothing is on disk", () => {

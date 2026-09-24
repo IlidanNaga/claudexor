@@ -136,7 +136,7 @@ struct HarnessModelOverrideField: View {
 
     private var modelFallbackHelp: String {
         if loadingModels { return "Loading \(family.label) models…" }
-        return "\(family.label) exposes no model truth source, so runs use its default model; an explicit model would be refused (strict model governance)."
+        return "\(family.label) exposes no model list, so runs use its default model; an explicit override is judged at run time by the harness's own declaration (refused where its lists are authoritative, forwarded and disclosed where they are advisory)."
     }
 
     private func loadModels(force: Bool = false) async {

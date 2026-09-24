@@ -276,7 +276,7 @@ export const HarnessCapabilities = z
       )
       .default([])
       .describe(
-        "Manifest-declared model ids/aliases this harness accepts (bare string = every credential route; object form scopes a model to specific routes), used as the model truth source when the adapter has no live inventory; explicit models outside the truth source are refused.",
+        "Manifest-declared model ids/aliases this harness accepts (bare string = every credential route; object form scopes a model to specific routes), used as the model truth source when the adapter has no live inventory and judged under model_inventory_absence: an authoritative harness refuses an explicit model outside it, an advisory harness forwards it with a note.",
       ),
     /**
      * Vendor CLI version this `known_models` hint set was last verified against

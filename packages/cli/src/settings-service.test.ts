@@ -548,6 +548,35 @@ describe("commitSettingsUpdate atomic validate+write (A-1 TOCTOU race)", () => {
     );
   });
 
+  it("a quality-tier route on an ADVISORY harness persists an unlisted model with the tier note; a listed one is silent", async () => {
+    const notes: string[] = [];
+    await expect(
+      assertSettingsPatchValid(
+        ControlSettingsUpdateRequest.parse({
+          qualityTiers: {
+            implement: [[{ harness: "codex", model: "gpt-ghost-9000", effort: "high" }]],
+          },
+        }),
+        { goal: "auto" as const, qualityTiers: {}, harnesses: {} },
+        notes,
+      ),
+    ).resolves.toBeDefined();
+    expect(notes).toEqual([
+      expect.stringMatching(
+        /^quality tier route 'codex\/gpt-ghost-9000' \(truth source: manifest\): model "gpt-ghost-9000" is not in this harness's manifest known-model list; /,
+      ),
+    ]);
+    const silent: string[] = [];
+    await expect(
+      assertSettingsPatchValid(
+        oneTierPatch(),
+        { goal: "auto" as const, qualityTiers: {}, harnesses: {} },
+        silent,
+      ),
+    ).resolves.toBeDefined();
+    expect(silent).toEqual([]);
+  }, 30_000);
+
   it("commitSettingsUpdate returns the admission notes the write produced", async () => {
     await withSeededConfig({ goal: "auto", qualityTiers: {} }, async (root) => {
       const notes = await commitSettingsUpdate(

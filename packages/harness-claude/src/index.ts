@@ -613,7 +613,7 @@ export function createClaudeAdapter(deps: Partial<ClaudeRuntimeDeps> = {}): Harn
     },
 
     models(spec) {
-      return runtime.probeModels(spec);
+      return runtime.probeModels(spec, { resolveProfileSecret: runtime.resolveProfileSecret });
     },
 
     probeCredentialProfile(

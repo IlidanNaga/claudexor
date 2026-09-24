@@ -1410,11 +1410,14 @@ Claude's producer is the prompt-free `initialize` handshake of the installed
 picker rows of the `control_response` (`value`, `displayName`, `resolvedModel`),
 exit on EOF, never `--model` (the CLI echoes it as a row), `--setting-sources
 ""` and `--strict-mcp-config` (no hooks, no settings echo), model-override env
-scrubbed. Two scopes (owner decision 2026-09-24): a `config_dir_login` profile
-is probed under its own config dir and keychain bridge, so the account view
-carries the account's own rows; every other query (unscoped, `oauth_token` /
-`api_key` profiles) runs credential-free under a scratch HOME with non-essential
-traffic off and describes the binary alone. Rows carry `origin` (`live`: the
+scrubbed. Scopes (owner decision 2026-09-24): a `config_dir_login` profile is
+probed under its own config dir and keychain bridge, an `api_key` /
+`oauth_token` profile with its own credential in the env var its runs use
+under a scratch HOME (cache keyed by profile id, never by a secret), so the
+account view carries the account's own rows; the unscoped listing runs
+credential-free under a scratch HOME with non-essential traffic off and
+describes the binary alone. The probe resolves the binary exactly as the spawn
+layer does (a caller's PATH patch replaces the normalized PATH). Rows carry `origin` (`live`: the
 picker selectors and their resolutions as pinnable exact ids; `hint`: the frozen
 `CLAUDE_KNOWN_MODELS` ids appended so presence never shrinks below the manifest)
 and `resolved_model` (diagnostic; the row id is what travels). The answer is
@@ -1440,9 +1443,9 @@ minimum), so the transport declares ITS OWN verified level,
 `CODEX_HTTP_CLIENT_VERSION` (`http-client-version.ts`), raised to the installed
 Codex CLI's version when that is newer and never below the constant — not the
 managed-installer pin, which is a different fact (a release that only moves
-the installer must never decide which models an account can see). The catalog
-response carries the declared `clientVersion` and its source, every membership
-refusal names it, and the constant moves together with a recorded catalog
+the installer must never decide which models an account can see). The account
+view carries the declared `clientVersion` and its source per catalog (the
+legacy query keeps its shape), every membership refusal names it, and the constant moves together with a recorded catalog
 fixture pair (`fixtures/models-http-*.json`) whose shared rows must stay
 identical. In-process refresh work is serialized by canonical managed home;
 cancelled callers cannot release another caller past a still-live refresh. Each

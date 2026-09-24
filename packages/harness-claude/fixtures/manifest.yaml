@@ -104,7 +104,8 @@ fixtures:
   # the API-key handshake above (2.1.281; its line 3 carries a 6-row picker).
   # Declared `synthetic`, NOT `recorded`, ON PURPOSE: the strict vendor gate
   # (`release:verify:vendors`) compares every recorded fixture with the ONE
-  # installed CLI, and this package's recordings are pinned to 2.1.261 — a
+  # installed CLI, and this package's recordings are pinned to 2.1.281 (the
+  # paid-subscription capture stays 2.1.261) — a
   # second recorded cli_version can never be fresh on one release machine.
   # Its real provenance is stated in `capture` instead.
   protocol/initialize-picker-2.1.280.jsonl:

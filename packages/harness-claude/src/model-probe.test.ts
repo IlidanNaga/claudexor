@@ -356,7 +356,7 @@ describe("probeClaudeModels failure paths answer the hint rows only", () => {
 });
 
 describe("scope", () => {
-  it("keys a config_dir_login profile by its config dir and everything else as the binary", () => {
+  it("keys a config_dir_login profile by its config dir, a credential profile by its id, and no profile as the binary", () => {
     // The scope canonicalises the profile dir (realpath), so the expectation
     // does too: macOS tmp dirs live behind a /private symlink.
     const dir = realpathSync(join(ownedTmp, "profiles", "work"));
@@ -370,14 +370,34 @@ describe("scope", () => {
       kind: "binary",
       key: "binary",
     });
-    for (const kind of ["oauth_token", "api_key"] as const) {
-      expect(
-        claudeModelProbeScope({
-          cwd: "/repo",
-          credentialProfile: profile({ credential_kind: kind, secret_ref: "anthropic:work" }),
+    // A credential profile is probed AS that account: its own env var, its
+    // id as the cache key (never the secret), no config dir of its own.
+    expect(
+      claudeModelProbeScope({
+        cwd: "/repo",
+        credentialProfile: profile({ credential_kind: "api_key", secret_ref: "anthropic:work" }),
+      }),
+    ).toEqual({
+      kind: "credential",
+      key: "credential:work",
+      envKey: "ANTHROPIC_API_KEY",
+      secretRef: "anthropic:work",
+    });
+    expect(
+      claudeModelProbeScope({
+        cwd: "/repo",
+        credentialProfile: profile({
+          profile_id: "sub",
+          credential_kind: "oauth_token",
+          secret_ref: "claude_oauth:sub",
         }),
-      ).toEqual({ kind: "binary", key: "binary" });
-    }
+      }),
+    ).toEqual({
+      kind: "credential",
+      key: "credential:sub",
+      envKey: "CLAUDE_CODE_OAUTH_TOKEN",
+      secretRef: "claude_oauth:sub",
+    });
   });
 
   it("profile-bound and binary probes never share a cache entry", async () => {
@@ -411,6 +431,94 @@ describe("scope", () => {
     // Neutral cwd (never a repository), disposed once the capture is over.
     expect(calls[0]?.opts.cwd).not.toBe("/repo");
     expect(existsSync(calls[0]?.opts.cwd ?? "/nonexistent")).toBe(false);
+  });
+
+  it("credential env: the profile's own variable under a scratch config, bootstrap allowed, every other secret scrubbed", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "placeholder-host-key-must-not-reach-the-probe");
+    vi.stubEnv("ANTHROPIC_MODEL", "bogus-env-model");
+    const { calls, runCapture } = fakeCapture(PICKER_2_1_280);
+    const resolveProfileSecret = (ref: string) =>
+      ref === "anthropic:work" ? "placeholder-profile-key" : null;
+    await probeClaudeModels(
+      {
+        cwd: "/repo",
+        credentialProfile: profile({ credential_kind: "api_key", secret_ref: "anthropic:work" }),
+      },
+      { runCapture, binaryIdentity: identity, resolveProfileSecret },
+    );
+    expect(calls).toHaveLength(1);
+    const env = calls[0]?.opts.env ?? {};
+    const root = join(nativeHarnessStateRoot(), "claude", "model-probe");
+    expect(env["ANTHROPIC_API_KEY"]).toBe("placeholder-profile-key");
+    for (const key of PROVIDER_SECRET_ENV)
+      if (key !== "ANTHROPIC_API_KEY") expect(env[key], key).toBeNull();
+    // The account's rows come from the bootstrap: not switched off.
+    expect(env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"]).toBeUndefined();
+    expect(String(env["CLAUDE_CONFIG_DIR"]).startsWith(root)).toBe(true);
+    expect(env["HOME"]).toBe(env["CLAUDE_CONFIG_DIR"]);
+    expect(env["ANTHROPIC_MODEL"]).toBeNull();
+    expect(existsSync(String(env["CLAUDE_CONFIG_DIR"]))).toBe(false);
+
+    // An OAuth profile carries its token in the variable its runs use.
+    clearClaudeModelProbeCache();
+    await probeClaudeModels(
+      {
+        cwd: "/repo",
+        credentialProfile: profile({
+          profile_id: "sub",
+          credential_kind: "oauth_token",
+          secret_ref: "claude_oauth:sub",
+        }),
+      },
+      {
+        runCapture,
+        binaryIdentity: identity,
+        resolveProfileSecret: (ref) => (ref === "claude_oauth:sub" ? "placeholder-token" : null),
+      },
+    );
+    const oauthEnv = calls[1]?.opts.env ?? {};
+    expect(oauthEnv["CLAUDE_CODE_OAUTH_TOKEN"]).toBe("placeholder-token");
+    expect(oauthEnv["ANTHROPIC_API_KEY"]).toBeNull();
+  });
+
+  it("a credential profile whose secret is not stored answers the hints without a spawn; two profiles never share an entry", async () => {
+    const { calls, runCapture } = fakeCapture(PICKER_2_1_280);
+    const missing = profile({ credential_kind: "api_key", secret_ref: "anthropic:gone" });
+    await expect(
+      probeClaudeModels(
+        { cwd: "/repo", credentialProfile: missing },
+        { runCapture, binaryIdentity: identity, resolveProfileSecret: () => null },
+      ),
+    ).resolves.toEqual(claudeModelRows(null));
+    expect(calls).toHaveLength(0);
+    // Two credential profiles and the binary scope are three cache entries.
+    const deps = {
+      runCapture,
+      binaryIdentity: identity,
+      resolveProfileSecret: () => "placeholder-key",
+    };
+    await probeClaudeModels(
+      { cwd: "/repo", credentialProfile: profile({ credential_kind: "api_key", secret_ref: "a" }) },
+      deps,
+    );
+    await probeClaudeModels(
+      {
+        cwd: "/repo",
+        credentialProfile: profile({
+          profile_id: "two",
+          credential_kind: "api_key",
+          secret_ref: "b",
+        }),
+      },
+      deps,
+    );
+    await probeClaudeModels({ cwd: "/repo" }, deps);
+    expect(calls).toHaveLength(3);
+    await probeClaudeModels(
+      { cwd: "/repo", credentialProfile: profile({ credential_kind: "api_key", secret_ref: "a" }) },
+      deps,
+    );
+    expect(calls).toHaveLength(3);
   });
 
   it("binary-only env: scratch HOME + config under the owned state root, nonessential traffic off, model overrides gone", async () => {
@@ -619,6 +727,62 @@ describe("binary identity on disk", () => {
     expect(cwd).not.toBe("/repo");
     expect(cwd?.includes(join("claude", "model-probe"))).toBe(true);
     expect(existsSync(cwd ?? "/nonexistent")).toBe(false);
+    probe.clearClaudeModelProbeCache();
+  });
+});
+
+/**
+ * The spawn layer applies a caller's env patch VERBATIM over the normalized
+ * host env, so a patch PATH replaces it and the child resolves `claude` on the
+ * patch alone. The probe must resolve the same way: with the managed binary
+ * re-prepended it would key and capture a different binary than the run.
+ */
+describe("a PATH patch resolves the binary the run would execute", () => {
+  let root: string;
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "claudexor-probe-path-"));
+    vi.resetModules();
+    vi.stubEnv("CLAUDEXOR_CLAUDE_BIN", ""); // a bare `claude`, resolved on PATH
+  });
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  function stubDir(name: string, value: string): string {
+    const dir = join(root, name);
+    mkdirSync(dir, { recursive: true });
+    const line = JSON.stringify({
+      type: "control_response",
+      response: {
+        subtype: "success",
+        request_id: CLAUDE_INIT_REQUEST_ID,
+        response: { models: [{ value, displayName: value, resolvedModel: value }] },
+      },
+    });
+    writeFileSync(
+      join(dir, "claude"),
+      `#!/bin/sh\n/bin/cat <<'CLAUDE_STUB_EOF'\n${line}\nCLAUDE_STUB_EOF\n`, // /bin/cat: the child's PATH is the patch alone
+      {
+        mode: 0o755,
+      },
+    );
+    return dir;
+  }
+
+  it("captures and keys the binary on the patch PATH, not a managed one", async () => {
+    const alpha = stubDir("alpha", "alpha-model");
+    const beta = stubDir("beta", "beta-model");
+    const probe = await import("./model-probe.js");
+    probe.clearClaudeModelProbeCache();
+    const liveIds = (rows: Awaited<ReturnType<typeof probe.probeClaudeModels>>) =>
+      rows.filter((r) => r.origin === "live").map((r) => r.id);
+    expect(liveIds(await probe.probeClaudeModels({ cwd: "/repo", env: { PATH: beta } }))).toEqual([
+      "beta-model",
+    ]);
+    // A different patch PATH is a different binary, hence a different entry.
+    expect(liveIds(await probe.probeClaudeModels({ cwd: "/repo", env: { PATH: alpha } }))).toEqual([
+      "alpha-model",
+    ]);
     probe.clearClaudeModelProbeCache();
   });
 });
