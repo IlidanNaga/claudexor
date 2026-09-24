@@ -18,7 +18,13 @@
  */
 import type { HarnessEvent, HarnessRunSpec } from "@claudexor/schema";
 import { EffortHint } from "@claudexor/schema";
-import { harnessBinaryIdentity, normalizeEffort, resolveEffort, runCapture } from "@claudexor/core";
+import {
+  harnessBinaryIdentity,
+  harnessBinaryIdentityOnPath,
+  normalizeEffort,
+  resolveEffort,
+  runCapture,
+} from "@claudexor/core";
 import { nowIso, redactSecrets } from "@claudexor/util";
 import { CLAUDE_VENDOR_CLI_VERSION } from "./vendor-cli-version.js";
 
@@ -93,14 +99,17 @@ export function claudeAdvertisedEffortsForRun(
  * requested); a live parse or a hint-less run never pays for it.
  */
 export async function claudeRunEffortResolution(
-  spec: Pick<HarnessRunSpec, "session_id" | "effort_hint">,
+  spec: Pick<HarnessRunSpec, "session_id" | "effort_hint"> & { env?: HarnessRunSpec["env"] },
   deps: {
     probeEffortLevels: typeof probeClaudeEffortLevels;
     detectVersion: (abortSignal?: AbortSignal) => Promise<string | null>;
   },
   abortSignal?: AbortSignal,
 ): Promise<{ advertised: readonly EffortHint[]; disclosure: HarnessEvent | null }> {
-  const efforts = await deps.probeEffortLevels(abortSignal);
+  // The ladder must come from the binary THIS run will execute: a PATH in the
+  // run's env patch replaces the normalized PATH at spawn (see helpProbeIdentity).
+  const patchPath = typeof spec.env?.PATH === "string" ? spec.env.PATH : undefined;
+  const efforts = await deps.probeEffortLevels(abortSignal, patchPath);
   const advertised =
     efforts.live || !spec.effort_hint
       ? efforts.levels
@@ -219,13 +228,24 @@ const HELP_PROBE_TIMEOUT_MS = 10_000;
  * is re-read on the next call instead of served the old ladder for the life
  * of the daemon (live defect 2026-09-18: a stale `xhigh`-less ladder after an
  * in-place update). An unresolvable binary keys as such; its capture fails and
- * is forgotten below anyway, so the next call looks again.
+ * is forgotten below anyway, so the next call looks again. A run whose env
+ * patch carries a PATH executes the binary on THAT path (the spawn layer applies
+ * the patch verbatim over the normalized PATH), so its ladder is read from the
+ * same bytes: resolved on the exact patch PATH, spawned by absolute path.
  */
 let helpProbe: { key: string; promise: Promise<ClaudeHelpProbe> } | null = null;
 
-function helpProbeKey(): string {
-  const id = harnessBinaryIdentity(BIN);
-  return JSON.stringify(id ? [id.path, id.ino, id.size, id.mtimeMs] : ["unresolved", BIN]);
+function helpProbeIdentity(patchPath?: string): { key: string; spawn: string } {
+  const id =
+    patchPath === undefined
+      ? harnessBinaryIdentity(BIN)
+      : harnessBinaryIdentityOnPath(BIN, patchPath);
+  return {
+    key: JSON.stringify(
+      id ? [id.path, id.ino, id.size, id.mtimeMs] : ["unresolved", BIN, patchPath ?? null],
+    ),
+    spawn: id?.path ?? BIN,
+  };
 }
 
 /** What an abandoned caller reads, without the shared capture ever seeing it. */
@@ -256,12 +276,13 @@ function abandonedProbe(): ClaudeHelpProbe {
  * machine running an older CLI does not merely lose freshness: it advertises and
  * forwards `xhigh` to a binary that rejects it, for the life of the daemon.
  */
-function sharedHelpCapture(): Promise<ClaudeHelpProbe> {
-  const key = helpProbeKey();
+function sharedHelpCapture(patchPath?: string): Promise<ClaudeHelpProbe> {
+  const { key, spawn } = helpProbeIdentity(patchPath);
   if (helpProbe?.key === key) return helpProbe.promise;
   const pending = (async (): Promise<ClaudeHelpProbe> => {
     try {
-      const result = await runCapture(BIN, ["--help"], {
+      const result = await runCapture(spawn, ["--help"], {
+        ...(patchPath !== undefined ? { env: { PATH: patchPath } } : {}),
         timeoutMs: HELP_PROBE_TIMEOUT_MS,
         cancelSignal: "SIGTERM",
         cancelKillDelayMs: 0,
@@ -293,8 +314,11 @@ function sharedHelpCapture(): Promise<ClaudeHelpProbe> {
  * anyway, and the ladder falls back to the snapshot for that one run — while the
  * capture keeps running for everybody else.
  */
-export function probeClaudeHelp(abortSignal?: AbortSignal): Promise<ClaudeHelpProbe> {
-  const shared = sharedHelpCapture();
+export function probeClaudeHelp(
+  abortSignal?: AbortSignal,
+  patchPath?: string,
+): Promise<ClaudeHelpProbe> {
+  const shared = sharedHelpCapture(patchPath);
   if (!abortSignal) return shared;
   if (abortSignal.aborted) return Promise.resolve(abandonedProbe());
   return new Promise<ClaudeHelpProbe>((resolve) => {
@@ -314,8 +338,10 @@ export function probeClaudeHelp(abortSignal?: AbortSignal): Promise<ClaudeHelpPr
  */
 export async function probeClaudeEffortLevels(
   abortSignal?: AbortSignal,
+  /** The run's PATH patch, when its env carries one (see helpProbeIdentity). */
+  patchPath?: string,
 ): Promise<{ levels: readonly EffortHint[]; live: boolean }> {
-  const probe = await probeClaudeHelp(abortSignal);
+  const probe = await probeClaudeHelp(abortSignal, patchPath);
   const parsed = probe.ok ? parseClaudeEffortHelp(probe.help) : null;
   return parsed ? { levels: parsed, live: true } : { levels: CLAUDE_EFFORT_SNAPSHOT, live: false };
 }

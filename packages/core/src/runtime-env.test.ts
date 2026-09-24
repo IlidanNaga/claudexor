@@ -117,8 +117,14 @@ describe("resolveHarnessBinary", () => {
     const env = { HOME: home, PATH: binDir, PATHEXT: ".COM;.EXE;.BAT;.CMD" } as NodeJS.ProcessEnv;
     // Pin a non-launchable runner so the managed-runner prepend stays out of the way.
     expect(resolveHarnessBinary("tool-w", env, "/no/such/node", "win32")).toBeNull();
+    // The exact-PATH resolver applies the same image rule (no shim, no bare name).
+    expect(harnessBinaryIdentityOnPath("tool-w", binDir, "win32")).toBeNull();
     const image = fakeBin(binDir, "tool-w.exe");
     expect(resolveHarnessBinary("tool-w", env, "/no/such/node", "win32")).toBe(image);
+    expect(harnessBinaryIdentityOnPath("tool-w", binDir, "win32")?.path).toBe(realpathSync(image));
+    expect(harnessBinaryIdentityOnPath("tool-w.exe", binDir, "win32")?.path).toBe(
+      realpathSync(image),
+    );
     // An explicit spelling is honored as written; POSIX keeps the bare name.
     expect(resolveHarnessBinary("tool-w.exe", env, "/no/such/node", "win32")).toBe(image);
     expect(resolveHarnessBinary("tool-w", env, "/no/such/node", "darwin")).toBe(

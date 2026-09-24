@@ -13,7 +13,7 @@
  * one alone.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -140,5 +140,43 @@ describe("the shared --help capture belongs to the process, not to its first cal
       levels: ["low", "medium", "high", "xhigh", "max"],
       live: true,
     });
+  });
+});
+
+/**
+ * A run whose env patch carries a PATH executes `claude` on that path (the spawn
+ * layer applies the patch verbatim over the normalized PATH), so its ladder must
+ * be read from the same bytes — not from whichever managed `claude` the host
+ * PATH resolves first.
+ */
+describe("the --help memo follows a run's PATH patch", () => {
+  it("reads the ladder of the binary on the patch PATH and keys it separately", async () => {
+    // A bare `claude`, resolved on PATH, as production spawns it.
+    vi.stubEnv("CLAUDEXOR_CLAUDE_BIN", "");
+    const pathDir = join(dir, "patch-bin");
+    mkdirSync(pathDir, { recursive: true });
+    const counter = join(dir, "spawns");
+    writeFileSync(
+      join(pathDir, "claude"),
+      `#!/bin/sh\necho spawn >> "${counter}"\n/bin/cat <<'CLAUDE_HELP_EOF'\n${HELP_2_1_89}\nCLAUDE_HELP_EOF\n`,
+      { mode: 0o755 },
+    );
+    const { probeClaudeEffortLevels, claudeRunEffortResolution } =
+      await import("./effort-probe.js");
+    expect(await probeClaudeEffortLevels(undefined, pathDir)).toEqual({
+      levels: LADDER_2_1_89,
+      live: true,
+    });
+    // The run-time resolution threads the spec's PATH through the same seam.
+    const resolution = await claudeRunEffortResolution(
+      { session_id: "ses", effort_hint: "xhigh", env: { PATH: pathDir } },
+      { probeEffortLevels: probeClaudeEffortLevels, detectVersion: async () => null },
+    );
+    expect(resolution.advertised).toEqual(LADDER_2_1_89);
+    expect(resolution.disclosure?.text).toContain("effort=xhigh (not accepted");
+    // Same patch PATH again: the memo answers, no second spawn.
+    await probeClaudeEffortLevels(undefined, pathDir);
+    const { readFileSync } = await import("node:fs");
+    expect(readFileSync(counter, "utf8").split("spawn").length - 1).toBe(1);
   });
 });
