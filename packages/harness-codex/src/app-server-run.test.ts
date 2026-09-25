@@ -40,6 +40,14 @@ describe("Codex app-server transport", () => {
             push({ id: request.id, result: {} });
           } else if (request.method === "thread/start") {
             push({ id: request.id, result: { thread: { id: "thread-1" } } });
+            push({
+              method: "mcpServer/startupStatus/updated",
+              params: { threadId: "thread-1", name: "required_one", status: "starting" },
+            });
+            push({
+              method: "mcpServer/startupStatus/updated",
+              params: { threadId: "thread-1", name: "required_one", status: "ready" },
+            });
           } else if (request.method === "turn/start") {
             push({ id: request.id, result: { turn: { id: "turn-1" } } });
             push({
@@ -74,6 +82,10 @@ describe("Codex app-server transport", () => {
       intent: "implement",
       prompt: "Keep working",
       cwd: process.cwd(),
+      output_schema: false,
+      extra_mcp_servers: [
+        { name: "required_one", command: "/bin/echo", args: [], env: {}, required: true },
+      ],
     });
     let first: HarnessEvent | undefined;
     for await (const event of runCodexAppServer({
@@ -98,11 +110,112 @@ describe("Codex app-server transport", () => {
       clientInfo: { name: "claudexor" },
       capabilities: { experimentalApi: true },
     });
+    expect(writes.find((request) => request.method === "turn/start")?.params).toMatchObject({
+      outputSchema: false,
+    });
     expect(first).toMatchObject({
       type: "started",
       session_id: "session-1",
-      payload: { native_session_id: "thread-1", native_turn_id: "turn-1" },
+      payload: {
+        native_session_id: "thread-1",
+        native_turn_id: "turn-1",
+        mcp_servers: [{ name: "required_one", status: "connected" }],
+      },
     });
+  });
+
+  it("types a required MCP startup failure notification before starting the turn", async () => {
+    const methods: string[] = [];
+    const replies: string[] = [];
+    let wake: (() => void) | undefined;
+    let stop = false;
+    const push = (message: unknown): void => {
+      replies.push(JSON.stringify(message));
+      wake?.();
+      wake = undefined;
+    };
+    const spawn: typeof spawnProcess = async function* (_bin, _args, options = {}) {
+      options.onSpawn?.({
+        write(data) {
+          const request = JSON.parse(data) as { id?: number; method: string };
+          methods.push(request.method);
+          if (request.method === "initialize") push({ id: request.id, result: {} });
+          if (request.method === "thread/start") {
+            push({ id: request.id, result: { thread: { id: "thread-mcp-failure" } } });
+            push({
+              method: "mcpServer/startupStatus/updated",
+              params: {
+                threadId: "thread-mcp-failure",
+                name: "required_one",
+                status: "starting",
+              },
+            });
+            push({
+              method: "mcpServer/startupStatus/updated",
+              params: {
+                threadId: "thread-mcp-failure",
+                name: "required_one",
+                status: "failed",
+                error: "unavailable",
+              },
+            });
+          }
+        },
+        end() {
+          stop = true;
+          wake?.();
+        },
+        closed: Promise.resolve(),
+      });
+      options.abortSignal?.addEventListener(
+        "abort",
+        () => {
+          stop = true;
+          wake?.();
+        },
+        { once: true },
+      );
+      while (!stop || replies.length) {
+        if (replies.length) yield { type: "stdout", line: replies.shift()! };
+        else
+          await new Promise<void>((resolve) => {
+            wake = resolve;
+          });
+      }
+    };
+    const events: HarnessEvent[] = [];
+    for await (const event of runCodexAppServer({
+      bin: "codex",
+      args: [],
+      spec: HarnessRunSpec.parse({
+        session_id: "session-mcp-failure",
+        intent: "implement",
+        prompt: "work",
+        cwd: process.cwd(),
+        extra_mcp_servers: [
+          { name: "required_one", command: "/bin/echo", args: [], env: {}, required: true },
+        ],
+      }),
+      env: {},
+      spawn,
+    }))
+      events.push(event);
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "error",
+        payload: {
+          code: "required_mcp_startup_failed",
+          mcp_servers: [{ name: "required_one", status: "failed" }],
+        },
+      }),
+    );
+    expect(events.at(-1)).toMatchObject({
+      type: "completed",
+      payload: { harness_reported_error: true },
+    });
+    expect(events.at(-1)?.aborted).toBeUndefined();
+    expect(methods).not.toContain("turn/start");
   });
 
   it("preserves run settings and verified image input", () => {
@@ -228,6 +341,25 @@ describe("Codex app-server transport", () => {
           },
         },
       },
+    ]);
+    expect(
+      codexAppServerEvents(
+        {
+          method: "item/completed",
+          params: {
+            item: {
+              type: "fileChange",
+              id: "patch-1",
+              changes: [{ path: "one.ts" }, { path: "two.ts" }],
+            },
+          },
+        },
+        "session-map",
+        state,
+      ),
+    ).toMatchObject([
+      { type: "file_change", payload: { path: "one.ts" } },
+      { type: "file_change", payload: { path: "two.ts" } },
     ]);
   });
 
@@ -487,7 +619,11 @@ describe("Codex app-server transport", () => {
     let stop = false;
     let paused = false;
     let interrupted = false;
-    let terminated = false;
+    const terminated = new Set<string>();
+    let resolveQueued!: () => void;
+    const queued = new Promise<void>((resolve) => {
+      resolveQueued = resolve;
+    });
     const push = (message: unknown): void => {
       replies.push(JSON.stringify(message));
       wake?.();
@@ -508,11 +644,31 @@ describe("Codex app-server transport", () => {
               params: { turn: { id: "turn-stop" } },
             });
             push({
+              method: "item/completed",
+              params: { item: { type: "agentMessage", id: "msg-stop", text: "waiting" } },
+            });
+            push({
+              method: "turn/completed",
+              params: { turn: { id: "turn-stop", status: "completed", items: [] } },
+            });
+            push({ method: "turn/started", params: { turn: { id: "turn-next" } } });
+            push({
               method: "item/started",
               params: {
                 item: {
                   type: "commandExecution",
                   id: "cmd-stop",
+                  command: "sleep 60",
+                  status: "inProgress",
+                },
+              },
+            });
+            push({
+              method: "item/started",
+              params: {
+                item: {
+                  type: "commandExecution",
+                  id: "cmd-stop-late",
                   command: "sleep 60",
                   status: "inProgress",
                 },
@@ -530,28 +686,35 @@ describe("Codex app-server transport", () => {
             push({ id: request.id, result: {} });
             push({
               method: "turn/completed",
-              params: { turn: { id: "turn-stop", status: "interrupted", items: [] } },
+              params: { turn: { id: "turn-next", status: "interrupted", items: [] } },
             });
           }
           if (request.method === "thread/backgroundTerminals/list")
             push({
               id: request.id,
               result: {
-                data: [
-                  ...(terminated ? [] : [{ itemId: "cmd-stop", processId: "process-owned" }]),
-                  { itemId: "other", processId: "process-unrelated" },
-                ],
+                data:
+                  request.params?.["cursor"] === "owned-page"
+                    ? !terminated.has("process-owned")
+                      ? [{ itemId: "cmd-stop", processId: "process-owned" }]
+                      : !terminated.has("process-late")
+                        ? [{ itemId: "cmd-stop-late", processId: "process-late" }]
+                        : []
+                    : [{ itemId: "other", processId: "process-unrelated" }],
+                nextCursor: request.params?.["cursor"] === "owned-page" ? null : "owned-page",
               },
             });
           if (request.method === "thread/backgroundTerminals/terminate") {
-            terminated = true;
+            terminated.add(String(request.params?.["processId"]));
             push({ id: request.id, result: {} });
           }
           if (request.method === "thread/read")
             push({
               id: request.id,
               result: {
-                thread: { status: { type: interrupted && terminated ? "idle" : "active" } },
+                thread: {
+                  status: { type: interrupted && terminated.size === 2 ? "idle" : "active" },
+                },
               },
             });
         },
@@ -570,8 +733,16 @@ describe("Codex app-server transport", () => {
         { once: true },
       );
       while (!stop || replies.length) {
-        if (replies.length) yield { type: "stdout", line: replies.shift()! };
-        else
+        if (replies.length) {
+          const line = replies.shift()!;
+          yield { type: "stdout", line };
+          const delivered = JSON.parse(line) as {
+            method?: string;
+            params?: { item?: { id?: string } };
+          };
+          if (delivered.method === "item/started" && delivered.params?.item?.id === "cmd-stop-late")
+            resolveQueued();
+        } else
           await new Promise<void>((resolve) => {
             wake = resolve;
           });
@@ -596,18 +767,24 @@ describe("Codex app-server transport", () => {
       cancelDeadlineMs: 100,
     })) {
       events.push(event);
-      if (event.type === "tool_call") await Promise.all([controller.cancel(), controller.cancel()]);
+      if (event.type === "message") {
+        await queued;
+        await Promise.all([controller.cancel(), controller.cancel()]);
+      }
     }
 
     expect(writes.filter((request) => request.method === "thread/goal/set")).toHaveLength(1);
     expect(writes.filter((request) => request.method === "turn/interrupt")).toEqual([
-      expect.objectContaining({ params: { threadId: "thread-stop", turnId: "turn-stop" } }),
+      expect.objectContaining({ params: { threadId: "thread-stop", turnId: "turn-next" } }),
     ]);
     expect(
       writes.filter((request) => request.method === "thread/backgroundTerminals/terminate"),
     ).toEqual([
       expect.objectContaining({
         params: { threadId: "thread-stop", processId: "process-owned" },
+      }),
+      expect.objectContaining({
+        params: { threadId: "thread-stop", processId: "process-late" },
       }),
     ]);
     expect(events.at(-1)).toMatchObject({ type: "completed", aborted: true });
@@ -710,6 +887,186 @@ describe("Codex app-server transport", () => {
     expect(methods.filter((method) => method === "thread/goal/set")).toHaveLength(1);
     expect(methods).not.toContain("turn/interrupt");
     expect(events.at(-1)).toMatchObject({ type: "completed", aborted: true });
+  });
+
+  it.each([
+    { caseName: "without turn/completed", emitTurnCompleted: false, goalStatus: "complete" },
+    { caseName: "with a stale active goal", emitTurnCompleted: true, goalStatus: "active" },
+  ])(
+    "fails on a durable thread systemError $caseName",
+    async ({ emitTurnCompleted, goalStatus }) => {
+      const replies: string[] = [];
+      let wake: (() => void) | undefined;
+      let stop = false;
+      const push = (message: unknown): void => {
+        replies.push(JSON.stringify(message));
+        wake?.();
+        wake = undefined;
+      };
+      const spawn: typeof spawnProcess = async function* (_bin, _args, options = {}) {
+        options.onSpawn?.({
+          write(data) {
+            const request = JSON.parse(data) as { id?: number; method: string };
+            if (request.method === "initialize") push({ id: request.id, result: {} });
+            if (request.method === "thread/start")
+              push({ id: request.id, result: { thread: { id: "thread-system-error" } } });
+            if (request.method === "turn/start") {
+              push({ id: request.id, result: { turn: { id: "turn-system-error" } } });
+              push({ method: "turn/started", params: { turn: { id: "turn-system-error" } } });
+              if (emitTurnCompleted)
+                push({
+                  method: "turn/completed",
+                  params: { turn: { id: "turn-system-error", status: "completed", items: [] } },
+                });
+              push({
+                method: "thread/status/changed",
+                params: {
+                  threadId: "thread-system-error",
+                  status: { type: "systemError" },
+                },
+              });
+            }
+            if (request.method === "thread/read")
+              push({ id: request.id, result: { thread: { status: { type: "systemError" } } } });
+            if (request.method === "thread/goal/get")
+              push({ id: request.id, result: { goal: { status: goalStatus } } });
+            if (request.method === "thread/backgroundTerminals/list")
+              push({ id: request.id, result: { data: [] } });
+          },
+          end() {
+            stop = true;
+            wake?.();
+          },
+          closed: Promise.resolve(),
+        });
+        options.abortSignal?.addEventListener(
+          "abort",
+          () => {
+            stop = true;
+            wake?.();
+          },
+          { once: true },
+        );
+        while (!stop || replies.length) {
+          if (replies.length) yield { type: "stdout", line: replies.shift()! };
+          else
+            await new Promise<void>((resolve) => {
+              wake = resolve;
+            });
+        }
+        yield { type: "stderr", line: "app-server diagnostic" };
+      };
+      const events: HarnessEvent[] = [];
+      for await (const event of runCodexAppServer({
+        bin: "codex",
+        args: [],
+        spec: HarnessRunSpec.parse({
+          session_id: "session-system-error",
+          intent: "implement",
+          prompt: "work",
+          cwd: process.cwd(),
+        }),
+        env: {},
+        spawn,
+        pollIntervalMs: 0,
+      }))
+        events.push(event);
+
+      expect(events).toContainEqual(
+        expect.objectContaining({ type: "error", error: expect.stringContaining("systemError") }),
+      );
+      expect(events.at(-1)).toMatchObject({
+        type: "completed",
+        payload: { harness_reported_error: true, stderr_tail: "app-server diagnostic" },
+      });
+    },
+  );
+
+  it("does not publish success before app-server process death is confirmed", async () => {
+    const replies: string[] = [];
+    let wake: (() => void) | undefined;
+    let aborted = false;
+    const push = (message: unknown): void => {
+      replies.push(JSON.stringify(message));
+      wake?.();
+      wake = undefined;
+    };
+    const spawn: typeof spawnProcess = async function* (_bin, _args, options = {}) {
+      options.onSpawn?.({
+        write(data) {
+          const request = JSON.parse(data) as { id?: number; method: string };
+          if (request.method === "initialize") push({ id: request.id, result: {} });
+          if (request.method === "thread/start")
+            push({ id: request.id, result: { thread: { id: "thread-survivor" } } });
+          if (request.method === "turn/start") {
+            push({ id: request.id, result: { turn: { id: "turn-survivor" } } });
+            push({ method: "turn/started", params: { turn: { id: "turn-survivor" } } });
+            push({
+              method: "turn/completed",
+              params: { turn: { id: "turn-survivor", status: "completed", items: [] } },
+            });
+          }
+          if (request.method === "thread/read")
+            push({ id: request.id, result: { thread: { status: { type: "idle" } } } });
+          if (request.method === "thread/goal/get")
+            push({ id: request.id, result: { goal: null } });
+          if (request.method === "thread/backgroundTerminals/list")
+            push({ id: request.id, result: { data: [] } });
+        },
+        end() {
+          aborted = true;
+          wake?.();
+        },
+        closed: Promise.resolve(),
+      });
+      options.abortSignal?.addEventListener(
+        "abort",
+        () => {
+          aborted = true;
+          wake?.();
+        },
+        { once: true },
+      );
+      while (!aborted || replies.length) {
+        if (replies.length) yield { type: "stdout", line: replies.shift()! };
+        else
+          await new Promise<void>((resolve) => {
+            wake = resolve;
+          });
+      }
+      yield { type: "exit", code: null, signal: "SIGINT" };
+      yield {
+        type: "termination_unconfirmed",
+        rootPid: 42,
+        survivors: [43],
+        unresolved: [],
+      };
+    };
+    const events: HarnessEvent[] = [];
+    for await (const event of runCodexAppServer({
+      bin: "codex",
+      args: [],
+      spec: HarnessRunSpec.parse({
+        session_id: "session-survivor",
+        intent: "implement",
+        prompt: "work",
+        cwd: process.cwd(),
+      }),
+      env: {},
+      spawn,
+      pollIntervalMs: 0,
+    }))
+      events.push(event);
+
+    expect(events.filter((event) => event.type === "completed")).toHaveLength(1);
+    expect(events.some((event) => event.final)).toBe(false);
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "error", payload: { code: "codex_control_loss" } }),
+    );
+    expect(events.at(-1)).toMatchObject({
+      type: "completed",
+      payload: { code: "codex_control_loss", termination_unconfirmed: { survivors: [43] } },
+    });
   });
 
   it("fails closed when native interrupt acknowledgement misses the deadline", async () => {

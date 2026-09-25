@@ -6,10 +6,30 @@ import { parseCodexEvent, type CodexParseState } from "./parse.js";
 
 export type JsonObject = Record<string, unknown>;
 
-function asObject(value: unknown): JsonObject | null {
+export function asObject(value: unknown): JsonObject | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as JsonObject)
     : null;
+}
+
+export function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export class CodexAppServerController {
+  private cancelRun: (() => Promise<void>) | null = null;
+
+  bind(cancel: () => Promise<void>): void {
+    this.cancelRun = cancel;
+  }
+
+  clear(cancel: () => Promise<void>): void {
+    if (this.cancelRun === cancel) this.cancelRun = null;
+  }
+
+  async cancel(): Promise<void> {
+    await this.cancelRun?.();
+  }
 }
 
 function sandboxMode(access: HarnessRunSpec["access"]): string | null {
@@ -109,14 +129,27 @@ export function codexAppServerEvents(
   if (method === "item/started" || method === "item/completed") {
     const item = asObject(params["item"]);
     if (!item) return null;
-    return parseCodexEvent(
-      {
-        type: method === "item/started" ? "item.started" : "item.completed",
-        item: appServerItem(item),
-      },
-      sessionId,
-      state,
-    );
+    const items =
+      item["type"] === "fileChange" && Array.isArray(item["changes"])
+        ? item["changes"]
+            .map(asObject)
+            .filter((change): change is JsonObject => typeof change?.["path"] === "string")
+            .map((change) => ({ ...appServerItem(item), path: change["path"] }))
+        : [appServerItem(item)];
+    const events: HarnessEvent[] = [];
+    for (const mappedItem of items) {
+      const mapped = parseCodexEvent(
+        {
+          type: method === "item/started" ? "item.started" : "item.completed",
+          item: mappedItem,
+        },
+        sessionId,
+        state,
+      );
+      if (mapped === null) return null;
+      events.push(...mapped);
+    }
+    return events;
   }
   if (method === "turn/plan/updated") {
     const plan = Array.isArray(params["plan"]) ? params["plan"] : [];

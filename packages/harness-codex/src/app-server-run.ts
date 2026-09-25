@@ -4,14 +4,17 @@ import { CLAUDEXOR_VERSION, nowIso, redactSecrets } from "@claudexor/util";
 import { codexAppServerInput } from "./attachments.js";
 import type { CodexEffortCatalog } from "./effort-probe.js";
 import {
+  asObject,
+  CodexAppServerController,
   codexAppServerEvents,
   codexAppServerThreadParams,
+  errorText,
   type JsonObject,
 } from "./app-server-protocol.js";
-import { parseCodexEvent, type CodexParseState } from "./parse.js";
+import { parseCodexEvent, parseCodexStderrFailure, type CodexParseState } from "./parse.js";
 
+export { CodexAppServerController } from "./app-server-protocol.js";
 export { codexAppServerEvents, codexAppServerThreadParams } from "./app-server-protocol.js";
-
 export interface CodexAppServerRunInput {
   bin: string;
   args: string[];
@@ -20,36 +23,8 @@ export interface CodexAppServerRunInput {
   spawn?: typeof spawnProcess;
   controller?: CodexAppServerController;
   effortCatalog?: CodexEffortCatalog;
-  /** Test seam; production polls owned background terminals four times per second. */
   pollIntervalMs?: number;
-  /** Test seam for the bounded cooperative-stop deadline. */
   cancelDeadlineMs?: number;
-}
-
-export class CodexAppServerController {
-  private cancelRun: (() => Promise<void>) | null = null;
-
-  bind(cancel: () => Promise<void>): void {
-    this.cancelRun = cancel;
-  }
-
-  clear(cancel: () => Promise<void>): void {
-    if (this.cancelRun === cancel) this.cancelRun = null;
-  }
-
-  async cancel(): Promise<void> {
-    await this.cancelRun?.();
-  }
-}
-
-function asObject(value: unknown): JsonObject | null {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as JsonObject)
-    : null;
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 export async function* runCodexAppServer(
@@ -74,9 +49,29 @@ export async function* runCodexAppServer(
   let nativeThreadId: string | null = null;
   let activeTurnId: string | null = null;
   const ownedCommandItemIds = new Set<string>();
+  const stderrRing: string[] = [];
+  let droppedUnrecognizedEvents = 0;
+  let harnessReportedError = false;
+  let terminationUnconfirmed: { survivors: number[]; unresolved: JsonObject[] } | null = null;
+  let nativeSystemError = false;
   let cancellationRequested = false;
   let cancellationQuiescent = false;
   let cancellationFailure: Error | null = null;
+  const requiredMcpStatuses = new Map<
+    string,
+    { status: "starting" | "ready" | "failed" | "cancelled"; error?: string }
+  >(
+    input.spec.extra_mcp_servers
+      .filter((server) => server.required)
+      .map((server) => [server.name, { status: "starting" }] as const),
+  );
+  const parseState: CodexParseState = {
+    envelopeActive: input.spec.output_schema !== undefined && input.spec.output_schema !== null,
+    requiredMcpServers: input.spec.extra_mcp_servers
+      .filter((server) => server.required)
+      .map((server) => server.name),
+    startedEmitted: true,
+  };
 
   const rejectPending = (error: Error): void => {
     for (const request of pending.values()) request.reject(error);
@@ -91,6 +86,7 @@ export async function* runCodexAppServer(
       pending.delete(object["id"]);
       const rpcError = asObject(object["error"]);
       if (rpcError) {
+        harnessReportedError = true;
         request.reject(new Error(String(rpcError["message"] ?? "Codex app-server request failed")));
         return;
       }
@@ -103,6 +99,38 @@ export async function* runCodexAppServer(
       return;
     }
     if (typeof object["method"] === "string") {
+      const params = asObject(object["params"]);
+      if (object["method"] === "turn/started") {
+        const turn = asObject(params?.["turn"]);
+        if (typeof turn?.["id"] === "string") activeTurnId = turn["id"];
+      } else if (object["method"] === "turn/completed") {
+        const turn = asObject(params?.["turn"]);
+        if (!turn || turn["id"] === activeTurnId) activeTurnId = null;
+      } else if (object["method"] === "item/started") {
+        const item = asObject(params?.["item"]);
+        if (item?.["type"] === "commandExecution" && typeof item["id"] === "string")
+          ownedCommandItemIds.add(item["id"]);
+      } else if (object["method"] === "thread/status/changed") {
+        if (asObject(params?.["status"])?.["type"] === "systemError") nativeSystemError = true;
+      } else if (object["method"] === "mcpServer/startupStatus/updated") {
+        const name = params?.["name"];
+        const status = params?.["status"];
+        if (
+          typeof name === "string" &&
+          requiredMcpStatuses.has(name) &&
+          (status === "starting" ||
+            status === "ready" ||
+            status === "failed" ||
+            status === "cancelled")
+        ) {
+          const error = params?.["error"] ?? params?.["failureReason"];
+          requiredMcpStatuses.set(name, {
+            status,
+            ...(typeof error === "string" ? { error } : {}),
+          });
+          if (status === "failed" || status === "cancelled") harnessReportedError = true;
+        }
+      }
       notifications.push(object);
       notificationWaiter.wake?.();
       notificationWaiter.wake = undefined;
@@ -129,7 +157,14 @@ export async function* runCodexAppServer(
           } catch (error) {
             throw new Error(`Invalid Codex app-server frame: ${errorText(error)}`);
           }
+        } else if (event.type === "stderr") {
+          stderrRing.push(event.line);
+          if (stderrRing.length > 40) stderrRing.shift();
         } else if (event.type === "termination_unconfirmed") {
+          terminationUnconfirmed = {
+            survivors: event.survivors,
+            unresolved: event.unresolved,
+          };
           throw new Error("Codex app-server process termination could not be confirmed");
         } else if (event.type === "exit" && !abort.signal.aborted) {
           throw new Error(
@@ -190,36 +225,87 @@ export async function* runCodexAppServer(
       });
     }
   };
-  const stopProcess = async (): Promise<void> => {
-    if (abort.signal.aborted) return;
-    abort.abort();
-    io?.end();
-    await process.catch(() => {});
+  const waitForRequiredMcp = async (): Promise<void> => {
+    while (requiredMcpStatuses.size) {
+      const failed = [...requiredMcpStatuses].filter(
+        ([, value]) => value.status === "failed" || value.status === "cancelled",
+      );
+      if (failed.length) {
+        throw new Error(
+          `required MCP servers failed to initialize: ${failed
+            .map(([name, value]) => `${name}: ${value.error ?? value.status}`)
+            .join(", ")}`,
+        );
+      }
+      if ([...requiredMcpStatuses.values()].every((value) => value.status === "ready")) return;
+      await nextNotification("mcpServer/startupStatus/updated");
+    }
+  };
+  let stopPromise: Promise<void> | null = null;
+  const stopProcess = (): Promise<void> => {
+    stopPromise ??= (async () => {
+      if (!abort.signal.aborted) abort.abort();
+      io?.end();
+      await process.catch(() => {});
+    })();
+    return stopPromise;
+  };
+  const terminalPayload = (extra: JsonObject = {}): JsonObject => {
+    const stderrTail = redactSecrets(stderrRing.join("\n")).slice(-1_000).trim();
+    return {
+      ...extra,
+      ...(harnessReportedError ? { harness_reported_error: true } : {}),
+      ...(stderrTail ? { stderr_tail: stderrTail } : {}),
+      ...(droppedUnrecognizedEvents
+        ? { dropped_unrecognized_events: droppedUnrecognizedEvents }
+        : {}),
+      ...(terminationUnconfirmed ? { termination_unconfirmed: terminationUnconfirmed } : {}),
+    };
   };
   const backgroundTerminals = async (): Promise<JsonObject[]> => {
     if (!nativeThreadId) return [];
-    const result = await request("thread/backgroundTerminals/list", {
-      threadId: nativeThreadId,
-    });
-    return Array.isArray(result["data"])
-      ? result["data"].map(asObject).filter((item): item is JsonObject => item !== null)
-      : [];
+    const terminals: JsonObject[] = [];
+    const seenCursors = new Set<string>();
+    let cursor: string | undefined;
+    for (;;) {
+      const result = await request("thread/backgroundTerminals/list", {
+        threadId: nativeThreadId,
+        ...(cursor ? { cursor } : {}),
+      });
+      if (Array.isArray(result["data"]))
+        terminals.push(
+          ...result["data"].map(asObject).filter((item): item is JsonObject => item !== null),
+        );
+      const nextCursor =
+        typeof result["nextCursor"] === "string" && result["nextCursor"]
+          ? result["nextCursor"]
+          : undefined;
+      if (!nextCursor) return terminals;
+      if (seenCursors.has(nextCursor))
+        throw new Error("Codex app-server repeated a background terminal cursor");
+      seenCursors.add(nextCursor);
+      cursor = nextCursor;
+    }
   };
   const readLifecycle = async (): Promise<{
+    threadStatus: string | null;
     threadSettled: boolean;
     goalActive: boolean;
     ownedBackground: JsonObject[];
   }> => {
-    if (!nativeThreadId) return { threadSettled: false, goalActive: false, ownedBackground: [] };
+    if (!nativeThreadId)
+      return { threadStatus: null, threadSettled: false, goalActive: false, ownedBackground: [] };
     const [threadResult, goalResult, terminals] = await Promise.all([
       request("thread/read", { threadId: nativeThreadId, includeTurns: false }),
       request("thread/goal/get", { threadId: nativeThreadId }),
       backgroundTerminals(),
     ]);
     const status = asObject(asObject(threadResult["thread"])?.["status"]);
+    const threadStatus = typeof status?.["type"] === "string" ? status["type"] : null;
     const goal = asObject(goalResult["goal"]);
     return {
-      threadSettled: status?.["type"] === "idle" || status?.["type"] === "systemError",
+      threadStatus,
+      threadSettled: threadStatus === "idle" || threadStatus === "systemError",
       goalActive: goal?.["status"] === "active",
       ownedBackground: terminals.filter(
         (terminal) =>
@@ -236,24 +322,41 @@ export async function* runCodexAppServer(
         const cooperative = async (): Promise<void> => {
           await spawned;
           if (!nativeThreadId) return;
-          const goalResult = await request("thread/goal/get", { threadId: nativeThreadId });
-          if (asObject(goalResult["goal"])?.["status"] === "active")
-            await request("thread/goal/set", { threadId: nativeThreadId, status: "paused" });
-          const turnId = activeTurnId;
-          if (turnId) await request("turn/interrupt", { threadId: nativeThreadId, turnId });
-          for (const terminal of await backgroundTerminals()) {
-            if (
-              typeof terminal["itemId"] === "string" &&
-              ownedCommandItemIds.has(terminal["itemId"]) &&
-              typeof terminal["processId"] === "string"
-            )
-              await request("thread/backgroundTerminals/terminate", {
-                threadId: nativeThreadId,
-                processId: terminal["processId"],
-              });
-          }
+          const interruptedTurnIds = new Set<string>();
           for (;;) {
-            const lifecycle = await readLifecycle();
+            const goalResult = await request("thread/goal/get", { threadId: nativeThreadId });
+            if (asObject(goalResult["goal"])?.["status"] === "active")
+              await request("thread/goal/set", { threadId: nativeThreadId, status: "paused" });
+            const turnId = activeTurnId;
+            if (turnId && !interruptedTurnIds.has(turnId)) {
+              try {
+                await request("turn/interrupt", { threadId: nativeThreadId, turnId });
+                interruptedTurnIds.add(turnId);
+              } catch (error) {
+                const lifecycle = await readLifecycle();
+                if (!lifecycle.threadSettled && activeTurnId === turnId) throw error;
+              }
+            }
+            let lifecycle = await readLifecycle();
+            for (const terminal of lifecycle.ownedBackground) {
+              if (typeof terminal["processId"] !== "string") continue;
+              try {
+                await request("thread/backgroundTerminals/terminate", {
+                  threadId: nativeThreadId,
+                  processId: terminal["processId"],
+                });
+              } catch (error) {
+                const fresh = await readLifecycle();
+                if (
+                  fresh.ownedBackground.some(
+                    (candidate) => candidate["processId"] === terminal["processId"],
+                  )
+                )
+                  throw error;
+                lifecycle = fresh;
+              }
+            }
+            if (lifecycle.ownedBackground.length) lifecycle = await readLifecycle();
             if (
               lifecycle.threadSettled &&
               !lifecycle.goalActive &&
@@ -283,6 +386,7 @@ export async function* runCodexAppServer(
         cancellationFailure = error instanceof Error ? error : new Error(String(error));
       } finally {
         await stopProcess();
+        if (processFailure) cancellationFailure ??= processFailure;
       }
     })();
     return cancelPromise;
@@ -314,10 +418,13 @@ export async function* runCodexAppServer(
     const threadId = thread?.["id"];
     if (typeof threadId !== "string") throw new Error("Codex app-server omitted thread id");
     nativeThreadId = threadId;
+    await waitForRequiredMcp();
     await request("turn/start", {
       threadId,
       input: codexAppServerInput(input.spec),
-      ...(input.spec.output_schema ? { outputSchema: input.spec.output_schema } : {}),
+      ...(input.spec.output_schema !== undefined && input.spec.output_schema !== null
+        ? { outputSchema: input.spec.output_schema }
+        : {}),
     });
     const started = await nextNotification("turn/started");
     const params = asObject(started["params"]);
@@ -328,38 +435,50 @@ export async function* runCodexAppServer(
       type: "started",
       session_id: input.spec.session_id,
       ts: nowIso(),
-      payload: { native_session_id: threadId, native_turn_id: turnId },
+      payload: {
+        native_session_id: threadId,
+        native_turn_id: turnId,
+        ...(parseState.requiredMcpServers?.length
+          ? {
+              mcp_servers: parseState.requiredMcpServers.map((name) => ({
+                name,
+                status: "connected",
+              })),
+            }
+          : {}),
+      },
     };
-    const parseState: CodexParseState = {
-      envelopeActive: !!input.spec.output_schema,
-      requiredMcpServers: input.spec.extra_mcp_servers
-        .filter((server) => server.required)
-        .map((server) => server.name),
-      startedEmitted: true,
-    };
-    activeTurnId = turnId;
     let pendingTerminal: JsonObject | null = null;
     for (;;) {
       const notification = await takeNotification();
       const method = notification["method"];
       const params = asObject(notification["params"]);
       if (method === "turn/started") {
-        const nextTurn = asObject(params?.["turn"]);
-        if (typeof nextTurn?.["id"] === "string") activeTurnId = nextTurn["id"];
         pendingTerminal = null;
         parseState.lastAgentMessage = undefined;
         continue;
       }
-      if (method === "item/started") {
-        const item = asObject(params?.["item"]);
-        if (item?.["type"] === "commandExecution" && typeof item["id"] === "string")
-          ownedCommandItemIds.add(item["id"]);
-      }
       const mapped = codexAppServerEvents(notification, input.spec.session_id, parseState);
-      if (mapped) for (const event of mapped) yield event;
+      if (mapped) {
+        for (const event of mapped) {
+          if (event.type === "error") harnessReportedError = true;
+          yield event;
+        }
+      } else if (
+        method !== "turn/completed" &&
+        method !== "thread/status/changed" &&
+        method !== "mcpServer/startupStatus/updated"
+      ) {
+        droppedUnrecognizedEvents += 1;
+      }
       if (method === "turn/completed") {
         pendingTerminal = asObject(params?.["turn"]);
-        activeTurnId = null;
+      } else if (method === "thread/status/changed" && nativeSystemError && !pendingTerminal) {
+        pendingTerminal = {
+          id: activeTurnId,
+          status: "failed",
+          error: { message: "Codex app-server thread settled in systemError" },
+        };
       } else if (!pendingTerminal) {
         continue;
       }
@@ -367,17 +486,29 @@ export async function* runCodexAppServer(
       for (;;) {
         const current =
           cancellationRequested && cancellationQuiescent
-            ? { threadSettled: true, goalActive: false, ownedBackground: [] }
+            ? {
+                threadStatus: "idle",
+                threadSettled: true,
+                goalActive: false,
+                ownedBackground: [],
+              }
             : await readLifecycle();
-        if (notifications.some((item) => item["method"] === "turn/started")) break;
+        if (!nativeSystemError && notifications.some((item) => item["method"] === "turn/started"))
+          break;
+        const systemError = nativeSystemError || current.threadStatus === "systemError";
         if (!current.threadSettled || current.goalActive || current.ownedBackground.length) {
-          if (current.ownedBackground.length && !current.goalActive) {
+          if (systemError && current.ownedBackground.length) {
             await new Promise<void>((resolve) => setTimeout(resolve, input.pollIntervalMs ?? 250));
             continue;
           }
-          break;
+          if (!systemError && current.ownedBackground.length && !current.goalActive) {
+            await new Promise<void>((resolve) => setTimeout(resolve, input.pollIntervalMs ?? 250));
+            continue;
+          }
+          if (!systemError) break;
         }
         const status = pendingTerminal?.["status"];
+        const terminalEvents: HarnessEvent[] = [];
         if (status === "failed") {
           const error = asObject(pendingTerminal?.["error"]);
           const failed = parseCodexEvent(
@@ -385,64 +516,80 @@ export async function* runCodexAppServer(
             input.spec.session_id,
             parseState,
           );
-          if (failed) for (const event of failed) yield event;
+          if (failed) {
+            harnessReportedError = failed.some((event) => event.type === "error");
+            terminalEvents.push(...failed);
+          }
+        } else if (systemError) {
+          harnessReportedError = true;
+          terminalEvents.push({
+            type: "error",
+            session_id: input.spec.session_id,
+            ts: nowIso(),
+            error: "Codex app-server thread settled in systemError",
+            payload: { code: "codex_app_server_failure" },
+          });
         } else if (status === "completed") {
           const final = parseCodexEvent(
             { type: "turn.completed", usage: {} },
             input.spec.session_id,
             parseState,
           );
-          if (final)
-            for (const event of final) {
-              if (event.type !== "usage") yield event;
-            }
+          if (final) terminalEvents.push(...final.filter((event) => event.type !== "usage"));
         }
+        await stopProcess();
+        if (processFailure) throw processFailure;
+        for (const event of terminalEvents) yield event;
         yield {
           type: "completed",
           session_id: input.spec.session_id,
           ts: nowIso(),
           ...(status === "interrupted" ? { aborted: true } : {}),
-          payload: {
+          payload: terminalPayload({
             native_session_id: threadId,
             native_turn_id: pendingTerminal?.["id"] ?? activeTurnId,
-          },
+          }),
         };
         return;
       }
     }
   } catch (error) {
-    if (cancellationRequested && cancellationQuiescent) {
+    await stopProcess();
+    if (processFailure && cancellationRequested) cancellationFailure ??= processFailure;
+    if (cancellationRequested && cancellationQuiescent && !cancellationFailure && !processFailure) {
       yield {
         type: "completed",
         session_id: input.spec.session_id,
         ts: nowIso(),
         aborted: true,
-        payload: { code: "user_cancelled", native_session_id: nativeThreadId },
+        payload: terminalPayload({ code: "user_cancelled", native_session_id: nativeThreadId }),
       };
       return;
     }
-    const aborted = abort.signal.aborted;
-    yield {
+    const aborted = cancellationRequested;
+    const failure = processFailure ?? cancellationFailure ?? error;
+    const code =
+      cancellationFailure || terminationUnconfirmed
+        ? "codex_control_loss"
+        : "codex_app_server_failure";
+    const nativeError =
+      failure !== processFailure && !cancellationFailure
+        ? parseCodexStderrFailure(errorText(failure), input.spec.session_id, parseState)
+        : null;
+    if (nativeError) harnessReportedError = true;
+    yield nativeError ?? {
       type: "error",
       session_id: input.spec.session_id,
       ts: nowIso(),
-      error: redactSecrets(errorText(error)),
-      payload: {
-        code: cancellationFailure ? "codex_control_loss" : "codex_app_server_failure",
-      },
+      error: redactSecrets(errorText(failure)),
+      payload: { code },
     };
     yield {
       type: "completed",
       session_id: input.spec.session_id,
       ts: nowIso(),
       ...(aborted ? { aborted: true } : {}),
-      payload: {
-        code: cancellationFailure
-          ? "codex_control_loss"
-          : aborted
-            ? "user_cancelled"
-            : "codex_app_server_failure",
-      },
+      payload: terminalPayload({ code, native_session_id: nativeThreadId }),
     };
   } finally {
     if (externalAbort instanceof AbortSignal) externalAbort.removeEventListener("abort", onAbort);
