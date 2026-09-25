@@ -1,5 +1,18 @@
 # @claudexor/review
 
+## 3.15.0
+
+### Patch Changes
+
+- Updated dependencies [3bc8af4]
+  - @claudexor/core@3.15.0
+  - @claudexor/context@3.15.0
+  - @claudexor/workspace@3.15.0
+  - @claudexor/budget@3.15.0
+  - @claudexor/config@3.15.0
+  - @claudexor/schema@3.15.0
+  - @claudexor/util@3.15.0
+
 ## 3.14.0
 
 ### Patch Changes
