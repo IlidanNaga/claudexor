@@ -17,15 +17,28 @@ export function printJsonLine(value: unknown): void {
   process.stdout.write(JSON.stringify(value) + "\n");
 }
 
+/** How long a finished command's event loop may stay alive on a stray handle
+ *  before the backstop forces termination. The clean path never waits for it. */
+const STRAY_HANDLE_EXIT_GRACE_MS = 1_000;
+
 export function exitAfterOutputFlush(code: number): void {
   // JSON projections such as `doctor --all` can exceed a pipe's 64 KiB high-water
   // mark. A direct process.exit() discards that buffered tail while still reporting
   // success. Empty writes queue behind every prior write; exit only after both pipes
-  // have drained, while retaining the explicit termination that closes stray handles.
+  // have drained.
+  //
+  // The clean path is a natural exit: an empty loop lets Node dispose the isolate,
+  // which joins V8's background work (the WASM compiles behind fetch()), before the
+  // platform shuts down. process.exit() shuts the platform down under that work, and
+  // on Windows libuv then aborts with 0xC0000409 after the JSON was written
+  // (`!(handle->flags & UV_HANDLE_CLOSING)`, nodejs/node#56645; fixed by #61999 in
+  // Node 24.20.0). The unref'd backstop fires only when a stray handle keeps the
+  // loop alive, so termination stays finite.
+  process.exitCode = code;
   let pending = 2;
   const flushed = () => {
     pending -= 1;
-    if (pending === 0) process.exit(code);
+    if (pending === 0) setTimeout(() => process.exit(code), STRAY_HANDLE_EXIT_GRACE_MS).unref();
   };
   process.stdout.write("", flushed);
   process.stderr.write("", flushed);
