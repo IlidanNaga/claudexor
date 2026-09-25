@@ -52,12 +52,18 @@ and deliberately excludes Node while including top-level
 build SHA, SHA-256, size, protocol major, separate daemon/CLI entrypoints, and
 tested full Node toolchain; after extraction it requires
 `node claudexord.bundle.cjs --probe` to report the same version/build identity.
-On POSIX, a host invoking
+A host invoking
 `node claudexor.bundle.cjs harness install <harness> --target local --yes --json`
-must provide `<node-root>/bin/node` plus the exact adjacent
-`<node-root>/lib/node_modules/npm/bin/npm-cli.js`; no system/PATH npm is used.
-Local Windows installation is a typed unsupported-platform outcome in this
-release. The existing signed runtime manifest remains the
+must provide the toolchain's own npm entrypoint next to the Node it runs the
+CLI on: `<node-root>/bin/node` plus `<node-root>/lib/node_modules/npm/bin/npm-cli.js`
+on POSIX, `<node-dir>\node.exe` plus `<node-dir>\node_modules\npm\bin\npm-cli.js`
+(the official zip layout) on Windows; no system/PATH npm is used. On Windows
+the local target is supported for Codex only: npm's `.cmd` shim is never the
+launcher, the receipt's `installedBinary` is the package-native
+`codex.exe` under `~/.claudexor/node/node_modules/@openai/codex/node_modules/@openai/codex-win32-<arch>/vendor/<triple>/bin`,
+and the host's `HOME` (or the user profile when unset) anchors that root exactly
+as the engine's own harness PATH does. Every other vendor is a typed
+`unsupported_platform` refusal before any side effect. The existing signed runtime manifest remains the
 publication authority, so an embedder does not create a second artifact or
 trust root.
 
@@ -76,7 +82,8 @@ JSON object. Every executed result carries `ok: boolean`, `dryRun: false`,
 `exitCode: number`, `target: "local" | "remote"`, `harness: string`,
 `command: string`, `installLocation: string`, `pinnedVersion: string | null`, and
 `verification: string`. Every successful `--target local` result additionally carries
-`installedBinary` (an absolute launcher path) and `installedVersion` (the exact
+`installedBinary` (an absolute launcher path; on Windows the package-native
+image) and `installedVersion` (the exact
 npm pin, or Cursor's bounded non-empty version line). On the local target,
 child exit zero is not sufficient: if that launcher/version proof fails, the
 result is `ok: false`, `code: "install_verification_failed"`. A remote success
