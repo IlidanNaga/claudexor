@@ -1,5 +1,36 @@
 # @claudexor/cli
 
+## 3.15.1
+
+### Patch Changes
+
+- On Windows the CLI exits with the status its command returned instead of aborting natively after printing valid output, and the Windows install smoke no longer trusts `claudexor doctor --json` output without checking its exit.
+
+  The shared CLI exit path (`exitAfterOutputFlush` in `cli-io.ts`) still waits for stdout and stderr to drain, so large JSON projections are not truncated. On Windows it then sets `process.exitCode` and lets Node exit naturally: a forced `process.exit()` after `doctor`'s `fetch()` raced isolate teardown on Node 24.16, and libuv aborted with `UV_HANDLE_CLOSING` (0xC0000409, nodejs/node#56645; upstream fix nodejs/node#61999) after the JSON was already written. An unref'd one-second backstop still forces the exit when a stray handle keeps the loop alive. Linux and macOS keep the immediate exit. `scripts/windows-local-install-smoke.mjs` now fails when `doctor --json` exits non-zero or by signal before it reads the JSON, and the Windows CI lane runs the exit-path regression (`packages/cli/src/cli-io.test.ts`).
+  - @claudexor/acp-server@3.15.1
+  - @claudexor/artifact-store@3.15.1
+  - @claudexor/config@3.15.1
+  - @claudexor/control-api@3.15.1
+  - @claudexor/core@3.15.1
+  - @claudexor/daemon@3.15.1
+  - @claudexor/delivery@3.15.1
+  - @claudexor/gateway@3.15.1
+  - @claudexor/harness-agy@3.15.1
+  - @claudexor/harness-claude@3.15.1
+  - @claudexor/harness-codex@3.15.1
+  - @claudexor/harness-cursor@3.15.1
+  - @claudexor/harness-fake@3.15.1
+  - @claudexor/harness-opencode@3.15.1
+  - @claudexor/harness-raw-api@3.15.1
+  - @claudexor/journal@3.15.1
+  - @claudexor/mcp-server@3.15.1
+  - @claudexor/orchestrator@3.15.1
+  - @claudexor/review@3.15.1
+  - @claudexor/schema@3.15.1
+  - @claudexor/secrets@3.15.1
+  - @claudexor/util@3.15.1
+  - @claudexor/workspace@3.15.1
+
 ## 3.15.0
 
 ### Minor Changes
