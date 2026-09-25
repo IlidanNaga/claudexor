@@ -1,5 +1,17 @@
 # @claudexor/review
 
+## 3.15.1
+
+### Patch Changes
+
+- @claudexor/budget@3.15.1
+- @claudexor/config@3.15.1
+- @claudexor/context@3.15.1
+- @claudexor/core@3.15.1
+- @claudexor/schema@3.15.1
+- @claudexor/util@3.15.1
+- @claudexor/workspace@3.15.1
+
 ## 3.15.0
 
 ### Patch Changes
