@@ -681,9 +681,9 @@ default-reachable regression on a supported platform.
   un-skip the four `itPosixReplace` cases on the Windows lane as its proof.
 - npm shim spawning on Windows (issue #191): default npm installs ship
   `codex.cmd`/sh shims with no `.exe`, so ordinary runs and login refuse with
-  the typed shim advisory. A candidate managed local Codex installer targets
-  the package-native `codex.exe` inside the pinned platform package; its
-  Windows CI proof is not yet observed, so this portion is not closed. Still open for an
+  the typed shim advisory. The managed local Codex installer proves the
+  package-native `codex.exe` inside the pinned platform package; both x64
+  Windows CI legs proved this path in PR #352 (run 36075171287). Still open for an
   operator's own ambient npm install (any prefix Claudexor did not lay out)
   and for claude/opencode, whose platform-package layouts are not verified;
   the remaining candidate fix is unchanged (spawn the shim's JS entry on
