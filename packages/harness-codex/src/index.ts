@@ -7,7 +7,6 @@ import {
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 export { createCodexModelAdapter } from "./model.js";
 export { describeCodexClientVersion } from "./http-client-version.js";
-import { codexTranscriptModel, codexTranscriptRateLimits } from "./transcript.js";
 import { withCodexVendorFailure } from "./vendor-failure.js";
 import { resolveSecret } from "@claudexor/secrets";
 import { tmpdir } from "node:os";
@@ -58,13 +57,13 @@ import { parseCodexEvent, parseCodexStderrFailure, type CodexParseState } from "
 import { CODEX_ACCESS_PROFILES, probeCodexCredentialProfile, resolveCodexProfileRoute } from "./profile.js";
 import { smokeIsolatedApiKey } from "./smoke.js";
 export { canonicalCodexProfileHome, codexAccountIdentity } from "./profile.js";
-import { estimateCodexCostUsd } from "./pricing.js";
 import { codexImageArgs } from "./attachments.js";
 import {
   CodexAppServerController,
   runCodexAppServer,
   type CodexAppServerRunInput,
 } from "./app-server-run.js";
+import { decorateCodexEvent, type CodexEventDecoration } from "./event-decoration.js";
 
 import { BIN, detectVersion, missingCliError, missingCliReport, probeEnv } from "./missing-cli.js";
 export { BIN } from "./missing-cli.js";
@@ -779,7 +778,6 @@ async function* runCodex(
     env["CODEX_HOME"],
     authRoute === "subscription",
   );
-  const processing = spec.processing;
   const suppressNodeRepl = codexConfigHasNodeRepl(env["CODEX_HOME"]);
   const args = runtime.runAppServer
     ? [
@@ -801,61 +799,21 @@ async function* runCodex(
     authRoute === "subscription" ? ("native_session" as const) : ("api_key_env" as const);
   // Codex reports tokens, not cash; only explicit rates may supply an estimate.
   const model = spec.model_hint ?? process.env.CLAUDEXOR_CODEX_MODEL ?? null;
-  // capture the native thread id (thread.started) so we can read the model
-  // codex recorded in its own rollout transcript; cache that one read.
-  let codexThreadId: string | undefined;
-  let transcriptModel: string | undefined;
   const parseState: CodexParseState = {
     envelopeActive: !!spec.output_schema,
     requiredMcpServers: (spec.extra_mcp_servers ?? [])
       .filter((server) => server.required)
       .map((server) => server.name),
   }; // finality + #19816 + required MCP startup proof
-  const decorate = (ev: HarnessEvent): HarnessEvent => {
-    if (ev.type === "started") {
-      const nativeId = ev.payload?.["native_session_id"];
-      if (typeof nativeId === "string") codexThreadId = nativeId;
-    }
-    if (processing) {
-      ev.processing = processing;
-      ev.processing_cost_basis = spec.processing_cost_basis;
-    }
-    if (ev.type === "started" && spec.model_hint && !ev.observed_model) {
-      ev.payload = {
-        ...(ev.payload ?? {}),
-        requested_model: spec.model_hint,
-        observed_model_source: "unobserved",
-      };
-    }
-    ev.credential_route = credentialRoute;
-    ev.credential_source = credentialSource;
-    if (profile) ev.credential_profile_id = profile.profile_id;
-    if (!ev.observed_model && spec.evidence_policy !== "stream_only") {
-      transcriptModel ??= codexTranscriptModel(env["CODEX_HOME"], codexThreadId) ?? undefined;
-      if (transcriptModel) {
-        ev.observed_model = transcriptModel;
-        ev.payload = { ...(ev.payload ?? {}), observed_model_source: "transcript" };
-      }
-    }
-    if (ev.type === "started" && tempCodexHome && ev.payload && "native_session_id" in ev.payload) {
-      const { native_session_id: _dropped, ...rest } = ev.payload as Record<string, unknown>;
-      ev.payload = { ...rest, resume_disabled: "ephemeral_codex_home" };
-    }
-    if (ev.type === "usage" && ev.usage && ev.usage.cost_usd === undefined && !processing) {
-      const est = estimateCodexCostUsd(model, ev.usage);
-      if (est !== undefined) {
-        ev.usage.cost_usd = est;
-        ev.usage.estimated = true;
-      }
-    }
-    if (ev.type === "usage" && !ev.quota && spec.evidence_policy !== "stream_only") {
-      const rl = codexTranscriptRateLimits(env["CODEX_HOME"], codexThreadId);
-      if (rl) ev.quota = rl;
-    }
-    if (ev.quota && profile && ev.quota.subject_id == null)
-      ev.quota = { ...ev.quota, subject_id: profile.profile_id };
-    return ev;
+  const decoration: CodexEventDecoration = {
+    spec,
+    env,
+    credentialRoute,
+    credentialSource,
+    tempCodexHome,
+    model,
   };
+  const decorate = (event: HarnessEvent): HarnessEvent => decorateCodexEvent(event, decoration);
 
   try {
     if (runtime.runAppServer) {
@@ -870,7 +828,7 @@ async function* runCodex(
       const decorated = (async function* (): AsyncGenerator<HarnessEvent> {
         for await (const event of native) yield decorate(event);
       })();
-      yield* withCodexVendorFailure(decorated, spec, env, () => codexThreadId);
+      yield* withCodexVendorFailure(decorated, spec, env, () => decoration.nativeThreadId);
       return;
     }
     const stream = runtime.runCliHarness({
@@ -885,7 +843,7 @@ async function* runCodex(
         // Bind the rollout transcript to THIS run via the native thread id.
         const raw = obj as { type?: unknown; thread_id?: unknown };
         if (raw?.type === "thread.started" && typeof raw.thread_id === "string")
-          codexThreadId = raw.thread_id;
+          decoration.nativeThreadId = raw.thread_id;
         const out = parseCodexEvent(obj, sessionId, parseState);
         if (out === null) return null;
         for (const ev of out) decorate(ev);
@@ -901,7 +859,7 @@ async function* runCodex(
         return event;
       },
     });
-    yield* withCodexVendorFailure(stream, spec, env, () => codexThreadId);
+    yield* withCodexVendorFailure(stream, spec, env, () => decoration.nativeThreadId);
   } finally {
     if (tempCodexHome) {
       try {

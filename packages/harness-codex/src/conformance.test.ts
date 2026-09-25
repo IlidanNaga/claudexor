@@ -7,6 +7,8 @@ import {
   validateTypedStream,
   type FixtureStreamExpectations,
 } from "@claudexor/core";
+import type { HarnessEvent } from "@claudexor/schema";
+import { codexAppServerEvents } from "./app-server-run.js";
 import { parseCodexEvent, type CodexParseState } from "./parse.js";
 import { parse as parseYaml } from "yaml";
 
@@ -52,6 +54,43 @@ function parseLines(raw: string): {
 }
 
 describe("codex adapter conformance fixtures", () => {
+  it("maps the recorded 0.156.1 app-server stream with lifecycle parity", () => {
+    const name = "app-server/recorded-run-0.156.1.jsonl";
+    const state: CodexParseState = { startedEmitted: true };
+    const events: HarnessEvent[] = [
+      {
+        type: "started",
+        session_id: "ses-fixture",
+        ts: "2026-09-25T00:00:00.000Z",
+        payload: { native_session_id: "thread-fixture", native_turn_id: "turn-fixture" },
+      },
+    ];
+    for (const line of readFileSync(join(FIXTURES, name), "utf8").split("\n").filter(Boolean)) {
+      const notification = JSON.parse(line) as Record<string, unknown>;
+      const mapped = codexAppServerEvents(notification, "ses-fixture", state);
+      if (mapped) events.push(...mapped);
+      if (notification["method"] === "turn/completed") {
+        const final = parseCodexEvent({ type: "turn.completed", usage: {} }, "ses-fixture", state);
+        if (final) events.push(...final.filter((event) => event.type !== "usage"));
+        events.push({
+          type: "completed",
+          session_id: "ses-fixture",
+          ts: "2026-09-25T00:00:00.000Z",
+        });
+      }
+    }
+
+    const expectations = manifest.fixtures[name]?.expectations;
+    expect(expectations).toBeTruthy();
+    expect(streamExpectationViolations(events, expectations!)).toEqual([]);
+    const stats = validateTypedStream(events);
+    expect(stats.started).toBe(1);
+    expect(stats.toolCalls).toBe(1);
+    expect(stats.toolResults).toBe(1);
+    expect(stats.statuslessToolResults).toBe(0);
+    expect(stats.usageEvents).toBe(2);
+  });
+
   for (const name of readdirSync(FIXTURES).filter((f) => f.endsWith(".jsonl"))) {
     it(`parses ${name} into a conformant typed stream`, () => {
       const { events, invalidLines, recognizedLines } = parseLines(
