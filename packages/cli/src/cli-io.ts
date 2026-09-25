@@ -17,7 +17,7 @@ export function printJsonLine(value: unknown): void {
   process.stdout.write(JSON.stringify(value) + "\n");
 }
 
-/** How long a finished command's event loop may stay alive on a stray handle
+/** On Windows, how long a finished command may stay alive on a stray handle
  *  before the backstop forces termination. The clean path never waits for it. */
 const STRAY_HANDLE_EXIT_GRACE_MS = 1_000;
 
@@ -27,18 +27,21 @@ export function exitAfterOutputFlush(code: number): void {
   // success. Empty writes queue behind every prior write; exit only after both pipes
   // have drained.
   //
-  // The clean path is a natural exit: an empty loop lets Node dispose the isolate,
-  // which joins V8's background work (the WASM compiles behind fetch()), before the
-  // platform shuts down. process.exit() shuts the platform down under that work, and
-  // on Windows libuv then aborts with 0xC0000409 after the JSON was written
-  // (`!(handle->flags & UV_HANDLE_CLOSING)`, nodejs/node#56645; fixed by #61999 in
-  // Node 24.20.0). The unref'd backstop fires only when a stray handle keeps the
-  // loop alive, so termination stays finite.
-  process.exitCode = code;
+  // On Windows, an empty event loop lets Node dispose the isolate and finish
+  // background work before shutdown. A forced process.exit() raced that work in
+  // Node 24.16 and libuv aborted after valid JSON (nodejs/node#56645, fixed in
+  // Node 24.20.0). Keep the former immediate exit on other platforms. The
+  // Windows-only unref'd backstop fires if a stray handle keeps the loop alive.
   let pending = 2;
   const flushed = () => {
     pending -= 1;
-    if (pending === 0) setTimeout(() => process.exit(code), STRAY_HANDLE_EXIT_GRACE_MS).unref();
+    if (pending !== 0) return;
+    if (process.platform !== "win32") {
+      process.exit(code);
+      return;
+    }
+    process.exitCode = code;
+    setTimeout(() => process.exit(code), STRAY_HANDLE_EXIT_GRACE_MS).unref();
   };
   process.stdout.write("", flushed);
   process.stderr.write("", flushed);

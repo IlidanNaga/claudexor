@@ -67,7 +67,7 @@ describe("exitAfterOutputFlush", () => {
     for (const root of tempRoots.splice(0)) rmSync(root, { recursive: true, force: true });
   });
 
-  it("exits naturally after fetch() and a >64 KiB projection: no forced exit to abort (nodejs/node#56645)", () => {
+  it("drains >64 KiB after fetch() without a forced exit on Windows (nodejs/node#56645)", () => {
     // The doctor shape: fetch() leaves V8 background work behind, then one large JSON
     // object. Under process.exit() Windows Node < 24.20 aborts with 0xC0000409 after
     // the JSON is written; the natural exit disposes the isolate first.
@@ -85,7 +85,7 @@ exitAfterOutputFlush(0);
     expect({ status: result.status, signal: result.signal, stderr: result.stderr }).toEqual({
       status: 0,
       signal: null,
-      stderr: "",
+      stderr: process.platform === "win32" ? "" : "forced-exit\n",
     });
     expect(JSON.parse(result.stdout)).toEqual({
       fetchError: "TypeError",
