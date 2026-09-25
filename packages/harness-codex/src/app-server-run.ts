@@ -206,11 +206,11 @@ export async function* runCodexAppServer(
       : [];
   };
   const readLifecycle = async (): Promise<{
-    threadIdle: boolean;
+    threadSettled: boolean;
     goalActive: boolean;
     ownedBackground: JsonObject[];
   }> => {
-    if (!nativeThreadId) return { threadIdle: false, goalActive: false, ownedBackground: [] };
+    if (!nativeThreadId) return { threadSettled: false, goalActive: false, ownedBackground: [] };
     const [threadResult, goalResult, terminals] = await Promise.all([
       request("thread/read", { threadId: nativeThreadId, includeTurns: false }),
       request("thread/goal/get", { threadId: nativeThreadId }),
@@ -219,7 +219,7 @@ export async function* runCodexAppServer(
     const status = asObject(asObject(threadResult["thread"])?.["status"]);
     const goal = asObject(goalResult["goal"]);
     return {
-      threadIdle: status?.["type"] === "idle",
+      threadSettled: status?.["type"] === "idle" || status?.["type"] === "systemError",
       goalActive: goal?.["status"] === "active",
       ownedBackground: terminals.filter(
         (terminal) =>
@@ -255,7 +255,7 @@ export async function* runCodexAppServer(
           for (;;) {
             const lifecycle = await readLifecycle();
             if (
-              lifecycle.threadIdle &&
+              lifecycle.threadSettled &&
               !lifecycle.goalActive &&
               lifecycle.ownedBackground.length === 0
             ) {
@@ -367,10 +367,10 @@ export async function* runCodexAppServer(
       for (;;) {
         const current =
           cancellationRequested && cancellationQuiescent
-            ? { threadIdle: true, goalActive: false, ownedBackground: [] }
+            ? { threadSettled: true, goalActive: false, ownedBackground: [] }
             : await readLifecycle();
         if (notifications.some((item) => item["method"] === "turn/started")) break;
-        if (!current.threadIdle || current.goalActive || current.ownedBackground.length) {
+        if (!current.threadSettled || current.goalActive || current.ownedBackground.length) {
           if (current.ownedBackground.length && !current.goalActive) {
             await new Promise<void>((resolve) => setTimeout(resolve, input.pollIntervalMs ?? 250));
             continue;

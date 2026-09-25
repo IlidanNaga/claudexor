@@ -367,7 +367,7 @@ describe("Codex app-server transport", () => {
     expect(events.at(-1)?.aborted).toBeUndefined();
   });
 
-  it("does not complete while a run-owned background terminal is still present", async () => {
+  it("waits for owned background before terminalizing a native system error", async () => {
     const replies: string[] = [];
     let wake: (() => void) | undefined;
     let stop = false;
@@ -407,13 +407,20 @@ describe("Codex app-server transport", () => {
             });
             push({
               method: "turn/completed",
-              params: { turn: { id: "turn-wait", status: "completed", items: [] } },
+              params: {
+                turn: {
+                  id: "turn-wait",
+                  status: "failed",
+                  error: { message: "native failed" },
+                  items: [],
+                },
+              },
             });
           }
           if (request.method === "thread/read")
             push({
               id: request.id,
-              result: { thread: { status: { type: snapshots ? "idle" : "active" } } },
+              result: { thread: { status: { type: snapshots ? "systemError" : "active" } } },
             });
           if (request.method === "thread/goal/get")
             push({ id: request.id, result: { goal: { status: "complete" } } });
@@ -467,7 +474,9 @@ describe("Codex app-server transport", () => {
       events.push(event);
 
     expect(snapshots).toBe(2);
-    expect(events.filter((event) => event.final)).toHaveLength(1);
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "error", error: "native failed" }),
+    );
     expect(events.at(-1)?.type).toBe("completed");
   });
 
