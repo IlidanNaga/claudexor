@@ -302,8 +302,11 @@ async function* runFake(
       // receipt codex yields on its userMessage echo and a deterministic final
       // text. The message TEXT is never read (BIBLE §6: fakes echo nothing).
       // An abort while parked terminalizes as a cancelled run.
+      // Register the waiter BEFORE the parking event reaches the journal, so a
+      // message sent the moment that row is visible always finds a parked run.
+      const parked = live!.park(s, spec.extra?.["abortSignal"] as AbortSignal | undefined);
       yield ev(s, "thinking", { text: "waiting for a live message (fake)" });
-      const messageId = await live!.park(s, spec.extra?.["abortSignal"] as AbortSignal | undefined);
+      const messageId = await parked;
       if (messageId === null) {
         yield ev(s, "completed", { aborted: true, observed_model: observedModel });
         return;

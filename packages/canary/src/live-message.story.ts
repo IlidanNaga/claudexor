@@ -90,27 +90,50 @@ async function runRow(api: ReturnType<typeof requestApi>, jobId: string): Promis
   return row;
 }
 
-/** Attempt ids whose `harness.started` row exists: the live steering targets. */
-function startedAttempts(runDir: string): string[] {
-  return readEvents(runDir)
-    .filter((event) => event.type === "harness.started")
-    .map((event) => String((event.payload as { attempt_id?: string }).attempt_id ?? ""))
-    .filter(Boolean);
+/**
+ * Attempt ids that have emitted the fake's parking row ("waiting for a live
+ * message"): the fake registers its waiter before that row, so these attempts
+ * are steerable the moment the row is visible.
+ */
+function parkedAttempts(runDir: string): string[] {
+  const started = new Map<string, string>();
+  const parked: string[] = [];
+  for (const event of readEvents(runDir)) {
+    const payload = event.payload as { attempt_id?: string; text?: string; type?: string };
+    if (event.type === "harness.started" && payload.attempt_id) {
+      started.set(payload.attempt_id, payload.attempt_id);
+    }
+    if (
+      event.type === "harness.event" &&
+      payload.attempt_id &&
+      typeof payload.text === "string" &&
+      payload.text.includes("waiting for a live message")
+    ) {
+      parked.push(payload.attempt_id);
+    }
+  }
+  return parked.filter((id) => started.has(id));
 }
 
 /**
  * Enqueue a fake-steerable run and wait until `attempts` agent attempts have
- * started (the fake parks right after `started`/`thinking`, so a started
- * attempt IS a steerable one). A race (`n > 1`) runs in agent mode.
+ * parked (the fake registers its live-input waiter before its parking row). Every run is an agent run on the sandbox repo.
  */
 async function startSteerableRun(
   api: ReturnType<typeof requestApi>,
+  repo: string,
   prompt: string,
   attempts = 1,
 ): Promise<{ jobId: string; runId: string; runDir: string; attemptIds: string[] }> {
+  // Live input registers AGENT attempts only (runCandidateInEnvelope owns the
+  // native session); Ask/Plan runs answer unsupported/no_live_session. An agent
+  // run needs a registered project root (idempotent per root).
+  const registered = await api<{ id?: string }>("POST", "/projects", { root: repo });
+  expect(registered.status, JSON.stringify(registered.body)).toBeLessThan(300);
   const { status, body } = await api<AcceptedRun>("POST", "/runs", {
     prompt,
-    mode: attempts > 1 ? "agent" : "ask",
+    mode: "agent",
+    scope: { kind: "project", root: repo },
     harnesses: ["fake-steerable"],
     primaryHarness: "fake-steerable",
     model: "fake-model",
@@ -121,7 +144,7 @@ async function startSteerableRun(
   for (;;) {
     const row = await runRow(api, body.jobId);
     if (row.state === "running" && row.runDir && existsSync(join(row.runDir, "events.jsonl"))) {
-      const attemptIds = startedAttempts(row.runDir);
+      const attemptIds = parkedAttempts(row.runDir);
       if (attemptIds.length >= attempts) {
         return { jobId: body.jobId, runId: row.runId, runDir: row.runDir, attemptIds };
       }
@@ -161,7 +184,7 @@ describe("[LIVE-MESSAGE:contract] live messages into a running fake-steerable ru
   it("admits, accepts and delivers one message and journals the three receipts in order", async () => {
     sb = makeSandbox();
     const api = startDaemon(sb);
-    const run = await startSteerableRun(api, "canary live-message accepted/delivered");
+    const run = await startSteerableRun(api, sb.repo, "canary live-message accepted/delivered");
     const key = `msg-${randomUUID()}`;
     const first = await api<MessageReceipt>(
       "POST",
@@ -218,7 +241,7 @@ describe("[LIVE-MESSAGE:contract] live messages into a running fake-steerable ru
       delete sb.env[name];
     }
     const api = startDaemon(sb);
-    const run = await startSteerableRun(api, "canary live-message race", 2);
+    const run = await startSteerableRun(api, sb.repo, "canary live-message race", 2);
     const ambiguous = await api<MessageReceipt>("POST", `/runs/${run.runId}/messages`, {
       text: "which one?",
     });
@@ -247,7 +270,7 @@ describe("[LIVE-MESSAGE:contract] live messages into a running fake-steerable ru
   it("dispatches nothing when admission cannot be journaled (rejected/admission_persist_failed)", async () => {
     sb = makeSandbox();
     const api = startDaemon(sb);
-    const run = await startSteerableRun(api, "canary live-message admission failure");
+    const run = await startSteerableRun(api, sb.repo, "canary live-message admission failure");
     const eventsPath = join(run.runDir, "events.jsonl");
     expect(existsSync(eventsPath)).toBe(true);
     chmodSync(eventsPath, 0o444);
@@ -273,7 +296,7 @@ describe("[LIVE-MESSAGE:contract] live messages into a running fake-steerable ru
   it("replays the recorded receipt under the same key across a daemon restart", async () => {
     sb = makeSandbox();
     let api = startDaemon(sb);
-    const run = await startSteerableRun(api, "canary live-message restart replay");
+    const run = await startSteerableRun(api, sb.repo, "canary live-message restart replay");
     const key = `msg-${randomUUID()}`;
     const first = await api<MessageReceipt>(
       "POST",

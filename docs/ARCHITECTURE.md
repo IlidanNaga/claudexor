@@ -2732,7 +2732,9 @@ facts (404 unknown run, 501 no service, 400 malformed/secret/too-long/missing
 key, 409 idempotency, 500 receipt-save failure); EVERY typed outcome is HTTP
 200 — deliberately unlike the answer and control routes — so a client reads
 `outcome`, never the status code. The protocol major stays 3; clients discover
-the route by its row in `GET /v2/operations`.
+the route by its row in `GET /v2/operations`. Only agent runs register a live
+target (the orchestrator's candidate envelope owns the native session): an Ask
+or Plan run answers `unsupported`/`no_live_session` before anything is journaled.
 
 Three boundaries are reported separately and never conflated:
 
