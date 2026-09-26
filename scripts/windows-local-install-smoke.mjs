@@ -13,7 +13,7 @@
  *     bare name on the shared harness PATH — the spawn doctor, login, run and
  *     quota perform, without a shell and without any `.cmd` shim;
  *  4. a second install is the idempotent recheck; `claudexor doctor --json`
- *     reports codex installed at that image (auth is a separate lane).
+ *     exits 0 and reports codex installed at that image (auth is a separate lane).
  * Anything short of that exits non-zero with the observed evidence.
  */
 import { spawnSync } from "node:child_process";
@@ -263,6 +263,15 @@ if (again.status !== 0 || recheck.ok !== true || recheck.installedBinary !== ins
 
 step("claudexor doctor --json reports codex installed at that image (auth is a separate lane)");
 const doctor = runCli(["doctor", "--json"], PROBE_TIMEOUT_MS);
+// Complete JSON is not success: a native abort after the write (0xC0000409) still
+// leaves parseable stdout, so the exit is checked before the projection is read.
+if (doctor.status !== 0 || doctor.signal !== null) {
+  const status =
+    doctor.status === null
+      ? "no status"
+      : `${doctor.status} (0x${(doctor.status >>> 0).toString(16).toUpperCase()})`;
+  fail(`doctor --json exited ${status}, signal ${String(doctor.signal)}`, doctor.stdout);
+}
 const report = parseSingleJson("doctor", doctor.stdout);
 const codex = Array.isArray(report.harnesses)
   ? report.harnesses.find((h) => h?.id === "codex")

@@ -1,5 +1,73 @@
 # @claudexor/cli
 
+## 3.15.1
+
+### Patch Changes
+
+- On Windows the CLI exits with the status its command returned instead of aborting natively after printing valid output, and the Windows install smoke no longer trusts `claudexor doctor --json` output without checking its exit.
+
+  The shared CLI exit path (`exitAfterOutputFlush` in `cli-io.ts`) still waits for stdout and stderr to drain, so large JSON projections are not truncated. On Windows it then sets `process.exitCode` and lets Node exit naturally: a forced `process.exit()` after `doctor`'s `fetch()` raced isolate teardown on Node 24.16, and libuv aborted with `UV_HANDLE_CLOSING` (0xC0000409, nodejs/node#56645; upstream fix nodejs/node#61999) after the JSON was already written. An unref'd one-second backstop still forces the exit when a stray handle keeps the loop alive. Linux and macOS keep the immediate exit. `scripts/windows-local-install-smoke.mjs` now fails when `doctor --json` exits non-zero or by signal before it reads the JSON, and the Windows CI lane runs the exit-path regression (`packages/cli/src/cli-io.test.ts`).
+  - @claudexor/acp-server@3.15.1
+  - @claudexor/artifact-store@3.15.1
+  - @claudexor/config@3.15.1
+  - @claudexor/control-api@3.15.1
+  - @claudexor/core@3.15.1
+  - @claudexor/daemon@3.15.1
+  - @claudexor/delivery@3.15.1
+  - @claudexor/gateway@3.15.1
+  - @claudexor/harness-agy@3.15.1
+  - @claudexor/harness-claude@3.15.1
+  - @claudexor/harness-codex@3.15.1
+  - @claudexor/harness-cursor@3.15.1
+  - @claudexor/harness-fake@3.15.1
+  - @claudexor/harness-opencode@3.15.1
+  - @claudexor/harness-raw-api@3.15.1
+  - @claudexor/journal@3.15.1
+  - @claudexor/mcp-server@3.15.1
+  - @claudexor/orchestrator@3.15.1
+  - @claudexor/review@3.15.1
+  - @claudexor/schema@3.15.1
+  - @claudexor/secrets@3.15.1
+  - @claudexor/util@3.15.1
+  - @claudexor/workspace@3.15.1
+
+## 3.15.0
+
+### Minor Changes
+
+- 3bc8af4: `claudexor harness install codex --target local` works on Windows, and doctor, login and runs resolve the image it installs.
+
+  On Windows an npm global prefix holds only `.cmd`/sh/ps1 shims and no executable image, and Claudexor never spawns a harness through a shell (issue #191). The local target is therefore supported exactly where the pinned package yields a verified package-native image: `@openai/codex` resolves its `@openai/codex-win32-<arch>` platform package and executes `vendor/<triple>/bin/codex.exe`. Core's `runtime-env.ts` becomes the one owner of that layout (`npmGlobalPackagesDir`, `embeddedNpmCli`, `windowsNativeImageDir`, `managedWindowsNativeImageDirs`): the installer runs the embedded `node_modules/npm/bin/npm-cli.js` beside `node.exe`, forwards the Windows process-environment keys, anchors the managed root on the same `HOME` the harness PATH producer reads, and proves the image inside the prefix; the normalized harness PATH carries that image dir on win32 so every local surface resolves the same `codex.exe` by bare name. The receipt fields are unchanged. Claude, OpenCode, Cursor and Antigravity keep a typed `unsupported_platform` refusal on the Windows local target, now naming the exact reason; an unsupported architecture refuses the same way. The Windows CI lane installs the real pinned package on the exact embedded Node with no ambient node/npm and an isolated profile, then checks the receipt, direct and by-name `--version`, the idempotent recheck and `doctor --json` (`scripts/windows-local-install-smoke.mjs`). Linux and macOS behaviour is unchanged.
+
+  Invariants: INV-067 (the same scoped env that spawns a run resolves the binary), INV-121/INV-122 (one layout owner reused by proof and PATH), INV-044 (typed refusals, no silent shim). No Bible change.
+
+### Patch Changes
+
+- Updated dependencies [3bc8af4]
+  - @claudexor/core@3.15.0
+  - @claudexor/daemon@3.15.0
+  - @claudexor/delivery@3.15.0
+  - @claudexor/gateway@3.15.0
+  - @claudexor/harness-agy@3.15.0
+  - @claudexor/harness-claude@3.15.0
+  - @claudexor/harness-codex@3.15.0
+  - @claudexor/harness-cursor@3.15.0
+  - @claudexor/harness-fake@3.15.0
+  - @claudexor/harness-opencode@3.15.0
+  - @claudexor/harness-raw-api@3.15.0
+  - @claudexor/orchestrator@3.15.0
+  - @claudexor/review@3.15.0
+  - @claudexor/workspace@3.15.0
+  - @claudexor/control-api@3.15.0
+  - @claudexor/acp-server@3.15.0
+  - @claudexor/artifact-store@3.15.0
+  - @claudexor/config@3.15.0
+  - @claudexor/journal@3.15.0
+  - @claudexor/mcp-server@3.15.0
+  - @claudexor/schema@3.15.0
+  - @claudexor/secrets@3.15.0
+  - @claudexor/util@3.15.0
+
 ## 3.14.0
 
 ### Minor Changes

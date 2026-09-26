@@ -280,8 +280,9 @@ jobs:
       # termination, and the journal walker whose separator bug reproduces
       # ONLY here. Suites built on POSIX mode bits, symlinks or `#!/bin/sh`
       # fixtures stay on the Linux/macOS legs; their win32 branches are
-      # proven by injected-platform unit tests instead.
-      - name: Test (platform auth, agy print, ConPTY, setup transport, journal)
+      # proven by injected-platform unit tests instead. The CLI exit tail runs
+      # here because only Windows libuv aborts a forced exit after fetch().
+      - name: Test (platform auth, agy print, ConPTY, setup transport, journal, CLI exit)
         run: >
           pnpm vitest run packages/schema/src/schema.test.ts
           packages/schema/src/platform-auth-policy.test.ts
@@ -294,6 +295,7 @@ jobs:
           packages/cli/src/setup-login-capability.test.ts
           packages/cli/src/setup-login-pty.test.ts
           packages/cli/src/setup-login-runner-transport.test.ts
+          packages/cli/src/cli-io.test.ts
           packages/journal/src/index.test.ts
           packages/journal/src/background-compaction.test.ts
           packages/journal/src/background-capacity.test.ts
