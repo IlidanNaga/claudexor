@@ -10,6 +10,7 @@ import {
   codexAppServerEvents,
   codexAppServerThreadParams,
   runCodexAppServer,
+  type CodexAppServerRunInput,
 } from "./app-server-run.js";
 import type { CodexParseState } from "./parse.js";
 import { createCodexAdapter } from "./index.js";
@@ -1199,5 +1200,470 @@ describe("Codex app-server transport", () => {
     expect(appServerRuns).toBe(1);
     expect(execRuns).toBe(0);
     expect(cancels).toBe(1);
+  });
+});
+
+describe("Codex live messages (turn/steer)", () => {
+  type Request = { id?: number; method: string; params?: Record<string, unknown> };
+  type Push = (message: unknown) => void;
+  const STEER_TEXT = "Change of plan: stop and answer MANGO.";
+
+  /** A scripted app-server whose first turn stays open until `finishTurn()`;
+   * `onSteer` scripts the vendor's answer to `turn/steer` (default: none). */
+  function liveAppServer(onSteer: (request: Request, push: Push) => void = () => {}) {
+    const writes: Request[] = [];
+    const replies: string[] = [];
+    let wake: (() => void) | undefined;
+    let stop = false;
+    let crashed = false;
+    let turnOpen = true;
+    const waiters: Array<{ method: string; resolve: () => void }> = [];
+    const state = { goalActive: false };
+    const push: Push = (message) => {
+      replies.push(JSON.stringify(message));
+      wake?.();
+      wake = undefined;
+    };
+    const completeTurn = (turnId: string, status: string): void => {
+      turnOpen = false;
+      push({
+        method: "turn/completed",
+        params: { threadId: "thread-live", turn: { id: turnId, status, items: [] } },
+      });
+    };
+    const spawn: typeof spawnProcess = async function* (_bin, _args, options = {}) {
+      options.onSpawn?.({
+        write(data) {
+          const request = JSON.parse(data) as Request;
+          writes.push(request);
+          for (const waiter of waiters.splice(0)) {
+            if (waiter.method === request.method) waiter.resolve();
+            else waiters.push(waiter);
+          }
+          if (request.method === "initialize") push({ id: request.id, result: {} });
+          if (request.method === "thread/start")
+            push({ id: request.id, result: { thread: { id: "thread-live" } } });
+          if (request.method === "turn/start") {
+            push({ id: request.id, result: { turn: { id: "turn-live" } } });
+            push({
+              method: "turn/started",
+              params: { threadId: "thread-live", turn: { id: "turn-live" } },
+            });
+            push({
+              method: "item/started",
+              params: {
+                item: {
+                  type: "commandExecution",
+                  id: "cmd-live",
+                  command: "sleep 3",
+                  status: "inProgress",
+                },
+                threadId: "thread-live",
+                turnId: "turn-live",
+              },
+            });
+          }
+          if (request.method === "turn/steer") onSteer(request, push);
+          if (request.method === "turn/interrupt") {
+            push({ id: request.id, result: {} });
+            completeTurn("turn-live", "interrupted");
+          }
+          if (request.method === "thread/read")
+            push({
+              id: request.id,
+              result: { thread: { status: { type: turnOpen ? "active" : "idle" } } },
+            });
+          if (request.method === "thread/goal/get")
+            push({
+              id: request.id,
+              result: { goal: state.goalActive ? { status: "active" } : null },
+            });
+          if (request.method === "thread/backgroundTerminals/list")
+            push({ id: request.id, result: { data: [] } });
+        },
+        end() {
+          stop = true;
+          wake?.();
+        },
+        closed: Promise.resolve(),
+      });
+      options.abortSignal?.addEventListener(
+        "abort",
+        () => {
+          stop = true;
+          wake?.();
+        },
+        { once: true },
+      );
+      while (!stop || replies.length) {
+        if (replies.length) yield { type: "stdout", line: replies.shift()! };
+        else
+          await new Promise<void>((resolve) => {
+            wake = resolve;
+          });
+      }
+      if (crashed) yield { type: "exit", code: 1, signal: null };
+    };
+    return {
+      spawn,
+      writes,
+      push,
+      state,
+      finishTurn: (): void => completeTurn("turn-live", "completed"),
+      startTurn: (turnId: string): void => {
+        turnOpen = true;
+        push({ method: "turn/started", params: { threadId: "thread-live", turn: { id: turnId } } });
+      },
+      completeTurn,
+      crash: (): void => {
+        crashed = true;
+        stop = true;
+        wake?.();
+      },
+      /** Resolves on the NEXT request of that method (register before triggering it). */
+      nextWrite: (method: string): Promise<void> =>
+        new Promise<void>((resolve) => waiters.push({ method, resolve })),
+    };
+  }
+
+  const echo = (
+    method: "item/started" | "item/completed",
+    clientId: string,
+    turnId = "turn-live",
+  ): unknown => ({
+    method,
+    params: {
+      item: {
+        type: "userMessage",
+        id: "user-live",
+        clientId,
+        content: [{ type: "text", text: STEER_TEXT, text_elements: [] }],
+      },
+      threadId: "thread-live",
+      turnId,
+    },
+  });
+
+  const spec = HarnessRunSpec.parse({
+    session_id: "session-live",
+    intent: "implement",
+    prompt: "work",
+    cwd: process.cwd(),
+  });
+
+  type Server = ReturnType<typeof liveAppServer>;
+  /** Runs the scripted server on a free-running consumer so the run's main loop
+   * keeps advancing while the test orchestrates from outside. */
+  function start(server: Server, options: Partial<CodexAppServerRunInput> = {}) {
+    const controller = new CodexAppServerController();
+    const events: HarnessEvent[] = [];
+    const watchers: Array<{ match: (event: HarnessEvent) => boolean; resolve: () => void }> = [];
+    const done = (async () => {
+      for await (const event of runCodexAppServer({
+        bin: "codex",
+        args: [],
+        spec,
+        env: {},
+        spawn: server.spawn,
+        controller,
+        pollIntervalMs: 0,
+        cancelDeadlineMs: 200,
+        ...options,
+      })) {
+        events.push(event);
+        for (const watcher of watchers.splice(0)) {
+          if (watcher.match(event)) watcher.resolve();
+          else watchers.push(watcher);
+        }
+      }
+    })();
+    return {
+      controller,
+      events,
+      done,
+      /** Resolves once an event matching `match` has been seen (past or future). */
+      seen: (match: (event: HarnessEvent) => boolean): Promise<void> =>
+        events.some(match)
+          ? Promise.resolve()
+          : new Promise<void>((resolve) => watchers.push({ match, resolve })),
+    };
+  }
+  const started = (event: HarnessEvent): boolean => event.type === "started";
+  const steerWrites = (server: Server): Request[] =>
+    server.writes.filter((request) => request.method === "turn/steer");
+  const statusEvents = (events: HarnessEvent[]): HarnessEvent[] =>
+    events.filter((event) => event.type === "status");
+
+  it("answers accepted on {turnId}; the later userMessage echo yields one delivered receipt", async () => {
+    const server = liveAppServer((request, push) =>
+      push({ id: request.id, result: { turnId: "turn-live" } }),
+    );
+    const run = start(server);
+    await run.seen(started);
+    await expect(run.controller.steer({ messageId: "msg-1", text: STEER_TEXT })).resolves.toEqual({
+      outcome: "accepted",
+      nativeTurnId: "turn-live",
+    });
+    // The vendor consumes the message later (2.9 s live) and echoes it twice
+    // (item/started + item/completed): ONE receipt, and neither frame counts
+    // as a dropped unrecognized event.
+    server.push(echo("item/started", "msg-1"));
+    server.push(echo("item/completed", "msg-1"));
+    await run.seen((event) => event.type === "status");
+    server.finishTurn();
+    await run.done;
+
+    expect(steerWrites(server)).toEqual([
+      expect.objectContaining({
+        params: {
+          threadId: "thread-live",
+          expectedTurnId: "turn-live",
+          clientUserMessageId: "msg-1",
+          input: [{ type: "text", text: STEER_TEXT, text_elements: [] }],
+        },
+      }),
+    ]);
+    expect(statusEvents(run.events)).toEqual([
+      expect.objectContaining({
+        type: "status",
+        session_id: "session-live",
+        payload: { code: "live_input_delivered", message_id: "msg-1", native_turn_id: "turn-live" },
+      }),
+    ]);
+    expect(run.events.at(-1)).toMatchObject({ type: "completed" });
+    expect(run.events.at(-1)?.aborted).toBeUndefined();
+    expect(run.events.at(-1)?.payload).not.toHaveProperty("harness_reported_error");
+    expect(run.events.at(-1)?.payload).not.toHaveProperty("dropped_unrecognized_events");
+  });
+
+  it("settles as delivered when the echo arrives before the vendor's reply", async () => {
+    const server = liveAppServer((request, push) => {
+      const clientId = String(request.params?.["clientUserMessageId"]);
+      push(echo("item/started", clientId));
+      push({ id: request.id, result: { turnId: "turn-live" } });
+    });
+    const run = start(server);
+    await run.seen(started);
+    await expect(
+      run.controller.steer({ messageId: "msg-early", text: STEER_TEXT }),
+    ).resolves.toEqual({ outcome: "delivered", nativeTurnId: "turn-live" });
+    server.finishTurn();
+    await run.done;
+    expect(statusEvents(run.events)).toHaveLength(1);
+    expect(run.events.at(-1)?.payload).not.toHaveProperty("harness_reported_error");
+  });
+
+  it("ignores a same-id echo on another turn and a foreign clientId", async () => {
+    const server = liveAppServer((request, push) => {
+      const clientId = String(request.params?.["clientUserMessageId"]);
+      push(echo("item/started", clientId, "turn-other"));
+      push(echo("item/started", "someone-else", "turn-live"));
+      push({ id: request.id, result: { turnId: "turn-live" } });
+    });
+    const run = start(server);
+    await run.seen(started);
+    await expect(
+      run.controller.steer({ messageId: "msg-strict", text: STEER_TEXT }),
+    ).resolves.toEqual({ outcome: "accepted", nativeTurnId: "turn-live" });
+    server.finishTurn();
+    await run.done;
+    expect(statusEvents(run.events)).toHaveLength(0);
+  });
+
+  it("answers not_active without an RPC when no turn is active (goal-continuation gap)", async () => {
+    const server = liveAppServer();
+    server.state.goalActive = true;
+    const run = start(server);
+    await run.seen(started);
+    // turn/completed with an ACTIVE goal: the run stays alive waiting for the
+    // continuation turn, and activeTurnId is null meanwhile.
+    const gap = server.nextWrite("thread/read");
+    server.finishTurn();
+    await gap;
+    await expect(run.controller.steer({ messageId: "msg-gap", text: STEER_TEXT })).resolves.toEqual(
+      { outcome: "not_active", reason: "no_active_turn" },
+    );
+    server.state.goalActive = false;
+    server.startTurn("turn-2");
+    server.completeTurn("turn-2", "completed");
+    await run.done;
+    expect(steerWrites(server)).toEqual([]);
+    expect(run.events.at(-1)).toMatchObject({ type: "completed" });
+    expect(run.events.at(-1)?.aborted).toBeUndefined();
+  });
+
+  it("maps a vendor refusal on the still-active turn to rejected without tainting the run", async () => {
+    const server = liveAppServer((request, push) =>
+      // Every codex refusal shares -32600; the prose is NOT consulted.
+      push({ id: request.id, error: { code: -32600, message: "no active turn to steer" } }),
+    );
+    const run = start(server);
+    await run.seen(started);
+    await expect(
+      run.controller.steer({ messageId: "msg-refused", text: STEER_TEXT }),
+    ).resolves.toEqual({ outcome: "rejected", reason: "rpc_refused" });
+    server.finishTurn();
+    await run.done;
+    expect(run.events.filter((event) => event.type === "error")).toEqual([]);
+    expect(run.events.at(-1)).toMatchObject({ type: "completed" });
+    expect(run.events.at(-1)?.payload).not.toHaveProperty("harness_reported_error");
+  });
+
+  it("maps a refusal that lands after the turn moved on to not_active", async () => {
+    const server = liveAppServer((request, push) => {
+      server.finishTurn();
+      push({ id: request.id, error: { code: -32600, message: "no active turn to steer" } });
+    });
+    const run = start(server);
+    await run.seen(started);
+    await expect(
+      run.controller.steer({ messageId: "msg-late", text: STEER_TEXT }),
+    ).resolves.toEqual({ outcome: "not_active", reason: "no_active_turn" });
+    await run.done;
+    expect(run.events.at(-1)?.payload).not.toHaveProperty("harness_reported_error");
+  });
+
+  it("answers delivery_unknown on a missed deadline and never cancels the run", async () => {
+    const server = liveAppServer();
+    const run = start(server, { steerDeadlineMs: 5 });
+    await run.seen(started);
+    await expect(
+      run.controller.steer({ messageId: "msg-slow", text: STEER_TEXT }),
+    ).resolves.toEqual({ outcome: "delivery_unknown", reason: "response_timeout" });
+    server.finishTurn();
+    await run.done;
+    expect(steerWrites(server)).toHaveLength(1);
+    expect(run.events.at(-1)).toMatchObject({ type: "completed" });
+    expect(run.events.at(-1)?.aborted).toBeUndefined();
+    expect(run.events.at(-1)?.payload).not.toHaveProperty("harness_reported_error");
+  });
+
+  it("answers delivery_unknown when the app-server dies before replying", async () => {
+    const server = liveAppServer(() => server.crash());
+    const run = start(server);
+    await run.seen(started);
+    await expect(
+      run.controller.steer({ messageId: "msg-lost", text: STEER_TEXT }),
+    ).resolves.toEqual({ outcome: "delivery_unknown", reason: "transport_lost" });
+    await run.done;
+    expect(run.events.at(-1)).toMatchObject({
+      type: "completed",
+      payload: { code: "codex_app_server_failure" },
+    });
+  });
+
+  it("answers not_active after Stop and after the session ended; unsupported when never bound", async () => {
+    const server = liveAppServer();
+    const run = start(server);
+    await run.seen(started);
+    await run.controller.cancel();
+    await expect(
+      run.controller.steer({ messageId: "msg-stopped", text: STEER_TEXT }),
+    ).resolves.toEqual({ outcome: "not_active", reason: "no_active_turn" });
+    await run.done;
+    expect(steerWrites(server)).toEqual([]);
+    expect(run.events.at(-1)).toMatchObject({ type: "completed", aborted: true });
+    await expect(
+      run.controller.steer({ messageId: "msg-after", text: STEER_TEXT }),
+    ).resolves.toEqual({ outcome: "not_active", reason: "no_active_turn" });
+    await expect(
+      new CodexAppServerController().steer({ messageId: "msg-unbound", text: STEER_TEXT }),
+    ).resolves.toEqual({ outcome: "unsupported", reason: "no_live_session" });
+  });
+
+  it("routes adapter.message through the session's app-server controller", async () => {
+    const seen: Array<{ messageId: string; text: string }> = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const adapter = createCodexAdapter({
+      detectVersion: async () => "codex-cli 0.156.1",
+      probeLogin: async () => ({ authed: true, method: "chatgpt", probeError: null }),
+      hasApiKey: () => false,
+      probeEfforts: async () => null,
+      runCliHarness: async function* (): AsyncGenerator<HarnessEvent> {
+        throw new Error("legacy exec path must not run");
+      },
+      runAppServer: async function* (input): AsyncGenerator<HarnessEvent> {
+        input.controller?.bindSteer(async (message) => {
+          seen.push(message);
+          return { outcome: "accepted", nativeTurnId: "native-turn" };
+        });
+        yield {
+          type: "started",
+          session_id: input.spec.session_id,
+          ts: "2026-09-26T00:00:00.000Z",
+        };
+        await held;
+        yield {
+          type: "completed",
+          session_id: input.spec.session_id,
+          ts: "2026-09-26T00:00:01.000Z",
+        };
+      },
+    });
+    const runSpec = HarnessRunSpec.parse({
+      session_id: "session-message",
+      intent: "implement",
+      prompt: "work",
+      cwd: process.cwd(),
+    });
+    const iterator = adapter.run(runSpec)[Symbol.asyncIterator]();
+    expect((await iterator.next()).value).toMatchObject({ type: "started" });
+    await expect(
+      adapter.message?.("session-message", { messageId: "msg-a", text: "steer" }),
+    ).resolves.toEqual({ outcome: "accepted", nativeTurnId: "native-turn" });
+    await expect(
+      adapter.message?.("session-unknown", { messageId: "msg-b", text: "steer" }),
+    ).resolves.toEqual({ outcome: "unsupported", reason: "no_live_session" });
+    release();
+    expect((await iterator.next()).value).toMatchObject({ type: "completed" });
+    expect((await iterator.next()).done).toBe(true);
+    // The finished session's controller is gone from the map.
+    await expect(
+      adapter.message?.("session-message", { messageId: "msg-c", text: "steer" }),
+    ).resolves.toEqual({ outcome: "unsupported", reason: "no_live_session" });
+    expect(seen).toEqual([{ messageId: "msg-a", text: "steer" }]);
+  });
+
+  it("answers unsupported on the legacy exec path, which has no app-server channel", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const adapter = createCodexAdapter({
+      detectVersion: async () => "codex-cli 0.156.1",
+      probeLogin: async () => ({ authed: true, method: "chatgpt", probeError: null }),
+      hasApiKey: () => false,
+      probeEfforts: async () => null,
+      runCliHarness: async function* (input): AsyncGenerator<HarnessEvent> {
+        yield {
+          type: "started",
+          session_id: input.spec.session_id,
+          ts: "2026-09-26T00:00:00.000Z",
+        };
+        await held;
+        yield {
+          type: "completed",
+          session_id: input.spec.session_id,
+          ts: "2026-09-26T00:00:01.000Z",
+        };
+      },
+    });
+    const runSpec = HarnessRunSpec.parse({
+      session_id: "session-exec",
+      intent: "implement",
+      prompt: "work",
+      cwd: process.cwd(),
+    });
+    const iterator = adapter.run(runSpec)[Symbol.asyncIterator]();
+    expect((await iterator.next()).value).toMatchObject({ type: "started" });
+    await expect(
+      adapter.message?.("session-exec", { messageId: "msg-exec", text: "steer" }),
+    ).resolves.toEqual({ outcome: "unsupported", reason: "no_live_session" });
+    release();
+    expect((await iterator.next()).value).toMatchObject({ type: "completed" });
+    expect((await iterator.next()).done).toBe(true);
   });
 });

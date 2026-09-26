@@ -1,4 +1,4 @@
-import { browserMcpCommand } from "@claudexor/core";
+import { browserMcpCommand, type LiveMessageResult } from "@claudexor/core";
 import type { HarnessEvent, HarnessRunSpec } from "@claudexor/schema";
 import { nowIso } from "@claudexor/util";
 import { CODEX_EFFORT_SNAPSHOT, codexEffortFor, type CodexEffortCatalog } from "./effort-probe.js";
@@ -16,8 +16,45 @@ export function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** A JSON-RPC error answer, kept typed so callers classify by provenance, never by prose (INV-049). */
+export class CodexRpcError extends Error {
+  constructor(
+    readonly code: number | null,
+    message: string,
+  ) {
+    super(message);
+    this.name = "CodexRpcError";
+  }
+}
+
+/** Where a request's answer came from: the vendor's result, its typed refusal, or the transport. */
+export type CodexRpcProvenance =
+  | { kind: "result"; result: JsonObject }
+  | { kind: "rpc_error"; code: number | null; message: string }
+  | { kind: "transport"; cause: Error };
+
+/** Typed provenance for a request whose failure must not taint the run. */
+export function rpcProvenance(reply: Promise<JsonObject>): Promise<CodexRpcProvenance> {
+  return reply.then(
+    (result): CodexRpcProvenance => ({ kind: "result", result }),
+    (error: unknown): CodexRpcProvenance =>
+      error instanceof CodexRpcError
+        ? { kind: "rpc_error", code: error.code, message: error.message }
+        : { kind: "transport", cause: error instanceof Error ? error : new Error(String(error)) },
+  );
+}
+
+export interface CodexSteerInput {
+  messageId: string;
+  text: string;
+}
+
+export type CodexSteerFn = (input: CodexSteerInput) => Promise<LiveMessageResult>;
+
 export class CodexAppServerController {
   private cancelRun: (() => Promise<void>) | null = null;
+  private steerRun: CodexSteerFn | null = null;
+  private steerEnded = false;
 
   bind(cancel: () => Promise<void>): void {
     this.cancelRun = cancel;
@@ -30,6 +67,223 @@ export class CodexAppServerController {
   async cancel(): Promise<void> {
     await this.cancelRun?.();
   }
+
+  bindSteer(steer: CodexSteerFn): void {
+    this.steerRun = steer;
+    this.steerEnded = false;
+  }
+
+  clearSteer(steer: CodexSteerFn): void {
+    if (this.steerRun !== steer) return;
+    this.steerRun = null;
+    this.steerEnded = true;
+  }
+
+  /** Never bound = no app-server channel (legacy exec path); bound then cleared = the session ended. */
+  steer(input: CodexSteerInput): Promise<LiveMessageResult> {
+    if (this.steerRun) return this.steerRun(input);
+    return Promise.resolve(
+      this.steerEnded
+        ? { outcome: "not_active", reason: "no_active_turn" }
+        : { outcome: "unsupported", reason: "no_live_session" },
+    );
+  }
+}
+
+export interface CodexSteerDeps {
+  sessionId: string;
+  threadId: () => string | null;
+  activeTurnId: () => string | null;
+  /** False once cancellation was requested or the app-server process stopped. */
+  live: () => boolean;
+  /** The NON-tainting request variant: a refusal here never marks the run errored. */
+  send: (method: string, params: JsonObject) => Promise<CodexRpcProvenance>;
+  /** Bound on the vendor's answer; past it the message may still have landed. */
+  responseDeadlineMs: number;
+}
+
+export interface CodexSteer {
+  send: CodexSteerFn;
+  /** onMessage hook, in arrival order: a userMessage echo settles its pending steer as delivered. */
+  observeEcho(notification: JsonObject): void;
+  /** Main-loop hook: the typed delivery receipt for an observed echo, emitted once. */
+  deliveredEvents(notification: JsonObject): HarnessEvent[] | null;
+}
+
+interface SteerCorrelation {
+  turnId: string;
+  settle: (result: LiveMessageResult) => void;
+  delivered: boolean;
+  announced: boolean;
+}
+
+/** The echo of a steered message: a userMessage item whose clientId names the steer. */
+function steerEcho(
+  notification: JsonObject,
+): { clientId: string; threadId: unknown; turnId: unknown } | null {
+  const method = notification["method"];
+  if (method !== "item/started" && method !== "item/completed") return null;
+  const params = asObject(notification["params"]);
+  const item = asObject(params?.["item"]);
+  if (item?.["type"] !== "userMessage" || typeof item["clientId"] !== "string") return null;
+  return { clientId: item["clientId"], threadId: params?.["threadId"], turnId: params?.["turnId"] };
+}
+
+/**
+ * Live input for one app-server run: `turn/steer` into the active turn.
+ * Outcomes come from the adapter's own state — every codex refusal shares
+ * JSON-RPC code -32600, so error prose is never consulted (INV-049):
+ * no active turn → `not_active` without an RPC; `{turnId}` → `accepted`;
+ * a refusal while the snapshot turn is still active → `rejected`, after the
+ * turn moved on → `not_active`; transport loss, a malformed reply or a missed
+ * deadline → `delivery_unknown`. The `userMessage` echo carrying our clientId
+ * (recorded on codex-cli 0.156.1) proves consumption: it settles a still-open
+ * steer as `delivered` and yields one `live_input_delivered` status event.
+ * A steer never cancels or fails the run.
+ */
+export function createCodexSteer(deps: CodexSteerDeps): CodexSteer {
+  const correlations = new Map<string, SteerCorrelation>();
+  const matching = (notification: JsonObject): SteerCorrelation | null => {
+    const echo = steerEcho(notification);
+    const correlation = echo ? correlations.get(echo.clientId) : undefined;
+    if (!echo || !correlation) return null;
+    if (echo.threadId !== undefined && echo.threadId !== deps.threadId()) return null;
+    if (echo.turnId !== undefined && echo.turnId !== correlation.turnId) return null;
+    return correlation;
+  };
+  return {
+    send(input) {
+      const threadId = deps.threadId();
+      const turnId = deps.activeTurnId();
+      if (!deps.live() || !threadId || !turnId)
+        return Promise.resolve({ outcome: "not_active", reason: "no_active_turn" });
+      return new Promise<LiveMessageResult>((resolve) => {
+        let settled = false;
+        const settle = (result: LiveMessageResult): void => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve(result);
+        };
+        const timer = setTimeout(
+          () => settle({ outcome: "delivery_unknown", reason: "response_timeout" }),
+          deps.responseDeadlineMs,
+        );
+        // Registered BEFORE the write: an echo that beats the reply still counts.
+        correlations.set(input.messageId, { turnId, settle, delivered: false, announced: false });
+        void deps
+          .send("turn/steer", {
+            threadId,
+            expectedTurnId: turnId,
+            clientUserMessageId: input.messageId,
+            input: [{ type: "text", text: input.text, text_elements: [] }],
+          })
+          .then((reply) => {
+            if (reply.kind === "result") {
+              const nativeTurnId = reply.result["turnId"];
+              settle(
+                typeof nativeTurnId === "string"
+                  ? { outcome: "accepted", nativeTurnId }
+                  : { outcome: "delivery_unknown", reason: "transport_lost" },
+              );
+            } else if (reply.kind === "rpc_error") {
+              settle(
+                deps.activeTurnId() === turnId
+                  ? { outcome: "rejected", reason: "rpc_refused" }
+                  : { outcome: "not_active", reason: "no_active_turn" },
+              );
+            } else settle({ outcome: "delivery_unknown", reason: "transport_lost" });
+          });
+      });
+    },
+    observeEcho(notification) {
+      const correlation = matching(notification);
+      if (!correlation || correlation.delivered) return;
+      correlation.delivered = true;
+      correlation.settle({ outcome: "delivered", nativeTurnId: correlation.turnId });
+    },
+    deliveredEvents(notification) {
+      const correlation = matching(notification);
+      if (!correlation?.delivered) return null;
+      if (correlation.announced) return [];
+      correlation.announced = true;
+      const messageId = steerEcho(notification)?.clientId ?? "";
+      return [
+        {
+          type: "status",
+          session_id: deps.sessionId,
+          ts: nowIso(),
+          text: `live message ${messageId} consumed by turn ${correlation.turnId}`,
+          payload: {
+            code: "live_input_delivered",
+            message_id: messageId,
+            native_turn_id: correlation.turnId,
+          },
+        },
+      ];
+    },
+  };
+}
+
+export type CodexRequest = (method: string, params: JsonObject) => Promise<JsonObject>;
+
+export interface CodexThreadLifecycle {
+  threadStatus: string | null;
+  threadSettled: boolean;
+  goalActive: boolean;
+  ownedBackground: JsonObject[];
+}
+
+async function backgroundTerminals(request: CodexRequest, threadId: string): Promise<JsonObject[]> {
+  const terminals: JsonObject[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+  for (;;) {
+    const result = await request("thread/backgroundTerminals/list", {
+      threadId,
+      ...(cursor ? { cursor } : {}),
+    });
+    if (Array.isArray(result["data"]))
+      terminals.push(
+        ...result["data"].map(asObject).filter((item): item is JsonObject => item !== null),
+      );
+    const nextCursor =
+      typeof result["nextCursor"] === "string" && result["nextCursor"]
+        ? result["nextCursor"]
+        : undefined;
+    if (!nextCursor) return terminals;
+    if (seenCursors.has(nextCursor))
+      throw new Error("Codex app-server repeated a background terminal cursor");
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+  }
+}
+
+/** Quiescence facts of the run's thread: status, goal, and the run-owned background terminals. */
+export async function readCodexLifecycle(
+  request: CodexRequest,
+  threadId: string | null,
+  ownedCommandItemIds: ReadonlySet<string>,
+): Promise<CodexThreadLifecycle> {
+  if (!threadId)
+    return { threadStatus: null, threadSettled: false, goalActive: false, ownedBackground: [] };
+  const [threadResult, goalResult, terminals] = await Promise.all([
+    request("thread/read", { threadId, includeTurns: false }),
+    request("thread/goal/get", { threadId }),
+    backgroundTerminals(request, threadId),
+  ]);
+  const status = asObject(asObject(threadResult["thread"])?.["status"]);
+  const threadStatus = typeof status?.["type"] === "string" ? status["type"] : null;
+  const goal = asObject(goalResult["goal"]);
+  return {
+    threadStatus,
+    threadSettled: threadStatus === "idle" || threadStatus === "systemError",
+    goalActive: goal?.["status"] === "active",
+    ownedBackground: terminals.filter(
+      (terminal) =>
+        typeof terminal["itemId"] === "string" && ownedCommandItemIds.has(terminal["itemId"]),
+    ),
+  };
 }
 
 function sandboxMode(access: HarnessRunSpec["access"]): string | null {
