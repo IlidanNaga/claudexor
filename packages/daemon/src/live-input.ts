@@ -51,6 +51,9 @@ export interface LiveAttemptRegistration {
  * in the per-run event log (`message.*` rows) and the idempotency ledger; this
  * map only answers "who can receive a message right now".
  */
+/** Terminal run ids remembered for the commit race (bounded; see dropForRun). */
+const TERMINAL_MEMORY = 1024;
+
 export class LiveInputRegistry {
   private readonly live = new Map<string, Map<string, LiveAttemptContext>>();
   private readonly terminal = new Set<string>();
@@ -78,6 +81,9 @@ export class LiveInputRegistry {
   /** Run terminal: every live attempt is gone and later sends answer run_terminal. */
   dropForRun(runId: string): void {
     this.live.delete(runId);
+    // The route already refuses terminal records by state; this set only
+    // covers the commit race, so a bounded memory is enough for a daemon's life.
+    if (this.terminal.size >= TERMINAL_MEMORY) this.terminal.clear();
     this.terminal.add(runId);
   }
 

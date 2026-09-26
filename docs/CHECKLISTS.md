@@ -146,7 +146,9 @@ pnpm test
 - Live input into active runs ships only as a declared per-adapter channel
   (`capability_profile.live_input`, projected as the catalog row's `liveInput`)
   with journaled typed delivery: `message.accepted` before any native dispatch,
-  then `message.delivered` or `message.refused` with `outcome` and `reason`. An
+  then `message.delivered` (a correlated consumption echo) or `message.refused`
+  with `outcome` and `reason`; an `accepted` receipt writes no second row and
+  consumption surfaces as the adapter's status event. An
   adapter without a truthful channel declares `none` and answers `unsupported`
   with no native write. If a native surface is discovered but not wired to
   active runs, expose it as a capability note only; do not enable live
