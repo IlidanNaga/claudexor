@@ -4,17 +4,15 @@
  *
  * Drives the BUILT claudexord over its public HTTP control plane against the
  * deterministic `fake-steerable` harness kind (declares `live_input: mid_turn`,
- * resolves `message()` to `accepted` and then `delivered`, never echoes the
- * text). The story pins the user-visible contract: admission → typed receipt →
+ * answers `message()` with `delivered` while parked, never echoes the text). The story pins the user-visible contract: admission → typed receipt →
  * journal rows; not_active after terminal; rejected/multi_attempt on a race
  * without expectedAttemptId; rejected/admission_persist_failed when the event
  * log cannot be written; and a daemon restart replaying the stored receipt
  * under the same Idempotency-Key.
  *
- * TODO(coordinator): the `fake-steerable` kind is the adapter lane's (CX-B)
- * deliverable and is absent from this tree, so the story is SKIPPED. Remove
- * the `.skip` once `packages/harness-fake` declares the kind; the assertions
- * below are written against CONTRACT v2 and need no other change.
+ * The `fake-steerable` kind (packages/harness-fake) parks after started/thinking,
+ * consumes exactly ONE message and answers `delivered` synchronously; the story
+ * therefore accepts `accepted` or `delivered` as the first receipt.
  */
 import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, readFileSync } from "node:fs";
@@ -159,7 +157,7 @@ afterEach(() => {
   sb.dispose();
 });
 
-describe.skip("[LIVE-MESSAGE:contract] live messages into a running fake-steerable run", () => {
+describe("[LIVE-MESSAGE:contract] live messages into a running fake-steerable run", () => {
   it("admits, accepts and delivers one message and journals the three receipts in order", async () => {
     sb = makeSandbox();
     const api = startDaemon(sb);

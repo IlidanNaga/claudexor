@@ -66,22 +66,12 @@ export interface PreparedHarnessProcessing {
 
 /**
  * Why a live message did not reach the model, filled from adapter/registry
- * state only — never from vendor error prose (INV-049). Mirrors the schema's
- * `LiveMessageReason` (control-run-message.ts) member for member.
+ * state only — never from vendor error prose (INV-049). The ONE vocabulary is
+ * the schema's `LiveMessageReason` (control-run-message.ts); core re-exports
+ * it so harness packages keep a single import path.
  */
-export type LiveMessageReason =
-  | "no_active_turn"
-  | "run_terminal"
-  | "attempt_mismatch"
-  | "no_live_session"
-  | "stdin_closed"
-  | "multi_attempt"
-  | "thread_bound"
-  | "interaction_pending"
-  | "rpc_refused"
-  | "admission_persist_failed"
-  | "transport_lost"
-  | "response_timeout";
+import type { LiveMessageReason } from "@claudexor/schema";
+export type { LiveMessageReason };
 
 /**
  * Typed answer of `HarnessAdapter.message`. `accepted`: the harness's
