@@ -2732,9 +2732,7 @@ facts (404 unknown run, 501 no service, 400 malformed/secret/too-long/missing
 key, 409 idempotency, 500 receipt-save failure); EVERY typed outcome is HTTP
 200 — deliberately unlike the answer and control routes — so a client reads
 `outcome`, never the status code. The protocol major stays 3; clients discover
-the route by its row in `GET /v2/operations`. Only agent runs register a live
-target (the orchestrator's candidate envelope owns the native session): an Ask
-or Plan run answers `unsupported`/`no_live_session` before anything is journaled.
+the route by its row in `GET /v2/operations`.
 
 Three boundaries are reported separately and never conflated:
 
@@ -2792,19 +2790,22 @@ continuity packet would lose the message, INV-137); no live attempt →
 beside an open `AskUserQuestion` would neither answer it nor be a work tool
 (INV-048); an adapter without `message` or a profile of `none` →
 `unsupported`; no native session yet → `not_active`; otherwise the adapter's
-verdict passes through 1:1. Plan, report, reviewer and synthesis lanes are not
-registered and therefore answer `not_active`.
+verdict passes through 1:1. Candidate attempts (including the synthesis
+attempt) and the read-only ask/plan/report attempts register; reviewer lanes do
+not and therefore answer `not_active`.
 
 Steering lifetime is attempt-local: a native transient retry keeps the
 registration (the getter follows the new session), while a convergence
 attempt, an Exact Retry or a `rerun_with_feedback` run is a new attempt that
 never re-injects earlier messages — the message was addressed to a session,
-not to the task. Two disclosed residuals: a receipt that lands after the run's
+not to the task. Three disclosed residuals: a receipt that lands after the run's
 terminal commit (the adapter answered late) is file-tail-stamped into
 `events.jsonl` (`message.*` rows are in the post-terminal audit allowlist next
 to `control.*`, so terminal-authority validation accepts them) — durable and
 visible on the next timeline read, but the live SSE push for that row is
-missed; and a consumed steer is not inactivity-watchdog progress until the
+missed; a closing row that arrives WHILE the terminal is being committed
+answers `500 message_receipt_unavailable` (the replay stays 500; the message
+may have landed); and a consumed steer is not inactivity-watchdog progress until the
 model's next output, so a message into a stalled session does not prevent its
 timeout.
 

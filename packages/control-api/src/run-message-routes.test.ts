@@ -331,24 +331,6 @@ describe("POST /v2/runs/:id/messages typed outcomes (every one is HTTP 200)", ()
     expect(send).not.toHaveBeenCalled();
     expect(rows(record).map((r) => r.type)).toEqual(["run.created"]);
   });
-
-  it("answers unsupported/no_live_session for an Ask or Plan run (only agent attempts register a live target), NO journal row and no dispatch", async () => {
-    for (const mode of ["ask", "plan"]) {
-      const send = sendStub({ outcome: "accepted" });
-      const record = { ...runRecord(), params: { prompt: "p", mode, scope: { kind: "none" } } };
-      await withServer([record], { ...ledger(), sendRunMessage: send }, async (base) => {
-        const response = await post(base, "run-m1", { text: TEXT });
-        expect(response.status).toBe(200);
-        expect(ControlRunMessageResponse.parse(await response.json())).toMatchObject({
-          accepted: false,
-          outcome: "unsupported",
-          reason: "no_live_session",
-        });
-      });
-      expect(send).not.toHaveBeenCalled();
-      expect(rows(record).map((r) => r.type)).toEqual(["run.created"]);
-    }
-  });
 });
 
 describe("POST /v2/runs/:id/messages journal-first admission and idempotency (CONTRACT A16/A23)", () => {

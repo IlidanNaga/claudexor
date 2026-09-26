@@ -124,16 +124,19 @@ async function startSteerableRun(
   repo: string,
   prompt: string,
   attempts = 1,
+  mode: "agent" | "ask" = "agent",
 ): Promise<{ jobId: string; runId: string; runDir: string; attemptIds: string[] }> {
-  // Live input registers AGENT attempts only (runCandidateInEnvelope owns the
-  // native session); Ask/Plan runs answer unsupported/no_live_session. An agent
-  // run needs a registered project root (idempotent per root).
-  const registered = await api<{ id?: string }>("POST", "/projects", { root: repo });
-  expect(registered.status, JSON.stringify(registered.body)).toBeLessThan(300);
+  // Candidate (agent) and read-only (ask/plan) attempts both register as live
+  // targets. An agent run needs a registered project root (idempotent per
+  // root); a no-project ask run needs none.
+  if (mode === "agent") {
+    const registered = await api<{ id?: string }>("POST", "/projects", { root: repo });
+    expect(registered.status, JSON.stringify(registered.body)).toBeLessThan(300);
+  }
   const { status, body } = await api<AcceptedRun>("POST", "/runs", {
     prompt,
-    mode: "agent",
-    scope: { kind: "project", root: repo },
+    mode,
+    ...(mode === "agent" ? { scope: { kind: "project", root: repo } } : {}),
     harnesses: ["fake-steerable"],
     primaryHarness: "fake-steerable",
     model: "fake-model",
@@ -291,6 +294,26 @@ describe("[LIVE-MESSAGE:contract] live messages into a running fake-steerable ru
     expect((await runRow(api, run.jobId)).state).toBe("running");
     await cancelRun(api, run.runId);
     await waitTerminal(api, run.jobId);
+  });
+
+  it("steers a read-only ask run the same way (the dominant delegated-child shape)", async () => {
+    sb = makeSandbox();
+    const api = startDaemon(sb);
+    const run = await startSteerableRun(api, sb.repo, "canary live-message ask mode", 1, "ask");
+    const first = await api<MessageReceipt>("POST", `/runs/${run.runId}/messages`, {
+      text: "Use MANGO.",
+    });
+    expect(first.status).toBe(200);
+    expect(first.body).toMatchObject({
+      accepted: true,
+      outcome: "delivered",
+      harnessId: "fake-steerable",
+      liveInput: "mid_turn",
+    });
+    await waitTerminal(api, run.jobId);
+    const types = readEvents(run.runDir).map((e) => e.type);
+    expect(types).toContain("message.accepted");
+    expect(types).toContain("message.delivered");
   });
 
   it("replays the recorded receipt under the same key across a daemon restart", async () => {

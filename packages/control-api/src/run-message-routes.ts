@@ -100,17 +100,6 @@ async function deliverLiveMessage(
       message: `run ${runId} is ${record.state}; no live attempt can receive a message`,
     });
   }
-  // Only agent attempts register a live-input target (the orchestrator's
-  // candidate envelope owns the native session); an Ask or Plan run has no
-  // channel in this mode, so the answer is the capability truth, not "wait".
-  const mode = (record.params as { mode?: unknown } | undefined)?.mode;
-  if (typeof mode === "string" && mode !== "agent") {
-    return receiptFor(runId, messageId, {
-      outcome: "unsupported",
-      reason: "no_live_session",
-      message: `run ${runId} is a ${mode} run; live messages reach agent attempts only`,
-    });
-  }
   try {
     appendMessageRow(record, runId, "message.accepted", {
       ...digest,

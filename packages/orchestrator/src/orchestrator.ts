@@ -6646,9 +6646,8 @@ export class Orchestrator {
       );
       const retryPolicy = transientRetryPolicy(this.config(input.repoRoot));
       let activeSessionId = spec.session_id;
-      const onAbort = () => {
-        void adapter.cancel?.(activeSessionId)?.catch(() => {});
-      };
+      const live = liveAttempt(input, routed, paths, contract, attemptId, () => activeSessionId);
+      const onAbort = () => void adapter.cancel?.(activeSessionId)?.catch(() => {});
       if (input.signal) {
         if (input.signal.aborted) onAbort();
         else input.signal.addEventListener("abort", onAbort, { once: true });
@@ -6846,6 +6845,7 @@ export class Orchestrator {
           await sleep(delayMs);
         }
       } finally {
+        live.release();
         input.signal?.removeEventListener("abort", onAbort);
         AC.settleGrantedAttemptLease({
           ledger,
