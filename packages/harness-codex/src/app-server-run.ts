@@ -6,9 +6,14 @@ import type { CodexEffortCatalog } from "./effort-probe.js";
 import {
   asObject,
   CodexAppServerController,
+  CodexRpcError,
   codexAppServerEvents,
   codexAppServerThreadParams,
+  createCodexSteer,
   errorText,
+  readCodexLifecycle,
+  rpcProvenance,
+  type CodexThreadLifecycle,
   type JsonObject,
 } from "./app-server-protocol.js";
 import { parseCodexEvent, parseCodexStderrFailure, type CodexParseState } from "./parse.js";
@@ -25,6 +30,8 @@ export interface CodexAppServerRunInput {
   effortCatalog?: CodexEffortCatalog;
   pollIntervalMs?: number;
   cancelDeadlineMs?: number;
+  /** Bound on the vendor's `turn/steer` answer (default 30 s); see createCodexSteer. */
+  steerDeadlineMs?: number;
 }
 
 export async function* runCodexAppServer(
@@ -34,7 +41,7 @@ export async function* runCodexAppServer(
   const abort = new AbortController();
   const pending = new Map<
     number,
-    { resolve: (value: JsonObject) => void; reject: (error: Error) => void }
+    { resolve: (value: JsonObject) => void; reject: (error: Error) => void; taint: boolean }
   >();
   const notifications: JsonObject[] = [];
   const notificationWaiter: { wake?: () => void } = {};
@@ -86,8 +93,11 @@ export async function* runCodexAppServer(
       pending.delete(object["id"]);
       const rpcError = asObject(object["error"]);
       if (rpcError) {
-        harnessReportedError = true;
-        request.reject(new Error(String(rpcError["message"] ?? "Codex app-server request failed")));
+        if (request.taint) harnessReportedError = true;
+        const code = typeof rpcError["code"] === "number" ? rpcError["code"] : null;
+        request.reject(
+          new CodexRpcError(code, String(rpcError["message"] ?? "Codex app-server request failed")),
+        );
         return;
       }
       const result = asObject(object["result"]);
@@ -131,6 +141,7 @@ export async function* runCodexAppServer(
           if (status === "failed" || status === "cancelled") harnessReportedError = true;
         }
       }
+      steer.observeEcho(object);
       notifications.push(object);
       notificationWaiter.wake?.();
       notificationWaiter.wake = undefined;
@@ -186,7 +197,9 @@ export async function* runCodexAppServer(
   })();
   void process.catch(() => {});
 
-  const request = async (method: string, params: JsonObject): Promise<JsonObject> => {
+  // `taint`: a refused request marks the run harness_reported_error; a live
+  // message (turn/steer) passes false so a benign refusal never poisons the run.
+  const request = async (method: string, params: JsonObject, taint = true): Promise<JsonObject> => {
     await Promise.race([
       spawned,
       process.then(() => {
@@ -195,7 +208,7 @@ export async function* runCodexAppServer(
     ]);
     const id = nextId++;
     const response = new Promise<JsonObject>((resolve, reject) => {
-      pending.set(id, { resolve, reject });
+      pending.set(id, { resolve, reject, taint });
     });
     io!.write(`${JSON.stringify({ id, method, params })}\n`);
     return response;
@@ -204,6 +217,14 @@ export async function* runCodexAppServer(
     await spawned;
     io!.write(`${JSON.stringify({ method, params })}\n`);
   };
+  const steer = createCodexSteer({
+    sessionId: input.spec.session_id,
+    threadId: () => nativeThreadId,
+    activeTurnId: () => activeTurnId,
+    live: () => !cancellationRequested && !processStopped,
+    send: (method, params) => rpcProvenance(request(method, params, false)),
+    responseDeadlineMs: input.steerDeadlineMs ?? 30_000,
+  });
   const nextNotification = async (method: string): Promise<JsonObject> => {
     for (;;) {
       const index = notifications.findIndex((item) => item["method"] === method);
@@ -262,57 +283,8 @@ export async function* runCodexAppServer(
       ...(terminationUnconfirmed ? { termination_unconfirmed: terminationUnconfirmed } : {}),
     };
   };
-  const backgroundTerminals = async (): Promise<JsonObject[]> => {
-    if (!nativeThreadId) return [];
-    const terminals: JsonObject[] = [];
-    const seenCursors = new Set<string>();
-    let cursor: string | undefined;
-    for (;;) {
-      const result = await request("thread/backgroundTerminals/list", {
-        threadId: nativeThreadId,
-        ...(cursor ? { cursor } : {}),
-      });
-      if (Array.isArray(result["data"]))
-        terminals.push(
-          ...result["data"].map(asObject).filter((item): item is JsonObject => item !== null),
-        );
-      const nextCursor =
-        typeof result["nextCursor"] === "string" && result["nextCursor"]
-          ? result["nextCursor"]
-          : undefined;
-      if (!nextCursor) return terminals;
-      if (seenCursors.has(nextCursor))
-        throw new Error("Codex app-server repeated a background terminal cursor");
-      seenCursors.add(nextCursor);
-      cursor = nextCursor;
-    }
-  };
-  const readLifecycle = async (): Promise<{
-    threadStatus: string | null;
-    threadSettled: boolean;
-    goalActive: boolean;
-    ownedBackground: JsonObject[];
-  }> => {
-    if (!nativeThreadId)
-      return { threadStatus: null, threadSettled: false, goalActive: false, ownedBackground: [] };
-    const [threadResult, goalResult, terminals] = await Promise.all([
-      request("thread/read", { threadId: nativeThreadId, includeTurns: false }),
-      request("thread/goal/get", { threadId: nativeThreadId }),
-      backgroundTerminals(),
-    ]);
-    const status = asObject(asObject(threadResult["thread"])?.["status"]);
-    const threadStatus = typeof status?.["type"] === "string" ? status["type"] : null;
-    const goal = asObject(goalResult["goal"]);
-    return {
-      threadStatus,
-      threadSettled: threadStatus === "idle" || threadStatus === "systemError",
-      goalActive: goal?.["status"] === "active",
-      ownedBackground: terminals.filter(
-        (terminal) =>
-          typeof terminal["itemId"] === "string" && ownedCommandItemIds.has(terminal["itemId"]),
-      ),
-    };
-  };
+  const readLifecycle = (): Promise<CodexThreadLifecycle> =>
+    readCodexLifecycle(request, nativeThreadId, ownedCommandItemIds);
   let cancelPromise: Promise<void> | null = null;
   const cancel = (): Promise<void> => {
     if (cancelPromise) return cancelPromise;
@@ -392,6 +364,7 @@ export async function* runCodexAppServer(
     return cancelPromise;
   };
   input.controller?.bind(cancel);
+  input.controller?.bindSteer(steer.send);
   const onAbort = (): void => void cancel();
   const externalAbort = input.spec.extra["abortSignal"];
   if (externalAbort instanceof AbortSignal) {
@@ -458,7 +431,9 @@ export async function* runCodexAppServer(
         parseState.lastAgentMessage = undefined;
         continue;
       }
-      const mapped = codexAppServerEvents(notification, input.spec.session_id, parseState);
+      const mapped =
+        steer.deliveredEvents(notification) ??
+        codexAppServerEvents(notification, input.spec.session_id, parseState);
       if (mapped) {
         for (const event of mapped) {
           if (event.type === "error") harnessReportedError = true;
@@ -594,6 +569,7 @@ export async function* runCodexAppServer(
   } finally {
     if (externalAbort instanceof AbortSignal) externalAbort.removeEventListener("abort", onAbort);
     input.controller?.clear(cancel);
+    input.controller?.clearSteer(steer.send);
     await stopProcess();
   }
 }

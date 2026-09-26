@@ -626,6 +626,15 @@ export function createCodexAdapter(deps: Partial<CodexRuntimeDeps> = {}): Harnes
       await controllers.get(sessionId)?.cancel();
     },
 
+    // Live input rides the app-server controller of the session (turn/steer);
+    // a session without one (legacy exec path, unknown id) has no channel.
+    async message(sessionId: string, input: { messageId: string; text: string }) {
+      const controller = controllers.get(sessionId);
+      return controller
+        ? controller.steer(input)
+        : { outcome: "unsupported" as const, reason: "no_live_session" as const };
+    },
+
     probeCredentialProfile(
       profile: CredentialProfile,
       abortSignal?: AbortSignal,
