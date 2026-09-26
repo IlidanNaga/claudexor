@@ -65,6 +65,42 @@ export interface PreparedHarnessProcessing {
 }
 
 /**
+ * Why a live message did not reach the model, filled from adapter/registry
+ * state only — never from vendor error prose (INV-049). Mirrors the schema's
+ * `LiveMessageReason` (control-run-message.ts) member for member.
+ */
+export type LiveMessageReason =
+  | "no_active_turn"
+  | "run_terminal"
+  | "attempt_mismatch"
+  | "no_live_session"
+  | "stdin_closed"
+  | "multi_attempt"
+  | "thread_bound"
+  | "interaction_pending"
+  | "rpc_refused"
+  | "admission_persist_failed"
+  | "transport_lost"
+  | "response_timeout";
+
+/**
+ * Typed answer of `HarnessAdapter.message`. `accepted`: the harness's
+ * documented acceptance boundary was observed (consumption unproved).
+ * `delivered`: a correlated native consumption event was observed (obedience
+ * unproved). `rejected`: an explicit refusal of THIS submission on a still
+ * active turn. `not_active`: no eligible target existed before dispatch.
+ * `unsupported`: this session has no live-input channel. `delivery_unknown`:
+ * the message may have landed (transport loss, malformed reply, timeout) —
+ * never "safe to resend under a new key".
+ */
+export interface LiveMessageResult {
+  outcome:
+    "accepted" | "delivered" | "rejected" | "not_active" | "unsupported" | "delivery_unknown";
+  reason?: LiveMessageReason;
+  nativeTurnId?: string;
+}
+
+/**
  * The contract every harness adapter implements. Adapters translate a native
  * harness's I/O into typed Claudexor events — they never contain orchestration
  * logic. External adapters may implement this as an in-tree HarnessAdapter implementation (the out-of-tree JSON-RPC bridge package was removed in v0.9).
@@ -114,6 +150,18 @@ export interface HarnessAdapter {
 
   /** Optional cancellation. */
   cancel?(sessionId: string): Promise<void>;
+
+  /**
+   * Optional live input into an ALREADY RUNNING session (the
+   * `POST /v2/runs/:id/messages` capability). Only adapters whose
+   * `capabilityProfile.live_input` is not `none` implement it; the daemon
+   * answers `unsupported` when the method is absent. The adapter never
+   * cancels or fails the run because of a message: every outcome is typed.
+   */
+  message?(
+    sessionId: string,
+    input: { messageId: string; text: string },
+  ): Promise<LiveMessageResult>;
 
   /**
    * Optional per-profile readiness probe (INV-135): the doctor projection for
