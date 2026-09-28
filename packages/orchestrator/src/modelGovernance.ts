@@ -32,6 +32,8 @@
 import type { HarnessAdapter } from "@claudexor/core";
 import {
   HarnessUnavailableError,
+  effortResolutionEvent,
+  resolveEffortEvidence,
   validateModel,
   hasModelInventoryForRoute,
   prepareHarnessProcessing,
@@ -255,6 +257,12 @@ export async function* runModelGovernedRoute(
       session_id: spec.session_id,
       text: unverified.join("; "),
     };
+  }
+  if (!routed.adapter.effortParameter) {
+    yield effortResolutionEvent(
+      spec.session_id,
+      resolveEffortEvidence(spec.effort_hint, [], [], "adapter", null),
+    );
   }
   yield* routed.adapter.run(spec);
 }

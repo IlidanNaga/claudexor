@@ -191,6 +191,7 @@ import {
   emitTransientExhausted,
   emitTransientRetryPlan,
   observeReadonlySpend,
+  recordAdapterThrow,
 } from "./laneStreamEvents.js";
 import {
   promptWithEngineConstraints,
@@ -239,7 +240,6 @@ import {
 } from "./deepScanReducer.js";
 import {
   type AttemptTelemetry,
-  classifyAdapterThrow,
   createAttemptTelemetry,
   observeAttemptTelemetry,
   setAttemptOutcome,
@@ -2652,9 +2652,7 @@ export class Orchestrator {
             processingRefusal = err;
             break;
           }
-          telemetry.transientFailures.push(
-            classifyAdapterThrow({ errorName: err instanceof Error ? err.name : null }),
-          );
+          if (!recordAdapterThrow(telemetry, err)) break;
         } finally {
           clearFileBackedContext();
         }
@@ -5038,6 +5036,7 @@ export class Orchestrator {
         attemptTelemetries.push({ attemptId, harnessId: adapter.id, telemetry: run.telemetry });
         // Cancellation/deadline keeps priority over a belt failure finalized concurrently.
         if (input.signal?.aborted || processingBudgetDenial) break;
+        if (run.telemetry.effortResolution?.resolution === "rejected") break;
         if (delegateFailure.candidateFailureKind(run)) {
           const failure = delegateFailure.candidateFailureTerminal(run, "convergence");
           if (run.files) {
@@ -5909,6 +5908,7 @@ export class Orchestrator {
           error: outcome.error,
         });
         if (outcome.status !== "success") {
+          if (outcome.telemetry?.effortResolution?.resolution === "rejected") break;
           const next = adapters[idx + 1];
           if (next && !input.signal?.aborted) {
             fallbackFrom = outcome.harnessId;
@@ -6756,9 +6756,7 @@ export class Orchestrator {
               break;
             }
             // #31: classify the throw (watchdog timeout vs process crash) as typed.
-            telemetry.transientFailures.push(
-              classifyAdapterThrow({ errorName: err instanceof Error ? err.name : null }),
-            );
+            if (!recordAdapterThrow(telemetry, err)) break;
           }
 
           if (streamBudgetDenied) break;
@@ -7055,6 +7053,7 @@ export class Orchestrator {
               }
             }
           }
+          if (last?.telemetry.effortResolution?.resolution === "rejected") break;
           // Per-harness fallback_model: one same-harness retry on FAILURE (not
           // policy blocks) before falling through to the next harness.
           const fallbackModel = routed.settings?.fallbackModel;

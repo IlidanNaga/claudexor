@@ -43,6 +43,16 @@ A confirmed processing refusal may authorize a separate caller-owned Standard
 request/reservation; it does not erase the first operation's physical dispatch
 or permit retrying an unknown outcome.
 
+Effort preferences resolve in the engine at the final model/account/harness.
+Embedding callers preserve the original request and consume the typed
+receipt; they do not duplicate adaptation or parse disclosure text. The
+[effort contract](ARCHITECTURE.md#4-routing) specifies existing result/artifact
+locations, omission versus explicit `none`, and independent provider observation.
+Raw model clients discover `captureEffortEvidence` on the model-operation POST
+descriptor and freeze that query choice for each operation; omission retains the
+legacy strict result shape. GET and ACK always use the exact stored bytes.
+The shared fixture is `packages/schema/fixtures/effort-resolution.json`.
+
 ## Embedded Engine Runtime
 
 An embedding host reuses `claudexor-runtime-<version>.tar.gz`, the same closure

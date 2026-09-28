@@ -1,7 +1,7 @@
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DurableJournal } from "@claudexor/journal";
 import type { ModelAdapter } from "@claudexor/core";
@@ -20,6 +20,7 @@ import { ResourceStore } from "./resource-store.js";
 import { ModelOperations } from "./model-operations.js";
 import { DaemonControlApiServer } from "../../control-api/src/daemon-server.js";
 import { createCodexModelAdapter } from "../../harness-codex/src/model.js";
+import effortFixture from "../../schema/fixtures/effort-resolution.json" with { type: "json" };
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -133,6 +134,188 @@ async function fixture(
 }
 
 describe("model operations over the existing daemon command substrate", () => {
+  it.each([undefined, false, true])(
+    "captures effort only with negotiated intent (%s) through HTTP, restart, replay and ACK",
+    async (captureEffortEvidence) => {
+      const posts = vi.fn();
+      const adapter = createCodexModelAdapter({
+        now: () => 1900000000000,
+        clientVersion: async () => ({ version: "0.156.1", source: "verified_transport" }),
+        readAuthFile: async () =>
+          JSON.stringify({
+            auth_mode: "chatgpt",
+            tokens: {
+              account_id: "fixture",
+              access_token: `fixture.${Buffer.from('{"exp":2100000000}').toString("base64url")}.signature`,
+            },
+          }),
+        fetch: async (_url, init) => {
+          if (init?.method === "POST") {
+            posts(JSON.parse(String(init.body)).reasoning.effort);
+            return new Response(
+              `data: ${JSON.stringify({ type: "response.completed", response: { model: "test-model", output: [] } })}\n\n`,
+            );
+          }
+          return Response.json({
+            models: [
+              {
+                slug: "test-model",
+                supported_reasoning_levels: [{ effort: "low" }, { effort: "xhigh" }],
+              },
+              {
+                slug: "sibling",
+                supported_reasoning_levels: [
+                  { effort: "low" },
+                  { effort: "xhigh" },
+                  { effort: "ultra" },
+                ],
+              },
+            ],
+          });
+        },
+      });
+      const f = await fixture((input, context) =>
+        adapter.invoke(input, {
+          ...context,
+          profile: {
+            ...context.profile,
+            isolation_locator: join(process.env.CLAUDEXOR_CONFIG_DIR!, "profiles", "fixture"),
+          },
+        }),
+      );
+      const api = new DaemonControlApiServer({
+        token: "fixture-control",
+        daemon: f.client,
+        services: {
+          createModelOperation: f.operations.create.bind(f.operations),
+          getModelOperation: async (id) => f.operations.inspect(id),
+          readModelResult: async (id) => f.operations.readResult(id),
+          acknowledgeModelResult: async (id, digest) => f.operations.acknowledge(id, digest),
+        },
+      });
+      const address = await api.start();
+      cleanup.push(() => api.stop());
+      const endpoint = `http://${address.host}:${address.port}/v2/model-operations`;
+      const headers = {
+        Authorization: "Bearer fixture-control",
+        "X-Claudexor-Protocol-Major": "3",
+        "Content-Type": "application/json",
+        "Idempotency-Key": "effort-custody",
+      };
+      const body = request();
+      body.options.reasoningEffort = effortFixture.requested;
+      const ref = f.upload(body);
+      const captureQuery =
+        captureEffortEvidence === undefined
+          ? ""
+          : `?captureEffortEvidence=${captureEffortEvidence}`;
+      const post = (query = captureQuery) =>
+        fetch(`${endpoint}${query}`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ request: ref }),
+        });
+      const createdResponse = await post();
+      expect(createdResponse.status).toBe(202);
+      const created = ControlModelOperationDetail.parse(await createdResponse.json());
+      await f.terminal(created.id);
+      const response = await fetch(`${endpoint}/${created.id}/result`, { headers });
+      expect(response.status).toBe(200);
+      const bytes = Buffer.from(await response.arrayBuffer());
+      const parsed = JSON.parse(bytes.toString());
+      if (captureEffortEvidence === true) expect(parsed.effortResolution).toEqual(effortFixture);
+      else expect(parsed).not.toHaveProperty("effortResolution");
+      // Frozen pre-effort top-level strict result fields, including real provider echoes.
+      expect(Object.keys(parsed).sort()).toEqual(
+        [
+          "appliedOptions",
+          "cost",
+          ...(captureEffortEvidence ? ["effortResolution"] : []),
+          "message",
+          "outcome",
+          "problem",
+          "route",
+          "usage",
+        ].sort(),
+      );
+      expect(parsed.appliedOptions).toEqual({});
+      const stored = f.operations.readResult(created.id);
+      const digest = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+      expect(stored.bytes.equals(bytes)).toBe(true);
+      expect(stored.sha256).toBe(digest);
+      expect(response.headers.get("etag")).toBe(`"${digest}"`);
+      expect(f.operations.readResult(created.id).bytes.equals(bytes)).toBe(true);
+      expect(((await (await post()).json()) as { id: string }).id).toBe(created.id);
+      expect((await post(`?captureEffortEvidence=${captureEffortEvidence !== true}`)).status).toBe(
+        409,
+      );
+      const params = f.store.get(created.id)!.params;
+      if (captureEffortEvidence === true)
+        expect(params).toHaveProperty("captureEffortEvidence", true);
+      else expect(params).not.toHaveProperty("captureEffortEvidence");
+      await api.stop();
+      await f.server.stop();
+      f.operations.close();
+      f.journal.close();
+      const journal = new DurableJournal({ rootDir: join(f.root, "journal"), partition: "global" });
+      const store = new CommandStore(journal);
+      const resources = new ResourceStore(join(f.root, "resources"));
+      const reopened = new ModelOperations({
+        commands: { current: () => store },
+        resources: () => resources,
+        enqueue: async () => {
+          throw new Error("replay cannot enqueue");
+        },
+        cancel: async () => {
+          throw new Error("replay cannot cancel");
+        },
+        resolve: async () => {
+          throw new Error("replay cannot resolve a provider");
+        },
+      });
+      cleanup.push(async () => {
+        reopened.close();
+        journal.close();
+      });
+      expect(reopened.readResult(created.id).bytes.equals(bytes)).toBe(true);
+      expect(
+        (await reopened.create(ref, "effort-custody", undefined, captureEffortEvidence)).id,
+      ).toBe(created.id);
+      await expect(
+        reopened.create(ref, "effort-custody", undefined, captureEffortEvidence !== true),
+      ).rejects.toMatchObject({ code: "idempotency_conflict" });
+      const restartedApi = new DaemonControlApiServer({
+        token: "fixture-control",
+        daemon: f.client,
+        services: {
+          readModelResult: async (id) => reopened.readResult(id),
+          acknowledgeModelResult: async (id, sha) => reopened.acknowledge(id, sha),
+        },
+      });
+      const restartedAddress = await restartedApi.start();
+      cleanup.push(() => restartedApi.stop());
+      const restartedEndpoint = `http://${restartedAddress.host}:${restartedAddress.port}/v2/model-operations/${created.id}`;
+      const recovered = await fetch(`${restartedEndpoint}/result`, { headers });
+      expect(Buffer.from(await recovered.arrayBuffer()).equals(bytes)).toBe(true);
+      expect(recovered.headers.get("etag")).toBe(`"${digest}"`);
+      const ack = await fetch(`${restartedEndpoint}/ack`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ sha256: digest }),
+      });
+      expect(ack.status).toBe(200);
+      expect(((await ack.json()) as { response: { state: string } }).response.state).toBe(
+        "acknowledged",
+      );
+      expect(
+        (await reopened.create(ref, "effort-custody", undefined, captureEffortEvidence)).response
+          .state,
+      ).toBe("acknowledged");
+      expect(resources.listModelResources()).toEqual([]);
+      expect(posts.mock.calls).toEqual([[effortFixture.submitted]]);
+    },
+  );
+
   it("binds capture intent while retaining historical false/omitted idempotency", async () => {
     const captures: Array<boolean | undefined> = [];
     const f = await fixture(async (_input, context) => {

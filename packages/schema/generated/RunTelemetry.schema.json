@@ -178,6 +178,103 @@
           "items": {
             "type": "object",
             "properties": {
+              "effort_resolution": {
+                "type": "object",
+                "properties": {
+                  "requested": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "\\S",
+                        "description": "User-supplied string that must contain visible content, not just whitespace."
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Original effort preference before adaptation; null when none was requested."
+                  },
+                  "submitted": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/RunTelemetry/properties/attempts/items/properties/effort_resolution/properties/requested/anyOf/0"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Native option prepared for transport; null means omitted, never the explicit token none. Not proof of dispatch."
+                  },
+                  "resolution": {
+                    "type": "string",
+                    "enum": [
+                      "exact",
+                      "downward",
+                      "floor",
+                      "omitted",
+                      "unverifiable",
+                      "rejected"
+                    ]
+                  },
+                  "source": {
+                    "type": "string",
+                    "enum": [
+                      "account_catalog",
+                      "live_probe",
+                      "versioned_snapshot",
+                      "adapter"
+                    ]
+                  },
+                  "parameter": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/RunTelemetry/properties/attempts/items/properties/effort_resolution/properties/requested/anyOf/0"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Native carrier, such as reasoning.effort, model_reasoning_effort or --effort; null when no separate knob is carried."
+                  },
+                  "observed": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/RunTelemetry/properties/attempts/items/properties/effort_resolution/properties/requested/anyOf/0"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Provider-reported effort only; null when unobserved, never copied from submission."
+                  },
+                  "observedSource": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/RunTelemetry/properties/attempts/items/properties/effort_resolution/properties/requested/anyOf/0"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Provider event/field that reported observed effort; null when unobserved."
+                  },
+                  "reason": {
+                    "$ref": "#/definitions/RunTelemetry/properties/attempts/items/properties/effort_resolution/properties/requested/anyOf/0",
+                    "description": "Diagnostic explanation; consumers branch on resolution, never prose."
+                  }
+                },
+                "required": [
+                  "requested",
+                  "submitted",
+                  "resolution",
+                  "source",
+                  "parameter",
+                  "observed",
+                  "observedSource"
+                ],
+                "additionalProperties": false
+              },
               "processing": {
                 "type": "object",
                 "properties": {
@@ -212,10 +309,7 @@
                   "submittedNative": {
                     "anyOf": [
                       {
-                        "type": "string",
-                        "minLength": 1,
-                        "pattern": "\\S",
-                        "description": "User-supplied string that must contain visible content, not just whitespace."
+                        "$ref": "#/definitions/RunTelemetry/properties/attempts/items/properties/effort_resolution/properties/requested/anyOf/0"
                       },
                       {
                         "type": "null"
@@ -236,13 +330,13 @@
                   "observedNative": {
                     "type": "array",
                     "items": {
-                      "$ref": "#/definitions/RunTelemetry/properties/attempts/items/properties/processing/properties/submittedNative/anyOf/0"
+                      "$ref": "#/definitions/RunTelemetry/properties/attempts/items/properties/effort_resolution/properties/requested/anyOf/0"
                     }
                   },
                   "reason": {
                     "anyOf": [
                       {
-                        "$ref": "#/definitions/RunTelemetry/properties/attempts/items/properties/processing/properties/submittedNative/anyOf/0"
+                        "$ref": "#/definitions/RunTelemetry/properties/attempts/items/properties/effort_resolution/properties/requested/anyOf/0"
                       },
                       {
                         "type": "null"
@@ -251,7 +345,7 @@
                     "description": "User-supplied string that must contain visible content, not just whitespace."
                   },
                   "source": {
-                    "$ref": "#/definitions/RunTelemetry/properties/attempts/items/properties/processing/properties/submittedNative/anyOf/0"
+                    "$ref": "#/definitions/RunTelemetry/properties/attempts/items/properties/effort_resolution/properties/requested/anyOf/0"
                   }
                 },
                 "required": [
@@ -272,7 +366,7 @@
                   "nativeMode": {
                     "anyOf": [
                       {
-                        "$ref": "#/definitions/RunTelemetry/properties/attempts/items/properties/processing/properties/submittedNative/anyOf/0"
+                        "$ref": "#/definitions/RunTelemetry/properties/attempts/items/properties/effort_resolution/properties/requested/anyOf/0"
                       },
                       {
                         "type": "null"
@@ -291,7 +385,7 @@
                     ]
                   },
                   "source": {
-                    "$ref": "#/definitions/RunTelemetry/properties/attempts/items/properties/processing/properties/submittedNative/anyOf/0"
+                    "$ref": "#/definitions/RunTelemetry/properties/attempts/items/properties/effort_resolution/properties/requested/anyOf/0"
                   }
                 },
                 "required": [

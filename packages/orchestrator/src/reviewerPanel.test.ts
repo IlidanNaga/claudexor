@@ -201,7 +201,7 @@ describe("reviewer effort gate", () => {
     ).rejects.toThrow(/harness declares no effort controls/);
   });
 
-  it("validates a MODEL-naming entry against THAT model's advertised ladder, not the union", async () => {
+  it("preserves a known preference for resolution against the final reviewer model", async () => {
     // The union carries `ultra` (a sibling model advertises it); the named
     // reviewer model stops at `high`. The gate must speak for the model that
     // will actually review.
@@ -217,9 +217,7 @@ describe("reviewer effort gate", () => {
       resolveExplicitReviewerPanel(deps([codexish()]), [
         { harness: "codexish", model: "m-small", effort: "ultra" },
       ]),
-    ).rejects.toThrow(
-      /does not support requested effort 'ultra'.*model 'm-small' advertises: low, medium, high/,
-    );
+    ).resolves.toMatchObject([{ requestedModel: "m-small", requestedEffort: "ultra" }]);
     // The SAME level on the model that advertises it passes.
     const specs = await resolveExplicitReviewerPanel(deps([codexish()]), [
       { harness: "codexish", model: "m-big", effort: "ultra" },
@@ -649,3 +647,18 @@ describe("reviewer manifest truth under the harness's absence declaration (INV-1
     ]);
   });
 });
+
+it.each(["cursor-grok-4.6-xhigh", "gemini-3.7-flash-high"])(
+  "preserves compound route %s and refuses a conflicting separate knob",
+  async (slug) => {
+    const adapter = reviewerAdapter("compound", "openai", [], { knownModels: [slug] });
+    expect(
+      await resolveExplicitReviewerPanel(deps([adapter]), [{ harness: "compound", model: slug }]),
+    ).toMatchObject([{ requestedModel: slug, requestedEffort: null }]);
+    await expect(
+      resolveExplicitReviewerPanel(deps([adapter]), [
+        { harness: "compound", model: slug, effort: "low" },
+      ]),
+    ).rejects.toThrow(/does not support requested effort/);
+  },
+);

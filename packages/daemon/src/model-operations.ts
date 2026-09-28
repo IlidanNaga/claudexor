@@ -102,11 +102,14 @@ export class ModelOperations {
     request: ModelPayloadRef,
     idempotencyKey: string,
     captureFailureEvidence?: boolean,
+    captureEffortEvidence?: boolean,
   ): Promise<ControlModelOperationDetail> {
     if (this.closed) throw operationError("daemon_stopping", "Model operations are stopping", 503);
     // Omission and false retain the historical command and idempotency bytes.
-    const capture =
-      captureFailureEvidence === true ? { captureFailureEvidence: true as const } : {};
+    const capture = {
+      ...(captureFailureEvidence === true ? { captureFailureEvidence: true as const } : {}),
+      ...(captureEffortEvidence === true ? { captureEffortEvidence: true as const } : {}),
+    };
     const envelope = {
       request: ModelOperationParams.parse({ kind: "model", request, ...capture }),
       operation: MODEL_OPERATION_ID,
@@ -191,6 +194,8 @@ export class ModelOperations {
             : result.outcome === "unknown" || result.outcome === "incomplete"
               ? "interrupted"
               : "failed";
+      // Freeze the negotiated shape BEFORE publication; GET must keep its digest-bound bytes.
+      if (params.captureEffortEvidence !== true) delete result.effortResolution;
       const ref = this.deps.resources().publishModel(Buffer.from(JSON.stringify(result), "utf8"));
       const ready = this.now();
       evidence.response = {

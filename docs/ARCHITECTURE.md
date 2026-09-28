@@ -458,8 +458,8 @@ positional merge of its models' lists (`mergeEffortLadders`; the Swift
 `EffortLadder` merges the manifest's already-ordered arrays the same way), and
 a level's rank is its position in that merged order — which is what lets a
 brand-new vendor level sort correctly with no code change. Should two models
-ever advertise genuinely contradictory orders, the merge flags it and
-cross-model clamping is refused rather than an order invented. Adapters
+advertise contradictory or incomparable orders, the resolver refuses
+cross-model substitutions rather than treating display order as rank. Adapters
 discover what is really advertised at discovery time and fall back to a
 recorded snapshot (stamped vendor data, kept in its captured order) when a
 probe cannot answer, so a probe failure costs freshness, never the run; both
@@ -471,25 +471,59 @@ does not make another account stale. Effort ceilings are per MODEL, not per
 harness (gpt-6-astra and gpt-5.6-sol take `ultra`, gpt-5.4 stops at `xhigh`), so
 `effortLevelsForModel` narrows the harness-wide merged ladder for the routed
 model. The shared normalizer then passes an ADVERTISED level through verbatim,
-clamps an unadvertised one onto the nearest advertised level INSIDE the merged
-vendor order, and refuses a level that order has never seen, disclosed via
-`ignored_settings` rather than silently downgraded. WHICH LAYER clamps is part
+resolves a known unadvertised preference to the strongest supported level not
+above the request. Only when every supported level exceeds the request may the
+known minimum be used. Display tie-breaking between incomparable vendor chains
+is not rank evidence; unknown order never authorizes a guessed substitution. WHICH LAYER clamps is part
 of the contract: `discover()` probes the DEFAULT native harness home, so the
 manifest carries the default account's ladders, while codex advertises per
 ACCOUNT and every credential profile and API-key route runs under its own
-`CODEX_HOME`. Run preflight (`governRouteEffort`) therefore only DISCLOSES a
-level the harness's merged ladder does not know and forwards everything else
-verbatim; the adapter, which has resolved the profile env the child will
-actually run in, is the single layer that clamps. Reviewer efforts have no
-adapter-side disclosure channel, so the panel resolvers refuse a level the
-SELECTED reviewer does not advertise — against the named model's own ladder
-when the entry resolves one, else the harness-wide merged ladder — instead of
-forwarding it to be dropped. The CLI help, the MCP tool
+`CODEX_HOME`. Run preflight (`governRouteEffort`) therefore forwards the original
+preference even when default-account discovery lacks it. Native effort adapters
+resolve only after the account, model and harness are bound. Settings writes and
+reviewer admission preserve these preferences too; a separate effort on an
+adapter without that carrier retains its typed validation rule. Compound
+Cursor/Antigravity model ids are route identities and are never rewritten by
+effort resolution. Claude uses the installed binary's accepted list and its
+recorded same-provider vendor order for known gaps; historical ordering cannot
+authorize submitting a value absent from the current accepted list. Snapshot
+fallback authorizes values only on its recorded CLI version. An unverifiable
+knob uses the current vendor default with an explicit omission receipt; known
+absence and unknown capability remain distinct. An unrankable request against
+an available nonempty ladder refuses before generation. The CLI help, the MCP tool
 schema and the macOS picker's ordering all derive from that single source. `doctor` validates each
 harness's CONFIGURED default model against the truth source, so a broken
 default (e.g. a model the CLI cannot run) is reported honestly instead of
 masked by a smoke that used a different model, and the same verdict rides
 the harness status DTO (`configuredModelCheck`) into the Settings UI.
+The reusable `EffortResolution` schema records `requested` (the original
+preference), `submitted` (native option or explicit null omission), `resolution`
+(`exact`, `downward`, `floor`, `omitted`, `unverifiable`, `rejected`), `source`
+(the resolution authority), and `parameter` (the native carrier, null if absent).
+`observed` and `observedSource` stay null unless a provider field reports effort;
+submission never becomes observation. Existing dispatch/lifecycle evidence still
+determines whether the prepared option was physically sent. The receipt is
+optional on historical records. Model operations retain `effortResolution` in the
+existing `ModelCallResult` resource only when creation opted into
+`captureEffortEvidence=true` (see [model operations](#caller-owned-model-operations)).
+Runs record it as `attempts[].effort_resolution` in
+`final/telemetry.yaml`, carried through `HarnessEvent.effort_resolution`. The
+attempt retains the final native execution's receipt after account rotation.
+Codex model results obtain observation only from Responses' `reasoning.effort`;
+`appliedOptions` keeps its existing provider-echo meaning. Session adapters do
+not claim an observed value. Adaptation disclosures are status/log events and
+never injected assistant messages. These fields add no operation, generation,
+retry, account-selection or budget authority. A rejected final-route preference
+ends that attempt without account rotation, model/harness fallback or repair retry;
+ordinary availability failover retains its existing policy.
+Managed catalogs also carry optional `reasoningEffortsVerified` on `ModelCatalogEntry`:
+true records a fully parsed vendor array (including known empty), while false or
+historical absence prevents an incomplete catalog from claiming known absence or
+authorizing a substitution. Native Codex likewise retains explicit empty arrays
+separately from missing metadata on a listed model. The unnegotiated model-catalog
+HTTP view omits this new field; the account view retains it. An unlisted advisory model
+still follows its existing sibling-ladder fallback.
+
 Manifest `auth_modes` and `capability_profile.auth.preferred_source` describe
 possible source availability only. They are not readiness. UI, routing, and
 reviewer selection use doctor status, enabled intents, and smoke/conformance
@@ -1531,8 +1565,18 @@ death are separate facts. A crash after response bytes are published but before
 the command's terminal journal commit retains an unknown outcome; uncommitted
 bytes cannot certify a completed response and are reclaimed as crash residue.
 
-Callers may request `captureFailureEvidence=true` on the existing model-operation
-POST, discovered through that operation's query descriptor. Omission and false
+Callers may request `captureEffortEvidence=true` on the existing model-operation
+POST, discovered through its query descriptor, to retain the adapter's typed
+`effortResolution` receipt. Omission and false strip only that field before
+immutable result publication, preserving strict legacy result bytes. The literal
+true choice is captured in command parameters and idempotency identity: rejoining
+the same operation retains it, and changing it under the same key conflicts.
+GET still returns the stored bytes and their original digest for ACK; it performs
+no projection. This choice never changes the inference request, real provider
+`appliedOptions`, dispatch or generation count. Historical results remain unchanged.
+
+Callers may independently request `captureFailureEvidence=true` on the same POST,
+discovered through that operation's query descriptor. Omission and false
 retain the legacy command identity and strict result shape; true is bound to the
 same idempotency key and cannot change during a create rejoin. This is transport
 evidence intent, not a provider generation option.
@@ -2545,6 +2589,10 @@ runner's hash-bound result is journaled before verification. For a
 DEFAULT-store login, exit zero enters a fresh, source-targeted native probe
 followed by an isolated same-harness capability smoke over the normal adapter
 stream; only the exact `vendor_native` / `native_session` route may pass.
+One silent effort-omission status may precede `started` for the smoke's explicit
+null effort preference. It remains preparation evidence in the stream digest;
+the native `started` event alone supplies credential route/source proof. Repeated
+pre-start preparation, other pre-start activity, and events after completion still fail.
 Another provider, an API key, tool use, external context, or workspace mutation
 invalidates the receipt. No plan-tier, entitlement, quota, or zero-cost
 inference is part of this proof. A PROFILE-targeted login (INV-135:

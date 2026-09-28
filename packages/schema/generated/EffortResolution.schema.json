@@ -1,0 +1,103 @@
+{
+  "$ref": "#/definitions/EffortResolution",
+  "definitions": {
+    "EffortResolution": {
+      "type": "object",
+      "properties": {
+        "requested": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "\\S",
+              "description": "User-supplied string that must contain visible content, not just whitespace."
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Original effort preference before adaptation; null when none was requested."
+        },
+        "submitted": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/EffortResolution/properties/requested/anyOf/0"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Native option prepared for transport; null means omitted, never the explicit token none. Not proof of dispatch."
+        },
+        "resolution": {
+          "type": "string",
+          "enum": [
+            "exact",
+            "downward",
+            "floor",
+            "omitted",
+            "unverifiable",
+            "rejected"
+          ]
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "account_catalog",
+            "live_probe",
+            "versioned_snapshot",
+            "adapter"
+          ]
+        },
+        "parameter": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/EffortResolution/properties/requested/anyOf/0"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Native carrier, such as reasoning.effort, model_reasoning_effort or --effort; null when no separate knob is carried."
+        },
+        "observed": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/EffortResolution/properties/requested/anyOf/0"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Provider-reported effort only; null when unobserved, never copied from submission."
+        },
+        "observedSource": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/EffortResolution/properties/requested/anyOf/0"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Provider event/field that reported observed effort; null when unobserved."
+        },
+        "reason": {
+          "$ref": "#/definitions/EffortResolution/properties/requested/anyOf/0",
+          "description": "Diagnostic explanation; consumers branch on resolution, never prose."
+        }
+      },
+      "required": [
+        "requested",
+        "submitted",
+        "resolution",
+        "source",
+        "parameter",
+        "observed",
+        "observedSource"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

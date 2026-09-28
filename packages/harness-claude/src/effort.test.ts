@@ -9,6 +9,7 @@ import {
   claudeAdvertisedEffortsForRun,
   claudeEffortClampedEvent,
   claudeEffortIgnoredEvent,
+  claudeEffortLadder,
   claudeSnapshotTrustedForVersion,
   parseClaudeEffortHelp,
 } from "./effort-probe.js";
@@ -117,19 +118,12 @@ describe("the claude ladder is a property of the INSTALLED binary", () => {
     expect(normalizeEffort("xhigh", advertised ?? [])).toBe("xhigh");
   });
 
-  it("the SAME request sends NO flag on a CLI that does not advertise xhigh — no invented downgrade", () => {
-    // The claude ladder is a single vendor list: the installed binary's own
-    // `--help` order. A level that list has never seen has no honest position
-    // on it (there is no rank table to guess with), so the arg builder sends
-    // no flag — the vendor default stands — and preflight disclosure
-    // (`governRouteEffort`) tells the user the level went nowhere.
+  it("uses recorded same-provider order to resolve xhigh downward when current help omits it", () => {
     const advertised = parseClaudeEffortHelp(HELP_2_1_89) ?? [];
     expect(advertised).not.toContain("xhigh");
-    expect(normalizeEffort("xhigh", advertised)).toBeNull();
-    const check = resolveEffort("xhigh", advertised);
-    expect(check.status).toBe("rejected");
-    if (check.status !== "rejected") throw new Error("expected a rejection");
-    expect(check.message).toContain("low, medium, high, max");
+    expect(normalizeEffort("xhigh", advertised, claudeEffortLadder(advertised))).toBe("high");
+    // Without that recorded order the missing value cannot be placed.
+    expect(resolveEffort("xhigh", advertised).status).toBe("rejected");
   });
 
   it("refuses a level the binary's advertised list cannot place, naming this binary's set", () => {
@@ -290,14 +284,12 @@ describe("the claude effort probe degrades gracefully", () => {
 describe("an effort dropped AFTER preflight is disclosed on the run (INV-105)", () => {
   it("claudeEffortIgnoredEvent yields the ignored-settings disclosure exactly when the flag is dropped", () => {
     const advertised = ["low", "medium", "high", "max"] as const; // a 2.1.89-shaped binary
-    const dropped = claudeEffortIgnoredEvent(
-      { session_id: "s1", effort_hint: "xhigh" },
-      advertised,
-    );
-    expect(dropped?.type).toBe("message");
-    expect(dropped?.payload?.["ignored_settings"]).toEqual([
-      expect.stringContaining("effort=xhigh"),
-    ]);
+    expect(
+      claudeEffortIgnoredEvent({ session_id: "s1", effort_hint: "xhigh" }, advertised),
+    ).toBeNull();
+    expect(
+      claudeEffortClampedEvent({ session_id: "s1", effort_hint: "xhigh" }, advertised)?.text,
+    ).toContain("high");
     expect(
       claudeEffortIgnoredEvent({ session_id: "s1", effort_hint: "max" }, advertised),
     ).toBeNull();
@@ -306,7 +298,7 @@ describe("an effort dropped AFTER preflight is disclosed on the run (INV-105)", 
     ).toBeNull();
   });
 
-  it("the RUN discloses the drop and sends no --effort flag when the installed ladder is narrower", async () => {
+  it("the RUN discloses a downward substitution when the installed ladder has a known gap", async () => {
     // Preflight passed `xhigh` against the manifest ladder; the INSTALLED
     // binary the run probes stops at `max` — the run must say so, not silently
     // execute at the vendor default.
@@ -347,7 +339,7 @@ describe("an effort dropped AFTER preflight is disclosed on the run (INV-105)", 
       expect.stringContaining("effort=xhigh"),
     ]);
     expect(cliArgs).toBeDefined();
-    expect(cliArgs).not.toContain("--effort");
+    expect(cliArgs?.[cliArgs.indexOf("--effort") + 1]).toBe("high");
   });
 
   const snapshotFallbackAdapter = (installedVersion: string, capture: (args: string[]) => void) =>
@@ -439,7 +431,7 @@ describe("an effort the resolution CLAMPED is disclosed too (INV-105) — the co
       maxCapped,
       ladderWithUltra,
     );
-    expect(clamped?.type).toBe("message");
+    expect(clamped?.type).toBe("status");
     expect(clamped?.text).toContain("clamped");
     expect(clamped?.payload?.["ignored_settings"]).toEqual([
       expect.stringContaining("effort=ultra"),
@@ -450,7 +442,7 @@ describe("an effort the resolution CLAMPED is disclosed too (INV-105) — the co
     expect(normalizeEffort("ultra", maxCapped, ladderWithUltra)).toBe("max");
   });
 
-  it("a PASS-THROUGH emits nothing; against the binary's OWN ladder a miss is a DROP, not a clamp", () => {
+  it("keeps diagnostic seams exclusive for exact and unrankable requests", () => {
     // Advertised verbatim: neither seam fires.
     expect(
       claudeEffortClampedEvent({ session_id: "s1", effort_hint: "max" }, maxCapped),
@@ -458,10 +450,8 @@ describe("an effort the resolution CLAMPED is disclosed too (INV-105) — the co
     expect(
       claudeEffortIgnoredEvent({ session_id: "s1", effort_hint: "max" }, maxCapped),
     ).toBeNull();
-    // TODAY'S production shape (two-arg resolution, ladder = the advertised
-    // list itself): an unadvertised level cannot clamp — it drops, and the
-    // existing DROP seam owns the disclosure. Pinned so the two seams stay
-    // mutually exclusive.
+    // No captured Claude order places ultra. The legacy diagnostic reports
+    // omission; the run gate emits a typed rejection and never starts native work.
     expect(
       claudeEffortClampedEvent({ session_id: "s1", effort_hint: "ultra" }, maxCapped),
     ).toBeNull();
@@ -475,4 +465,14 @@ describe("an effort the resolution CLAMPED is disclosed too (INV-105) — the co
       claudeEffortClampedEvent({ session_id: "s1", effort_hint: null }, maxCapped, ladderWithUltra),
     ).toBeNull();
   });
+});
+
+it("describes effort preparation without claiming a dispatch or observed vendor use", () => {
+  const spec = { session_id: "prepared", effort_hint: "medium" };
+  expect(claudeEffortClampedEvent(spec, ["low", "high"])?.text).toBe(
+    "[effort] clamped: effort=medium (clamped to low: the requested level is not advertised by the installed claude CLI (it advertises: low, high), so preparation selected low, the resolved supported level)",
+  );
+  expect(claudeEffortIgnoredEvent(spec, [])?.text).toContain(
+    "no effort flag is prepared; the vendor default is left unspecified",
+  );
 });

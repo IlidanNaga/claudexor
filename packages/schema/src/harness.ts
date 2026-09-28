@@ -1,3 +1,4 @@
+import { EffortResolution } from "./effort.js";
 import { z } from "zod/v3";
 import { AuthSourceKind, AuthSourceReadiness, CredentialRoute } from "./auth.js";
 import { CredentialProfile } from "./credential-profile.js";
@@ -720,6 +721,7 @@ export type InputTokenUsage = z.infer<typeof InputTokenUsage>;
 /** Normalized event emitted by every adapter (the SSOT of adapter output). */
 export const HarnessEvent = z
   .object({
+    effort_resolution: EffortResolution.optional(),
     processing: ProcessingReceipt.optional(),
     processing_cost_basis: ProcessingCostBasis.optional(),
     type: z

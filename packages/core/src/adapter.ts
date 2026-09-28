@@ -97,6 +97,8 @@ export interface LiveMessageResult {
  */
 export interface HarnessAdapter {
   readonly id: string;
+  /** Separate native effort carrier; the adapter resolves it at the final route. */
+  readonly effortParameter?: string;
 
   /**
    * Static capability declaration available without spawning the vendor CLI.

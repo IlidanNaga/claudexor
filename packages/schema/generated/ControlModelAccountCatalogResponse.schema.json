@@ -206,6 +206,10 @@
                                 "type": "string"
                               }
                             },
+                            "reasoningEffortsVerified": {
+                              "type": "boolean",
+                              "description": "Whether the provider supplied a fully parsed effort array, including a known empty array. Missing on historical catalogs means unverified."
+                            },
                             "defaultReasoningEffort": {
                               "type": [
                                 "string",

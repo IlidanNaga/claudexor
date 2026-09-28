@@ -24,6 +24,7 @@ import type { DoctorSpec, HarnessAdapter, InteractionChannel } from "@claudexor/
 import {
   abortSignalFromSpec,
   HarnessUnavailableError,
+  throwIfEffortRejected,
   interactionChannelFromSpec,
   needsScopedHomeKeychainBridge,
   normalizeEffort,
@@ -70,6 +71,7 @@ import {
   CLAUDE_EFFORT_SNAPSHOT,
   CLAUDE_EFFORT_SNAPSHOT_VERIFIED_AGAINST,
   claudeRunEffortResolution,
+  claudeEffortLadder,
   claudeRunPatchPath,
   detectClaudeVersion,
   probeClaudeEffortLevels,
@@ -94,8 +96,6 @@ import { CLAUDE_MODEL_INVENTORY, probeClaudeModels } from "./model-probe.js";
 export const CLAUDE_PROVIDER_ENV_DENYLIST = PROVIDER_SECRET_ENV.filter(
   (k) => k !== "ANTHROPIC_API_KEY",
 );
-
-// The `--effort` ladder is read from the INSTALLED binary (`probeClaudeEffortLevels`).
 
 /** Exported for focused route-policy tests; runtime uses this exact selector. */
 export const selectClaudeRunAuthRoute = selectStrictAuthRoute;
@@ -289,6 +289,7 @@ export function createClaudeAdapter(deps: Partial<ClaudeRuntimeDeps> = {}): Harn
   const live = createClaudeLiveInput();
   return {
     id: "claude",
+    effortParameter: "--effort",
     capabilityProfile: CLAUDE_CAPABILITY_PROFILE,
     prepareProcessing: prepareClaudeSessionProcessing,
     // Live input into a running interactive session (live-input.ts): typed
@@ -676,7 +677,11 @@ export function claudeArgsForSpec(
   // through verbatim (so a newer binary's level needs no code change here), a
   // rankable one clamps, and anything else sends no flag rather than a level the
   // vendor would reject. Null = not requested OR not tunable -> pass no flag.
-  const eff = normalizeEffort(spec.effort_hint, advertisedEfforts);
+  const eff = normalizeEffort(
+    spec.effort_hint,
+    advertisedEfforts,
+    claudeEffortLadder(advertisedEfforts),
+  );
   if (eff) args.push("--effort", eff);
   if (spec.max_turns !== null && spec.max_turns > 0)
     args.push("--max-turns", String(spec.max_turns));
@@ -907,12 +912,12 @@ async function* runClaude(
   }
 
   const useSubscription = route === "subscription";
-  // Probe the installed effort ladder through the shared memoized help capture.
   const effort = await claudeRunEffortResolution(spec, runtime, abortSignalFromSpec(spec));
   spec = applyClaudeRunProcessing(spec, nativeEnv.CLAUDE_CONFIG_DIR, useSubscription);
   const processing = spec.processing;
   const args = claudeArgsForSpec(spec, interactive, useSubscription, effort.advertised);
-  if (effort.disclosure) yield effort.disclosure;
+  yield effort.event;
+  throwIfEffortRejected(effort.resolution);
   // Scrub all provider secrets, then re-add only this route's credential.
   const env: Record<string, string | null | undefined> =
     subscriptionSource === "native_session" ? nativeEnv : { ...spec.env, ...providerScrubEnv() };
@@ -948,8 +953,7 @@ async function* runClaude(
       const out = live.observe(obj, processed, sessionId);
       if (out) {
         for (const ev of out) {
-          // The auth route is fixed before spawn. Carry it on every event so
-          // a later api_retry/quota record remains independently attributable.
+          // Keep every event attributable to its fixed auth route.
           ev.credential_route = credentialRoute;
           ev.credential_source = credentialSource;
           if (profile) ev.credential_profile_id = profile.profile_id;
@@ -964,9 +968,7 @@ async function* runClaude(
             initialStdin: initialSessionFrames(spec.prompt, attachmentBlocks),
             matches: isControlRequestFrame,
             handle: (obj, io) => handleControlRequestFrame(obj, io, spec.session_id, channel),
-            // Held open past a result while a live message is queued|started or
-            // a run-owned background task is open (the CLI then runs the next
-            // native turn in this process); closes on the first quiet result.
+            // Hold stdin while live messages or background work remain.
             closeStdinOn: (obj) => live.closeStdinOn(spec.session_id, obj),
             onIo: live.onIo,
           },

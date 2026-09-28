@@ -4,8 +4,14 @@ import {
   observeCodexProcessing,
   codexProcessingCost,
 } from "./processing.js";
-import type { ProcessingReceipt } from "@claudexor/schema";
-import { validateModel, type ModelAdapter, type ModelAdapterContext } from "@claudexor/core";
+import type { ProcessingReceipt, EffortResolution } from "@claudexor/schema";
+import {
+  resolveEffortEvidence,
+  effortRankLadder,
+  validateModel,
+  type ModelAdapter,
+  type ModelAdapterContext,
+} from "@claudexor/core";
 import type {
   ControlModelCatalogResponse,
   ModelCallResult,
@@ -137,10 +143,12 @@ export function parseCodexModelCatalog(value: unknown): ModelCatalogEntry[] {
         "catalog_unavailable",
         "Codex returned an invalid model catalog entry.",
       );
-    const efforts = Array.isArray(entry.supported_reasoning_levels)
-      ? entry.supported_reasoning_levels
-          .map((item) => text(record(item)?.effort))
-          .filter((item): item is string => item !== null)
+    const reportedEfforts = entry.supported_reasoning_levels;
+    const reasoningEffortsVerified =
+      Array.isArray(reportedEfforts) &&
+      reportedEfforts.every((item) => text(record(item)?.effort)?.trim());
+    const efforts = reasoningEffortsVerified
+      ? reportedEfforts.map((item) => text(record(item)?.effort)!)
       : [];
     const modalities = Array.isArray(entry.input_modalities)
       ? entry.input_modalities.filter((item): item is string => typeof item === "string")
@@ -156,6 +164,7 @@ export function parseCodexModelCatalog(value: unknown): ModelCatalogEntry[] {
       maxOutputTokens: capacity(entry.max_output_tokens),
       inputModalities: modalities,
       reasoningEfforts: efforts,
+      reasoningEffortsVerified,
       defaultReasoningEffort: text(entry.default_reasoning_level),
       supportedOptions: [
         "toolChoice",
@@ -247,6 +256,7 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
       let dispatched = false;
       const capture = new ResponseFailureCapture(context.captureFailureEvidence);
       let processing: ProcessingReceipt | undefined;
+      let effortResolution: EffortResolution | undefined;
       let nativeContinuation: ModelNativeContinuation | null | undefined =
         request.nativeContinuation === undefined ? undefined : null;
       const withTurnState = (result: ModelCallResult): ModelCallResult => {
@@ -270,6 +280,17 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
             : nativeContinuation;
         return {
           ...result,
+          ...(effortResolution
+            ? {
+                effortResolution: {
+                  ...effortResolution,
+                  observed: result.appliedOptions.reasoningEffort ?? null,
+                  observedSource: result.appliedOptions.reasoningEffort
+                    ? "codex.responses.reasoning.effort"
+                    : null,
+                },
+              }
+            : {}),
           ...(nativeContinuation === undefined ? {} : { nativeContinuation: turn }),
           ...(observed
             ? {
@@ -333,24 +354,39 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
               clientVersionSource: catalog.clientVersionSource,
             },
           );
-        if (
-          request.options.reasoningEffort &&
-          !model.reasoningEfforts.includes(request.options.reasoningEffort)
-        ) {
-          throw new CodexModelError(
-            "unsupported_parameter",
-            "The requested reasoning effort is not advertised for this model.",
-            { parameter: "reasoningEffort" },
-          );
+        effortResolution = resolveEffortEvidence(
+          request.options.reasoningEffort,
+          model.reasoningEfforts,
+          effortRankLadder(
+            catalog.models
+              .filter((entry) => entry.reasoningEffortsVerified === true)
+              .map((entry) => entry.reasoningEfforts),
+          ),
+          "account_catalog",
+          "reasoning.effort",
+          model.reasoningEffortsVerified !== true,
+        );
+        if (effortResolution.resolution === "rejected") {
+          throw new CodexModelError("unsupported_parameter", effortResolution.reason!, {
+            parameter: "reasoningEffort",
+          });
         }
         processing = prepareCodexProcessing(
           request.options.processingPreference,
           model.processing,
           request.options.serviceTier,
         );
-        const physicalRequest = processing?.submittedNative
-          ? { ...request, options: { ...request.options, serviceTier: processing.submittedNative } }
-          : request;
+        const { reasoningEffort: _requestedEffort, ...otherOptions } = request.options;
+        const physicalRequest = {
+          ...request,
+          options: {
+            ...otherOptions,
+            ...(effortResolution.submitted === null
+              ? {}
+              : { reasoningEffort: effortResolution.submitted }),
+            ...(processing?.submittedNative ? { serviceTier: processing.submittedNative } : {}),
+          },
+        };
         const body = JSON.stringify(buildResponsesRequest(physicalRequest, route));
         const requestHeaders = new Headers(headers(auth));
         if (nativeContinuation) {
