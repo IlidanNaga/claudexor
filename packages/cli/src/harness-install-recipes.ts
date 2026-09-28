@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { CLAUDE_VENDOR_CLI_VERSION } from "@claudexor/harness-claude";
 import { CODEX_VENDOR_CLI_VERSION } from "@claudexor/harness-codex";
 import { OPENCODE_VENDOR_CLI_VERSION } from "@claudexor/harness-opencode";
-import { managedNodeRoot } from "@claudexor/core";
+import { managedNodeRoot, windowsNativeImageSegments } from "@claudexor/core";
 import type { PinnedVendorCliVersion } from "@claudexor/util";
 import { INSTALLABLE_HARNESSES } from "./harness-command-specs.js";
 
@@ -167,15 +167,29 @@ export interface HarnessInstallerDisclosure {
 export function harnessInstallerDisclosure(
   harness: InstallableHarness,
   target: HarnessInstallTarget = "remote",
+  platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch,
 ): HarnessInstallerDisclosure {
   const layout = TARGET_LAYOUTS[target];
   const pin = NPM_PINS[harness];
+  const windows = platform === "win32";
   if (pin) {
+    // A local Windows prefix holds no `bin` dir: npm leaves shims in the prefix
+    // root and the launcher is the package-native image (or there is none, and
+    // the installer refuses); the remote target is always a POSIX SSH host.
+    const nativeImage =
+      windows && target === "local" ? windowsNativeImageSegments(pin.npmPackage, arch) : null;
+    const installLocation =
+      windows && target === "local"
+        ? nativeImage
+          ? `${layout.displayRoot}/node_modules/${nativeImage.join("/")}`
+          : `${layout.displayRoot}/node_modules/${pin.npmPackage} (no Claudexor-runnable Windows image in this release)`
+        : `${layout.displayRoot}/bin`;
     return {
       harness,
       target,
       command: `npm install --global --prefix ${layout.displayRoot} ${pin.npmPackage}@${pin.version}`,
-      installLocation: `${layout.displayRoot}/bin`,
+      installLocation,
       pinnedVersion: pin.version,
       verification: pin.verification,
     };
@@ -184,7 +198,6 @@ export function harnessInstallerDisclosure(
   /* c8 ignore next -- every non-npm harness has a script row; this is the
      unreachable guard that keeps the two tables honest. */
   if (!script) throw new Error(`harness ${harness} has neither an npm pin nor a script installer`);
-  const windows = process.platform === "win32";
   const url = windows ? (script.windowsUrl ?? script.url) : script.url;
   const file = windows && script.windowsUrl ? "install.ps1" : "install.sh";
   const runner =

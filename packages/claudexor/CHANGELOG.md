@@ -1,5 +1,41 @@
 # claudexor
 
+## 3.17.0
+
+### Patch Changes
+
+- @claudexor/cli@3.17.0
+
+## 3.16.0
+
+### Patch Changes
+
+- Updated dependencies [788ddca]
+  - @claudexor/cli@3.16.0
+
+## 3.15.1
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/cli@3.15.1
+
+## 3.15.0
+
+### Patch Changes
+
+- Updated dependencies [3bc8af4]
+  - @claudexor/cli@3.15.0
+
+## 3.14.0
+
+### Patch Changes
+
+- Updated dependencies [2c024ac]
+- Updated dependencies [7e615b6]
+- Updated dependencies [fb42a94]
+  - @claudexor/cli@3.14.0
+
 ## 3.13.0
 
 ### Minor Changes

@@ -440,8 +440,10 @@ consumer is a staged field). Capabilities are data-driven and declared by the
 adapter: `effort_levels` + `model_effort_levels` (+ the
 `effort_levels_verified_against` freshness note) and `known_models` (+ the
 `known_models_verified_against` freshness note) as the manifest model truth
-source under the STRICT semantics described in the model-governance section
-above — there is no warn-and-pass-through tier.
+source, judged under the harness's own `model_inventory_absence` declaration
+described in the model-governance section above: strict where the harness
+declares its lists complete, forward-and-disclose where it declares them
+advisory — there is no silent pass-through tier either way.
 
 Reasoning effort is an OPEN vocabulary, mirroring the vendors: codex types its
 own `ReasoningEffort` as any non-empty value the model advertises, and Claude
@@ -549,9 +551,9 @@ reads; per-attempt overrides
 (budget downgrade to `fallback_model`, fallback retry) sit on top. Every
 explicit model — per-run, settings default, fallback, reviewer — must pass
 the harness's model truth source wherever that source can prove absence (live
-`models()` inventory, else manifest `known_models`; a harness with neither
-refuses explicit models; an advisory live inventory forwards, see below): enforced at
-settings write (400), run preflight (typed failure with artifacts before any
+`models()` inventory, else manifest `known_models`; an authoritative harness
+with neither refuses explicit models; an advisory harness forwards, see below):
+enforced at settings write (400), run preflight (typed failure with artifacts before any
 CLI spawns), immediately before each routed spawn against that attempt's exact
 profile, state, cwd, and auth preference, and both reviewer-panel paths. A pinned
 profile answers its OWN inventory through the same route resolver the run path
@@ -560,26 +562,36 @@ route is enumerated with the same `auto` the adapter will resolve and the spec
 reaches the adapter unrewritten: the gate reads the run's identity, it never
 decides it, and an undecidable route is the vendor's refusal to make, not the
 gate's.
-The same rule decides what a list may refuse with. A live inventory always
-proves PRESENCE; it proves ABSENCE only when its producer declares that it can.
-`model_inventory_absence: "advisory"` (codex, because `model/list` carries no
-provenance and the CLI substitutes a bundled default list when its remote fetch
-times out) makes an unlisted EXPLICIT model undecidable here, so the gate
-forwards it byte-identical, the vendor decides, and the per-spawn gate discloses
-once — as a status event — that the model was not listed. Preflight stays
-silent, so one spawn speaks once. Manifest truth is never advisory and is never
-substituted to admit a model; the unscoped `/harnesses/:id/models` query, the
-settings-write gate, the doctor's configured-model check and the automatic
-reviewer panel are unaffected, since they read manifest truth or keep their own
-skip-at-zero-cost contract. The residual is disclosed rather than guessed at: a
-vendor CLI refusing a forwarded model surfaces as an untyped error carrying the
-vendor's text, and a mistyped model on such a harness costs one spawn.
+The same rule decides what a list may refuse with. A list always proves
+PRESENCE; whether an absence from it is proof too is the HARNESS's declaration
+(`model_inventory_absence`), and it governs the live inventory and the manifest
+hint list alike — the hints are one day's memory of the same vendor menu, so
+they can refuse no more than the producer can. `advisory` (claude: the picker
+is an alias menu of one binary version plus the account's bootstrap rows;
+codex: `model/list` carries no provenance and the CLI substitutes a bundled
+default list when its remote fetch times out; cursor: `--list-models` is a
+fail-soft menu blind to routing variants) makes an unlisted EXPLICIT model
+undecidable, so every gate forwards it byte-identical and the vendor decides.
+Each admitting consumer says so once: the settings write persists the model
+and its read-back carries the admission in `notes` (the CLI prints it), the
+doctor's configured-model row passes with the note in its detail, and the
+per-spawn gate discloses a status event; preflight stays silent, so one spawn
+speaks once. `validateModel` takes the list, its source and the declaration
+with no defaults, and `checkHarnessModel` in the CLI registry is the one owner
+of that triple for the settings, doctor and catalog gates. No list is ever
+substituted to admit a model, and the automatic reviewer panel keeps its own
+skip-at-zero-cost contract whatever the harness declares. The residual is
+disclosed rather than guessed at: a vendor CLI refusing a forwarded model
+surfaces as an untyped error carrying the vendor's text, and a mistyped model
+on an advisory harness costs one spawn.
 Thread ask/plan readiness and inventory use the same durable lane HOME as the
 eventual spawn, while non-thread read-only runs retain disposable state.
 `/harnesses/:id/models` reports
-the truth source honestly (`source: api|manifest|none`, with the manifest's
-`verifiedAgainst` CLI-version freshness note), and the model-hints-freshness
-gate warns when the installed vendor CLI drifts from the verified version.
+the truth source honestly (`source: api|manifest|none` — a producer that
+answered only hint rows reports `manifest`; rows may carry `origin` and
+`resolved_model` — with the manifest's `verifiedAgainst` CLI-version freshness
+note), and the model-hints-freshness gate warns when the installed vendor CLI
+drifts from the verified version.
 Candidate diffs additionally pass a typed policy gate: protected-path changes
 and critical-risk diffs escalate as `NEEDS_HUMAN` findings. An accepted
 escalation blocks the run only when it belongs to the WINNING candidate
@@ -597,10 +609,15 @@ the argv prompt only instructs the harness to read it, and the file is removed
 before every diff/gate/review (including native retries). This prevents
 `spawn E2BIG` without truncating evidence or polluting the candidate patch.
 
-One-shot Codex and Cursor prompts use the vendors' stdin contracts through the
-shared CLI run loop; prompt bytes never ride their process argv. One-shot stdin
-and a bidirectional session are exclusive owners of the same pipe. Adapters
-without a verified prompt-stdin contract retain their vendor-specific transport.
+Cursor prompts use the vendor's one-shot stdin contract through the shared CLI
+run loop; prompt bytes never ride process argv. Codex instead owns one native
+`app-server --stdio` JSON-RPC child per Claudexor run. The adapter keeps the run
+active while a native turn, active goal continuation, or run-owned background
+terminal exists. Native thread/turn ids are control handles, not durable engine
+truth; the daemon journal remains authoritative. Stop pauses an active goal,
+interrupts the exact stored turn id, terminates only background terminals whose
+item ids were observed in that run, verifies quiescence, then reaps app-server.
+Adapters without a verified prompt transport retain their vendor-specific path.
 
 Git-backed candidate envelopes also preserve bounded raster previews before
 cleanup (PNG/JPEG/WebP/GIF, 16 MiB each / 32 MiB total) under the attempt's
@@ -1271,9 +1288,10 @@ run. A read-only turn of a THREAD instead gets a DURABLE per-lane home under
 `projects/<project-sha256>/lanes/<threadId>/<harness>-<profileOrDefault>/home`
 (a lane = thread + harness + credential profile), a sibling of `workspaces/`
 and outside every worktree (INV-063). The lane home persists across turns so
-the harness's recorded native session is reachable for `codex exec resume` /
-`claude --resume` on the next lane turn (INV-034); it is removed only by thread
-purge, credential-profile deletion, or the orphan-lane retention sweep.
+the harness's recorded native session is reachable for Codex app-server
+`thread/resume` / `claude --resume` on the next lane turn (INV-034); it is
+removed only by thread purge, credential-profile deletion, or the orphan-lane
+retention sweep.
 
 Convergence modes also default to isolated envelopes. The CLI-only `--in-place`
 is reserved for explicit stateful external adapters, such as Terminal-Bench
@@ -1387,10 +1405,41 @@ manifest truth applies. Codex account enumeration is native-session-specific,
 so API-key and unscoped legacy queries retain their manifest source instead of
 borrowing a subscription catalog. A failed supported live inventory remains
 unverifiable; it never falls back to a convenient manifest to admit a model.
-Where its producer declared absences advisory, an unverifiable answer instead
-sends the explicit model to the vendor unchanged (above). The authenticated
+Where the harness declared absences advisory, an unverifiable answer — and a
+manifest miss — instead sends the explicit model to the vendor unchanged
+(above). The authenticated
 account catalog read below is a different source and stays strict: a model it
 does not carry is a typed `model_unavailable` refusal.
+
+Claude's producer is the prompt-free `initialize` handshake of the installed
+`claude` binary (`harness-claude/src/model-probe.ts`): one stdin frame, the
+picker rows of the `control_response` (`value`, `displayName`, `resolvedModel`),
+exit on EOF, never `--model` (the CLI echoes it as a row), `--setting-sources
+""` and `--strict-mcp-config` (no hooks, no settings echo), model-override env
+scrubbed. Scopes (owner decision 2026-09-24): a `config_dir_login` profile is
+probed under its own config dir and keychain bridge, an `api_key` /
+`oauth_token` profile with its own credential in the env var its runs use
+under a scratch HOME (cache keyed by profile id, never by a secret), so the
+account view carries the account's own rows; the unscoped listing runs
+credential-free under a scratch HOME with non-essential traffic off and
+describes the binary alone. The probe resolves the binary exactly as the spawn
+layer does (a caller's PATH patch replaces the normalized PATH). Rows carry `origin` (`live`: the
+picker selectors and their resolutions as pinnable exact ids; `hint`: the frozen
+`CLAUDE_KNOWN_MODELS` ids appended so presence never shrinks below the manifest)
+and `resolved_model` (diagnostic; the row id is what travels). The answer is
+total: any failure yields the hint rows alone, and the registry then reports
+the list as `source: manifest` with its frozen `verifiedAgainst` stamp rather
+than a live `api` claim. One cached single-flight capture per (scope, binary
+identity — realpath, inode, size, mtime; `harnessBinaryIdentity` in core) lives
+an hour, a failure a minute, so an in-place CLI update is re-read without a
+daemon restart. The `--help` effort memo is keyed by the same identity and
+follows a run's PATH patch the same way, as do the readonly-flag probe and the
+`--version` read behind the snapshot-trust gate, so every question about "the
+binary this run executes" is asked of that binary. Two stated bounds: the memo
+is one slot (a patched run alternating with host-keyed callers re-reads
+`--help`, one bounded spawn per alternation), and a relative entry in a patch
+PATH is resolved as the daemon sees it, so a binary reachable only through a
+project-relative entry falls back to the snapshot ladder.
 
 The engine also accepts one raw model generation independently of Agent Runs.
 `ModelAdapter` in core and the model-operation schemas define caller-owned
@@ -1401,7 +1450,17 @@ review loop, model fallback or internal compaction is created for this capabilit
 
 The Codex transport lives in `harness-codex`. It uses a selected managed ChatGPT
 profile, the official CLI for an expired-token refresh, and the raw account's
-model catalog. In-process refresh work is serialized by canonical managed home;
+model catalog. The backend filters that catalog by the client version the
+caller declares (a model is listed only for clients at or above its own
+minimum), so the transport declares ITS OWN verified level,
+`CODEX_HTTP_CLIENT_VERSION` (`http-client-version.ts`), raised to the installed
+Codex CLI's version when that is newer and never below the constant — not the
+managed-installer pin, which is a different fact (a release that only moves
+the installer must never decide which models an account can see). The account
+view carries the declared `clientVersion` and its source per catalog (the
+legacy query keeps its shape), every membership refusal names it, and the constant moves together with a recorded catalog
+fixture pair (`fixtures/models-http-*.json`) whose shared rows must stay
+identical. In-process refresh work is serialized by canonical managed home;
 cancelled callers cannot release another caller past a still-live refresh. Each
 caller rereads current authorization. Selection hands its exact-profile catalog
 to this operation's invocation, which rechecks the current account fingerprint;
@@ -1648,6 +1707,7 @@ validator dump, and validates the per-run SSE cursor as a nonnegative integer
 - `POST /v2/runs/:id/decision`
 - `GET /v2/runs/:id/events`
 - `POST /v2/runs/:id/interactions/:id/answer`
+- `POST /v2/runs/:id/messages`
 - `GET /v2/runs/:id/produced`
 - `GET /v2/runs/:id/produced/<path>`
 - `POST /v2/runs/:id/retry`
@@ -1757,7 +1817,12 @@ Endpoint semantics beyond the inventory:
   `claudexor retry` and `claudexor run-again`. Durable idempotent replay is
   resolved before mutable resource, Git, or harness preflight: once a request
   was accepted, a later environment change returns the original command/run
-  handle rather than replacing history with a new refusal. If no command was
+  handle rather than replacing history with a new refusal. A project root that
+  was never registered is a caller fix, not an unreadable replay index:
+  `POST /v2/runs` and Exact Retry answer typed `404 project_not_registered`
+  (`retryable: false`, required action: register the root with
+  `POST /v2/projects` or declare `scope.ephemeral`) instead of the retryable
+  `503 idempotency_status_unavailable`. If no command was
   accepted, a replay may reuse its one journaled runless turn only while that
   turn is still the conversation tail; the recovery boundary refuses a
   historical orphan before enqueue. Already accepted commands remain valid and
@@ -2559,9 +2624,10 @@ of local fake apply state.
 daemon abort closes the active harness stream and the process helper sends a
 cooperative interrupt with hard-kill fallback. (The former `interrupt` control
 kind was deleted as a fake knob — it mapped to the same daemon cancel.) Live
-input forwarding into a running harness is not a supported control surface; the
-former `/runs/:id/input` endpoint and `RunInput` DTO were removed as dead code
-rather than left as an always-`unsupported` stub.
+input into a running attempt is its own typed surface,
+`POST /v2/runs/:id/messages`, described under "Live messages into a running run"
+below; the former `/runs/:id/input` endpoint and `RunInput` DTO stay deleted (a
+stub that always answered `unsupported` was dead code, not a channel).
 
 A run blocked by the winning candidate's `NEEDS_HUMAN` findings (reviewer
 escalation, protected-path change, critical-risk diff) retains lifecycle
@@ -2655,6 +2721,143 @@ the run carries a typed `protected_path_approvals` entry for the matching glob
 built-in critical/security path gates such as `.github/workflows`. They are
 accepted only from the run request surface — plans and repo config never carry
 approvals.
+
+### Live messages into a running run
+
+`POST /v2/runs/:id/messages` places a message into a run's ACTIVE agent
+attempt while it runs (the nanny's correction that used to wait for the
+terminal or cost a cancel+restart). The body is `{text, expectedAttemptId?}`
+(1..65,536 UTF-16 code units, secret-like values refused like every prompt
+ingress), the `Idempotency-Key` is REQUIRED and IS the message id, and the
+route is served through the durable delivery ledger (`run.message`): a replay
+under the same key returns the recorded receipt, a different body under the
+same key is `409 idempotency_conflict`, and a command left non-terminal by a
+daemon restart answers `409 delivery_interrupted`. HTTP carries only transport
+facts (404 unknown run, 501 no service, 400 malformed/secret/too-long/missing
+key, 409 idempotency, 500 receipt-save failure); EVERY typed outcome is HTTP
+200 — deliberately unlike the answer and control routes — so a client reads
+`outcome`, never the status code. The protocol major stays 3; clients discover
+the route by its row in `GET /v2/operations`.
+
+Three boundaries are reported separately and never conflated:
+
+- **Daemon admission** — the run's `events.jsonl` gets a `message.accepted`
+  row through a failure-PROPAGATING append BEFORE any native dispatch. When
+  that append throws, nothing is sent and the receipt is `rejected` with
+  reason `admission_persist_failed` (a new key is needed to try again).
+- **Native acceptance** — outcome `accepted`: the harness's documented
+  acceptance boundary was observed (Codex: `turn/steer` returned `{turnId}`,
+  carried as `nativeTurnId`; Claude Code: the `command_lifecycle queued`
+  frame for the message's uuid); consumption is unproved. No second row is
+  written: the receipt is the answer and replays under the same key.
+- **Native consumption** — outcome `delivered`: a correlated native
+  consumption event was observed (Codex: the `userMessage` echo whose
+  `clientId` equals the message id; Claude Code: the `--replay-user-messages`
+  echo `{type:"user", isReplay:true, uuid}` or the `command_lifecycle started`
+  frame for that uuid) and a `message.delivered` row closes the
+  message. Obedience is still unproved — the model may ignore the text. The
+  receipt reads `delivered` only when the echo reaches the adapter before it
+  answers; for Codex `turn/steer` replies first (the echo followed 2.9 s
+  later in the 0.156.1 recording), so the usual receipt is `accepted` and the
+  echo then surfaces as the adapter's status event with code live_input_delivered — a
+  `harness.event` timeline row carrying `message_id` and `native_turn_id` —
+  which a client reconciles against its message id. No `message.delivered`
+  row is written retroactively for an already-answered receipt.
+
+Every non-delivery closes with a `message.refused` row carrying `outcome` and
+`reason`: `rejected` (an explicit refusal of THIS submission: a vendor RPC
+refusal on a still-active turn `rpc_refused`, a caller error `multi_attempt`,
+or `admission_persist_failed`), `not_active` (no eligible target before
+dispatch: `run_terminal`, `no_live_session`, `attempt_mismatch`,
+`no_active_turn`, `interaction_pending`), `unsupported` (no live-input channel
+for this harness/transport/run scope: `no_live_session` for an adapter that
+declares `none` or lacks `message`, `thread_bound` for a thread turn), and
+`delivery_unknown` (the message MAY have landed: `transport_lost`,
+`response_timeout`; a receipt-save failure is the ledger's 500).
+`accepted:false` on `delivery_unknown` never means "safe to resend under a new
+key" — reuse the key to read the recorded verdict. Reasons come from adapter
+and registry state only, never from vendor prose (INV-049). The payload of
+every `message.*` row is `{message_id, attempt_id?, harness_id?, outcome?,
+reason?, live_input?, native_turn_id?, text_sha256, text_bytes, text, title}`;
+the journaled copy in the owning partition drops `text` (like the
+`run.created` prompt digest), the per-run `events.jsonl` keeps it, and the
+timeline shows it as the row detail.
+
+The daemon's in-process `LiveInputRegistry` (`packages/daemon/src/live-input.ts`)
+is the one live-handle owner, fed by the orchestrator at the agent attempt
+scope through `RunInput.onLiveAttempt` (a LIVE session-id getter, because a
+native transient retry mints a new session id per try) and released in that
+attempt's `finally`; `dropForRun` runs beside the interaction registry's on run
+terminal. Its decision order: an unknown-and-terminal run → `not_active`
+(`run_terminal`); a thread turn → `unsupported` (`thread_bound`: the
+continuity packet would lose the message, INV-137); no live attempt →
+`not_active` (`no_live_session`); several live attempts (race `n>1`) without
+`expectedAttemptId` → `rejected` (`multi_attempt`); a mismatching
+`expectedAttemptId` → `not_active` (`attempt_mismatch`); a pending interaction
+→ `not_active` (`interaction_pending`) with NO vendor write, since a steer
+beside an open `AskUserQuestion` would neither answer it nor be a work tool
+(INV-048); an adapter without `message` or a profile of `none` →
+`unsupported`; no native session yet → `not_active`; otherwise the adapter's
+verdict passes through 1:1. Candidate attempts (including the synthesis
+attempt) and the read-only ask/plan/report attempts register; reviewer lanes do
+not and therefore answer `not_active`.
+
+Steering lifetime is attempt-local: a native transient retry keeps the
+registration (the getter follows the new session), while a convergence
+attempt, an Exact Retry or a `rerun_with_feedback` run is a new attempt that
+never re-injects earlier messages — the message was addressed to a session,
+not to the task. Three disclosed residuals: a receipt that lands after the run's
+terminal commit (the adapter answered late) is file-tail-stamped into
+`events.jsonl` (`message.*` rows are in the post-terminal audit allowlist next
+to `control.*`, so terminal-authority validation accepts them) — durable and
+visible on the next timeline read, but the live SSE push for that row is
+missed; a closing row that arrives WHILE the terminal is being committed
+answers `500 message_receipt_unavailable` (the replay stays 500; the message
+may have landed); and a consumed steer is not inactivity-watchdog progress until the
+model's next output, so a message into a stalled session does not prevent its
+timeout.
+
+The channel is a per-adapter declaration, not a doctor probe:
+`HarnessCapabilityProfile.live_input` (`mid_turn` | `next_tool_boundary` |
+`none`, default `none`) is projected as `liveInput` on the `CatalogHarness` row
+of `GET /v2/agent-capabilities`, and an adapter that declares a channel implements
+`message(sessionId, {messageId, text})` beside `cancel`. Codex declares
+`mid_turn` (app-server `turn/steer` against the snapshotted active turn; a
+turn gap answers `not_active`/`no_active_turn`, an app-server without
+`turn/steer` answers `rejected`/`rpc_refused`). Claude Code declares
+`next_tool_boundary` through the native queue fold of its stream-json stdin
+(`packages/harness-claude/src/live-input.ts`, recorded on Claude Code 2.1.283
+through the real adapter path: `fixtures/stream-json/recorded-live-fold-2.1.283.jsonl`
+and `recorded-live-final-text-2.1.283.jsonl`, replayed 1:1 by the conformance
+tests): the message is written to the live stdin as a user frame whose `uuid`
+is the message id, Claude Code queues it at once (`command_lifecycle queued`
+within ~10 ms = `accepted`) and picks it up inside the same turn right after
+the current tool batch (the replay echo, `command_lifecycle started` or
+`completed`, or the result's `user_message_uuids` = `delivered`, surfaced once
+as the `live_input_delivered` status event keyed by `message_id`). The managed
+vendor pin (2.1.281) carries the same frames and flag; the pickup itself is
+recorded on 2.1.283. A
+message that arrives while the model composes its final text stays queued
+and runs as the NEXT native turn inside the same run: the run loop's
+`session.onIo` seam hands the adapter the live handle, `closeStdinOn` returns
+false while a message is written-but-unreceipted, `queued` or `started`, or a
+run-owned background task is open (`system/task_started` with
+`is_backgrounded: true` … `system/task_notification`, so a background
+continuation is kept too), the second `system/init` folds into the one
+`started` (a `native_turn_started` status marks the turn), each result's
+`usage.cost_usd` is the delta of the cumulative `total_cost_usd`, and the last
+result's final text is the run's answer. No `queued` frame within 2 s answers
+`delivery_unknown`/`response_timeout` (the stdin handle swallows write errors,
+so a dead pipe surfaces this way), a session closed with the message still
+unreceipted `delivery_unknown`/`transport_lost`, and a `cancelled|discarded|
+refused` lifecycle state before consumption is typed `live_input_refused`
+without failing the run. A one-shot argv run (no interaction channel; never
+the daemon's shape) has no live session and answers `not_active`/`no_live_session`. Cursor declares `none` (no
+persistent live-input channel: its prompt is piped once, then EOF); agy,
+opencode and raw-api declare `none`. There is no CLI verb or MCP tool for
+messages in this release (`claudexor follow` is the later surface), and the
+ACP server's `session/prompt` on an active session is refused rather than
+bridged into a steer.
 
 ### Live-tree mutation paths
 
@@ -3096,7 +3299,7 @@ run's final answer must conform to (agent race / ask answers), normalized and
 strictified
 for vendor strict modes (every object: `required` = all keys,
 `additionalProperties: false`; inline root — both live-verified: codex
-`--output-schema <FILE>` written into the scoped CODEX_HOME, claude
+app-server `turn/start.outputSchema`, claude
 `--json-schema <inline JSON>`). The conformance validator selects draft-07
 (the compatibility default when `$schema` is omitted) or draft 2020-12 from
 the caller declaration; the metadata declaration is removed only from the
@@ -3151,13 +3354,13 @@ the typed `context` field of `HarnessEvent`: result `terminal_reason` (`prompt_t
 the rapid-refill breaker `rapid_refill_breaker` → `capacity_exhausted` with a
 typed cause), the `compact_boundary` system frame → a compaction event, and the
 top-level typed `rate_limit_event` → the existing `rate_limit` signal (a routine
-`allowed` heartbeat surfaces nothing and never arms rotation). Codex exec
-0.153.3's recorded oversized-input case surfaces a stderr JSON-RPC error
-(`input_error_code: input_too_large`) before model execution, without a typed
-context stream frame. The Codex adapter has no token-window context mapping;
-this character-limit capture does not establish a token-window limit. A
-terminal `capacity_exhausted` with no completed WorkReport maps to
-`interrupted / context_capacity_exhausted`.
+`allowed` heartbeat surfaces nothing and never arms rotation). Codex exec's
+recorded oversized-input case (0.153.3 and 0.156.1, byte-identical) surfaces
+a stderr JSON-RPC error (`input_error_code: input_too_large`) before model
+execution, without a typed context stream frame. The Codex adapter has no
+token-window context mapping; this character-limit capture does not establish
+a token-window limit. A terminal `capacity_exhausted` with no completed
+WorkReport maps to `interrupted / context_capacity_exhausted`.
 
 One-shot continuation (D-16d): when an eligible terminal `capacity_exhausted`
 (cause `repeated_refill` only — `prompt_too_long` may be an irreducible packet)
@@ -3550,9 +3753,13 @@ Vendor harness CLIs land on a host only through the disclosed installer
 connected host). The npm-distributed harnesses (claude, codex, opencode)
 install one EXACT pinned version — each pin aliases that harness package's
 vendor-version constant, and npm checks the registry integrity checksum for
-that exact version; `@latest` is never used. For claude and codex that
-constant is the same value the model-hints and effort freshness gates read,
-so the installed CLI is the version this release was verified against; the
+that exact version; `@latest` is never used. For codex that constant is the
+same value the model-hints and effort freshness gates read; for claude it is
+the effort-snapshot stamp, while the Claude known-model hint list keeps the
+literal version it was last actually re-verified against (a pin bump never
+restamps unrechecked ids). So the installed CLI is the version this release's
+effort ladders were verified against (a recording that needs a paid live run
+keeps the version it was captured from, as its fixture manifest states); the
 opencode pin is a deterministic install target, not a verification claim —
 no recorded fixture covers it yet, as its `vendor-cli-version.ts` discloses.
 Cursor ships no npm artifact and cannot be pinned:
@@ -3575,7 +3782,8 @@ credential variables.
 
 The installer recipe producer also accepts the explicit `local` target used by
 host integrations. Npm harnesses then install under the existing managed Node
-root (`~/.claudexor/node/bin`), which is already shared by local resolution and
+root (`~/.claudexor/node`, launchers in its `bin` on POSIX), which is already
+shared by local resolution and
 native harness PATH resolution; Cursor keeps its vendor-selected destination,
 and normalized harness discovery covers both `~/.local/bin` and
 `~/.cursor/bin`. An explicit `--target local --yes` is suitable for an
@@ -3598,8 +3806,24 @@ pathname because a new owner could have replaced it between observation and
 mutation. An unexpected filesystem or child-process exception is normalized by
 the canonical CLI projector as `harness_install_failed`; JSON mode still emits
 one object containing the full pre-execution disclosure.
-Local Windows installation is a typed `unsupported_platform` refusal before
-filesystem or child-process side effects. The omitted target remains `remote`,
+On Windows an npm global prefix holds only `.cmd`/sh/ps1 shims and no
+executable image, and Claudexor never spawns a harness through a shell (issue
+#191), so the local target is supported exactly where the pinned package
+yields a verified package-native image: `@openai/codex` resolves its optional
+`@openai/codex-win32-<arch>` platform package and executes
+`vendor/<triple>/bin/codex.exe` from it. Core's `runtime-env.ts` is the one
+owner of that layout (`npmGlobalPackagesDir`, `embeddedNpmCli`,
+`windowsNativeImageDir`): the installer runs the embedded
+`node_modules/npm/bin/npm-cli.js` beside `node.exe`, proves the image inside
+the prefix, and the normalized harness PATH carries that image dir on win32
+(`managedWindowsNativeImageDirs`) so doctor, login, runs and quota resolve the
+same `codex.exe` by bare name. The prefix is anchored on the same `HOME` the
+PATH producer reads (the user profile when unset). Every other vendor — an npm
+pin without a verified image (claude, opencode), an unsupported architecture,
+or a script vendor — is a typed `unsupported_platform` refusal before
+filesystem or child-process side effects, and the Windows CI lane installs the
+real pinned package with no ambient node/npm as the proof
+(`scripts/windows-local-install-smoke.mjs`). The omitted target remains `remote`,
 so the SSH installer's
 visible disclosure, confirmation, command, destination, and precedence
 contract are unchanged. After any successful local install, the embedding host
@@ -3673,7 +3897,8 @@ A host owns the install directory, config root, process, rollback, and exact
 reviewed pin. Its full Node toolchain is the exact version proven by that pin's
 closure smoke; POSIX consumers using local harness install must provide both
 `<node-root>/bin/node` and
-`<node-root>/lib/node_modules/npm/bin/npm-cli.js`, with no ambient-PATH npm
+`<node-root>/lib/node_modules/npm/bin/npm-cli.js` (Windows: `node.exe` and its
+adjacent `node_modules\npm\bin\npm-cli.js`), with no ambient-PATH npm
 fallback. The root package's
 `engines.node >=20.19.0` promise covers the npm distribution and does not by
 itself prove a release-built `--target=node22` closure on Node 20. The pin also

@@ -200,8 +200,16 @@ function catalogView(query: URL): "accounts" | undefined {
   return view;
 }
 
+/** The pre-negotiation shape of `GET /model-sources/:id/models`: a legacy client
+ * keeps its strict schema, so everything the account view carries beyond it —
+ * `processing` per row, the declared client version per catalog — is stripped
+ * here and only here. */
 function legacyModelCatalog(value: unknown) {
-  const catalog = ControlModelCatalogResponse.parse(value);
+  const {
+    clientVersion: _clientVersion,
+    clientVersionSource: _clientVersionSource,
+    ...catalog
+  } = ControlModelCatalogResponse.parse(value);
   return {
     ...catalog,
     models: catalog.models.map(({ processing: _processing, ...model }) => model),

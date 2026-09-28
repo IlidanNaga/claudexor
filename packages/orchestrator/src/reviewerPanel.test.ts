@@ -599,3 +599,53 @@ describe("reviewer inventory route applicability", () => {
     expect(models.mock.calls.length).toBeGreaterThan(0);
   });
 });
+
+describe("reviewer manifest truth under the harness's absence declaration (INV-104)", () => {
+  /** A claude-shaped reviewer with NO live producer: the manifest branch is the
+   * only truth, and the hint list deliberately lacks the requested model. */
+  const manifestAdapter = async (absence?: "advisory" | "authoritative") => {
+    const adapter = reviewerAdapter("claude", "anthropic", ["high"], {
+      knownModels: ["listed-model"],
+    });
+    if (absence) {
+      const manifest = await adapter.discover();
+      manifest.capabilities.model_inventory_absence = absence;
+      adapter.discover = async () => manifest;
+    }
+    return adapter;
+  };
+
+  it("an ADVISORY harness's manifest branch forwards an explicit reviewer model its hints lack", async () => {
+    const specs = await resolveExplicitReviewerPanel(deps([await manifestAdapter("advisory")]), [
+      { harness: "claude", model: "claude-opus-5-5" },
+    ]);
+    expect(specs).toHaveLength(1);
+    expect(specs[0]?.requestedModel).toBe("claude-opus-5-5");
+  });
+
+  it("an AUTHORITATIVE harness's manifest branch (declared or by omission) still refuses with today's exact text", async () => {
+    for (const adapter of [await manifestAdapter(), await manifestAdapter("authoritative")]) {
+      await expect(
+        resolveExplicitReviewerPanel(deps([adapter]), [
+          { harness: "claude", model: "claude-opus-5-5" },
+        ]),
+      ).rejects.toThrow(
+        "reviewer harness 'claude' refused requested model 'claude-opus-5-5': " +
+          'model "claude-opus-5-5" is not in the harness\'s manifest known-model list ' +
+          "(listed-model); run `claudexor models --harness claude`",
+      );
+    }
+  });
+
+  it("the AUTO panel keeps skipping an unlisted family at zero cost, whatever the harness declares", async () => {
+    const ignored: string[] = [];
+    const specs = await resolveAutoReviewerPanel(
+      { ...deps([await manifestAdapter("advisory")]), onIgnoredSetting: (d) => ignored.push(d) },
+      { reviewerModels: { anthropic: "claude-opus-5-5" } },
+    );
+    expect(specs).toEqual([]);
+    expect(ignored).toEqual([
+      expect.stringContaining("requested model 'claude-opus-5-5' is unavailable"),
+    ]);
+  });
+});

@@ -31,7 +31,7 @@ with a vendor usage source (Antigravity, Claude, and Codex); Cursor has none
 yet. Everything runs on your machine, files are the source of truth, and there
 is no telemetry.
 
-Current status: **v3.13.0**. See "Stability at 2.0" below for what is a stable
+Current status: **v3.17.0**. See "Stability at 2.0" below for what is a stable
 contract and what remains experimental; retired verbs and mode ids hard-error
 with the new spelling instead of silently aliasing.
 
@@ -139,7 +139,10 @@ Exact npm pins install under `~/.claudexor/node`; Cursor remains unpinned, so
 the JSON receipt records the downloaded installer's SHA-256 and byte length.
 Every successful executed receipt also records the absolute installed launcher
 and its verified version; a zero-exit installer without that postcondition is a
-typed failure.
+typed failure. On Windows that launcher is the vendor's own `codex.exe` inside
+the pinned npm platform package (never npm's `.cmd` shim), and the same
+managed-root path is what doctor, login and runs resolve; Codex is the one
+vendor with that verified image in this release, the others refuse typed.
 Omitting `--target` preserves the disclosed remote-host flow, its prefix and
 its exit-code contract; the install lease and the post-install proof are part
 of the unattended local contract and do not apply there.
@@ -224,10 +227,12 @@ client verifiers themselves stay fail-closed for the waived versions too).
   `CLAUDEXOR_DAEMON_SOCK`, or the lifecycle command may address another daemon.
   A Windows consumer still owns a native
   extract/`--probe`/handshake/`--stop` smoke before claiming Windows support.
-  The local harness installer is intentionally typed-unsupported on Windows in
-  this release. On POSIX, npm-backed local installation additionally requires
-  `<node-root>/lib/node_modules/npm/bin/npm-cli.js`; Claudexor never falls back
-  to a `npm` found on ambient `PATH`.
+  npm-backed local installation additionally requires the toolchain's own
+  npm entrypoint — `<node-root>/lib/node_modules/npm/bin/npm-cli.js` beside
+  `bin/node` on POSIX, `node_modules\npm\bin\npm-cli.js` beside `node.exe`
+  on Windows; Claudexor never falls back to a `npm` found on ambient `PATH`.
+  On Windows only Codex installs locally (its package-native image); the
+  other vendors are a typed `unsupported_platform` refusal.
 - **npm** — CLI/daemon installs update the ordinary way:
   `npm install -g claudexor@latest`. `claudexor release check` reports whether a
   newer engine runtime is published, verifying the same signed manifest
@@ -690,7 +695,10 @@ future verified host-side-effect mode is explicitly selected.
 Claudexor can be driven by other tools through CLI JSON on supported commands, the
 local daemon/control API, MCP, and ACP. These surfaces are capability-gated;
 integrations should not assume every subcommand has JSON output or every
-harness supports live steering (see "Stability at 2.0").
+harness supports live steering: read a harness's `liveInput` channel from
+`GET /v2/agent-capabilities` and send a live message through
+`POST /v2/runs/:id/messages`, which answers a typed outcome instead of guessing
+(see "Stability at 2.0").
 
 The CLI accepts repeatable/comma-separated `--attach <path>` or `--image <path>`
 and immediately streams each regular, non-symlink file through `/v2/uploads`.

@@ -178,6 +178,8 @@ describe("raw model operation HTTP surface", () => {
       accountFingerprint: null,
       observedAt: "2026-09-06T00:00:00.000Z",
       provenance,
+      clientVersion: "0.156.1",
+      clientVersionSource: "verified_transport",
       models: [],
     }));
     const f = await fixture({ modelSources, modelCatalog });
@@ -192,6 +194,9 @@ describe("raw model operation HTTP surface", () => {
     provenance = "provider_http";
     const observed = await f.request("/model-sources/codex/models?credentialProfileId=chosen");
     expect(observed.status).toBe(200);
+    // The legacy query keeps its pre-negotiation shape: the declared client
+    // version the transport recorded is NOT projected here (the account view
+    // below carries it), exactly like `processing` per row.
     expect(await observed.json()).toEqual({
       source: "codex",
       credentialProfileId: "chosen",
@@ -254,6 +259,8 @@ describe("raw model operation HTTP surface", () => {
       accountFingerprint: null,
       observedAt: "2026-09-12T00:00:00.000Z",
       provenance: "provider_http",
+      clientVersion: "0.156.1",
+      clientVersionSource: "installed_cli",
       models: [model],
     };
     const accountView = {
@@ -288,7 +295,13 @@ describe("raw model operation HTTP surface", () => {
       "/model-sources/codex/models?view=accounts&credentialProfileId=a",
     );
     expect(modern.status).toBe(200);
-    expect(await modern.json()).toEqual(accountView);
+    // The negotiated view carries the declared client version per catalog.
+    const modernBody = (await modern.json()) as { accounts: Array<{ catalog: unknown }> };
+    expect(modernBody).toEqual(accountView);
+    expect(modernBody.accounts[0]?.catalog).toMatchObject({
+      clientVersion: "0.156.1",
+      clientVersionSource: "installed_cli",
+    });
     expect(modelAccountCatalog).toHaveBeenCalledExactlyOnceWith("codex", "a");
     expect(modelCatalog).toHaveBeenCalledTimes(1);
     for (const query of [
