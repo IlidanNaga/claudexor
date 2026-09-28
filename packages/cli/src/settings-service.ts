@@ -1,3 +1,4 @@
+import { resolveEffort, effortRankLadder } from "@claudexor/core";
 /**
  * Settings-write validation + patch merge — the daemon's POST /settings core.
  *
@@ -123,38 +124,18 @@ export function assertRoutingGoalTiersConsistent(goal: RoutingGoal, tiers: Quali
 }
 
 /**
- * Manifest effort facts for the harnesses ONE patch touches, resolved once from
- * live manifests (`discover()`, which spawns vendor CLIs) so the merged-effective
- * effort invariant can be re-checked SYNCHRONOUSLY inside the config lock without
- * probing again. `null` means the harness has no adapter to ask.
+ * Separate-knob support for a settings write. Native adapters defer vocabulary
+ * resolution to dispatch; other adapters keep manifest validation under lock.
+ * `null` means the harness has no adapter to ask.
  */
-export type PatchEffortCapabilities = ReadonlyMap<string, HarnessCapabilities | null>;
+export type PatchEffortCapabilities = ReadonlyMap<
+  string,
+  HarnessCapabilities | { effortParameter: string } | null
+>;
 
-/**
- * The merged-effective (model, effort) invariant (INV-104 pairing): an effort
- * ceiling belongs to the MODEL, so the effort a harness ends up holding must sit
- * on the ladder of the model it ends up pointing at.
- *
- * Only the MERGE tells the truth here, because either half of the pair can arrive
- * alone. An effort-only patch inherits the STORED default model, whose ladder may
- * be narrower than the harness-wide union (`gpt-5.5` stops at `xhigh` while the
- * union carries `ultra`), so judging it against the union accepted a setting the
- * routed model rejects. A defaultModel-only patch inherits the STORED effort, so
- * skipping the effort check entirely let a narrowing model silently strand an
- * already-saved effort.
- *
- * `harnesses` is the ALREADY-MERGED settings map (patch folded over stored, via
- * `applyHarnessSettingsPatches` — the same merge the persist path uses, so
- * validation can never disagree with what gets written). `capabilities` is keyed
- * by the ids whose pair this write actually touches, so an unrelated write to a
- * harness whose stored pair drifted (a vendor narrowing a ladder under a value
- * saved long ago) is not turned into a refusal. A model the manifest records no
- * ladder for keeps the harness-wide union rather than becoming a hard refusal —
- * that fallback is `effortLevelsForModel`'s, the ONE owner of the lookup.
- *
- * Pure + synchronous so it runs BOTH as the pre-lock fast-fail and inside the
- * locked read-mutate-write cycle, exactly like `assertRoutingGoalTiersConsistent`.
- */
+/** Effort is a preference resolved at dispatch. A separate effort on a route
+ * without a native knob still refuses; compound model ids are never rewritten.
+ * Older adapters without a declaration retain validation against known order. */
 export function assertHarnessEffortPairsValid(
   harnesses: GlobalConfigT["harnesses"],
   capabilities: PatchEffortCapabilities,
@@ -164,8 +145,20 @@ export function assertHarnessEffortPairsValid(
     const effort = settings?.effort ?? null;
     if (!effort) continue;
     const model = settings?.default_model ?? null;
+    if (caps && "effortParameter" in caps) continue;
     const ladder = caps ? effortLevelsForModel(caps, model) : [];
-    if (ladder.includes(effort)) continue;
+    if (
+      ladder.length &&
+      resolveEffort(
+        effort,
+        ladder,
+        effortRankLadder([
+          caps!.effort_levels,
+          ...Object.values(caps!.model_effort_levels).map((entry) => entry.levels),
+        ]),
+      ).status === "ok"
+    )
+      continue;
     badRequest(
       ladder.length === 0
         ? `harness '${id}' declares no effort ladder; leave effort unset`
@@ -201,7 +194,10 @@ export async function assertSettingsPatchValid(
 ): Promise<PatchEffortCapabilities> {
   const realIds = new Set(buildRegistry({ includeFakes: false }).keys());
   const realList = [...realIds].sort().join(", ");
-  const effortCapabilities = new Map<string, HarnessCapabilities | null>();
+  const effortCapabilities = new Map<
+    string,
+    HarnessCapabilities | { effortParameter: string } | null
+  >();
   if (p.primaryHarness) {
     if (!realIds.has(p.primaryHarness)) {
       badRequest(
@@ -230,14 +226,15 @@ export async function assertSettingsPatchValid(
           notes.push(
             `quality tier route '${route.harness}/${route.model}' (truth source: ${truth.response.source}): ${model.message}`,
           );
-        const manifest = await buildRegistry().get(route.harness)?.discover();
+        const adapter = buildRegistry().get(route.harness);
+        const manifest = adapter?.effortParameter ? null : await adapter?.discover();
         // A tier names harness AND model, so hold it to what that MODEL
         // advertises rather than the harness-wide union. No merge is involved
         // here, unlike the per-harness pair below: a tier route is a COMPLETE
         // (harness, model, effort) triple and `qualityTiers` replaces wholesale,
         // so `route.model`/`route.effort` already ARE the effective pair.
         const advertised = manifest ? effortLevelsForModel(manifest.capabilities, route.model) : [];
-        if (!advertised.includes(route.effort)) {
+        if (!adapter?.effortParameter && !advertised.includes(route.effort)) {
           badRequest(
             `quality tier route '${route.harness}/${route.model}' does not accept effort '${route.effort}'` +
               (advertised.length > 0 ? ` (advertised: ${advertised.join(", ")})` : ""),
@@ -283,7 +280,14 @@ export async function assertSettingsPatchValid(
     if (patch.effort !== undefined || patch.defaultModel !== undefined) {
       const adapter = buildRegistry().get(id);
       try {
-        effortCapabilities.set(id, adapter ? (await adapter.discover()).capabilities : null);
+        effortCapabilities.set(
+          id,
+          adapter?.effortParameter
+            ? { effortParameter: adapter.effortParameter }
+            : adapter
+              ? (await adapter.discover()).capabilities
+              : null,
+        );
       } catch (err) {
         // A harness whose manifest cannot be discovered (binary missing) still
         // 400s honestly rather than bubbling a raw error out of the endpoint.
@@ -293,9 +297,7 @@ export async function assertSettingsPatchValid(
       }
     }
   }
-  // INV-104 pairing, against the MERGED settings rather than the patch fields:
-  // the effort a harness will hold must be on the ladder of the model it will
-  // point at, whichever half of the pair this write supplied.
+  // Validate separate-knob support while preserving the original preference.
   if (effortCapabilities.size > 0) {
     assertHarnessEffortPairsValid(
       applyHarnessSettingsPatches(current.harnesses, p.harnesses),

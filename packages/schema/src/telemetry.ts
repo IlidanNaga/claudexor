@@ -1,3 +1,4 @@
+import { EffortResolution } from "./effort.js";
 import { z } from "zod/v3";
 import {
   RecordedAccessProfile,
@@ -379,6 +380,7 @@ export type BrowserEvidenceRecord = z.infer<typeof BrowserEvidenceRecord>;
 
 export const AttemptTelemetryRecord = z
   .object({
+    effort_resolution: EffortResolution.optional(),
     processing: ProcessingReceipt.optional(),
     processing_cost_basis: ProcessingCostBasis.optional(),
     usage_cost: UsageCostSummary.optional(),

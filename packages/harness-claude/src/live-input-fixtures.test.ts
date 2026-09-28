@@ -149,10 +149,23 @@ describe("claude live-input recordings (2.1.283), replayed through the real adap
     // the result's uuid list re-announce nothing.
     expect(events.filter((e) => e.type === "status")).toEqual([
       expect.objectContaining({
+        effort_resolution: {
+          requested: null,
+          submitted: null,
+          parameter: "--effort",
+          resolution: "omitted",
+          source: "live_probe",
+          observed: null,
+          observedSource: null,
+        },
+      }),
+      expect.objectContaining({
         payload: { code: LIVE_INPUT_DELIVERED, message_id: liveMessageId },
         credential_route: "vendor_native",
       }),
     ]);
+    expect(events.find((e) => e.effort_resolution)?.text).toBeUndefined();
+    expect(events.find((e) => e.effort_resolution)?.payload).toBeUndefined();
     expect(streamExpectationViolations(events, expectations)).toEqual([]);
     const stats = validateTypedStream(events);
     expect(stats.started).toBe(1);
@@ -178,8 +191,21 @@ describe("claude live-input recordings (2.1.283), replayed through the real adap
     const name = "stream-json/recorded-live-final-text-2.1.283.jsonl";
     const { events, receipt, liveMessageId, expectations } = await replay(name, "tool_result");
     expect(receipt).toEqual({ outcome: "accepted" });
+    const preparation = events.find((e) => e.type === "status")!;
+    expect(preparation.effort_resolution).toEqual({
+      requested: null,
+      submitted: null,
+      parameter: "--effort",
+      resolution: "omitted",
+      source: "live_probe",
+      observed: null,
+      observedSource: null,
+    });
+    expect(preparation.text).toBeUndefined();
+    expect(preparation.payload).toBeUndefined();
     const statuses = events.filter((e) => e.type === "status").map((e) => e.payload);
     expect(statuses).toEqual([
+      undefined,
       { code: LIVE_INPUT_DELIVERED, message_id: liveMessageId },
       { code: "native_turn_started", turn: 2 },
     ]);

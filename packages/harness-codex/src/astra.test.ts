@@ -169,17 +169,26 @@ describe("the codex adapter under a stale model/list (the gate itself: modelGove
         auth_preference: "subscription",
       });
       const events: HarnessEvent[] = [];
-      for await (const event of staleAdapter(args).run(spec)) events.push(event);
-      // The model reaches the vendor verbatim either way.
-      expect(args[args.indexOf("-m") + 1]).toBe("gpt-6-astra");
+      const consume = async () => {
+        for await (const event of staleAdapter(args).run(spec)) events.push(event);
+      };
+      if (expectedArg) await consume();
+      else await expect(consume()).rejects.toThrow(/advertised ladder cannot place it/);
       const disclosed = events.find((event) => Array.isArray(event.payload?.["ignored_settings"]));
       if (expectedArg) {
+        expect(args[args.indexOf("-m") + 1]).toBe("gpt-6-astra");
         // A level the stale ladders DO carry rides through, and nothing is disclosed.
         expect(args).toContain(expectedArg);
         expect(disclosed).toBeUndefined();
       } else {
-        // A level none of them carries is not sent — and the run SAYS so.
-        expect(args.some((arg) => arg.startsWith("model_reasoning_effort="))).toBe(false);
+        // Model absence remains advisory; the unrankable separate effort refuses.
+        expect(spec.model_hint).toBe("gpt-6-astra");
+        expect(args).toEqual([]);
+        expect(disclosed?.effort_resolution).toMatchObject({
+          requested: "ultra",
+          submitted: null,
+          resolution: "rejected",
+        });
         expect(disclosed?.payload?.["ignored_settings"]).toEqual([
           expect.stringContaining("effort=ultra"),
         ]);

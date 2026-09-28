@@ -34,6 +34,7 @@ export interface ModelRouteServices {
     request: ModelPayloadRef,
     idempotencyKey: string,
     captureFailureEvidence?: boolean,
+    captureEffortEvidence?: boolean,
   ): Promise<unknown>;
   getModelOperation(id: string): Promise<unknown>;
   readModelResult(id: string): Promise<{ bytes: Buffer; sha256: string }>;
@@ -115,6 +116,10 @@ export async function handleModelRoute(
     const input = await routeValue(ctx, res, 400, async () => ({
       key: requiredIdempotencyKey(req),
       body: ControlModelOperationCreateRequest.parse(await ctx.readBody(req)),
+      effort: optionalBooleanQuery(
+        new URL(req.url ?? "/", "http://localhost"),
+        "captureEffortEvidence",
+      ),
       capture: optionalBooleanQuery(
         new URL(req.url ?? "/", "http://localhost"),
         "captureFailureEvidence",
@@ -122,9 +127,16 @@ export async function handleModelRoute(
     }));
     if (!input.ok) return true;
     const value = await routeValue(ctx, res, 500, () =>
-      input.value.capture === true
-        ? services.createModelOperation!(input.value.body.request, input.value.key, true)
-        : services.createModelOperation!(input.value.body.request, input.value.key),
+      input.value.effort === true
+        ? services.createModelOperation!(
+            input.value.body.request,
+            input.value.key,
+            input.value.capture === true ? true : undefined,
+            true,
+          )
+        : input.value.capture === true
+          ? services.createModelOperation!(input.value.body.request, input.value.key, true)
+          : services.createModelOperation!(input.value.body.request, input.value.key),
     );
     if (!value.ok) return true;
     return serviceResponse(ctx, res, "createModelOperation", () =>
@@ -202,7 +214,7 @@ function catalogView(query: URL): "accounts" | undefined {
 
 /** The pre-negotiation shape of `GET /model-sources/:id/models`: a legacy client
  * keeps its strict schema, so everything the account view carries beyond it —
- * `processing` per row, the declared client version per catalog — is stripped
+ * `processing` and effort verification per row, declared client version per catalog — are stripped
  * here and only here. */
 function legacyModelCatalog(value: unknown) {
   const {
@@ -212,7 +224,9 @@ function legacyModelCatalog(value: unknown) {
   } = ControlModelCatalogResponse.parse(value);
   return {
     ...catalog,
-    models: catalog.models.map(({ processing: _processing, ...model }) => model),
+    models: catalog.models.map(
+      ({ processing: _processing, reasoningEffortsVerified: _effortVerified, ...model }) => model,
+    ),
   };
 }
 
@@ -271,6 +285,12 @@ export const MODEL_OPERATION_DRAFTS: OperationDraft[] = [
     responseKind: "json",
     summary: "Accept one idempotent model generation without an agent run.",
     parameters: [
+      queryParam({
+        name: "captureEffortEvidence",
+        enum: ["true", "false"],
+        description:
+          "Retain typed effort preparation and observation evidence in the private result. Omitted or false preserves the legacy result shape; the choice is bound to idempotency.",
+      }),
       queryParam({
         name: "captureFailureEvidence",
         enum: ["true", "false"],

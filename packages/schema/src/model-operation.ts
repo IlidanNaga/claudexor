@@ -1,3 +1,4 @@
+import { EffortResolution } from "./effort.js";
 import { z } from "zod/v3";
 import { CostEvidence } from "./budget.js";
 import { CostKnowledge } from "./auth.js";
@@ -111,7 +112,7 @@ export const ModelCallOptions = z
   })
   .strict()
   .describe(
-    "Generation options only, not a caller's context/output reserve; unsupported explicit options refuse before inference.",
+    "Generation options only, not a caller's context/output reserve; reasoningEffort is an adaptive preference, while unsupported other explicit options refuse before inference.",
   );
 export type ModelCallOptions = z.infer<typeof ModelCallOptions>;
 
@@ -195,6 +196,9 @@ export const ModelCallResult = z
     usage: ModelUsage,
     cost: ModelCostEvidence,
     appliedOptions: ModelCallOptions,
+    effortResolution: EffortResolution.optional().describe(
+      "Prepared and observed effort evidence; model operations retain it only when creation requests captureEffortEvidence=true. Legacy results omit it before immutable publication.",
+    ),
     processing: ProcessingReceipt.optional(),
     problem: ControlProblem.nullable(),
     failureEvidence: ModelFailureEvidence.optional(),
@@ -220,6 +224,12 @@ export const ModelCatalogEntry = z
     maxOutputTokens: z.number().int().positive().nullable(),
     inputModalities: z.array(z.string()),
     reasoningEfforts: z.array(z.string()),
+    reasoningEffortsVerified: z
+      .boolean()
+      .optional()
+      .describe(
+        "Whether the provider supplied a fully parsed effort array, including a known empty array. Missing on historical catalogs means unverified.",
+      ),
     defaultReasoningEffort: z.string().nullable(),
     supportedOptions: z.array(z.string()),
     processing: ProcessingCapability.optional(),
@@ -369,6 +379,7 @@ export const ModelOperationParams = z
     kind: z.literal("model"),
     request: ModelPayloadRef,
     captureFailureEvidence: z.literal(true).optional(),
+    captureEffortEvidence: z.literal(true).optional(),
   })
   .strict();
 export type ModelOperationParams = z.infer<typeof ModelOperationParams>;

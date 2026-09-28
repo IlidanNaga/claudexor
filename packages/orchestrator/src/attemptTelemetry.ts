@@ -1,6 +1,7 @@
 /** The single owner of typed attempt evidence and outcome truth, never prose inference. */
 import type {
   AttemptTelemetryRecord,
+  EffortResolution,
   AuthSourceKind,
   ExternalContextPolicy,
   HarnessEvent,
@@ -60,9 +61,7 @@ export interface WebEvidenceState {
   attempted: boolean;
   satisfied: boolean;
   failed: boolean;
-  /** QA-042: retrieval strength — "verified" once any web result carried a
-   * typed successful retrieval, else "dispatched" once web activity completed
-   * with no typed outcome (codex), else "none". Never downgrades verified. */
+  /** Typed retrieval strength; never downgrades verified. */
   verification: "verified" | "dispatched" | "none";
   tool: string | null;
   target: string | null;
@@ -89,6 +88,7 @@ export interface DelegationBeltState {
 }
 
 export interface AttemptTelemetry extends ProcessingTelemetry {
+  effortResolution?: EffortResolution;
   requestRequirements: RequestRequirementResolution[];
   toolErrors: ToolErrorRecord[];
   /** tool_result events without a status field: never silently treated as ok. */
@@ -120,8 +120,7 @@ export interface AttemptTelemetry extends ProcessingTelemetry {
   outputMarkers: marks.AttemptOutputMarkers;
   /** Delegation-belt runtime readiness (QA-024); requested=false on non-delegate attempts. */
   delegationBelt: DelegationBeltState;
-  /** Browser-MCP runtime evidence (QA-040); requested=false unless the browser
-   * injection was armed for this attempt. */
+  /** Browser-MCP runtime evidence; requested=false unless armed. */
   browser: BrowserEvidenceState;
   /** D-16: a terminal `capacity_exhausted` context signal was observed this
    * attempt (never a transient; consumed by the finalizer, not the retry loop). */
@@ -135,7 +134,6 @@ export interface AttemptTelemetry extends ProcessingTelemetry {
    * final message (claude StructuredOutput tool), or null. The unwrap validates
    * it while the markdown answer stays the deliverable. */
   sideToolWorkReport: unknown;
-  /** Contract/outcome truth for this attempt, produced by the orchestrator. */
   outcome: AttemptOutcomeState | null;
   /** Legacy fields sum known reports with harness-specific input/cache semantics.
    * Normalized input fields require complete coverage. Money stays in the ledger. */
@@ -282,6 +280,7 @@ function bumpWebVerification(t: AttemptTelemetry, retrieval: string | undefined)
 /** Observe typed adapter evidence, never payload strings or tool-name heuristics. */
 export function observeAttemptTelemetry(t: AttemptTelemetry, ev: HarnessEvent): void {
   observeProcessing(t, ev);
+  if (ev.effort_resolution) t.effortResolution = ev.effort_resolution;
   marks.observeAttemptOutputMarkers(t.outputMarkers, ev);
   // Delegation belt readiness (QA-024): normalized startup/error events carry
   // typed MCP server statuses. Read THAT server's status as first-class truth;
@@ -676,6 +675,7 @@ export function attemptTelemetryRecord(
       cashKnowledge: t.usageCost.cashKnowledge ?? "unknown",
       valuationKnowledge: t.usageCost.valuationKnowledge ?? "unknown",
     },
+    effort_resolution: t.effortResolution,
     processing: t.processing,
     processing_cost_basis: t.processingCostBasis,
     attempt_id: attemptId,

@@ -19,6 +19,8 @@ import Testing
     /// canonical JSON by the caller.
     private static func roundTrip(schema: String, _ data: Data) throws -> Data? {
         switch schema {
+        // Effort evidence rides generic event/artifact payloads, which use JSONValue.
+        case "EffortResolution": return try recode(JSONValue.self, data)
         case "ControlHandshakeResponse": return try recode(ControlHandshakeResponse.self, data)
         case "ControlProblem": return try recode(ControlProblem.self, data)
         case "ControlThread": return try recode(ThreadSummary.self, data)
@@ -44,7 +46,7 @@ import Testing
         "RunOutcomeFacts", "DelegationCapability", "RunDelegationInfo", "RunFailure",
         "ControlBudgetSnapshot", "PlanReadiness", "PlanQuestionsArtifact",
         "ApplyEligibility", "ControlQuotaResponse", "ControlHarnessSettingsPatch",
-        "ControlSettingsSnapshot",
+        "ControlSettingsSnapshot", "EffortResolution",
     ]
 
     private static func recode<T: Codable>(_ type: T.Type, _ data: Data) throws -> Data {
