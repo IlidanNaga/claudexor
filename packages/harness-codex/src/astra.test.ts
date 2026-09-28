@@ -6,7 +6,7 @@ import { CODEX_VENDOR_CLI_VERSION, clearCodexEffortCache, createCodexAdapter } f
 import { readModelListEfforts, type CodexEffortCatalog } from "./effort-probe.js";
 
 const captured = JSON.parse(
-  readFileSync(new URL("../fixtures/models-0.153.3.json", import.meta.url), "utf8"),
+  readFileSync(new URL("../fixtures/models-0.156.1.json", import.meta.url), "utf8"),
 ) as { data: unknown[] };
 const capturedCatalog = readModelListEfforts(captured.data);
 
@@ -24,7 +24,7 @@ describe("GPT-6 Astra on the pinned Codex CLI", () => {
   it.each(["live", "snapshot"] as const)(
     "admits Astra and sends ultra unchanged with the %s catalog",
     async (source) => {
-      expect(CODEX_VENDOR_CLI_VERSION).toBe("0.153.3");
+      expect(CODEX_VENDOR_CLI_VERSION).toBe("0.156.1");
       expect(capturedCatalog).not.toBeNull();
       let cliArgs: string[] | undefined;
       const adapter = createCodexAdapter({
@@ -47,13 +47,20 @@ describe("GPT-6 Astra on the pinned Codex CLI", () => {
       });
       const manifest = await adapter.discover();
       const known = knownModelIdsForRoute(manifest.capabilities.known_models, "local_session");
-      expect(validateModel("gpt-6-astra", known, "manifest").status).toBe("ok");
+      expect(validateModel("gpt-6-astra", known, "manifest", "authoritative").status).toBe("ok");
       expect(manifest.capabilities.model_effort_levels["gpt-6-astra"]).toEqual({
         levels: ["low", "medium", "high", "xhigh", "max", "ultra"],
         default: "medium",
       });
-      for (const hidden of ["gpt-reserve", "codex-auto-review"])
-        expect(validateModel(hidden, known, "manifest").status).toBe("rejected");
+      // The hint list itself lacks these; codex's advisory declaration then
+      // forwards them (presence is not required), authoritative would refuse.
+      for (const hidden of ["gpt-reserve", "codex-auto-review"]) {
+        expect(known).not.toContain(hidden);
+        expect(validateModel(hidden, known, "manifest", "authoritative").status).toBe("rejected");
+        expect(
+          validateModel(hidden, known, "manifest", manifest.capabilities.model_inventory_absence!),
+        ).toMatchObject({ status: "ok", unverified: true });
+      }
 
       const spec = HarnessRunSpec.parse({
         session_id: `astra-${source}`,
@@ -131,11 +138,12 @@ describe("the codex adapter under a stale model/list (the gate itself: modelGove
     );
   });
 
-  it("keeps UNSCOPED consumers on manifest truth, where the gate stays strict", async () => {
+  it("keeps UNSCOPED consumers on manifest truth (route scoping only; admission there follows the harness declaration)", async () => {
     // settings-service (quality tiers + per-harness defaults), the doctor's
     // configuredModelCheck and the capabilities catalog all call
     // `harnessModels(id, cwd, true)` with NO route, so the live producer is not
-    // applicable to them and they keep judging against `known_models`.
+    // applicable to them and they judge against `known_models` — under codex's
+    // advisory declaration (cli/src/model-truth.test.ts pins the admission).
     const adapter = staleAdapter();
     const routes = (await adapter.discover()).capabilities.model_inventory_routes;
     expect(hasModelInventoryForRoute(adapter, routes, null)).toBe(false);

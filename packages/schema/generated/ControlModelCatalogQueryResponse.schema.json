@@ -31,16 +31,44 @@
               "pattern": "\\S",
               "description": "provider_http means the catalog body was read and validated from a successful upstream HTTP response at observedAt. Other values do not certify provider contact."
             },
+            "clientVersion": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S",
+                  "description": "User-supplied string that must contain visible content, not just whitespace."
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Client version the transport declared when it read this catalog; the backend lists only models whose minimum client version is at or below it. Null for catalogs from an older engine.",
+              "default": null
+            },
+            "clientVersionSource": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "verified_transport",
+                    "installed_cli"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Where the declared client version came from: verified_transport (the version this Claudexor release verified its HTTP transport against) or installed_cli (a newer installed Codex CLI raised it). Null for catalogs from an older engine."
+            },
             "models": {
               "type": "array",
               "items": {
                 "type": "object",
                 "properties": {
                   "id": {
-                    "type": "string",
-                    "minLength": 1,
-                    "pattern": "\\S",
-                    "description": "User-supplied string that must contain visible content, not just whitespace."
+                    "$ref": "#/definitions/ControlModelCatalogQueryResponse/anyOf/0/properties/clientVersion/anyOf/0"
                   },
                   "label": {
                     "type": [
@@ -139,7 +167,7 @@
                               "$ref": "#/definitions/ControlModelCatalogQueryResponse/anyOf/0/properties/models/items/properties/processing/properties/modes/anyOf/0/items"
                             },
                             "id": {
-                              "$ref": "#/definitions/ControlModelCatalogQueryResponse/anyOf/0/properties/models/items/properties/id"
+                              "$ref": "#/definitions/ControlModelCatalogQueryResponse/anyOf/0/properties/clientVersion/anyOf/0"
                             }
                           },
                           "required": [
@@ -152,7 +180,7 @@
                       "defaultNativeMode": {
                         "anyOf": [
                           {
-                            "$ref": "#/definitions/ControlModelCatalogQueryResponse/anyOf/0/properties/models/items/properties/id"
+                            "$ref": "#/definitions/ControlModelCatalogQueryResponse/anyOf/0/properties/clientVersion/anyOf/0"
                           },
                           {
                             "type": "null"
@@ -167,7 +195,7 @@
                         ]
                       },
                       "source": {
-                        "$ref": "#/definitions/ControlModelCatalogQueryResponse/anyOf/0/properties/models/items/properties/id"
+                        "$ref": "#/definitions/ControlModelCatalogQueryResponse/anyOf/0/properties/clientVersion/anyOf/0"
                       },
                       "observedAt": {
                         "anyOf": [

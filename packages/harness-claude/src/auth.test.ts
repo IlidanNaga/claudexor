@@ -311,6 +311,14 @@ describe("Claude readonly enforcement capability", () => {
     const manifest = await adapter.discover();
     expect(manifest.access_profiles_supported).not.toContain("readonly");
     expect(manifest.capability_profile.access_control.readonly_mechanism).toBe("none");
+    // Live-input channel: recorded on Claude Code 2.1.283 (2026-09-26), a user
+    // frame written mid-turn while a Bash call ran was queued at once and
+    // consumed inside the same turn right after that tool batch (the native
+    // queue fold); one written during the final text runs as the next native
+    // turn of the same process, so the run loop holds stdin open for it. The
+    // profile declares `next_tool_boundary` and the adapter ships `message`.
+    expect(manifest.capability_profile.live_input).toBe("next_tool_boundary");
+    expect(typeof adapter.message).toBe("function");
 
     const report = await adapter.doctor({
       cwd: "/repo",

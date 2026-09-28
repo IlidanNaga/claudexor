@@ -5,7 +5,9 @@ import {
   inspectExecutable,
   isBoundedRegularExecutable,
   isLaunchableExecutable,
+  npmGlobalPackagesDir,
   resolveHarnessBinary,
+  windowsNativeImageDir,
 } from "@claudexor/core";
 
 export interface InstalledHarnessProof {
@@ -19,6 +21,9 @@ export type HarnessProofResult =
 export interface InstallProofRuntime {
   runnerNodePath: string;
   platform: NodeJS.Platform;
+  /** The runner Node's architecture: it selects the npm platform package and
+   * therefore which package-native Windows image is the launcher. */
+  arch: string;
   resolutionSource: NodeJS.ProcessEnv;
   environment: NodeJS.ProcessEnv;
   spawn: typeof spawnSync;
@@ -110,7 +115,10 @@ export function proveInstalledNpm(
   spec: NpmInstallProofSpec,
   runtime: InstallProofRuntime,
 ): HarnessProofResult {
-  const packageRoot = join(spec.vendorRoot, "lib", "node_modules", ...spec.npmPackage.split("/"));
+  const packageRoot = join(
+    npmGlobalPackagesDir(spec.vendorRoot, runtime.platform),
+    ...spec.npmPackage.split("/"),
+  );
   let canonicalRoot: string;
   let canonicalPackageRoot: string;
   let canonicalPackageJson: string;
@@ -143,16 +151,33 @@ export function proveInstalledNpm(
     };
   }
 
+  // POSIX: the npm launcher in the prefix's bin dir. Windows: npm ships only
+  // shims there, so the launcher is the vendor's own image inside its platform
+  // package — the same dir the harness PATH producer carries (runtime-env.ts).
+  const launcherDir =
+    runtime.platform === "win32"
+      ? windowsNativeImageDir(spec.vendorRoot, spec.npmPackage, runtime.arch)
+      : resolve(spec.vendorRoot, "bin");
+  if (launcherDir === null) {
+    return { ok: false, reason: "this pin has no Claudexor-runnable native Windows image" };
+  }
+  const launcherSuffix = runtime.platform === "win32" ? ".exe" : "";
   let installedBinary: string | null = null;
   for (const binaryName of spec.binaryNames) {
-    const base = resolve(spec.vendorRoot, "bin", binaryName);
-    const candidates =
-      runtime.platform === "win32" ? [base, `${base}.exe`, `${base}.cmd`, `${base}.bat`] : [base];
-    installedBinary = candidates.find((candidate) => isLaunchableExecutable(candidate)) ?? null;
-    if (installedBinary !== null) break;
+    const candidate = resolve(launcherDir, `${binaryName}${launcherSuffix}`);
+    if (isLaunchableExecutable(candidate, runtime.platform)) {
+      installedBinary = candidate;
+      break;
+    }
   }
   if (installedBinary === null) {
-    return { ok: false, reason: "the expected npm launcher is missing or not launchable" };
+    return {
+      ok: false,
+      reason:
+        runtime.platform === "win32"
+          ? "the package-native Windows image is missing or not launchable"
+          : "the expected npm launcher is missing or not launchable",
+    };
   }
   try {
     const inspection = inspectExecutable(installedBinary);

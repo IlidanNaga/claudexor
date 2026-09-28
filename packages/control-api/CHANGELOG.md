@@ -1,5 +1,70 @@
 # @claudexor/control-api
 
+## 3.17.0
+
+### Patch Changes
+
+- 951489f: `POST /v2/runs` and Exact Retry for a project root that was never registered now answer a typed `404 project_not_registered` (not retryable, with the remedy: register the root with `POST /v2/projects` or declare `scope.ephemeral`) instead of a retryable `503 idempotency_status_unavailable`.
+- Updated dependencies [951489f]
+  - @claudexor/schema@3.17.0
+  - @claudexor/delivery@3.17.0
+  - @claudexor/workspace@3.17.0
+  - @claudexor/event-log@3.17.0
+  - @claudexor/secrets@3.17.0
+  - @claudexor/util@3.17.0
+
+## 3.16.0
+
+### Minor Changes
+
+- 788ddca: Add `POST /v2/runs/:id/messages`: a live message into a running run's active attempt with journal-first admission, typed outcomes (delivered, accepted, rejected, not_active, unsupported, delivery_unknown) plus reasons, and a key-required idempotent receipt. Each harness declares its live-input channel as `capability_profile.live_input`, projected as `liveInput` in the agent-capability catalog.
+
+### Patch Changes
+
+- Updated dependencies [788ddca]
+  - @claudexor/schema@3.16.0
+  - @claudexor/delivery@3.16.0
+  - @claudexor/event-log@3.16.0
+  - @claudexor/workspace@3.16.0
+  - @claudexor/secrets@3.16.0
+  - @claudexor/util@3.16.0
+
+## 3.15.1
+
+### Patch Changes
+
+- @claudexor/delivery@3.15.1
+- @claudexor/event-log@3.15.1
+- @claudexor/schema@3.15.1
+- @claudexor/secrets@3.15.1
+- @claudexor/util@3.15.1
+- @claudexor/workspace@3.15.1
+
+## 3.15.0
+
+### Patch Changes
+
+- @claudexor/delivery@3.15.0
+- @claudexor/workspace@3.15.0
+- @claudexor/event-log@3.15.0
+- @claudexor/schema@3.15.0
+- @claudexor/secrets@3.15.0
+- @claudexor/util@3.15.0
+
+## 3.14.0
+
+### Patch Changes
+
+- Updated dependencies [2c024ac]
+- Updated dependencies [7e615b6]
+- Updated dependencies [fb42a94]
+  - @claudexor/schema@3.14.0
+  - @claudexor/delivery@3.14.0
+  - @claudexor/workspace@3.14.0
+  - @claudexor/event-log@3.14.0
+  - @claudexor/secrets@3.14.0
+  - @claudexor/util@3.14.0
+
 ## 3.13.0
 
 ### Patch Changes

@@ -33,6 +33,15 @@ writeFileSync(
 );
 chmodSync(stubBin, 0o755);
 process.env["CLAUDEXOR_CODEX_BIN"] = stubBin;
+// Same shape for agy: its manifest hint list is the AUTHORITATIVE truth source
+// the strict refusal test needs now that codex declares absence advisory.
+const agyBin = join(stubDir, "agy");
+writeFileSync(
+  agyBin,
+  '#!/bin/sh\ncase "$1" in\n  --version) echo "agy 0.0.0-stub" ;;\n  *) exit 1 ;;\nesac\n',
+);
+chmodSync(agyBin, 0o755);
+process.env["CLAUDEXOR_AGY_BIN"] = agyBin;
 const {
   applyHarnessSettingsPatches,
   assertSettingsPatchValid,
@@ -130,11 +139,13 @@ describe("assertSettingsPatchValid", () => {
     ).rejects.toThrow(/not persistable/);
   });
 
-  it("refuses a model outside the harness truth source with the actionable message (HTTP 400 path)", async () => {
+  it("refuses a model outside an AUTHORITATIVE harness's truth source with the actionable message (HTTP 400 path)", async () => {
+    // agy declares nothing about absence, so its manifest hint list is a
+    // complete enumeration and a miss is a typed refusal (INV-104).
     await expect(
       assertSettingsPatchValid(
         ControlSettingsUpdateRequest.parse({
-          harnesses: { codex: { defaultModel: "ghost-model-9000" } },
+          harnesses: { agy: { defaultModel: "ghost-model-9000" } },
         }),
         AUTO_NO_TIERS,
       ),
@@ -142,11 +153,37 @@ describe("assertSettingsPatchValid", () => {
     // A truth-listed model passes.
     await expect(
       assertSettingsPatchValid(
-        ControlSettingsUpdateRequest.parse({ harnesses: { codex: { defaultModel: "gpt-5.5" } } }),
+        ControlSettingsUpdateRequest.parse({
+          harnesses: { agy: { defaultModel: "gemini-3.7-flash-high" } },
+        }),
         AUTO_NO_TIERS,
       ),
     ).resolves.toBeDefined();
-  }, 30_000); // codex discover() spawns the vendor CLI; its startup latency is environmental
+  }, 30_000); // discover() spawns the (stubbed) vendor CLI; startup latency is environmental
+
+  it("persists a model an ADVISORY harness's list lacks and hands the caller the note (INV-104)", async () => {
+    // codex declares absence advisory: its hint list proves presence only, so
+    // the write goes through and the note travels instead of a 400.
+    const notes: string[] = [];
+    await expect(
+      assertSettingsPatchValid(
+        patchCodex({ defaultModel: "gpt-ghost-9000" }),
+        AUTO_NO_TIERS,
+        notes,
+      ),
+    ).resolves.toBeDefined();
+    expect(notes).toEqual([
+      "harness 'codex' defaultModel 'gpt-ghost-9000' (truth source: manifest): " +
+        'model "gpt-ghost-9000" is not in this harness\'s manifest known-model list; ' +
+        "this harness's list cannot prove a model is absent, so the request is forwarded to the vendor",
+    ]);
+    // A listed model passes silently: presence is proof.
+    const silent: string[] = [];
+    await expect(
+      assertSettingsPatchValid(patchCodex({ defaultModel: "gpt-5.5" }), AUTO_NO_TIERS, silent),
+    ).resolves.toBeDefined();
+    expect(silent).toEqual([]);
+  }, 30_000);
 
   it("refuses an effort outside the declared ladder", async () => {
     // raw-api discovers without a vendor binary and declares NO effort ladder;
@@ -510,6 +547,59 @@ describe("commitSettingsUpdate atomic validate+write (A-1 TOCTOU race)", () => {
       },
     );
   });
+
+  it("a quality-tier route on an ADVISORY harness persists an unlisted model with the tier note; a listed one is silent", async () => {
+    const notes: string[] = [];
+    await expect(
+      assertSettingsPatchValid(
+        ControlSettingsUpdateRequest.parse({
+          qualityTiers: {
+            implement: [[{ harness: "codex", model: "gpt-ghost-9000", effort: "high" }]],
+          },
+        }),
+        { goal: "auto" as const, qualityTiers: {}, harnesses: {} },
+        notes,
+      ),
+    ).resolves.toBeDefined();
+    expect(notes).toEqual([
+      expect.stringMatching(
+        /^quality tier route 'codex\/gpt-ghost-9000' \(truth source: manifest\): model "gpt-ghost-9000" is not in this harness's manifest known-model list; /,
+      ),
+    ]);
+    const silent: string[] = [];
+    await expect(
+      assertSettingsPatchValid(
+        oneTierPatch(),
+        { goal: "auto" as const, qualityTiers: {}, harnesses: {} },
+        silent,
+      ),
+    ).resolves.toBeDefined();
+    expect(silent).toEqual([]);
+  }, 30_000);
+
+  it("commitSettingsUpdate returns the admission notes the write produced", async () => {
+    await withSeededConfig({ goal: "auto", qualityTiers: {} }, async (root) => {
+      const notes = await commitSettingsUpdate(
+        root,
+        ControlSettingsUpdateRequest.parse({
+          harnesses: { codex: { defaultModel: "gpt-ghost-9000" } },
+        }),
+      );
+      expect(notes).toEqual([
+        expect.stringMatching(
+          /^harness 'codex' defaultModel 'gpt-ghost-9000' \(truth source: manifest\): model "gpt-ghost-9000" is not in this harness's manifest known-model list; /,
+        ),
+      ]);
+      expect(loadConfig(root).global.harnesses["codex"]?.default_model).toBe("gpt-ghost-9000");
+      // A listed model persists with no note; the read-back is silent.
+      expect(
+        await commitSettingsUpdate(
+          root,
+          ControlSettingsUpdateRequest.parse({ harnesses: { codex: { defaultModel: "gpt-5.5" } } }),
+        ),
+      ).toEqual([]);
+    });
+  }, 30_000);
 
   it("an effort-only write is judged against the PERSISTED default model", async () => {
     // End-to-end proof that the stored per-harness settings actually reach the

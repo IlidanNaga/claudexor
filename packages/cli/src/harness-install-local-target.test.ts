@@ -11,6 +11,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   utimesSync,
@@ -23,6 +24,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CLAUDE_VENDOR_CLI_VERSION } from "@claudexor/harness-claude";
 import { CODEX_VENDOR_CLI_VERSION } from "@claudexor/harness-codex";
 import { OPENCODE_VENDOR_CLI_VERSION } from "@claudexor/harness-opencode";
+import { harnessBinaryIdentityOnPath, normalizedHarnessPath } from "@claudexor/core";
 import type { ParsedArgs } from "./args.js";
 import {
   CURSOR_INSTALL_URL,
@@ -86,20 +88,53 @@ const writeExecutable = (path: string, body = "#!/bin/sh\nexit 0\n"): void => {
   chmodSync(path, 0o755);
 };
 
+/** npm global layout observed for the exact Codex pin: the main package under
+ * `<prefix>/node_modules`, its optional platform package NESTED under the main
+ * package's `node_modules`, and shims (`codex`, `codex.cmd`) in the prefix root.
+ * `image: false` reproduces a shim-only install (platform package missing). */
+const WINDOWS_CODEX_IMAGE_DIR = (root: string): string =>
+  join(
+    root,
+    "node_modules",
+    "@openai",
+    "codex",
+    "node_modules",
+    "@openai",
+    "codex-win32-x64",
+    "vendor",
+    "x86_64-pc-windows-msvc",
+    "bin",
+  );
+
 const installNpmFixture = (
   home: string,
   target: "local" | "remote",
   harness: NpmHarness,
-  options: { packageVersion?: string; binaryBody?: string } = {},
+  options: {
+    packageVersion?: string;
+    binaryBody?: string;
+    layout?: "posix" | "win32";
+    image?: boolean;
+  } = {},
 ): { binary: string; packageRoot: string } => {
   const fixture = NPM_FIXTURES[harness];
   const root = vendorRoot(home, target);
-  const packageRoot = join(root, "lib", "node_modules", ...fixture.npmPackage.split("/"));
+  const windows = options.layout === "win32";
+  const packageRoot = windows
+    ? join(root, "node_modules", ...fixture.npmPackage.split("/"))
+    : join(root, "lib", "node_modules", ...fixture.npmPackage.split("/"));
   mkdirSync(packageRoot, { recursive: true });
   writeFileSync(
     join(packageRoot, "package.json"),
     `${JSON.stringify({ version: options.packageVersion ?? fixture.version })}\n`,
   );
+  if (windows) {
+    writeExecutable(join(root, fixture.binary), "");
+    writeExecutable(join(root, `${fixture.binary}.cmd`), "@ECHO off\r\n");
+    const binary = join(WINDOWS_CODEX_IMAGE_DIR(root), `${fixture.binary}.exe`);
+    if (options.image !== false) writeExecutable(binary, options.binaryBody ?? "MZ-fixture");
+    return { binary, packageRoot };
+  }
   const binary = join(root, "bin", fixture.binary);
   writeExecutable(binary, options.binaryBody);
   return { binary, packageRoot };
@@ -131,6 +166,10 @@ interface InstallerSpawnOptions {
   versionOutput?: string;
   materialize?: boolean;
   noisy?: boolean;
+  /** Which npm prefix layout a successful install materializes. */
+  layout?: "posix" | "win32";
+  /** Windows only: leave the platform package (and its image) out. */
+  image?: boolean;
 }
 
 /** A contract-faithful fake: successful installer children materialize the
@@ -158,7 +197,10 @@ const installerSpawn = (options: InstallerSpawnOptions) => {
     } else if (installerStatus === 0 && materialize) {
       if (binary === "/bin/sh") installCursorFixture(options.home);
       else if (options.harness !== "cursor") {
-        installNpmFixture(options.home, target, options.harness);
+        installNpmFixture(options.home, target, options.harness, {
+          layout: options.layout,
+          image: options.image,
+        });
       }
     }
     if (options.noisy) {
@@ -417,20 +459,175 @@ describe("harness install --target local", () => {
     }
   });
 
-  it("refuses local Windows before filesystem or child-process side effects", () => {
+  it("refuses a local Windows install typed, before side effects, for every vendor without a verified image", () => {
+    for (const [harness, reason] of [
+      ["claude", "no Claudexor-verified native Windows image"],
+      ["opencode", "no Claudexor-verified native Windows image"],
+      ["cursor", "not supported on Windows for cursor"],
+      ["agy", "not supported on Windows for agy"],
+    ] as const) {
+      const spawn = vi.fn(() => ({ status: 0 }) as never);
+      const mkdir = vi.fn();
+      const result = runHarnessInstaller(harness, {
+        home: "/tmp/operator",
+        target: "local",
+        platform: "win32",
+        arch: "x64",
+        spawn: spawn as never,
+        mkdir,
+      });
+      expect(result).toMatchObject({ exitCode: 1, code: "unsupported_platform" });
+      expect(result.refusal).toContain(reason);
+      expect(result.refusal).toContain("nothing was executed");
+      expect(spawn).not.toHaveBeenCalled();
+      expect(mkdir).not.toHaveBeenCalled();
+    }
+    // The verified image exists only for x64/arm64 platform packages.
     const spawn = vi.fn(() => ({ status: 0 }) as never);
-    const mkdir = vi.fn();
     const result = runHarnessInstaller("codex", {
       home: "/tmp/operator",
       target: "local",
       platform: "win32",
+      arch: "ia32",
       spawn: spawn as never,
-      mkdir,
     });
     expect(result).toMatchObject({ exitCode: 1, code: "unsupported_platform" });
-    expect(result.refusal).toContain("nothing was executed");
+    expect(result.refusal).toContain("ia32 architecture");
     expect(spawn).not.toHaveBeenCalled();
-    expect(mkdir).not.toHaveBeenCalled();
+  });
+
+  it("installs codex on Windows with the embedded npm-cli.js and proves the package-native codex.exe", () => {
+    const home = mkdtempSync(join(tmpdir(), "claudexor-win-codex-"));
+    const spawn = installerSpawn({ home, harness: "codex", target: "local", layout: "win32" });
+    const secrets = { OPENAI_API_KEY: "sk-never", ANTHROPIC_API_KEY: "never" };
+    const windowsKeys = {
+      SystemRoot: "C:\\Windows",
+      TEMP: "C:\\Temp",
+      LOCALAPPDATA: "C:\\Users\\u\\AppData\\Local",
+      PATHEXT: ".COM;.EXE;.BAT;.CMD",
+    };
+    try {
+      const result = runHarnessInstaller("codex", {
+        home,
+        nodePath: "/runtime/node/node.exe",
+        target: "local",
+        platform: "win32",
+        arch: "x64",
+        spawn: spawn as never,
+        exists: () => true,
+        lock: false,
+        sourceEnv: { PATH: "", ...secrets, ...windowsKeys },
+      });
+      const image = join(WINDOWS_CODEX_IMAGE_DIR(vendorRoot(home, "local")), "codex.exe");
+      expect(result).toEqual({
+        exitCode: 0,
+        installedBinary: image,
+        installedVersion: CODEX_VENDOR_CLI_VERSION,
+      });
+      expect(spawn).toHaveBeenCalledTimes(2);
+      expect(spawn).toHaveBeenNthCalledWith(
+        1,
+        "/runtime/node/node.exe",
+        [
+          join("/runtime", "node", "node_modules", "npm", "bin", "npm-cli.js"),
+          "install",
+          "--global",
+          "--prefix",
+          join(home, ".claudexor", "node"),
+          `@openai/codex@${CODEX_VENDOR_CLI_VERSION}`,
+        ],
+        expect.objectContaining({ stdio: "inherit" }),
+      );
+      // The absolute image, never the `codex`/`codex.cmd` shims npm left in
+      // the prefix root, is what the proof executes.
+      expect(spawn).toHaveBeenNthCalledWith(
+        2,
+        image,
+        ["--version"],
+        expect.objectContaining({ stdio: ["ignore", "pipe", "pipe"] }),
+      );
+      // Windows process keys reach npm and the image; provider secrets never do.
+      const npmEnv = (spawn.mock.calls[0]![2] as { env: NodeJS.ProcessEnv }).env;
+      expect(npmEnv).toMatchObject({
+        SYSTEMROOT: "C:\\Windows",
+        TEMP: "C:\\Temp",
+        LOCALAPPDATA: "C:\\Users\\u\\AppData\\Local",
+        PATHEXT: ".COM;.EXE;.BAT;.CMD",
+        HOME: home,
+      });
+      expect(npmEnv.OPENAI_API_KEY).toBeUndefined();
+      expect(npmEnv.ANTHROPIC_API_KEY).toBeUndefined();
+      // The same PATH every local surface composes resolves the same image.
+      const harnessPath = normalizedHarnessPath(
+        { HOME: home, PATH: "" },
+        "/no/such/node",
+        "win32",
+        "x64",
+      );
+      expect(harnessBinaryIdentityOnPath("codex", harnessPath, "win32")?.path).toBe(
+        realpathSync(image),
+      );
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a shim-only Windows install (platform package missing) as a verification failure", () => {
+    const home = mkdtempSync(join(tmpdir(), "claudexor-win-shim-only-"));
+    const spawn = installerSpawn({
+      home,
+      harness: "codex",
+      target: "local",
+      layout: "win32",
+      image: false,
+    });
+    try {
+      const result = runHarnessInstaller("codex", {
+        home,
+        nodePath: "/runtime/node/node.exe",
+        target: "local",
+        platform: "win32",
+        arch: "x64",
+        spawn: spawn as never,
+        exists: () => true,
+        lock: false,
+        sourceEnv: { PATH: "" },
+      });
+      expect(result).toMatchObject({ exitCode: 1, code: "install_verification_failed" });
+      expect(result.refusal).toContain("package-native Windows image is missing");
+      expect(spawn).toHaveBeenCalledOnce();
+      expect(existsSync(join(vendorRoot(home, "local"), "codex.cmd"))).toBe(true);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("anchors the Windows prefix on the HOME the harness PATH producer reads", () => {
+    const scoped = mkdtempSync(join(tmpdir(), "claudexor-win-scoped-home-"));
+    const spawn = installerSpawn({
+      home: scoped,
+      harness: "codex",
+      target: "local",
+      layout: "win32",
+    });
+    try {
+      const result = runHarnessInstaller("codex", {
+        nodePath: "/runtime/node/node.exe",
+        target: "local",
+        platform: "win32",
+        arch: "x64",
+        spawn: spawn as never,
+        exists: () => true,
+        lock: false,
+        sourceEnv: { PATH: "", HOME: scoped },
+      });
+      expect(result).toMatchObject({ exitCode: 0 });
+      const argv = spawn.mock.calls[0]![1] as string[];
+      expect(argv[argv.indexOf("--prefix") + 1]).toBe(join(scoped, ".claudexor", "node"));
+      expect(result.installedBinary?.startsWith(join(scoped, ".claudexor", "node"))).toBe(true);
+    } finally {
+      rmSync(scoped, { recursive: true, force: true });
+    }
   });
 
   it("serializes installs and rechecks an exact npm pin after taking the lease", () => {
@@ -781,9 +978,9 @@ describe("harness install --target local", () => {
     const stdout = captureStdout();
     const spawn = vi.fn(() => ({ status: 0 }) as never);
     const code = harnessInstallCommand(
-      args(["harness", "install", "codex"], { target: "local", yes: true }),
+      args(["harness", "install", "claude"], { target: "local", yes: true }),
       true,
-      { platform: "win32", spawn: spawn as never },
+      { platform: "win32", arch: "x64", spawn: spawn as never },
     );
     stdout.restore();
     expect(code).toBe(1);
@@ -792,10 +989,76 @@ describe("harness install --target local", () => {
       dryRun: false,
       exitCode: 1,
       code: "unsupported_platform",
-      harness: "codex",
+      harness: "claude",
       target: "local",
+      installLocation:
+        "~/.claudexor/node/node_modules/@anthropic-ai/claude-code (no Claudexor-runnable Windows image in this release)",
     });
     expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it("emits the unchanged local receipt for a Windows codex install, naming the image dir", () => {
+    const home = mkdtempSync(join(tmpdir(), "claudexor-win-json-receipt-"));
+    const stdout = captureStdout();
+    const stderr = captureStderr();
+    const spawn = installerSpawn({ home, harness: "codex", target: "local", layout: "win32" });
+    const imageDir =
+      "~/.claudexor/node/node_modules/@openai/codex/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin";
+    try {
+      const dryRunCode = harnessInstallCommand(
+        args(["harness", "install", "codex"], { target: "local", "dry-run": true }),
+        true,
+        { platform: "win32", arch: "x64" },
+      );
+      expect(dryRunCode).toBe(0);
+      expect(JSON.parse(stdout.lines())).toEqual({
+        ok: true,
+        dryRun: true,
+        harness: "codex",
+        target: "local",
+        command: `npm install --global --prefix ~/.claudexor/node @openai/codex@${CODEX_VENDOR_CLI_VERSION}`,
+        installLocation: imageDir,
+        pinnedVersion: CODEX_VENDOR_CLI_VERSION,
+        verification: "release_verified",
+      });
+      stdout.restore();
+      const executed = captureStdout();
+      const code = harnessInstallCommand(
+        args(["harness", "install", "codex"], { target: "local", yes: true }),
+        true,
+        {
+          home,
+          nodePath: "/runtime/node/node.exe",
+          platform: "win32",
+          arch: "x64",
+          spawn: spawn as never,
+          exists: () => true,
+          lock: false,
+          sourceEnv: { PATH: "" },
+        },
+      );
+      executed.restore();
+      expect(code).toBe(0);
+      const payload = JSON.parse(executed.lines()) as Record<string, unknown>;
+      // Exactly the receipt fields an embedding host validates — no new keys.
+      expect(payload).toEqual({
+        ok: true,
+        dryRun: false,
+        exitCode: 0,
+        harness: "codex",
+        target: "local",
+        command: `npm install --global --prefix ~/.claudexor/node @openai/codex@${CODEX_VENDOR_CLI_VERSION}`,
+        installLocation: imageDir,
+        pinnedVersion: CODEX_VENDOR_CLI_VERSION,
+        verification: "release_verified",
+        installedBinary: join(WINDOWS_CODEX_IMAGE_DIR(vendorRoot(home, "local")), "codex.exe"),
+        installedVersion: CODEX_VENDOR_CLI_VERSION,
+      });
+    } finally {
+      stdout.restore();
+      stderr.restore();
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it("normalizes an unexpected npm mkdir failure into one fully disclosed JSON envelope", () => {

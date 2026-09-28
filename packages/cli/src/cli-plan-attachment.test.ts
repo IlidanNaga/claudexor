@@ -108,7 +108,7 @@ describe("plan CLI attachment transport", () => {
     ];
     try {
       await import("./cli.js");
-      await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(0));
+      await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(0), { timeout: 2_500 });
     } finally {
       process.argv = priorArgv;
       stdout.mockRestore();
