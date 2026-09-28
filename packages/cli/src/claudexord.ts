@@ -27,6 +27,7 @@ import {
   ensureDaemonRuntimeRoot,
   logPath,
   socketAlive,
+  LiveInputRegistry,
 } from "@claudexor/daemon";
 import { DaemonControlApiServer } from "@claudexor/control-api";
 import {
@@ -44,6 +45,8 @@ import {
   recoveryBlockedPartitions,
 } from "./daemon-startup.js";
 import { engineBuildIdentity, noProjectRepoRoot, redactSecrets } from "@claudexor/util";
+import { loadConfig } from "@claudexor/config";
+import { runtimeConcurrencyCaps } from "@claudexor/schema";
 import { scheduleStartupRetention } from "./retention-service.js";
 import { controlServices } from "./control-services.js";
 import { AuthReadinessService } from "@claudexor/gateway";
@@ -93,6 +96,8 @@ export async function main(): Promise<void> {
   );
   try {
     const token = ensureToken();
+    const startupConfig = loadConfig(noProjectRepoRoot()).global;
+    const startupConcurrencyCaps = runtimeConcurrencyCaps(startupConfig);
 
     if (await socketAlive(socketPath)) {
       throw new Error(`a claudexor daemon is already listening on ${socketPath}; stop it first`);
@@ -167,6 +172,11 @@ export async function main(): Promise<void> {
       forRequest: (params) => threads.interactionsForRequest(params),
       all: () => threads.interactionStores(),
     });
+    // Live-input targets (POST /v2/runs/:id/messages): in-process only, fed by
+    // the agent runner per attempt; a pending question blocks a send (INV-048).
+    const liveInputs = new LiveInputRegistry({
+      pendingForRun: (runId) => interactions.pendingForRun(runId),
+    });
     // C5b: construction mkdirs under the daemon dir and the recovery plane
     // serves no resources — the store materializes on first product use.
     let resourceStore: ResourceStore | null = null;
@@ -186,19 +196,23 @@ export async function main(): Promise<void> {
       quotaStore: () => quotaStoreSlot.current(),
       threads,
       interactions,
+      liveInputs,
       resources,
       bus,
+      runtimeConcurrencyCaps: startupConcurrencyCaps,
     });
 
     const server = new DaemonServer({
       socketPath,
       token,
       commands: threads,
+      runtimeConcurrencyCaps: startupConcurrencyCaps,
       servingMode: admission.snapshot,
       delegationAuthority: delegationBudgetAuthority,
       onCommandTerminal: (record) => models.operations.onCommandTerminal(record),
       onRunTerminal: (runId, threadId) => {
         interactions.dropForRun(runId);
+        liveInputs.dropForRun(runId);
         // Run-terminal is the one W12 path with no thread-store mutation to
         // ride — the terminal changes the thread's presented state, so ping.
         if (threadId) threads.pingThreadHead(threadId);
@@ -263,6 +277,7 @@ export async function main(): Promise<void> {
     // the startup retention pass below consumes them directly.
     const services = controlServices(
       interactions,
+      liveInputs,
       () => projectStoreSlot.current(),
       threads,
       setupBinding,
@@ -271,6 +286,7 @@ export async function main(): Promise<void> {
       resources,
       () => quotaStoreSlot.current(),
       () => selfClient.list(),
+      startupConcurrencyCaps,
     );
     const runRetention = services.runRetention;
     services.runRetention = models.withRetention(runRetention);

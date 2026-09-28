@@ -120,7 +120,7 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
   {
     id: "plan",
     positionalPatterns: [{ min: 0, max: null }],
-    usageArgs: '"<prompt>" [--council [--n 2..4]]',
+    usageArgs: '"<prompt>" [--council [--n N]]',
     summary: "Read-only planning report (--council: multi-harness drafts merged into one plan)",
     flags: [...RUN_FLAGS_BY_MODE.plan],
     mutability: "read",

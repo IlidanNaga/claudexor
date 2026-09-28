@@ -10994,7 +10994,7 @@ describe("Orchestrator", () => {
       mode: "plan",
       council: true,
       harnesses: ["cursor"],
-      n: 1,
+      n: 2, // Requested minimum; one available lane is disclosed as degraded.
     });
     expect(legacyOutcome(res)).toBe("success");
     expect(homesByIntent["plan"]).toBeTruthy();
@@ -11039,7 +11039,7 @@ describe("Orchestrator", () => {
       mode: "plan",
       council: true,
       harnesses: ["cursor"],
-      n: 1,
+      n: 2, // Requested minimum; one available lane is disclosed as degraded.
     });
     expect(legacyOutcome(res)).toBe("failed");
     // Root cause 3: the proven-success p01 draft is NEVER labeled failed.

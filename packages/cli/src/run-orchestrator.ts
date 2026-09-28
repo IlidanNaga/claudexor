@@ -9,6 +9,7 @@ import { CredentialUnusableLedger, type QuotaRegistry } from "@claudexor/daemon"
 import { Orchestrator } from "@claudexor/orchestrator";
 import type { normalizeRunStartRequest } from "@claudexor/control-api";
 import { buildRegistry } from "./registry.js";
+import type { RuntimeConcurrencyCaps } from "@claudexor/schema";
 
 /**
  * Daemon-lifetime typed `credential_unusable` evidence (A7): in-memory and
@@ -27,6 +28,7 @@ export function buildRunOrchestrator(args: {
   /** Typed per-harness refusal while a unified-accounts migration is
    * incomplete (a crash between phases) — other harnesses keep working. */
   accountsMigrationGate?: OrchestratorDeps["accountsMigrationGate"];
+  runtimeConcurrencyCaps?: RuntimeConcurrencyCaps;
 }): Orchestrator {
   const { p, quotaStore } = args;
   return new Orchestrator({
@@ -52,5 +54,6 @@ export function buildRunOrchestrator(args: {
       p.reviewerModels && typeof p.reviewerModels === "object" ? p.reviewerModels : undefined,
     reviewerEfforts:
       p.reviewerEfforts && typeof p.reviewerEfforts === "object" ? p.reviewerEfforts : undefined,
+    runtimeConcurrencyCaps: args.runtimeConcurrencyCaps,
   });
 }

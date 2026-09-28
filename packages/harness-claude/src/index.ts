@@ -70,6 +70,8 @@ import {
   CLAUDE_EFFORT_SNAPSHOT,
   CLAUDE_EFFORT_SNAPSHOT_VERIFIED_AGAINST,
   claudeRunEffortResolution,
+  claudeRunPatchPath,
+  detectClaudeVersion,
   probeClaudeEffortLevels,
   probeClaudeHelp,
 } from "./effort-probe.js";
@@ -85,8 +87,9 @@ import {
   handleControlRequestFrame,
   initialSessionFrames,
   isControlRequestFrame,
-  isResultFrame,
 } from "./interactive.js";
+import { createClaudeLiveInput, type ClaudeLiveInput } from "./live-input.js";
+import { CLAUDE_MODEL_INVENTORY, probeClaudeModels } from "./model-probe.js";
 
 export const CLAUDE_PROVIDER_ENV_DENYLIST = PROVIDER_SECRET_ENV.filter(
   (k) => k !== "ANTHROPIC_API_KEY",
@@ -142,12 +145,14 @@ const CLAUDE_READONLY_REQUIRED_FLAGS = [
  * a probe that failed once (or that a cancelled run read) stayed failed for the
  * process lifetime, so a long-lived daemon reported readonly enforcement
  * unavailable forever. It bought nothing either: the spawn is already memoized,
- * and what is left is a handful of `includes` over text we already hold.
+ * and what is left is a handful of `includes` over text we already hold. A
+ * run's PATH patch selects the binary the flags are read from, as for the ladder.
  */
 export async function probeClaudeReadonlyProfile(
   abortSignal?: AbortSignal,
+  patchPath?: string,
 ): Promise<ClaudeReadonlyProfileProbe> {
-  const probe = await probeClaudeHelp(abortSignal);
+  const probe = await probeClaudeHelp(abortSignal, patchPath);
   if (!probe.ok) {
     return {
       supported: false,
@@ -169,20 +174,6 @@ export async function probeClaudeReadonlyProfile(
       ? "installed Claude CLI exposes the complete restrictive readonly flag set"
       : `readonly enforcement unavailable; missing ${missingFlags.join(", ") || `help exited ${probe.code}`}`,
   };
-}
-
-async function detectVersion(abortSignal?: AbortSignal): Promise<string | null> {
-  try {
-    const r = await runCapture(BIN, ["--version"], {
-      timeoutMs: 10_000,
-      abortSignal,
-      cancelSignal: "SIGTERM",
-      cancelKillDelayMs: 0,
-    });
-    return r.stdout.trim() || `${BIN} (version unknown)`;
-  } catch {
-    return null;
-  }
 }
 
 /** Options for probing the default or explicitly selected native Claude store. */
@@ -263,7 +254,7 @@ export type ClaudeProfileRuntimeDeps = Pick<
 >;
 
 type ClaudeRuntimeDeps = {
-  detectVersion: typeof detectVersion;
+  detectVersion: typeof detectClaudeVersion;
   probeAuthStatus: typeof probeAuthStatus;
   anthropicApiKey: typeof anthropicApiKey;
   claudeOAuthToken: typeof claudeOAuthToken;
@@ -275,12 +266,14 @@ type ClaudeRuntimeDeps = {
   probeReadonlyProfile: typeof probeClaudeReadonlyProfile;
   /** Effort ladder of the installed binary; falls back to the recorded snapshot. */
   probeEffortLevels: typeof probeClaudeEffortLevels;
+  /** Cached prompt-free initialize picker (model-probe.ts); total, never empty. */
+  probeModels: typeof probeClaudeModels;
   runCliHarness: typeof runCliHarness;
 };
 
 export function createClaudeAdapter(deps: Partial<ClaudeRuntimeDeps> = {}): HarnessAdapter {
   const runtime: ClaudeRuntimeDeps = {
-    detectVersion,
+    detectVersion: detectClaudeVersion,
     probeAuthStatus,
     anthropicApiKey,
     claudeOAuthToken,
@@ -289,13 +282,18 @@ export function createClaudeAdapter(deps: Partial<ClaudeRuntimeDeps> = {}): Harn
     smokeIsolatedOAuthToken,
     probeReadonlyProfile: probeClaudeReadonlyProfile,
     probeEffortLevels: probeClaudeEffortLevels,
+    probeModels: probeClaudeModels,
     runCliHarness,
     ...deps,
   };
+  const live = createClaudeLiveInput();
   return {
     id: "claude",
     capabilityProfile: CLAUDE_CAPABILITY_PROFILE,
     prepareProcessing: prepareClaudeSessionProcessing,
+    // Live input into a running interactive session (live-input.ts): typed
+    // receipts from the native stdin queue; never cancels or fails the run.
+    message: live.message,
     async discover(): Promise<HarnessManifest> {
       const version = await runtime.detectVersion();
       if (version === null) {
@@ -326,6 +324,7 @@ export function createClaudeAdapter(deps: Partial<ClaudeRuntimeDeps> = {}): Harn
         adapter_version: CLAUDEXOR_VERSION,
         provider_family: "anthropic",
         capabilities: {
+          ...CLAUDE_MODEL_INVENTORY,
           processing_preferences: ["standard", "fast", "economy"],
           plan: true,
           implement: true,
@@ -600,11 +599,15 @@ export function createClaudeAdapter(deps: Partial<ClaudeRuntimeDeps> = {}): Harn
     },
 
     run(spec: HarnessRunSpec): AsyncIterable<HarnessEvent> {
-      return runClaude(spec, runtime);
+      return runClaude(spec, runtime, live);
     },
 
     review(spec: HarnessRunSpec): AsyncIterable<HarnessEvent> {
-      return runClaude(spec, runtime);
+      return runClaude(spec, runtime, live);
+    },
+
+    models(spec) {
+      return runtime.probeModels(spec, { resolveProfileSecret: runtime.resolveProfileSecret });
     },
 
     probeCredentialProfile(
@@ -653,6 +656,8 @@ export function claudeArgsForSpec(
         "--verbose",
         "--permission-prompt-tool",
         "stdio",
+        // Echo every stdin user frame back (`isReplay`): the live-input receipt.
+        "--replay-user-messages",
         ...permissionArgs(spec.access),
       ]
     : [
@@ -776,10 +781,14 @@ function toolPermissionSets(spec: HarnessRunSpec): { allow: Set<string>; deny: S
 async function* runClaude(
   spec: HarnessRunSpec,
   runtime: ClaudeRuntimeDeps,
+  live: ClaudeLiveInput,
 ): AsyncIterable<HarnessEvent> {
   const abortSignal = abortSignalFromSpec(spec);
   if (spec.access === "readonly") {
-    const readonlyProfile = await runtime.probeReadonlyProfile(abortSignal);
+    const readonlyProfile = await runtime.probeReadonlyProfile(
+      abortSignal,
+      claudeRunPatchPath(spec),
+    );
     if (!readonlyProfile.supported) {
       yield {
         type: "error",
@@ -935,7 +944,8 @@ async function* runClaude(
     redact: redactSecrets,
     parseEvent: (obj, sessionId) => {
       const parsed = baseParser(obj, sessionId);
-      const out = observeProcessing ? observeProcessing(obj, parsed, sessionId) : parsed;
+      const processed = observeProcessing ? observeProcessing(obj, parsed, sessionId) : parsed;
+      const out = live.observe(obj, processed, sessionId);
       if (out) {
         for (const ev of out) {
           // The auth route is fixed before spawn. Carry it on every event so
@@ -954,7 +964,11 @@ async function* runClaude(
             initialStdin: initialSessionFrames(spec.prompt, attachmentBlocks),
             matches: isControlRequestFrame,
             handle: (obj, io) => handleControlRequestFrame(obj, io, spec.session_id, channel),
-            closeStdinOn: isResultFrame,
+            // Held open past a result while a live message is queued|started or
+            // a run-owned background task is open (the CLI then runs the next
+            // native turn in this process); closes on the first quiet result.
+            closeStdinOn: (obj) => live.closeStdinOn(spec.session_id, obj),
+            onIo: live.onIo,
           },
         }
       : {}),

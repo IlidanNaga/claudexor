@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  assertCouncilWidth,
   buildCouncilProjection,
   councilDegradationNote,
   councilDraftRelPath,
@@ -24,6 +25,21 @@ describe("resolveCouncilWidth", () => {
     expect(resolveCouncilWidth(4, 4)).toEqual({ requested: 4, members: 4, degraded: false });
     // requested more than available -> capped + degraded (never duplicate a lane).
     expect(resolveCouncilWidth(4, 2)).toEqual({ requested: 4, members: 2, degraded: true });
+    expect(resolveCouncilWidth(9, 12, 10)).toEqual({ requested: 9, members: 9, degraded: false });
+    expect(() => resolveCouncilWidth(12, 12, 10)).toThrow(/exceeds the startup-frozen cap 10/);
+    expect(resolveCouncilWidth(9, 8, 10)).toEqual({ requested: 9, members: 8, degraded: true });
+  });
+});
+
+describe("assertCouncilWidth", () => {
+  it("accepts the configured boundary and rejects only explicit invalid or over-cap widths", () => {
+    expect(() => assertCouncilWidth(undefined, 2)).not.toThrow();
+    expect(() => assertCouncilWidth(2, 2)).not.toThrow();
+    expect(() => assertCouncilWidth(24, 24)).not.toThrow();
+    expect(() => assertCouncilWidth(25, 24)).toThrow(/exceeds the startup-frozen cap 24/);
+    for (const width of [0, 1, 2.5, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => assertCouncilWidth(width, 24)).toThrow(/safe integer of at least 2/);
+    }
   });
 });
 

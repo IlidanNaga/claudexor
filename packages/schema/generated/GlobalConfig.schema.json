@@ -237,6 +237,32 @@
               "exclusiveMinimum": 0,
               "default": 3600000,
               "description": "Inactivity watchdog for harness streams: no events for this window aborts the stream and fails the attempt with a typed timeout."
+            },
+            "max_concurrent": {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991,
+              "exclusiveMinimum": 0,
+              "default": 24,
+              "description": "Regular daemon jobs per data root; applied at daemon startup."
+            },
+            "max_parallel_candidates": {
+              "$ref": "#/definitions/GlobalConfig/properties/runtime/properties/max_concurrent",
+              "default": 4,
+              "description": "Active best-of candidates or deep-scan scouts within one run."
+            },
+            "max_deep_scan_width": {
+              "$ref": "#/definitions/GlobalConfig/properties/runtime/properties/max_concurrent",
+              "default": 8,
+              "description": "Maximum scout count in one deep scan."
+            },
+            "max_council_members": {
+              "type": "integer",
+              "minimum": 2,
+              "maximum": 9007199254740991,
+              "exclusiveMinimum": 0,
+              "default": 4,
+              "description": "Maximum distinct Council members; Council requires at least two."
             }
           },
           "additionalProperties": false,

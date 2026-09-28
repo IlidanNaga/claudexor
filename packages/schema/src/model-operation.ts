@@ -276,6 +276,22 @@ export const ControlModelCatalogResponse = z
     provenance: NonBlankString.describe(
       "provider_http means the catalog body was read and validated from a successful upstream HTTP response at observedAt. Other values do not certify provider contact.",
     ),
+    /** The backend filters this catalog by the client version the transport
+     * declared; a model above that version's floor is absent here even when
+     * the same account can generate with it. Null only for catalogs handed
+     * over by an older engine. */
+    clientVersion: NonBlankString.nullable()
+      .default(null)
+      .describe(
+        "Client version the transport declared when it read this catalog; the backend lists only models whose minimum client version is at or below it. Null for catalogs from an older engine.",
+      ),
+    clientVersionSource: z
+      .enum(["verified_transport", "installed_cli"])
+      .nullable()
+      .default(null)
+      .describe(
+        "Where the declared client version came from: verified_transport (the version this Claudexor release verified its HTTP transport against) or installed_cli (a newer installed Codex CLI raised it). Null for catalogs from an older engine.",
+      ),
     models: z.array(ModelCatalogEntry),
   })
   .strict()

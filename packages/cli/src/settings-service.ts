@@ -10,19 +10,26 @@
  * native error.
  */
 import type {
-  ControlSettingsUpdateRequest,
   GlobalConfig as GlobalConfigT,
   HarnessCapabilities,
   QualityTierSet,
   RoutingGoal,
+  RuntimeConcurrencyCaps,
 } from "@claudexor/schema";
-import { GlobalConfig } from "@claudexor/schema";
-import { validateModel } from "@claudexor/core";
+import {
+  ControlSettingsUpdateRequest,
+  GlobalConfig,
+  runtimeConcurrencyCaps,
+  concurrencyState,
+} from "@claudexor/schema";
 import { effortLevelsForModel } from "@claudexor/schema";
 import { loadConfig, updateGlobalConfig } from "@claudexor/config";
-import { buildRegistry, harnessModels } from "./registry.js";
+import { buildRegistry, checkHarnessModelTruth, harnessModelTruth } from "./registry.js";
 
-export function settingsSnapshot(repoRoot: string) {
+export function settingsSnapshot(
+  repoRoot: string,
+  effectiveConcurrencyCaps?: RuntimeConcurrencyCaps,
+) {
   const cfg = loadConfig(repoRoot);
   return {
     sources: cfg.sources,
@@ -40,6 +47,14 @@ export function settingsSnapshot(repoRoot: string) {
     runtime: {
       reviewerTimeoutMs: cfg.global.runtime.reviewer_timeout_ms,
       harnessInactivityTimeoutMs: cfg.global.runtime.harness_inactivity_timeout_ms,
+      ...(effectiveConcurrencyCaps
+        ? {
+            concurrency: concurrencyState(
+              runtimeConcurrencyCaps(cfg.global),
+              effectiveConcurrencyCaps,
+            ),
+          }
+        : {}),
       transientRetry: {
         maxRetries: cfg.global.runtime.transient_retry.max_retries,
         initialDelayMs: cfg.global.runtime.transient_retry.initial_delay_ms,
@@ -180,6 +195,9 @@ export async function assertSettingsPatchValid(
     qualityTiers: QualityTierSet;
     harnesses: GlobalConfigT["harnesses"];
   },
+  /** Admission notes the write must surface: models a truth source admitted
+   * WITHOUT being able to verify them (INV-104). Appended, never thrown. */
+  notes: string[] = [],
 ): Promise<PatchEffortCapabilities> {
   const realIds = new Set(buildRegistry({ includeFakes: false }).keys());
   const realList = [...realIds].sort().join(", ");
@@ -204,14 +222,14 @@ export async function assertSettingsPatchValid(
         if (!realIds.has(route.harness)) {
           badRequest(`quality tier for '${intent}' names unknown harness '${route.harness}'`);
         }
-        const truth = await harnessModels(route.harness, process.cwd(), true);
-        const model = validateModel(
-          route.model,
-          truth.models.map((item) => item.id),
-          truth.source === "api" ? "api" : "manifest",
-        );
+        const truth = await harnessModelTruth(route.harness, process.cwd(), true);
+        const model = checkHarnessModelTruth(truth, route.model);
         if (model.status !== "ok")
           badRequest(model.message ?? `model '${route.model}' was refused`);
+        if (model.unverified && model.message)
+          notes.push(
+            `quality tier route '${route.harness}/${route.model}' (truth source: ${truth.response.source}): ${model.message}`,
+          );
         const manifest = await buildRegistry().get(route.harness)?.discover();
         // A tier names harness AND model, so hold it to what that MODEL
         // advertises rather than the harness-wide union. No merge is involved
@@ -241,18 +259,21 @@ export async function assertSettingsPatchValid(
     if (patch.defaultModel) models.push({ field: "defaultModel", value: patch.defaultModel });
     if (patch.fallbackModel) models.push({ field: "fallbackModel", value: patch.fallbackModel });
     if (models.length > 0) {
-      const truth = await harnessModels(id, process.cwd(), true);
+      // One truth read per harness; each field is judged under the harness's
+      // own absence declaration (INV-104). An advisory harness persists an
+      // unlisted model and says so in the response notes instead of refusing.
+      const truth = await harnessModelTruth(id, process.cwd(), true);
       for (const { field, value } of models) {
-        const check = validateModel(
-          value,
-          truth.models.map((m) => m.id),
-          truth.source === "api" ? "api" : "manifest",
-        );
+        const check = checkHarnessModelTruth(truth, value);
         if (check.status !== "ok") {
           badRequest(
-            `harness '${id}' refused ${field} '${value}' (truth source: ${truth.source}): ${check.message}`,
+            `harness '${id}' refused ${field} '${value}' (truth source: ${truth.response.source}): ${check.message}`,
           );
         }
+        if (check.unverified && check.message)
+          notes.push(
+            `harness '${id}' ${field} '${value}' (truth source: ${truth.response.source}): ${check.message}`,
+          );
       }
     }
     // Touching EITHER half of the (model, effort) pair puts the merged pair up for
@@ -362,16 +383,21 @@ export function mergeSettingsPatch(
 export async function commitSettingsUpdate(
   repoRoot: string,
   p: ControlSettingsUpdateRequest,
-): Promise<void> {
+): Promise<string[]> {
   const currentGlobal = loadConfig(repoRoot).global;
+  const notes: string[] = [];
   // Pre-lock: the patch-local truth (harness ids, models), the manifest effort
   // facts, and a fast-fail on the merged-effective invariants against the
   // current snapshot.
-  const effortCapabilities = await assertSettingsPatchValid(p, {
-    goal: currentGlobal.routing.goal,
-    qualityTiers: currentGlobal.routing.quality_tiers,
-    harnesses: currentGlobal.harnesses,
-  });
+  const effortCapabilities = await assertSettingsPatchValid(
+    p,
+    {
+      goal: currentGlobal.routing.goal,
+      qualityTiers: currentGlobal.routing.quality_tiers,
+      harnesses: currentGlobal.harnesses,
+    },
+    notes,
+  );
   // Atomic write: the merge + the cross-field re-validation both run INSIDE the
   // config lock against the state actually being mutated. A racing writer that
   // committed between the pre-lock snapshot and here is seen by `cfg`, so a
@@ -384,6 +410,7 @@ export async function commitSettingsUpdate(
     assertHarnessEffortPairsValid(next.harnesses, effortCapabilities);
     return next;
   });
+  return notes;
 }
 
 /** Merge camelCase per-harness patches into the snake_case GlobalConfig shape. */
@@ -433,4 +460,25 @@ export function applyHarnessSettingsPatches(
     };
   }
   return next;
+}
+
+/** Bind both reads and post-write readback to the same daemon-lifetime snapshot. */
+export function settingsControlServices(
+  root: string,
+  effective: RuntimeConcurrencyCaps | undefined,
+  changed: () => void,
+) {
+  return {
+    settings: async () => settingsSnapshot(root, effective),
+    updateSettings: async (patch: unknown) => {
+      const notes = await commitSettingsUpdate(
+        root,
+        ControlSettingsUpdateRequest.parse(patch ?? {}),
+      );
+      changed();
+      // The write's admission notes ride the read-back once; a plain read
+      // carries none (the snapshot schema defaults them to []).
+      return { ...settingsSnapshot(root, effective), notes };
+    },
+  };
 }

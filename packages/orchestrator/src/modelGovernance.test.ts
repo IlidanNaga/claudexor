@@ -50,7 +50,7 @@ describe("runModelGovernedRoute", () => {
       }
     };
     await expect(consume()).rejects.toThrow(
-      /profile 'rotated'.*verify or re-authenticate that profile/,
+      /profile 'rotated' supplied this live inventory \(\d+ models\); inspect that profile's own vendor model list/,
     );
     expect(models).toHaveBeenCalledWith({
       cwd: "/repo/attempt",
@@ -386,9 +386,11 @@ describe("advisory live inventory (absence is not proof)", () => {
     );
   });
 
-  it("does not let an advisory declaration reach MANIFEST truth on another route", async () => {
-    // The advisory fact belongs to the live producer. An api_key route reads the
-    // manifest, which stays strict — no list is ever swapped for another.
+  it("carries the advisory declaration to MANIFEST truth on another route (the harness declares, not the list)", async () => {
+    // An api_key route reads the manifest hints. Those are one day's memory of
+    // the same vendor menu, so the harness's declaration governs them too:
+    // advisory forwards the miss; authoritative refuses it with today's text.
+    // No list is swapped for another either way (the live list is never read).
     const profile = CredentialProfile.parse({
       profile_id: "api",
       harness_id: "codex",
@@ -396,14 +398,24 @@ describe("advisory live inventory (absence is not proof)", () => {
       credential_kind: "api_key",
       secret_ref: "openai:api",
     });
-    const routed: ModelGovernedRoute = {
+    const forwarded: ModelGovernedRoute = {
       ...codexish("advisory", STALE),
       knownModels: [{ id: "manifest-only", routes: ["api_key"] }],
       quotaAdmission: { profile },
     };
     await expect(
-      assertRouteModelsAllowed([routed], { codex: "gpt-6-astra" }, "/repo"),
-    ).rejects.toThrow(/truth source: manifest, route: api_key/);
+      assertRouteModelsAllowed([forwarded], { codex: "gpt-6-astra" }, "/repo"),
+    ).resolves.toBeUndefined();
+    const refused: ModelGovernedRoute = {
+      ...codexish("authoritative", STALE),
+      knownModels: [{ id: "manifest-only", routes: ["api_key"] }],
+      quotaAdmission: { profile },
+    };
+    await expect(
+      assertRouteModelsAllowed([refused], { codex: "gpt-6-astra" }, "/repo"),
+    ).rejects.toThrow(
+      /truth source: manifest, route: api_key.*manifest known-model list \(manifest-only\)/,
+    );
   });
 });
 

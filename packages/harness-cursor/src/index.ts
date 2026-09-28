@@ -319,6 +319,9 @@ export function createCursorAdapter(deps: Partial<CursorRuntimeDeps> = {}): Harn
           structured_output_channel: "final_message",
           // cursor-agent exposes no reasoning-effort flag -> effort is not tunable.
           effort_levels: [],
+          // `--list-models` is a fail-soft menu (empty on failure, blind to routing
+          // variants): presence only, so an unlisted model is forwarded (INV-104).
+          model_inventory_absence: "advisory",
         },
         capability_profile: {
           ...CURSOR_CAPABILITY_PROFILE,

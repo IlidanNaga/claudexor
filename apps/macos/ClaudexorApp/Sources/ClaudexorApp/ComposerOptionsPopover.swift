@@ -350,8 +350,12 @@ extension ThreadsScreen {
                         .toggleStyle(.switch).tint(Theme.accent)
                         .help("Council: each member drafts a plan in its own lane; the primary merges them into one plan and one question set. Solo (off) is the default.")
                     if councilEnabled {
-                        Stepper("Members: \(councilMembers)", value: $councilMembers, in: 2...4)
-                            .help("How many harnesses draft in parallel (2–4).")
+                        let memberSelection = Binding(
+                            get: { resolvedComposerStrategy.councilN ?? 2 },
+                            set: { councilMembers = $0 }
+                        )
+                        Stepper("Members: \(memberSelection.wrappedValue)", value: memberSelection, in: 2...councilMemberLimit)
+                            .help("How many harnesses draft in parallel (2–\(councilMemberLimit)).")
                     }
                 }
             }

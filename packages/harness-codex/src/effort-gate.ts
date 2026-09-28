@@ -22,7 +22,7 @@ import {
  * `claudeSnapshotTrustedForVersion`.
  *
  * The installed version string is whatever `codex --version` printed
- * (e.g. `codex-cli 0.153.3`), so the comparison extracts the full dotted
+ * (e.g. `codex-cli 0.156.1`), so the comparison extracts the full dotted
  * numeric token and requires it to EQUAL the snapshot stamp exactly. An
  * unknown or unparseable version can never vouch for the snapshot.
  */

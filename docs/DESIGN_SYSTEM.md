@@ -831,9 +831,12 @@ views in the shared design-system files; screens compose them.
   thread. The composer's intent menu surfaces the THREE canonical modes —
   `ask` / `plan` / `agent` (the v3.0.0 collapse) — and nothing else. **Best-of**
   is `agent` + the best-of-N strategy flag, not a mode; **Council** is a Plan
-  knob; `ask --deep-scan`, `agent --delegate`, `--create`, race width,
-  until-clean and attempts are engine strategy flags (in the "⋯" popover or
-  CLI-only power-user flows), not modes. The retired `orchestrate` / `spec` /
+  knob. Its existing member picker ranges from two to the selected execution
+  location's effective `maxCouncilMembers` setting, using four only when an
+  older engine omits the projection. Pending configured values do not expand
+  that range until daemon replacement. `ask --deep-scan`, `agent --delegate`,
+  `--create`, race width, until-clean and attempts are engine strategy flags
+  (in the "⋯" popover or CLI-only power-user flows), not modes. The retired `orchestrate` / `spec` /
   `explore` / `audit` modes are gone — delegation is `agent --delegate` and Plan
   absorbed Spec.
 - **Composer attachments + Capture.** The paperclip picker attaches files to a

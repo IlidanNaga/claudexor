@@ -145,7 +145,7 @@
                   "boolean",
                   "null"
                 ],
-                "description": "Strict truth-source check of configuredModel (null when no model is configured)."
+                "description": "Admission of configuredModel under the harness's own absence declaration (INV-104): false = refused by an authoritative list, or no list could be read; true = listed, or unlisted on an advisory harness (forwarded to the vendor; the settings write and doctor readiness carry that note); null when no model is configured."
               },
               "models": {
                 "type": "object",
@@ -323,6 +323,16 @@
                 ],
                 "additionalProperties": false,
                 "description": "Whether this installed runtime can offer Delegate through this harness."
+              },
+              "liveInput": {
+                "type": "string",
+                "enum": [
+                  "mid_turn",
+                  "next_tool_boundary",
+                  "none"
+                ],
+                "description": "How a live message enters one of this harness's RUNNING sessions (POST /v2/runs/:id/messages): mid_turn | next_tool_boundary | none. The harness maximum from its capability profile; the POST answers for the specific run. Omitted by engines older than 3.16.0 (= none).",
+                "default": "none"
               },
               "setupLogin": {
                 "anyOf": [

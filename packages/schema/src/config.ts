@@ -1,4 +1,5 @@
 import { z } from "zod/v3";
+import { RuntimeConcurrencyCaps } from "./runtime-concurrency.js";
 import {
   AccessProfile,
   AuthPreference,
@@ -263,6 +264,7 @@ export const GlobalConfig = z
           .describe(
             "Inactivity watchdog for harness streams: no events for this window aborts the stream and fails the attempt with a typed timeout.",
           ),
+        ...RuntimeConcurrencyCaps.shape,
       })
       .strict()
       .default({})

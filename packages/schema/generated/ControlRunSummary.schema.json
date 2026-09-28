@@ -239,6 +239,58 @@
                   "default": null,
                   "description": "When the refused window reopens (a spent subscription quota window), or null when the failure has no such time. Callers schedule a retry off this field, never off safeMessage."
                 },
+                "vendorFailure": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 128
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "description": "The vendor's own machine-readable failure code, verbatim; null when the vendor recorded an error without one."
+                        },
+                        "message": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 4000
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "description": "The vendor's own words from the same record, verbatim (redacted); null when absent."
+                        },
+                        "source": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 64,
+                          "description": "Evidence channel the code was read from (codex: `codex_rollout`). An open vocabulary: consumers display it, never branch on it."
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "source"
+                      ],
+                      "additionalProperties": false,
+                      "description": "Vendor-typed failure evidence read from a vendor-owned machine-readable record, never parsed from prose."
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "The vendor's own typed failure for the attempt this record speaks for, or null when no vendor-typed evidence exists (every harness without such a channel, and any unreadable record). Facts only: carries no remedy.",
+                  "default": null
+                },
                 "nextActions": {
                   "type": "array",
                   "items": {

@@ -72,6 +72,7 @@ const typedFailure = {
   safeMessage: "Authentication expired",
   rawDetailRef: "attempts/a01/failure.json",
   resetsAt: null,
+  vendorFailure: null,
   logRefs: ["attempts/a01/stderr.log"],
   eventRefs: ["events.jsonl#42"],
   runDir: "/tmp/run-1",

@@ -156,7 +156,7 @@ export const CLI_FLAGS: readonly CliFlagSpec[] = [
   booleanFlag("create", "Create-from-scratch intent (agent)"),
   booleanFlag(
     "council",
-    "Council (plan): N harnesses draft in parallel, the primary merges into one plan + one question set; --n sets members (2..4)",
+    "Council (plan): N harnesses draft in parallel, the primary merges into one plan + one question set; --n sets members (at least 2, up to the configured Council cap)",
   ),
   booleanFlag(
     "delegate",

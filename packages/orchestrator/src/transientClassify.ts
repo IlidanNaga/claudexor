@@ -7,7 +7,11 @@
  * exit disclosure are read, never prose. The retry policy gates on `retryable`;
  * required-actions attach auth guidance only on `auth_failed`.
  */
-import type { HarnessEvent, HarnessFailureCategory } from "@claudexor/schema";
+import {
+  VendorFailureEvidence,
+  type HarnessEvent,
+  type HarnessFailureCategory,
+} from "@claudexor/schema";
 
 /**
  * A single classified transient failure. `kind` keeps the fine-grained adapter
@@ -24,16 +28,23 @@ export interface TransientFailureObservation {
   httpStatus: number | null;
   signal: string | null;
   adapterCode: string | null;
+  /** The vendor's own typed failure the adapter attached to the terminal event.
+   * In-memory evidence for the terminal failure record only: opaque, never
+   * persisted into attempt telemetry, never an input to `retryable`. */
+  vendorFailure?: VendorFailureEvidence | null;
 }
 
 /**
- * Whether a classified category admits a bounded stream retry. Only failures
- * the adapter DISCLOSED mid-stream as recoverable (a typed transient or a rate
- * limit) are retried — retrying replays the work with a fresh session. Auth /
- * capability / config are deterministic refusals. A process crash and an
- * inactivity-watchdog give-up are NOT auto-retried here (the watchdog exists to
- * STOP a wedged stream; a crashed child is settled, not replayed): they are
- * still classified and disclosed, but the run terminates on them.
+ * The DEFAULT retry verdict per category, for signals an adapter DISCLOSED
+ * mid-stream as recoverable (a typed transient or a rate limit): retrying
+ * replays the work with a fresh session. Auth / capability / config are
+ * deterministic refusals. `retryable` is a property of each OBSERVATION, not of
+ * its category: terminal exit evidence (`classifyCompletedCrash`) and adapter
+ * throws (`classifyAdapterThrow`) are give-ups and always carry an explicit
+ * `retryable: false` whatever this table says for their category — the watchdog
+ * exists to STOP a wedged stream, and a child that already exited is settled,
+ * not replayed. They are still classified and disclosed, but the run terminates
+ * on them.
  */
 const CATEGORY_RETRYABLE: Record<HarnessFailureCategory, boolean> = {
   timeout: true,
@@ -107,11 +118,18 @@ export function classifyStatusError(
 }
 
 /**
- * Classify a process crash from the run loop's TYPED `completed` payload
- * (never prose): a spawn failure is a config/environment error (retrying
- * replays the same missing binary/bad config); a non-aborted signal kill or
- * non-zero exit is a settled crash. An aborted completion (our watchdog/cancel)
- * is never a crash. Returns null when the completion carries no crash evidence.
+ * Classify the run loop's TYPED exit evidence on the `completed` payload (never
+ * prose): a spawn failure is a config/environment error (retrying replays the
+ * same missing binary/bad config); a non-aborted signal kill or a silent
+ * non-zero exit is a settled crash. A harness that VOICED its own error
+ * (`harness_reported_error`) and then exited non-zero did not crash — the exit
+ * code is the CLI's way of saying "that turn failed" — so it is an
+ * `unknown_harness_error`; a signal kill stays a crash whatever preceded it.
+ * Exit evidence is a give-up, never a retry signal: every observation here
+ * carries `retryable: false`. The adapter-attached `vendor_failure` is forwarded
+ * as opaque evidence and decides nothing. An aborted completion (our
+ * watchdog/cancel) is never a crash. Returns null when the completion carries no
+ * exit evidence.
  */
 export function classifyCompletedCrash(
   payload: Record<string, unknown> | undefined,
@@ -124,10 +142,17 @@ export function classifyCompletedCrash(
     return observation("config_error", { signal, adapterCode: "spawn_failed" });
   }
   if (signal !== null || (exitCode !== null && exitCode !== 0)) {
-    return observation("process_crash", {
-      signal,
-      adapterCode: exitCode !== null ? `exit_${exitCode}` : null,
-    });
+    const voiced = payload["harness_reported_error"] === true && signal === null;
+    const vendor = VendorFailureEvidence.safeParse(payload["vendor_failure"]);
+    return {
+      ...observation(voiced ? "unknown_harness_error" : "process_crash", {
+        signal,
+        adapterCode: exitCode !== null ? `exit_${exitCode}` : null,
+      }),
+      retryable: false,
+      // A signal kill is a crash whatever preceded it: its record carries no vendor evidence.
+      vendorFailure: voiced && vendor.success ? vendor.data : null,
+    };
   }
   return null;
 }

@@ -100,7 +100,11 @@ export type CouncilMember = z.infer<typeof CouncilMember>;
  * shape-identical to a solo plan, so this field is purely additive disclosure. */
 export const CouncilProjection = z
   .object({
-    requested: z.number().int().positive().describe("Requested member count (n; 2..4)."),
+    requested: z
+      .number()
+      .int()
+      .positive()
+      .describe("Requested member count (n; at least 2, up to the configured Council cap)."),
     drafted: z
       .number()
       .int()

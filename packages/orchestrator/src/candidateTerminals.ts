@@ -15,7 +15,11 @@ import * as secretDiff from "./secretDiff.js";
 import { classifyBudgetFailure, budgetFailureRecord, type BudgetDenial } from "./budgetFailure.js";
 import { writeFailure } from "./runTerminalResults.js";
 import { decisionBudgetSummary } from "./decisionBudget.js";
-import { dominantHarnessFailureCategory, harnessFailureNextActions } from "./harnessFailure.js";
+import {
+  attemptVendorFailure,
+  dominantHarnessFailureCategory,
+  harnessFailureNextActions,
+} from "./harnessFailure.js";
 import { cancelledResult } from "./runTerminals.js";
 import { gatesPassed } from "@claudexor/review";
 
@@ -201,6 +205,8 @@ export async function failedCandidatesResult(
     eventRefs: existingEventRefs,
     runDir: paths.root,
     resetsAt: unanimous?.resetsAt ?? null,
+    // The first candidate speaks (like harnessId/attemptId); a budget terminal speaks for itself.
+    vendorFailure: budget ? null : attemptVendorFailure([first], first.attemptId),
     nextActions: first.secretDiffRefusal
       ? secretDiff.secretDiffNextActions(first.secretDiffRefusal)
       : phase === "workspace"

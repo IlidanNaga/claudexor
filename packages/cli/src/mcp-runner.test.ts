@@ -1330,6 +1330,7 @@ describe("mcp daemon body mapping", () => {
       safeMessage: "Authentication expired",
       rawDetailRef: null,
       resetsAt: null,
+      vendorFailure: null,
       logRefs: [],
       eventRefs: [],
       runDir: "/tmp/run-failed",

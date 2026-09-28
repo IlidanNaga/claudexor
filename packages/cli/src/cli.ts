@@ -1172,7 +1172,7 @@ async function dispatch(args: ParsedArgs, outputMode: CliOutputMode): Promise<nu
       print(`output: ${outputReadyState}${primary ? ` ${primary.path}` : ""}`);
       if (failure) {
         print(
-          `failure: ${failure.category}${failure.code ? `/${failure.code}` : ""} phase=${failure.phase}${failure.harnessId ? ` harness=${failure.harnessId}` : ""}`,
+          `failure: ${failure.category}${failure.code ? `/${failure.code}` : ""} phase=${failure.phase}${failure.harnessId ? ` harness=${failure.harnessId}` : ""}${failure.vendorFailure?.code ? ` vendor_code=${failure.vendorFailure.code} (${failure.vendorFailure.source})` : ""}`,
         );
         print(`failure message: ${failure.safeMessage}`);
         for (const action of failure.nextActions) print(`next action: ${action}`);
