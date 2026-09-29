@@ -111,6 +111,18 @@
       "error_schema": "ControlProblem"
     },
     {
+      "method": "POST",
+      "path": "/v2/credential-profiles/:harness/:profileId/credential-change",
+      "mutating": true,
+      "applicability": "global",
+      "summary": "Report that a client-run native login for this profile ended (any exit); the daemon voids its credential observations like a setup-job login.",
+      "auth": "loopback_bearer",
+      "request_schema": null,
+      "parameters": [],
+      "response_schema": "ControlCredentialProfileCredentialChangeResponse",
+      "error_schema": "ControlProblem"
+    },
+    {
       "method": "GET",
       "path": "/v2/filesystem/directories",
       "mutating": false,

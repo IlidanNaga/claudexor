@@ -63,6 +63,10 @@ async function listCursorModelsForProfile(
     deps,
     resolveAuthRoute,
     spec.abortSignal,
+    // An inventory read is not a launch and carries no pin fact: it may read
+    // on a bounded last positive, while the spawn-time check alone decides
+    // whether the route starts on it (#363).
+    { admitLastPositive: true },
   );
   if ("refusal" in resolved) return [];
   if (resolved.route === "local_session")

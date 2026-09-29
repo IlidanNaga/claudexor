@@ -170,6 +170,7 @@ import {
   ControlCredentialProfileUpdateRequest,
   ControlCredentialProfileUpdateResponse,
   ControlCredentialProfileDeleteResponse,
+  ControlCredentialProfileCredentialChangeResponse,
   ControlTrustUpdateRequest,
   ControlInteractionAnswerRequest,
   ControlInteractionAnswerResponse,
@@ -286,6 +287,7 @@ export interface DaemonControlApiOptions {
       createCredentialProfile?: (input: unknown) => Promise<unknown>;
       updateCredentialProfile?: (input: unknown) => Promise<unknown>;
       deleteCredentialProfile?: (input: unknown) => Promise<unknown>;
+      reportCredentialProfileChange?: (input: unknown) => Promise<unknown>;
       listSecrets?: () => Promise<unknown>;
       setSecret?: (input: unknown) => Promise<unknown>;
       deleteSecret?: (name: string) => Promise<unknown>;
@@ -1635,6 +1637,19 @@ export class DaemonControlApiServer {
           profileId: decodeURIComponent(profileMutateMatch[2] as string),
         },
         ControlCredentialProfileDeleteResponse,
+      );
+    }
+    // A client-run profile login reports that the credential may have changed.
+    const changeMatch = /^\/credential-profiles\/([^/]+)\/([^/]+)\/credential-change$/.exec(path);
+    if (method === "POST" && changeMatch) {
+      return this.service(
+        res,
+        "reportCredentialProfileChange",
+        {
+          harnessId: decodeURIComponent(changeMatch[1] as string),
+          profileId: decodeURIComponent(changeMatch[2] as string),
+        },
+        ControlCredentialProfileCredentialChangeResponse,
       );
     }
     // Unified-accounts migration rollback (the supported downgrade path).

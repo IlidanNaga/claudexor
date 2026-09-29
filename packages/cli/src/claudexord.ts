@@ -52,7 +52,7 @@ import { controlServices } from "./control-services.js";
 import { AuthReadinessService } from "@claudexor/gateway";
 import { buildGateway } from "./registry.js";
 import { createSetupJobManager } from "./setup-jobs.js";
-import { bustGlobalCredentialStatusCaches } from "./credential-status-invalidation.js";
+import { bustLoginCredentialState } from "./credential-status-invalidation.js";
 import { SetupJobStore } from "./setup-job-store.js";
 import { SetupLifecycleBinding } from "./setup-lifecycle-binding.js";
 import { DaemonRuntimeShutdown } from "./daemon-runtime-shutdown.js";
@@ -247,10 +247,8 @@ export async function main(): Promise<void> {
       createSetupJobManager({
         rootDir: daemonDir(),
         store,
-        onCredentialStateMayHaveChanged: (harness) => {
-          bustGlobalCredentialStatusCaches(() => quotaStoreSlot.current());
-          authReadiness.invalidate(harness);
-        },
+        onCredentialStateMayHaveChanged: (harness) =>
+          bustLoginCredentialState(() => quotaStoreSlot.current(), authReadiness, harness),
       }),
     );
     let control: DaemonControlApiServer | null = null;

@@ -37,6 +37,7 @@ function mutations(platform: NodeJS.Platform = "win32") {
     }),
     secretStore: { delete: () => true },
     bustStatusCaches: () => {},
+    noteLoginCredentialChange: () => {},
     activeLoginJob: () => undefined,
     platform,
   });

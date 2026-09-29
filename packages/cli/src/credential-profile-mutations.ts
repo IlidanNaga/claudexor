@@ -46,6 +46,9 @@ export interface CredentialProfileMutationDeps {
   /** Credential-mutation cache bust; the optional subject scopes the A7
    * unusable-ledger clearing to exactly the credential this mutation touched. */
   bustStatusCaches: (subject?: { harnessId: string; profileId: string }) => void;
+  /** The login-lifecycle invalidation a setup-job login runs (claudexord's
+   * owner), for a login a client ran in its own terminal. */
+  noteLoginCredentialChange: (harnessId: string) => void;
   activeLoginJob: (harnessId: string, profileId: string) => ControlSetupJob | undefined;
   /** Deterministic platform-policy tests; production uses process.platform. */
   platform?: NodeJS.Platform;
@@ -137,6 +140,25 @@ export function credentialProfileMutations(deps: CredentialProfileMutationDeps) 
           await profileDoctorStatus(updated, deps.platform),
           deps.quotaRegistry().read(),
         ),
+      };
+    },
+    // POST /credential-profiles/:harness/:id/credential-change — `claudexor
+    // profiles login` ran the vendor login in the client's terminal. Whatever
+    // its exit, the store may have changed, and every observation it can
+    // outdate lives HERE, so the daemon runs the SAME login-lifecycle
+    // invalidation as a setup-job login (#363).
+    reportCredentialProfileChange: async (input: unknown) => {
+      const p = (input ?? {}) as Record<string, unknown>;
+      const harnessId = typeof p["harnessId"] === "string" ? p["harnessId"] : "";
+      const profileId = typeof p["profileId"] === "string" ? p["profileId"] : "";
+      const registry = loadConfig(NO_PROJECT_ROOT).global.credential_profiles;
+      assertCredentialProfileRegistered(registry, harnessId, profileId);
+      deps.noteLoginCredentialChange(harnessId);
+      return {
+        profile: registry.find(
+          (row) => row.harness_id === harnessId && row.profile_id === profileId,
+        ),
+        voided: "all_accounts",
       };
     },
     // DELETE /credential-profiles/:harness/:id — provable removal (D-U4).

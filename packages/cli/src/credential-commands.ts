@@ -8,6 +8,7 @@ import { spawnSync } from "node:child_process";
 import { registerConfigDirProfile } from "./profile-registration.js";
 import {
   ControlAccountsMigrationRollbackResponse,
+  ControlCredentialProfileCredentialChangeResponse,
   ControlCredentialProfileDeleteResponse,
   ControlCredentialProfileUpdateResponse,
   ControlCredentialProfilesResponse,
@@ -28,7 +29,7 @@ import {
 import { type ParsedArgs, flagStr } from "./args.js";
 import { print, printJson, printUsageError } from "./cli-io.js";
 import { ensureDaemon } from "./daemon-run.js";
-import { controlApiFetch } from "./live.js";
+import { type ControlApiAddress, controlApiFetch } from "./live.js";
 import { daemonGet } from "./ops-commands.js";
 import { nativeLoginEnv, nativeLoginSpec } from "./native-login.js";
 import { isAgyProfileKeychainUnsafe, prepareAgyProfileKeychain } from "@claudexor/harness-agy";
@@ -115,6 +116,8 @@ export async function accountsCommandWithDeps(
 
 export interface ProfilesCommandDeps {
   daemonGet?: typeof daemonGet;
+  /** The daemon a direct login reports its credential change to. */
+  ensureDaemon?: () => Promise<{ addr: ControlApiAddress }>;
   spawnSync?: typeof spawnSync;
   platform?: NodeJS.Platform;
   prepareAgyProfileKeychain?: (home: string) => void;
@@ -270,6 +273,27 @@ export async function profilesCommandWithDeps(
     if (child.status !== 0) {
       print(`login command exited with ${child.status ?? child.signal ?? "unknown"}`);
     }
+    // #363: what this login can outdate (reused status answers, ledger marks,
+    // the credential generations in-flight tries bind) lives in the daemon, not
+    // in this process. Whatever the exit — a failed or interrupted login may
+    // still have rewritten the store — the daemon runs its login-lifecycle
+    // invalidation before the verification re-read below.
+    const { addr } = await (deps.ensureDaemon ?? ensureDaemon)();
+    const report = await controlApiFetch(
+      addr,
+      `/credential-profiles/${encodeURIComponent(harness)}/${encodeURIComponent(profileId)}/credential-change`,
+      { method: "POST" },
+    );
+    if (!report.ok) {
+      return renderCliFailure(
+        json,
+        new CliError(
+          "operational",
+          `the ${harness}/${profileId} login ran, but the daemon did not void its credential observations (${report.status}): ${await report.text()}; restart the daemon before relying on this account's status`,
+        ),
+      );
+    }
+    ControlCredentialProfileCredentialChangeResponse.parse(await report.json());
     const after = ControlCredentialProfilesResponse.parse(
       await get("/credential-profiles"),
     ).profiles.find((p) => p.profile.harness_id === harness && p.profile.profile_id === profileId);

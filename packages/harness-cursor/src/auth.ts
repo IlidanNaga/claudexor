@@ -1,6 +1,6 @@
 import { namespacedSecretRefBase, resolveSecret } from "@claudexor/secrets";
 import type { AuthPreference } from "@claudexor/schema";
-import { runCapture } from "@claudexor/core";
+import { runCapture, type CaptureResult } from "@claudexor/core";
 import { redactSecrets } from "@claudexor/util";
 
 const BIN = process.env.CLAUDEXOR_CURSOR_BIN || "cursor-agent";
@@ -10,30 +10,44 @@ const CURSOR_JSON_STATUS_UNSUPPORTED =
   /(?:unknown|unrecognized|unsupported|invalid|unimplemented)\s+(?:option|flag|argument)[^\n]*--format|--format[^\n]*(?:unknown|unrecognized|unsupported|invalid|unimplemented)\s+(?:option|flag|argument)|(?:unknown|unrecognized|unsupported|invalid|unimplemented)[^\n]*(?:--format|json status)/i;
 
 const MAX_CURSOR_ACCOUNT_EMAIL_LENGTH = 320;
+/** Wall-clock budget of one `cursor-agent status` child. */
+export const CURSOR_STATUS_TIMEOUT_MS = 10_000;
 
 /**
  * Typed, allowlisted observation from `cursor-agent status`. Raw status output
  * never leaves this parser. Only an anchored email principal may become an
  * Accounts identity; every other successful-but-unknown shape fails closed.
+ * `observedAt` is when the vendor gave a reused positive answer (status-cache.ts).
+ * An unknown observation stays unknown: `timedOut` marks a child killed at its
+ * own budget, and `lastPositive` (set only by the status coordinator on such a
+ * timeout) is the row store's bounded last positive answer — stale evidence
+ * for unpinned admission alone, never authentication (#363, INV-135).
  */
 export type CursorStatusObservation =
-  | { kind: "authenticated"; email?: string }
+  | { kind: "authenticated"; email?: string; observedAt?: string }
   | { kind: "loggedOut" }
-  | { kind: "unknown"; error?: string };
+  | {
+      kind: "unknown";
+      error?: string;
+      timedOut?: boolean;
+      lastPositive?: { observedAt: string; ageMs: number };
+    };
 
 /** Probe only Cursor's vendor-owned native session in the supplied run env. */
 export async function probeCursorNativeAuth(
   env?: Record<string, string | null | undefined>,
   abortSignal?: AbortSignal,
   capture: typeof runCapture = runCapture,
+  nowMs: () => number = Date.now,
 ): Promise<CursorStatusObservation> {
   try {
     const profileScoped = Boolean(
       env?.["AGENT_CLI_CREDENTIAL_STORE"] || env?.["CURSOR_CONFIG_DIR"],
     );
+    const startedAtMs = nowMs();
     const result = await capture(BIN, profileScoped ? ["status", "--format", "json"] : ["status"], {
       env,
-      timeoutMs: 10_000,
+      timeoutMs: CURSOR_STATUS_TIMEOUT_MS,
       abortSignal,
       cancelSignal: "SIGTERM",
       cancelKillDelayMs: 0,
@@ -52,9 +66,10 @@ export async function probeCursorNativeAuth(
         result.code !== 0 &&
         cursorJsonStatusUnsupported(text)
       ) {
+        const fallbackStartedAtMs = nowMs();
         const fallback = await capture(BIN, ["status"], {
           env,
-          timeoutMs: 10_000,
+          timeoutMs: CURSOR_STATUS_TIMEOUT_MS,
           abortSignal,
           cancelSignal: "SIGTERM",
           cancelKillDelayMs: 0,
@@ -65,7 +80,12 @@ export async function probeCursorNativeAuth(
           if (observed) return observed;
           if (cursorStatusLoggedOut(fallbackText)) return { kind: "loggedOut" };
         }
+        // The text retry is the probe that went unanswered, not the JSON exit.
+        const fallbackUnanswered = cursorStatusUnanswered(fallback, fallbackStartedAtMs, nowMs);
+        if (fallbackUnanswered) return fallbackUnanswered;
       }
+      const unanswered = cursorStatusUnanswered(result, startedAtMs, nowMs);
+      if (unanswered) return unanswered;
       return {
         kind: "unknown",
         error: `cursor-agent status failed (${result.code ?? result.signal ?? "unknown result"})`,
@@ -99,6 +119,23 @@ export async function probeCursorNativeAuth(
       error: redactSecrets(err instanceof Error ? err.message : String(err)).slice(0, 500),
     };
   }
+}
+
+/**
+ * A child killed at its own budget did not answer: the login state is
+ * unknown, which callers must never read as a logout (#363).
+ */
+function cursorStatusUnanswered(
+  result: Pick<CaptureResult, "signal">,
+  startedAtMs: number,
+  nowMs: () => number,
+): CursorStatusObservation | null {
+  if (result.signal === null || nowMs() - startedAtMs < CURSOR_STATUS_TIMEOUT_MS) return null;
+  return {
+    kind: "unknown",
+    error: `cursor-agent status did not answer within ${CURSOR_STATUS_TIMEOUT_MS / 1000}s (${result.signal}); login state unknown`,
+    timedOut: true,
+  };
 }
 
 function cursorJsonStatusUnsupported(text: string): boolean {

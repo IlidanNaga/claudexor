@@ -31,6 +31,7 @@ import { credentialProfilePolicyState } from "@claudexor/core";
 import { codexAccountIdentity } from "@claudexor/harness-codex";
 import { claudeAccountIdentity } from "@claudexor/harness-claude";
 import { buildGateway, buildRegistry } from "./registry.js";
+import { preProgressRefusalLedger } from "./run-orchestrator.js";
 
 /**
  * Non-secret {email, plan} of a config_dir_login PROFILE, read daemon-side from
@@ -173,7 +174,12 @@ export async function accountPoolsProjection(
   const statusById = new Map(statuses.map((status) => [status.id, status]));
   const readyProfiles = new Map<string, Set<string>>();
   for (const entry of snapshot?.profiles ?? []) {
-    if (!entry.profile.enabled || !profileStatusAdmits(entry.profile, entry.status)) continue;
+    // next_up is an unpinned pool verdict: the same admission as pool routing.
+    if (
+      !entry.profile.enabled ||
+      !profileStatusAdmits(entry.profile, entry.status, { unpinned: true })
+    )
+      continue;
     const ready = readyProfiles.get(entry.profile.harness_id) ?? new Set<string>();
     ready.add(entry.profile.profile_id);
     readyProfiles.set(entry.profile.harness_id, ready);
@@ -218,6 +224,9 @@ export async function accountPoolsProjection(
       readyProfileIds: eligibleReady,
       headroomThreshold: h?.profile_policy?.headroom_threshold ?? 1,
       model: h?.default_model ?? null,
+      // Same pool owner as run admission, so a row a recent unpinned run saw
+      // refuse before progress is not advertised ahead of its siblings.
+      refusals: preProgressRefusalLedger.live(),
     });
     if (selection.outcome === "selected") {
       return {
@@ -238,6 +247,15 @@ export async function accountPoolsProjection(
     if (keyRouteReady) {
       return { harness_id: harnessId, next_up: { kind: "api_key_route" } };
     }
+    // Enabled rows that are registered but not ready are named with what their
+    // probe observed: an unanswered probe is unknown, never "not signed in".
+    const unready = (snapshot?.profiles ?? []).filter(
+      (entry) =>
+        entry.profile.harness_id === harnessId &&
+        entry.profile.enabled &&
+        entry.profile.credential_kind !== "api_key" &&
+        !profileStatusAdmits(entry.profile, entry.status, { unpinned: true }),
+    );
     return {
       harness_id: harnessId,
       next_up: {
@@ -245,7 +263,14 @@ export async function accountPoolsProjection(
         reason:
           selection.outcome === "exhausted"
             ? `every enabled account is over its quota window${selection.resets_at ? ` (earliest reset ${selection.resets_at})` : ""}; unpinned runs wait for the reset (the paid API-key route requires the explicit api_key preference)`
-            : "no enabled account is signed in for this harness; connect an account or pin one per-run (--profile)",
+            : unready.length > 0
+              ? `no enabled account is ready (${unready
+                  .map(
+                    ({ profile, status }) =>
+                      `${profile.profile_id}: ${status.detail ?? `${status.availability}/${status.verification}`}`,
+                  )
+                  .join("; ")})`
+              : "no enabled account is signed in for this harness; connect an account or pin one per-run (--profile)",
       },
     };
   });

@@ -140,6 +140,15 @@ export const CredentialProfileStatus = z
       .nonnegative()
       .optional()
       .describe("Age in milliseconds of the bounded stale observation, when stale is true."),
+    /** What a stale observation stands on, when it is not the generic
+     * last-known-good transport grace (absent) that only an already selected
+     * route may consume. INV-135 #363: only a Cursor row produces this. */
+    stale_basis: z
+      .enum(["last_positive_after_timeout"])
+      .optional()
+      .describe(
+        "Basis of a stale observation: last_positive_after_timeout = the status probe did not answer within its budget and this row store's last positive status answer, still inside its bounded interval, stands in; unpinned pool admission alone may consume it. Absent = the generic last-known-good grace, consumable only by an already selected route.",
+      ),
     detail: z.string().optional().describe("Redacted human-readable probe evidence."),
     last_verified_at: IsoTimestamp.nullable()
       .default(null)
@@ -229,6 +238,34 @@ export const ModelSubstitutionObservation = z
     "A bounded, self-expiring typed observation that an account served a different model than a model operation requested; it orders the account pool and never excludes a row.",
   );
 export type ModelSubstitutionObservation = z.infer<typeof ModelSubstitutionObservation>;
+
+/**
+ * ONE typed observation that a pool account's vendor session STARTED and then
+ * ended in a terminal refusal before any agent progress, with no deliverable
+ * and no mutation — for this requested model, on an unpinned run. It is read
+ * from the typed attempt evidence, never from the vendor's wording, and claims
+ * no quota fact and no dead credential: the row stays selectable and only RANKS
+ * after other selectable rows for that requested model (INV-135). In-memory
+ * and self-expiring, never durable config.
+ */
+export const PreProgressRefusalObservation = z
+  .object({
+    harness_id: Id.describe("Harness family the observed account belongs to."),
+    profile_id: Id.describe("Account row whose started session was refused before progress."),
+    requested_model: z
+      .string()
+      .nullable()
+      .describe("Model the run asked this account for; null = the harness default model."),
+    observed_at: IsoTimestamp.describe("When the pre-progress refusal was observed."),
+    expires_at: IsoTimestamp.describe(
+      "Self-expiry instant (observation retention, not a vendor reset time); after this the observation is ignored.",
+    ),
+  })
+  .strict()
+  .describe(
+    "A bounded, self-expiring typed observation that an account refused a started session before any progress; it orders the account pool and never excludes a row.",
+  );
+export type PreProgressRefusalObservation = z.infer<typeof PreProgressRefusalObservation>;
 
 /**
  * NON-SECRET account identity projection (INV-067/INV-135): the email and plan
@@ -507,6 +544,26 @@ export const ControlCredentialProfileDeleteResponse = z
   .describe("Receipt for a credential-profile removal.");
 export type ControlCredentialProfileDeleteResponse = z.infer<
   typeof ControlCredentialProfileDeleteResponse
+>;
+
+/** POST /credential-profiles/:harness/:id/credential-change — a client ran this
+ * profile's native login in its own terminal (`claudexor profiles login`) and
+ * reports that the credential may have changed, whatever the vendor's exit. The
+ * daemon owns every observation that login can outdate, so it runs the same
+ * login-lifecycle invalidation as a setup-job login (#363). */
+export const ControlCredentialProfileCredentialChangeResponse = z
+  .object({
+    profile: CredentialProfile.describe("The registry entry the reported login targeted."),
+    voided: z
+      .literal("all_accounts")
+      .describe(
+        "A native login may rewrite an OS-user-scoped store, so the daemon voided every account's reused status answers and credential-ledger marks and moved every account's credential generation, not only this profile's.",
+      ),
+  })
+  .strict()
+  .describe("Receipt for a client-reported native-login credential change.");
+export type ControlCredentialProfileCredentialChangeResponse = z.infer<
+  typeof ControlCredentialProfileCredentialChangeResponse
 >;
 
 export const ControlCredentialProfileCreateResponse = z

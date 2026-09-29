@@ -1,0 +1,241 @@
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { CursorStatusObservation } from "./auth.js";
+import { cursorProfileRunEnv } from "./profile.js";
+import {
+  CURSOR_STATUS_LAST_POSITIVE_MS,
+  CURSOR_STATUS_REUSE_MS,
+  createCursorStatusCoordinator,
+} from "./status-cache.js";
+
+type EnvMap = Record<string, string | null | undefined>;
+
+const T0 = Date.parse("2026-09-28T19:52:00.000Z");
+const SUPERSEDED: CursorStatusObservation = {
+  kind: "unknown",
+  error: "cursor-agent status answer predates a credential change; login state unknown",
+};
+const TIMED_OUT: CursorStatusObservation = {
+  kind: "unknown",
+  error: "cursor-agent status did not answer within 10s (SIGKILL); login state unknown",
+  timedOut: true,
+};
+let root: string;
+let priorRoot: string | undefined;
+beforeEach(() => {
+  // Row HOMEs must live under the Claudexor profiles tree (realpath: macOS tmp).
+  root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-cursor-status-")));
+  priorRoot = process.env.CLAUDEXOR_CONFIG_DIR;
+  process.env.CLAUDEXOR_CONFIG_DIR = root;
+});
+afterEach(() => {
+  if (priorRoot === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+  else process.env.CLAUDEXOR_CONFIG_DIR = priorRoot;
+  rmSync(root, { recursive: true, force: true });
+});
+const rowHome = (id: string) => join(root, "profiles", `cursor-${id}`);
+const rowA = () => cursorProfileRunEnv(rowHome("a"));
+const rowB = () => cursorProfileRunEnv(rowHome("b"));
+
+function deferred() {
+  let resolve!: (value: CursorStatusObservation) => void;
+  const promise = new Promise<CursorStatusObservation>((r) => (resolve = r));
+  return { promise, resolve };
+}
+
+function harness(answers: Array<CursorStatusObservation | ReturnType<typeof deferred>>) {
+  const clock = { now: T0 };
+  const calls: EnvMap[] = [];
+  const signals: Array<AbortSignal | undefined> = [];
+  const coordinator = createCursorStatusCoordinator({
+    nowMs: () => clock.now,
+    probe: async (env, signal) => {
+      calls.push(env ?? {});
+      signals.push(signal);
+      const next = answers.shift() ?? { kind: "unknown", error: "no scripted answer" };
+      return "promise" in next ? next.promise : next;
+    },
+  });
+  return { coordinator, calls, signals, clock };
+}
+
+describe("Cursor status coordinator (#363)", () => {
+  it("concurrent callers for one row store share ONE status child", async () => {
+    const pending = deferred();
+    const h = harness([pending]);
+    const first = h.coordinator.status(rowA());
+    // Same auth store, different lane state dir (spawn-time env): still shared.
+    const second = h.coordinator.status(cursorProfileRunEnv(rowHome("a"), { HOME: "/tmp/lane" }));
+    pending.resolve({ kind: "authenticated", email: "b@example.com" });
+    expect(await first).toMatchObject({ kind: "authenticated", email: "b@example.com" });
+    expect(await second).toMatchObject({ kind: "authenticated" });
+    expect(h.calls).toHaveLength(1);
+    // The shared child never receives a single caller's abort signal.
+    expect(h.signals).toEqual([undefined]);
+  });
+
+  it("reuses a positive answer for the bounded window with its original instant", async () => {
+    const h = harness([{ kind: "authenticated" }, { kind: "authenticated" }]);
+    const fresh = await h.coordinator.status(rowA());
+    expect(fresh).toEqual({ kind: "authenticated", observedAt: new Date(T0).toISOString() });
+    h.clock.now = T0 + CURSOR_STATUS_REUSE_MS - 1;
+    expect(await h.coordinator.status(rowA())).toEqual(fresh);
+    expect(h.calls).toHaveLength(1);
+    // Another row's store is never served from this row's answer.
+    await h.coordinator.status(rowB());
+    expect(h.calls).toHaveLength(2);
+    // Past the window the store is asked again.
+    h.clock.now = T0 + CURSOR_STATUS_REUSE_MS;
+    await h.coordinator.status(rowA());
+    expect(h.calls).toHaveLength(3);
+  });
+
+  it("an unanswered probe is never cached, never a logout and never a pass", async () => {
+    const h = harness([TIMED_OUT, TIMED_OUT, { kind: "authenticated" }]);
+    // No positive answer was ever seen: unknown is not positive proof.
+    expect(await h.coordinator.status(rowA())).toEqual(TIMED_OUT);
+    expect(await h.coordinator.status(rowA())).toEqual(TIMED_OUT);
+    expect(await h.coordinator.status(rowA())).toMatchObject({ kind: "authenticated" });
+    expect(h.calls).toHaveLength(3);
+  });
+
+  it("a timeout inside the bound stays unknown and carries the last positive with its age", async () => {
+    const h = harness([{ kind: "authenticated", email: "b@example.com" }, TIMED_OUT, TIMED_OUT]);
+    await h.coordinator.status(rowA());
+    h.clock.now = T0 + CURSOR_STATUS_REUSE_MS;
+    const first = await h.coordinator.status(rowA());
+    expect(first).toEqual({
+      ...TIMED_OUT,
+      lastPositive: { observedAt: new Date(T0).toISOString(), ageMs: CURSOR_STATUS_REUSE_MS },
+    });
+    // A timeout never refreshes the answer it leans on: the age keeps growing.
+    h.clock.now = T0 + CURSOR_STATUS_LAST_POSITIVE_MS - 1;
+    expect(await h.coordinator.status(rowA())).toMatchObject({
+      kind: "unknown",
+      lastPositive: { ageMs: CURSOR_STATUS_LAST_POSITIVE_MS - 1 },
+    });
+    expect(h.calls).toHaveLength(3);
+  });
+
+  it("the last positive expires at its bound", async () => {
+    const h = harness([{ kind: "authenticated" }, TIMED_OUT, TIMED_OUT]);
+    await h.coordinator.status(rowA());
+    h.clock.now = T0 + CURSOR_STATUS_LAST_POSITIVE_MS;
+    expect(await h.coordinator.status(rowA())).toEqual(TIMED_OUT);
+    h.clock.now = T0 + 1; // an expired entry is gone, not resurrected by a clock step
+    expect(await h.coordinator.status(rowA())).toEqual(TIMED_OUT);
+  });
+
+  it("only a timeout leans on the last positive; another failure stays plain unknown", async () => {
+    const failed: CursorStatusObservation = {
+      kind: "unknown",
+      error: "cursor-agent status failed (1)",
+    };
+    const h = harness([{ kind: "authenticated" }, failed]);
+    await h.coordinator.status(rowA());
+    h.clock.now = T0 + CURSOR_STATUS_REUSE_MS;
+    expect(await h.coordinator.status(rowA())).toEqual(failed);
+  });
+
+  it("a logged-out answer from the store revokes its last positive", async () => {
+    const h = harness([{ kind: "authenticated" }, { kind: "loggedOut" }, TIMED_OUT]);
+    await h.coordinator.status(rowA());
+    h.clock.now = T0 + CURSOR_STATUS_REUSE_MS;
+    expect(await h.coordinator.status(rowA())).toEqual({ kind: "loggedOut" });
+    h.clock.now += 1;
+    expect(await h.coordinator.status(rowA())).toEqual(TIMED_OUT);
+  });
+
+  it("a credential mutation revokes every last positive", async () => {
+    const h = harness([{ kind: "authenticated" }, TIMED_OUT]);
+    await h.coordinator.status(rowA());
+    h.coordinator.clear();
+    h.clock.now = T0 + 1;
+    expect(await h.coordinator.status(rowA())).toEqual(TIMED_OUT);
+  });
+
+  it("another row's positive never stands in for this row", async () => {
+    const h = harness([{ kind: "authenticated" }, TIMED_OUT]);
+    await h.coordinator.status(rowB());
+    h.clock.now = T0 + 1;
+    expect(await h.coordinator.status(rowA())).toEqual(TIMED_OUT);
+  });
+
+  it("a logged-out answer is returned as such and is not remembered", async () => {
+    const h = harness([{ kind: "loggedOut" }, { kind: "authenticated" }]);
+    expect(await h.coordinator.status(rowA())).toEqual({ kind: "loggedOut" });
+    expect(await h.coordinator.status(rowA())).toMatchObject({ kind: "authenticated" });
+    expect(h.calls).toHaveLength(2);
+  });
+
+  it("clear() drops reuse and stops an in-flight probe from repopulating it", async () => {
+    const inFlight = deferred();
+    const h = harness([{ kind: "authenticated" }, inFlight, { kind: "loggedOut" }]);
+    await h.coordinator.status(rowA());
+    h.coordinator.clear();
+    h.clock.now = T0 + 1;
+    const racing = h.coordinator.status(rowA());
+    h.coordinator.clear();
+    inFlight.resolve({ kind: "authenticated" });
+    expect(await racing).toEqual(SUPERSEDED);
+    // The pre-mutation answer was not cached: the next call asks the store.
+    expect(await h.coordinator.status(rowA())).toEqual({ kind: "loggedOut" });
+    expect(h.calls).toHaveLength(3);
+  });
+
+  it("an old positive landing after a new logout answer is unknown to its waiters, never authenticated", async () => {
+    const old = deferred();
+    const fresh = deferred();
+    const h = harness([old, fresh, { kind: "loggedOut" }]);
+    // Two callers share the child that started before the logout mutation.
+    const oldWaiter = h.coordinator.status(rowA());
+    const oldJoiner = h.coordinator.status(
+      cursorProfileRunEnv(rowHome("a"), { HOME: "/tmp/lane" }),
+    );
+    h.coordinator.clear();
+    // A caller after the mutation gets its own child, which sees the logout.
+    const newWaiter = h.coordinator.status(rowA());
+    fresh.resolve({ kind: "loggedOut" });
+    expect(await newWaiter).toEqual({ kind: "loggedOut" });
+    old.resolve({ kind: "authenticated", email: "a@example.com" });
+    expect(await oldWaiter).toEqual(SUPERSEDED);
+    expect(await oldJoiner).toEqual(SUPERSEDED);
+    // Nor did the old positive become reuse: the next caller asks the store.
+    expect(await h.coordinator.status(rowA())).toEqual({ kind: "loggedOut" });
+    expect(h.calls).toHaveLength(3);
+  });
+
+  it("an old logout landing after a login mutation is unknown too, never login advice", async () => {
+    const old = deferred();
+    const h = harness([old, { kind: "authenticated" }]);
+    const oldWaiter = h.coordinator.status(rowA());
+    h.coordinator.clear();
+    old.resolve({ kind: "loggedOut" });
+    expect(await oldWaiter).toEqual(SUPERSEDED);
+    expect(await h.coordinator.status(rowA())).toMatchObject({ kind: "authenticated" });
+    expect(h.calls).toHaveLength(2);
+  });
+
+  it("a caller's abort answers that caller unknown without cancelling the shared child", async () => {
+    const pending = deferred();
+    const h = harness([pending]);
+    const controller = new AbortController();
+    const aborted = h.coordinator.status(rowA(), controller.signal);
+    const patient = h.coordinator.status(rowA());
+    controller.abort();
+    expect(await aborted).toEqual({ kind: "unknown", error: "cursor-agent status probe aborted" });
+    pending.resolve({ kind: "authenticated" });
+    expect(await patient).toMatchObject({ kind: "authenticated" });
+    expect(h.calls).toHaveLength(1);
+  });
+
+  it("never shares an env that is not a scrubbed row file store", async () => {
+    const h = harness([{ kind: "authenticated" }, { kind: "authenticated" }]);
+    const hostLike = { HOME: "/Users/someone", AGENT_CLI_CREDENTIAL_STORE: "file" };
+    await h.coordinator.status(hostLike);
+    await h.coordinator.status(hostLike);
+    expect(h.calls).toHaveLength(2);
+  });
+});

@@ -20,6 +20,7 @@ import {
 import type { DoctorSpec, HarnessAdapter } from "@claudexor/core";
 import {
   abortSignalFromSpec,
+  credentialProfileUnpinned,
   HarnessUnavailableError,
   promptWithInstructions,
   providerScrubEnv,
@@ -41,11 +42,14 @@ import {
   type CursorStatusObservation,
 } from "./auth.js";
 import { probeCursorDoctorForAccounts } from "./doctor.js";
+import { coordinatedCursorNativeAuth, cursorFileStoreEnv } from "./status-cache.js";
+export { clearCursorStatusCache } from "./status-cache.js";
 import {
   probeCursorCredentialAccount,
   probeCursorCredentialProfile,
   resolveCursorRunRoute,
   stampCursorProfileEvents,
+  staleCursorAuthEvent,
 } from "./profile.js";
 export { canonicalCursorProfileHome, cursorProfilePathEnv } from "./profile.js";
 import { prepareCursorMcpInjection } from "./mcp-config.js";
@@ -113,13 +117,6 @@ export const CURSOR_CAPABILITY_PROFILE: HarnessCapabilityProfile =
     mcp_injection_requires_full_access: false,
     attachment_inputs: [],
   });
-
-/** True only when the supplied env explicitly selects the vendor FILE store
- * (an account row's HOME, `AGENT_CLI_CREDENTIAL_STORE=file`). Any other env
- * would resolve the HOST Keychain login, which is never read (D-U3). */
-function cursorFileStoreEnv(env?: EnvMap): boolean {
-  return env?.["AGENT_CLI_CREDENTIAL_STORE"] === "file";
-}
 
 async function detectVersion(abortSignal?: AbortSignal): Promise<string | null> {
   try {
@@ -243,7 +240,8 @@ async function resolveCursorAuthRoute(
 export function createCursorAdapter(deps: Partial<CursorRuntimeDeps> = {}): HarnessAdapter {
   const runtime: CursorRuntimeDeps = {
     detectVersion,
-    nativeAuthOk: probeCursorNativeAuth,
+    // Row-store probes are shared and briefly reused process-wide (#363).
+    nativeAuthOk: coordinatedCursorNativeAuth,
     cursorApiKey,
     listCursorModels: (env, cwd) => queryCursorModels(BIN, env, cwd),
     smokeIsolatedApiKey,
@@ -398,6 +396,7 @@ async function* runCursor(
     ({ cursorApiKey, ...input }) =>
       resolveCursorAuthRoute(cursorApiKey ? { ...deps, cursorApiKey } : deps, input),
     abortSignalFromSpec(spec),
+    { admitLastPositive: credentialProfileUnpinned(spec) }, // #363: the engine's pin fact
   );
   if ("refusal" in resolved) {
     yield { type: "error", session_id: spec.session_id, ts: nowIso(), error: resolved.refusal };
@@ -405,6 +404,7 @@ async function* runCursor(
     return;
   }
   const { route, env, key, nativeAuthed, scopedHome } = resolved;
+  if (resolved.staleAuth) yield staleCursorAuthEvent(spec.session_id, resolved.staleAuth);
   if (route === "api_key" && key) {
     env.CURSOR_API_KEY = key;
     if (

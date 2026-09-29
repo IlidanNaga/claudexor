@@ -174,6 +174,60 @@ describe("cursor auth status parsing", () => {
     expect(calls).toEqual([["status", "--format", "json"]]);
   });
 
+  it("reports a probe killed at its own budget as an unanswered, unknown login state (#363)", async () => {
+    let now = 1_000;
+    const result = await probeCursorNativeAuth(
+      { AGENT_CLI_CREDENTIAL_STORE: "file", CURSOR_CONFIG_DIR: "/tmp/profile/.cursor" },
+      undefined,
+      (async () => {
+        now += 10_000; // the loaded host never answered inside the budget
+        return { code: null, signal: "SIGKILL", stdout: "", stderr: "" };
+      }) as never,
+      () => now,
+    );
+    expect(result).toEqual({
+      kind: "unknown",
+      error: "cursor-agent status did not answer within 10s (SIGKILL); login state unknown",
+      timedOut: true,
+    });
+    // Never the logged-out verdict, which alone may carry login advice.
+    expect(result.kind).not.toBe("loggedOut");
+  });
+
+  it("reports an unsupported-JSON text fallback killed at its budget as that timeout, not the JSON exit (#363)", async () => {
+    const run = async (fallbackMs: number) => {
+      let now = 1_000;
+      const calls: string[][] = [];
+      const result = await probeCursorNativeAuth(
+        { AGENT_CLI_CREDENTIAL_STORE: "file", CURSOR_CONFIG_DIR: "/tmp/profile/.cursor" },
+        undefined,
+        (async (_bin: string, argv: string[]) => {
+          calls.push(argv);
+          if (argv.includes("--format")) {
+            now += 9_000; // a slow JSON rejection spends most of ITS budget
+            return { code: 2, signal: null, stdout: "", stderr: "unknown option --format" };
+          }
+          now += fallbackMs;
+          return { code: null, signal: "SIGKILL", stdout: "", stderr: "" };
+        }) as never,
+        () => now,
+      );
+      expect(calls).toEqual([["status", "--format", "json"], ["status"]]);
+      return result;
+    };
+    expect(await run(10_000)).toEqual({
+      kind: "unknown",
+      error: "cursor-agent status did not answer within 10s (SIGKILL); login state unknown",
+      timedOut: true,
+    });
+    // The fallback's budget is its own: a retry killed early is no timeout,
+    // even though both children together outlasted one budget.
+    const early = await run(2_000);
+    expect(early.kind).toBe("unknown");
+    expect(early).not.toMatchObject({ error: expect.stringContaining("did not answer") });
+    expect(early).not.toHaveProperty("timedOut");
+  });
+
   it("does not retry an ordinary non-zero probe without explicit JSON-option evidence", async () => {
     const calls: string[][] = [];
     const result = await probeCursorNativeAuth(

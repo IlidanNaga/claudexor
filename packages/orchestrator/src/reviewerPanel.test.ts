@@ -307,6 +307,7 @@ describe("reviewer effort gate", () => {
       [{ harness: "cursor", model: "target-model" }],
     );
     expect(specs[0]?.credentialProfile?.profile_id).toBe(second.profile_id);
+    expect(specs[0]?.profilePinned).toBe(false);
     expect(inventoryCalls).toEqual([first.profile_id, second.profile_id]);
     expect([...(resolverCalls[1] ?? [])]).toEqual([first.profile_id]);
   });
@@ -570,14 +571,15 @@ describe("reviewer inventory route applicability", () => {
       secret_ref: "openai:api",
     });
     const d = { ...deps([adapter]), resolveReviewerProfile: async () => profile };
-    expect(
-      await resolveExplicitReviewerPanel(d, [
-        { harness: "generic", model: "api-model", credentialProfileId: "api" },
-      ]),
-    ).toHaveLength(1);
-    expect(
-      await resolveAutoReviewerPanel(d, { reviewerModels: { openai: "api-model" } }),
-    ).toHaveLength(1);
+    const explicit = await resolveExplicitReviewerPanel(d, [
+      { harness: "generic", model: "api-model", credentialProfileId: "api" },
+    ]);
+    expect(explicit).toHaveLength(1);
+    const auto = await resolveAutoReviewerPanel(d, { reviewerModels: { openai: "api-model" } });
+    expect(auto).toHaveLength(1);
+    // #363: the same account is a pin only when the entry named it.
+    expect(explicit[0]?.profilePinned).toBe(true);
+    expect(auto[0]?.profilePinned).toBe(false);
     expect(models).not.toHaveBeenCalled();
     const nativeProfile = CredentialProfile.parse({
       ...profile,

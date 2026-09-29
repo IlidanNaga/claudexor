@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "@claudexor/config";
+import { DaemonControlApiServer } from "@claudexor/control-api";
 import { noProjectRepoRoot } from "@claudexor/util";
 import { parseArgs } from "./args.js";
 import {
@@ -76,6 +77,31 @@ describe("claudexor profiles add (INV-135)", () => {
     expect(loadConfig(noProjectRepoRoot()).global.credential_profiles).toHaveLength(0);
   });
 });
+
+/** A loopback control server whose only service answers a direct login's
+ * credential-change report (#363); ephemeral port, never a real daemon. */
+async function withLoginReportDaemon<T>(
+  report: (input: unknown) => Promise<unknown>,
+  fn: (ensureDaemon: () => Promise<{ addr: { baseUrl: string; token: string } }>) => Promise<T>,
+): Promise<T> {
+  const token = "profile-login-report-fixture";
+  const server = new DaemonControlApiServer({
+    token,
+    daemon: {
+      enqueue: async () => ({ id: "unused", state: "queued" }),
+      status: async (id: string) => ({ id, state: "failed" }),
+      list: async () => [],
+      cancel: async () => ({ cancelled: true }),
+    } as never,
+    services: { reportCredentialProfileChange: report },
+  });
+  const { host, port } = await server.start();
+  try {
+    return await fn(async () => ({ addr: { baseUrl: `http://${host}:${port}`, token } }));
+  } finally {
+    await server.stop();
+  }
+}
 
 describe("claudexor profiles login machine output", () => {
   afterEach(() => vi.restoreAllMocks());
@@ -202,14 +228,18 @@ describe("claudexor profiles login machine output", () => {
       expect(order).toEqual([]);
       order.push("prepare");
     });
+    const report = vi.fn(async (input: unknown) => {
+      order.push("report");
+      expect(input).toEqual({ harnessId: "agy", profileId: "work" });
+      return { profile: listing.profiles[0]!.profile, voided: "all_accounts" };
+    });
     let gets = 0;
     try {
-      const code = await profilesCommandWithDeps(
-        parseArgs(["profiles", "login", "agy", "work"]),
-        false,
-        {
+      const code = await withLoginReportDaemon(report, (ensureDaemon) =>
+        profilesCommandWithDeps(parseArgs(["profiles", "login", "agy", "work"]), false, {
           daemonGet: async () => {
             gets += 1;
+            if (gets > 1) order.push("reread");
             return gets === 1
               ? listing
               : {
@@ -227,12 +257,13 @@ describe("claudexor profiles login machine output", () => {
                   ],
                 };
           },
+          ensureDaemon,
           spawnSync,
           prepareAgyProfileKeychain: prepare,
-        },
+        }),
       );
       expect(code).toBe(0);
-      expect(order).toEqual(["prepare", "spawn"]);
+      expect(order).toEqual(["prepare", "spawn", "report", "reread"]);
       expect(prepare).toHaveBeenCalledOnce();
       expect(spawnSync).toHaveBeenCalledOnce();
     } finally {
@@ -240,6 +271,54 @@ describe("claudexor profiles login machine output", () => {
       else process.env.CLAUDEXOR_CONFIG_DIR = previous;
       if (previousBin === undefined) delete process.env.CLAUDEXOR_AGY_BIN;
       else process.env.CLAUDEXOR_AGY_BIN = previousBin;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails a login whose credential-change report the daemon refused, without a re-read (#363)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "claudexor-cursor-login-"));
+    const previous = process.env.CLAUDEXOR_CONFIG_DIR;
+    const previousBin = process.env.CLAUDEXOR_CURSOR_BIN;
+    process.env.CLAUDEXOR_CONFIG_DIR = root;
+    const fakeCursor = join(root, "cursor-agent");
+    writeFileSync(fakeCursor, "#!/bin/sh\nexit 0\n");
+    chmodSync(fakeCursor, 0o755);
+    process.env.CLAUDEXOR_CURSOR_BIN = fakeCursor;
+    const locator = join(root, "profiles", "cursor-work");
+    mkdirSync(locator, { recursive: true, mode: 0o700 });
+    const cursorRow = row("cursor", "work");
+    const listing = {
+      profiles: [{ ...cursorRow, profile: { ...cursorRow.profile, isolation_locator: locator } }],
+      harnessAccounts: [],
+      accountPools: [],
+    };
+    let stderr = "";
+    vi.spyOn(process.stderr, "write").mockImplementation(((chunk: unknown) => {
+      stderr += String(chunk);
+      return true;
+    }) as never);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const get = vi.fn(async () => listing);
+    try {
+      const code = await withLoginReportDaemon(
+        async () => {
+          throw Object.assign(new Error("credential change not recorded"), { status: 503 });
+        },
+        (ensureDaemon) =>
+          profilesCommandWithDeps(parseArgs(["profiles", "login", "cursor", "work"]), false, {
+            daemonGet: get,
+            ensureDaemon,
+            spawnSync: vi.fn(() => ({ status: 0, signal: null }) as never),
+          }),
+      );
+      expect(code).toBe(1);
+      expect(get).toHaveBeenCalledOnce();
+      expect(stderr).toContain("did not void its credential observations (503)");
+    } finally {
+      if (previous === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previous;
+      if (previousBin === undefined) delete process.env.CLAUDEXOR_CURSOR_BIN;
+      else process.env.CLAUDEXOR_CURSOR_BIN = previousBin;
       rmSync(root, { recursive: true, force: true });
     }
   });

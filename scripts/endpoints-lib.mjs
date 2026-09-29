@@ -47,8 +47,11 @@ function routeSites(src) {
       .replaceAll("\\/", "/")
       .replace(/\(\[\^\/\]\+\)/g, ":id")
       .replace(/\(\.\+\)/g, "<path>");
-    if (template === "/credential-profiles/:id/:id") {
-      template = "/credential-profiles/:harness/:profileId";
+    if (template.startsWith("/credential-profiles/:id/:id")) {
+      template = template.replace(
+        "/credential-profiles/:id/:id",
+        "/credential-profiles/:harness/:profileId",
+      );
     }
     sites.push({ method: m[1], path: `/v2${template}`, index: m.index });
   }

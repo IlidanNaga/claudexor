@@ -718,9 +718,38 @@ an in-flight probe); an external vendor login/logout may remain visible for the
 bounded grace window. Stale evidence is never reported as a fresh passed login
 and does not alter profile selection or paid-route policy: an already explicit
 pin or durable thread binding may keep its exact config-dir route alive for
-this bounded grace, while unpinned pool/rotation selection remains fresh-only.
+this bounded grace, while unpinned pool/rotation selection never consumes it.
 This absorbs a probe failure only; it does not claim to serialize the vendor's
 OAuth refresh or to repair a revoked credential.
+Cursor's row status probe (`cursor-agent status` in a row's file-store HOME)
+is coordinated the same way: concurrent reads of one row store — keyed by the
+auth-selecting `HOME`/`USERPROFILE`/`XDG_CONFIG_HOME`/`APPDATA`, so admission
+and a spawn with a lane state HOME share it — share one child, and a POSITIVE
+answer is reused as fresh for at most one minute, keeping the instant the
+vendor gave it as `last_verified_at`. A probe that did not answer is never
+cached: a child killed at its ten-second budget reports `did not answer within
+10s (…); login state unknown`, which is `unknown + not_run`, never a logout and
+never a pass. Its stale path serves the other side of routing (the INV-135
+#363 amendment): only such a timeout, while the store's last positive answer is
+under five minutes old, projects that answer as `stale: true` with
+`stale_basis: last_positive_after_timeout`, its `stale_age_ms`, a detail naming
+the answer's instant, and no `last_verified_at` or identity. That basis admits
+UNPINNED choices only — a bound row, the pool, rotation and `next_up` — never
+an explicit pin (a pin whose probe timed out is still refused), while the
+generic grace above still serves only a selected route. A logged-out answer
+from the store drops its positive, as do Claudexor-handled credential
+mutations (including an in-flight probe); any other unknown answer never
+consults it, and no file in the row HOME is read as a substitute. The
+adapter's spawn-time route check applies the same split. The engine stamps
+each spec whose row was an unpinned choice (a bound row, the pool, rotation, an
+unpinned or automatic reviewer seat) with that row's id in `spec.extra`; the
+adapter never infers it from profile fields. Only a stamped row starts on a
+stale positive, after yielding an `[auth] … using the last positive status
+answer …` status event (`auth_status_stale`; never answer text). An explicit
+pin, or any unstamped spec, whose spawn-time probe times out refuses as
+`login state is unknown`, naming the last positive as unpinned-only, and every
+other unconfirmed row refuses the same way rather than with login advice. A
+model-inventory read, which launches nothing, may still read on it.
 Adapters declare the physical credential transport they support (`config_file`,
 `env_var`, `oauth_token_env`, `os_keychain`, `http_header`, or `none`) plus the
 containment strategy that keeps it honest. A transport may be platform-scoped;
@@ -878,14 +907,36 @@ checkpoint, per harness) and hands it to the run as `threadAccountBindings`;
 a binding whose row became disabled/deleted/revoked/exhausted moves to a pool
 sibling with a typed `route.account.lane_switch` disclosure, never silently.
 (3) Otherwise the quota-aware POOL of enabled+ready subscription rows selects
-the account (`route.account.pool_selected`): fresh model-applicable headroom
+the account (`route.account.pool_selected`); "ready" is fresh readiness except
+a Cursor row's bounded last positive status answer after a timed-out probe
+(see [Auth And Secrets](#5-auth-and-secrets)): fresh model-applicable headroom
 descending, unknown/stale quota after known-positive headroom but before
 exhausted (stale quota never authorizes routing), deterministic profile-id
 tie-break; a row under an observed live block (a reactive vendor-limit
 cooldown or spent window — the A4 reader) ranks exhausted with its release
-instant. Model operations pass one more ordering key, a live model-substitution
+instant. Two live observations add one ordering key among the selectable rows:
+a marked row ranks after every other selectable row for that requested model,
+a row's newest mark counts, oldest mark first, and a mark never excludes a row
+or makes the pool exhausted. Model operations pass a model-substitution
 observation (see [Caller-owned model operations](#caller-owned-model-operations));
-Agent Runs pass none. An empty or exhausted pool is a TYPED TERMINAL
+Agent Runs, reviewer seats and the `next_up` projection pass a pre-progress
+refusal observation. That observation is recorded when an unpinned try on a
+subscription row reported a typed `started` session and then ended in the
+structural rotation branch's own evidence (a terminal non-transient death with
+no agent progress, no deliverable and no mutation) without a typed vendor limit,
+which is already a cooldown; an adapter's own pre-spawn refusal and an explicit
+pin never record one, and the vendor's wording is never read. It is keyed by
+harness, row and requested model (the harness default model is its own key),
+lives in daemon memory for one hour, and clears when a later try on that row and
+model makes agent progress or ends cleanly, or on a credential-generation
+change. A try binds its row's credential generation before it spawns, so an
+outcome arriving after such a change neither records nor clears a mark. When
+the default route is not ready and no registered row admits a
+lane, the lane refusal names every row with its own observed readiness
+(`<harness> has no ready account (<row>: <detail>; …)`) instead of the default
+route's doctor advice, so login advice appears only where a row's probe
+positively reported logged-out; `next_up` names unready rows the same way. An
+empty or exhausted pool is a TYPED TERMINAL
 (`route.account.pool_exhausted`, then `credential_pool_exhausted` with the
 pool's earliest known reset — owner Q3=A): an unpinned run under `auto` or
 explicit `subscription` waits for a window instead of silently taking the
@@ -918,7 +969,9 @@ resuming a sibling's. `claudexor profiles login
 <harness> <id>` runs the vendor login with the named binding's exact scoped
 environment: codex rides the SAME durable device-code setup job as the default
 login (D-17); the other harnesses run the vendor command interactively in this
-terminal. Credential custody remains an effective platform fact, so a scoped
+terminal and then report the possible credential change to the daemon (see
+the profile-login note under [Design constraints](#design-constraints)).
+Credential custody remains an effective platform fact, so a scoped
 HOME may select Claudexor-owned vendor state without representing a separate
 OS-user credential.
 
@@ -1710,6 +1763,7 @@ validator dump, and validates the per-run SSE cursor as a nonnegative integer
 - `POST /v2/credential-profiles`
 - `DELETE /v2/credential-profiles/:harness/:profileId`
 - `PATCH /v2/credential-profiles/:harness/:profileId`
+- `POST /v2/credential-profiles/:harness/:profileId/credential-change`
 - `GET /v2/filesystem/directories`
 - `GET /v2/global/events`
 - `POST /v2/handshake`
@@ -4292,9 +4346,16 @@ code touching one of these areas must honor it or change it explicitly here.
   job): vendor OAuth needs the user's TTY/browser interactively, and the
   binding's Claudexor-owned HOME/config root scopes vendor state. Credential
   custody remains platform-defined and may be OS-user-owned; Claudexor neither
-  reads nor copies it. There is no daemon setup receipt to journal, and the
-  post-exit vendor doctor probe under the exact binding environment is the
-  verification truth (exit code non-zero unless the probe passes). Codex
+  reads nor copies it. There is no daemon setup receipt to journal, but the
+  observations the login can outdate live in the daemon: once the vendor
+  exits, whatever its exit, the CLI reports
+  `POST /v2/credential-profiles/:harness/:profileId/credential-change` and
+  the daemon runs the same login-lifecycle invalidation as a setup-job login
+  (every reused status answer and credential-ledger mark, every account's
+  credential generation, the harness's auth readiness; #363); a refused
+  report fails the command. The post-exit vendor doctor probe under the exact
+  binding environment is then the verification truth (exit code non-zero
+  unless the probe passes). Codex
   profile login is the D-17
   exception: it rides the SAME durable app-server device-code setup job as
   the default codex login (restart-surviving runner, transient sidecar,

@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { HarnessRunSpec, type CredentialProfile, type HarnessEvent } from "@claudexor/schema";
-import type { CliRunLoopOptions } from "@claudexor/core";
+import { stampCredentialProfileSelection, type CliRunLoopOptions } from "@claudexor/core";
+import type { CursorStatusObservation } from "./auth.js";
 import { createCursorAdapter } from "./index.js";
 import {
   canonicalCursorProfileHome,
@@ -13,6 +14,7 @@ import {
   probeCursorCredentialProfile,
   resolveCursorProfileRoute,
 } from "./profile.js";
+import { CURSOR_STATUS_LAST_POSITIVE_MS, createCursorStatusCoordinator } from "./status-cache.js";
 
 describe("Cursor config-dir credential profiles (INV-135)", () => {
   let root: string;
@@ -119,6 +121,85 @@ describe("Cursor config-dir credential profiles (INV-135)", () => {
     );
     expect(route).toMatchObject({
       refusal: expect.stringContaining("status probe failed"),
+    });
+    // Unknown is not a logout (#363): no login advice rides this refusal.
+    const refusal = "refusal" in route ? route.refusal : "";
+    expect(refusal).toContain("login state is unknown");
+    expect(refusal).not.toMatch(/run the profile login|auth login/);
+  });
+
+  const lastPositive = { observedAt: "2026-09-28T19:52:00.000Z", ageMs: 95_000 };
+  const timedOutWithLastPositive = {
+    kind: "unknown" as const,
+    error: "cursor-agent status did not answer within 10s (SIGKILL); login state unknown",
+    timedOut: true,
+    lastPositive,
+  };
+
+  it("projects a timeout's bounded last positive as disclosed stale evidence, never a pass (#363)", async () => {
+    const status = await probeCursorCredentialProfile(profile(), {
+      nativeAuthOk: async () => timedOutWithLastPositive,
+      resolveProfileSecret: () => null,
+    });
+    expect(status).toEqual({
+      profile_id: "valentine",
+      harness_id: "cursor",
+      availability: "unknown",
+      verification: "not_run",
+      verification_source: "local_store",
+      stale: true,
+      stale_age_ms: 95_000,
+      stale_basis: "last_positive_after_timeout",
+      detail:
+        "cursor-agent status did not answer within 10s (SIGKILL); login state unknown; the last positive status answer (2026-09-28T19:52:00.000Z, 95000ms old) stands in for unpinned routing only",
+      last_verified_at: null,
+    });
+    expect(status.detail).not.toMatch(/run the profile login|auth login/);
+    // Without a remembered positive, the same timeout is plain unknown.
+    const { lastPositive: _dropped, ...plainTimeout } = timedOutWithLastPositive;
+    const plain = await probeCursorCredentialProfile(profile(), {
+      nativeAuthOk: async () => plainTimeout,
+      resolveProfileSecret: () => null,
+    });
+    expect(plain).not.toHaveProperty("stale");
+    expect(plain).not.toHaveProperty("stale_basis");
+    expect(plain).toMatchObject({ availability: "unknown", verification: "not_run" });
+  });
+
+  it("a route check rides a timeout's last positive only when its caller admits it (#363)", async () => {
+    const runtime = {
+      nativeAuthOk: async () => timedOutWithLastPositive,
+      resolveProfileSecret: () => null,
+    };
+    await expect(
+      resolveCursorProfileRoute(profile(), {}, runtime, undefined, { admitLastPositive: true }),
+    ).resolves.toMatchObject({ kind: "native", staleAuth: lastPositive });
+    // No caller decision is the strict pin contract: the same answer refuses.
+    const strict = await resolveCursorProfileRoute(profile(), {}, runtime);
+    const refusal = "refusal" in strict ? strict.refusal : "";
+    expect(refusal).toContain("login state is unknown");
+    expect(refusal).toContain("serves unpinned routing only, never an explicit pin");
+    expect(refusal).not.toMatch(/run the profile login|auth login/);
+  });
+
+  it("keeps the account identity null while only a stale positive stands in", async () => {
+    const receipt = await probeCursorCredentialAccount(profile(), {
+      nativeAuthOk: async () => timedOutWithLastPositive,
+      resolveProfileSecret: () => null,
+    });
+    expect(receipt.identity).toBeNull();
+  });
+
+  it("stamps a reused positive status answer with the instant the vendor gave it (#363)", async () => {
+    const observedAt = "2026-09-28T19:52:00.000Z";
+    const status = await probeCursorCredentialProfile(profile(), {
+      nativeAuthOk: async () => ({ kind: "authenticated", observedAt }),
+      resolveProfileSecret: () => null,
+    });
+    expect(status).toMatchObject({
+      availability: "available",
+      verification: "passed",
+      last_verified_at: observedAt,
     });
   });
 
@@ -297,6 +378,141 @@ describe("Cursor config-dir credential profiles (INV-135)", () => {
       expect(existsSync(join(home, "Library", "Keychains"))).toBe(false);
       expect(stamped?.credential_profile_id).toBe("valentine");
       expect(stamped?.credential_route).toBe("vendor_native");
+    });
+
+    // #363: the ENGINE stamps whether the row was an explicit pin; the adapter
+    // never infers it from the profile, and an unstamped profile is a pin.
+    const selected = (pinned: boolean | null): HarnessRunSpec => {
+      const s = spec({ credential_profile: profile() });
+      if (pinned !== null) stampCredentialProfileSelection(s, { pinned });
+      return s;
+    };
+    const runOn = async (
+      nativeAuthOk: () => Promise<CursorStatusObservation>,
+      runSpec: HarnessRunSpec,
+    ): Promise<{ events: HarnessEvent[]; launches: number }> => {
+      let launches = 0;
+      const adapter = createCursorAdapter({
+        detectVersion: async () => "cursor-test",
+        nativeAuthOk,
+        cursorApiKey: () => {
+          throw new Error("default key ladder must not run under a profile");
+        },
+        resolveProfileSecret: () => {
+          throw new Error("secret store must not be read for a native profile");
+        },
+        runCliHarness: async function* (opts: CliRunLoopOptions): AsyncGenerator<HarnessEvent> {
+          launches += 1;
+          expect(opts.env).toMatchObject({
+            AGENT_CLI_CREDENTIAL_STORE: "file",
+            CURSOR_API_KEY: null,
+          });
+          yield { type: "completed", session_id: "s1", ts: new Date().toISOString() };
+        },
+      });
+      const events: HarnessEvent[] = [];
+      for await (const ev of adapter.run(runSpec)) events.push(ev);
+      return { events, launches };
+    };
+    const staleEvents = (events: HarnessEvent[]) =>
+      events.filter((e) => e.payload?.["auth_status_stale"] === true);
+
+    it("an unpinned choice starts on a timeout's bounded last positive, disclosed first (#363)", async () => {
+      const { events, launches } = await runOn(
+        async () => timedOutWithLastPositive,
+        selected(false),
+      );
+      expect(events.some((e) => e.type === "error")).toBe(false);
+      expect(events[0]).toMatchObject({
+        type: "status",
+        text: "[auth] cursor-agent status did not answer; using the last positive status answer from 2026-09-28T19:52:00.000Z (95000ms old)",
+        payload: { auth_status_stale: true, auth_status_stale_age_ms: 95_000 },
+      });
+      expect(launches).toBe(1);
+    });
+
+    it.each([
+      { label: "an explicit pin", pinned: true },
+      { label: "an unstamped profile", pinned: null },
+    ])(
+      "the same timed-out sequence refuses $label without launching (#363)",
+      async ({ pinned }) => {
+        const { events, launches } = await runOn(
+          async () => timedOutWithLastPositive,
+          selected(pinned),
+        );
+        expect(events.map((e) => e.type)).toEqual(["error", "completed"]);
+        const error = (events[0] as { error?: string }).error ?? "";
+        expect(error).toContain("login state is unknown");
+        expect(error).toContain("never an explicit pin");
+        expect(error).not.toMatch(/run the profile login|auth login/);
+        expect(staleEvents(events)).toEqual([]);
+        expect(launches).toBe(0);
+      },
+    );
+
+    it("a stamp for another profile never admits the row it now carries (#363)", async () => {
+      const runSpec = selected(false);
+      runSpec.credential_profile = profile({ profile_id: "other" });
+      const { events, launches } = await runOn(async () => timedOutWithLastPositive, runSpec);
+      expect(events.map((e) => e.type)).toEqual(["error", "completed"]);
+      expect(launches).toBe(0);
+    });
+
+    it("a timeout with no remembered positive refuses even an unpinned choice (#363)", async () => {
+      const { lastPositive: _dropped, ...plainTimeout } = timedOutWithLastPositive;
+      const { events, launches } = await runOn(async () => plainTimeout, selected(false));
+      expect(events.map((e) => e.type)).toEqual(["error", "completed"]);
+      expect((events[0] as { error?: string }).error).toContain("login state is unknown");
+      expect(launches).toBe(0);
+    });
+
+    it("through the row store coordinator, only a live last positive starts an unpinned spawn: logout, credential mutation, expiry and other unknowns refuse (#363)", async () => {
+      let now = Date.parse("2026-09-29T08:00:00.000Z");
+      let next: CursorStatusObservation = { kind: "authenticated" };
+      const coordinator = createCursorStatusCoordinator({
+        probe: async () => next,
+        nowMs: () => now,
+      });
+      const timeout: CursorStatusObservation = {
+        kind: "unknown",
+        error: "cursor-agent status did not answer within 10s (SIGTERM); login state unknown",
+        timedOut: true,
+      };
+      const step = async (
+        observation: CursorStatusObservation,
+        advanceMs: number,
+        pinned: boolean,
+      ) => {
+        now += advanceMs;
+        next = observation;
+        const { events, launches } = await runOn(coordinator.status, selected(pinned));
+        return { launched: launches === 1, stale: staleEvents(events).length === 1 };
+      };
+      const answered = { launched: true, stale: false };
+      const onStale = { launched: true, stale: true };
+      const refused = { launched: false, stale: false };
+      const afterReuse = 61_000;
+
+      // A fresh positive, then a timeout: unpinned starts disclosed, a pin refuses.
+      expect(await step({ kind: "authenticated" }, 0, false)).toEqual(answered);
+      expect(await step(timeout, afterReuse, false)).toEqual(onStale);
+      expect(await step(timeout, 1_000, true)).toEqual(refused);
+      // A positive logged-out answer revokes the store's last positive.
+      expect(await step({ kind: "loggedOut" }, 1_000, false)).toEqual(refused);
+      expect(await step(timeout, 1_000, false)).toEqual(refused);
+      // A Claudexor credential mutation revokes it too.
+      expect(await step({ kind: "authenticated" }, 1_000, false)).toEqual(answered);
+      coordinator.clear();
+      expect(await step(timeout, afterReuse, false)).toEqual(refused);
+      // An expired last positive no longer stands in.
+      expect(await step({ kind: "authenticated" }, 1_000, false)).toEqual(answered);
+      expect(await step(timeout, CURSOR_STATUS_LAST_POSITIVE_MS, false)).toEqual(refused);
+      // Only a timeout consults it: any other unknown answer refuses.
+      expect(await step({ kind: "authenticated" }, 1_000, false)).toEqual(answered);
+      expect(
+        await step({ kind: "unknown", error: "status transport failed" }, afterReuse, false),
+      ).toEqual(refused);
     });
 
     it("a logged-out named profile refuses typed without launching or falling back", async () => {
