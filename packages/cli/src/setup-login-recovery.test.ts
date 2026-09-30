@@ -42,7 +42,7 @@ const leader: KnownProcessIdentity = {
 };
 
 beforeEach(() => {
-  root = realpathSync(mkdtempSync(join(tmpdir(), "setup-recovery-")));
+  root = realpathSync.native(mkdtempSync(join(tmpdir(), "setup-recovery-")));
   oldConfig = process.env.CLAUDEXOR_CONFIG_DIR;
   process.env.CLAUDEXOR_CONFIG_DIR = join(root, "config");
   registerConfigDirProfile({ harnessId: "cursor", profileId: request.profileId });

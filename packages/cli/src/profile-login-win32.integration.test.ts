@@ -126,7 +126,7 @@ async function withFixture(
     "LOCALAPPDATA",
   ] as const;
   const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "c363-win32-")));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "c363-win32-")));
   process.env.CLAUDEXOR_CONFIG_DIR = root;
   const home = join(root, "home");
   mkdirSync(home);

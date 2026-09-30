@@ -13,7 +13,12 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { DaemonControlApiServer, type DaemonControlApiOptions } from "@claudexor/control-api";
-import { bindCredentialMutationWindow, credentialMutationWindowOpen } from "@claudexor/core";
+import {
+  bindCredentialMutationWindow,
+  credentialMutationWindowOpen,
+  defaultProcessGroupService,
+  parseProcessGroupHandle,
+} from "@claudexor/core";
 import { createCursorAdapter } from "@claudexor/harness-cursor";
 import type { ControlSetupJob, CredentialProfile } from "@claudexor/schema";
 import { parseArgs } from "./args.js";
@@ -118,7 +123,7 @@ interface Daemon {
   artifact: (name: string) => string;
   /** The runner worker (process-group leader) the job's permit was issued to. */
   workerGroup: () => number;
-  restart: (options?: { beforeStart?: () => void }) => Promise<void>;
+  restart: (options?: { beforeStart?: () => void | Promise<void> }) => Promise<void>;
 }
 
 async function withDaemon<T>(
@@ -187,7 +192,7 @@ async function withDaemon<T>(
       bound = null;
       await manager.shutdown();
       manager._store.journal.close();
-      beforeStart?.();
+      await beforeStart?.();
       manager = build();
       await manager.start();
       bound = manager;
@@ -452,7 +457,13 @@ describe("profiles login as a daemon setup job: credential-mutation window over 
   it("a restart never proves completion: a live login stays open, a dead one closes on proof", async () => {
     await withDaemon({}, async (daemon) => {
       scriptVendor("old@example.com", "hang");
-      const login = cliLogin(daemon);
+      // Reconciliation owns this scenario; hold the client's automatic cancel
+      // until the restarted manager has recorded its terminal evidence.
+      const login = cliLogin(daemon, () =>
+        until("restart disposition before client cleanup", () =>
+          TERMINAL.includes(daemon.job().state),
+        ),
+      );
       await until("the vendor login to run", permitted(daemon));
       const vendorPid = Number(readFileSync(vendorFile("login-pid"), "utf8"));
       // Between generations the lifecycle is unbound: observers read it open.
@@ -466,8 +477,16 @@ describe("profiles login as a daemon setup job: credential-mutation window over 
       expect(daemon.bumps).toEqual(["cursor"]);
       // The runner group dies while the daemon is down: the next successor
       // finds it empty with no receipt and closes the window on that proof.
-      const group = daemon.workerGroup();
-      await daemon.restart({ beforeStart: () => process.kill(-group, "SIGKILL") });
+      const handle = parseProcessGroupHandle(daemon.job().execution!.processGroup);
+      await daemon.restart({
+        beforeStart: async () => {
+          process.kill(-handle.pgid, "SIGKILL");
+          await until(
+            "runner group dead while daemon is down",
+            () => defaultProcessGroupService.probeEmpty(handle).status === "empty",
+          );
+        },
+      });
       await until("the successor to settle", () => TERMINAL.includes(daemon.job().state));
       expect(daemon.job()).toMatchObject({
         state: "cancelled",
