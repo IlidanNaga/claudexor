@@ -9,7 +9,8 @@ import AppKit
 /// Shared by the run-detail answer view and the chat transcript (a turn's assistant
 /// message renders markdown, not flat text — the v0.10 chat regression fix).
 struct MarkdownOutputView: View {
-    @Environment(AppModel.self) private var model
+    // Passive file snapshots can render without a live conversation model.
+    @Environment(AppModel.self) private var model: AppModel?
     let markdown: String
     /// Roots (thread repoRoot / run dir) whose images may render INLINE and
     /// whose file links may open (F2.5 W-C7). Empty = no local-file access:
@@ -18,6 +19,10 @@ struct MarkdownOutputView: View {
     /// Conversation answers use body-sized prose; dense secondary surfaces
     /// retain the compact callout default.
     var bodyFont: Font = .callout
+    /// A file snapshot is passive: image references stay text and no link opens,
+    /// web or local (a snapshot is never a launch surface and carries no thread
+    /// scope); answer links keep their existing behavior.
+    var isFilePreview = false
     /// A visible, dismissible refusal for a blocked file-link click (sol #14):
     /// out-of-scope or unsafe-type targets never fail silently.
     @State private var linkRefusal: String?
@@ -30,7 +35,9 @@ struct MarkdownOutputView: View {
                     .font(.caption).foregroundStyle(.orange)
                     .textSelection(.enabled)
                     .onTapGesture { self.linkRefusal = nil }
-                    .help("Tap to dismiss. Agent-produced files open only inside this thread's scope, and only for safe document/image types.")
+                    .help(isFilePreview
+                          ? "Tap to dismiss. Links stay closed in a file preview."
+                          : "Tap to dismiss. Agent-produced files open only inside this thread's scope, and only for safe document/image types.")
             }
             ForEach(blocks) { block in
                 switch block.kind {
@@ -39,7 +46,9 @@ struct MarkdownOutputView: View {
                 case .paragraph:
                     inline(block.text, font: bodyFont)
                 case .image(let alt, let target):
-                    if model.selectedExecutionLocation == .local {
+                    if isFilePreview || model == nil {
+                        Text(block.text).font(bodyFont).textSelection(.enabled)
+                    } else if model?.selectedExecutionLocation == .local {
                         ScopedInlineImage(target: target, alt: alt, roots: fileScopeRoots)
                     } else {
                         RemoteScopedProjectImage(target: target, alt: alt)
@@ -57,7 +66,8 @@ struct MarkdownOutputView: View {
                     // Dense two-dimensional content: a NON-LAZY bounded Grid inside a
                     // horizontal ScrollView on a solid code surface (§3 dense-content
                     // rule). Explicitly no nested LazyVStack — the #23 hang lesson.
-                    MarkdownTableView(table: table, bodyFont: bodyFont)
+                    MarkdownTableView(table: table, bodyFont: bodyFont,
+                                      overflowHint: MarkdownTableView.overflowHint(filePreview: isFilePreview))
                 case .code:
                     ScrollView(.horizontal, showsIndicators: true) {
                         Text(block.text)
@@ -70,7 +80,9 @@ struct MarkdownOutputView: View {
                 }
             }
             if renderTruncated > 0 {
-                Text("\(renderTruncated) more characters not rendered here — open the run's full answer artifact.")
+                Text(isFilePreview
+                     ? "\(renderTruncated) more characters not formatted here — choose Show source to inspect the loaded text."
+                     : "\(renderTruncated) more characters not rendered here — open the run's full answer artifact.")
                     .font(.caption2).foregroundStyle(.tertiary)
             }
         }
@@ -80,8 +92,16 @@ struct MarkdownOutputView: View {
         // in the bounded source/Quick Look sheet; unsupported in-scope files are
         // revealed in Finder, while out-of-scope paths remain refused.
         .environment(\.openURL, OpenURLAction { url in
-            guard url.isFileURL || url.scheme == nil else { return .systemAction }
-            let raw = url.isFileURL ? url.path : url.absoluteString
+            let raw: String
+            switch Self.linkRoute(for: url, isFilePreview: isFilePreview) {
+            case .system: return .systemAction
+            case .refuse(let notice): linkRefusal = notice; return .discarded
+            case .scoped(let target): raw = target
+            }
+            guard let model else {
+                linkRefusal = "Link not opened: preview context is unavailable."
+                return .discarded
+            }
             if model.selectedExecutionLocation != .local {
                 if model.remoteProjectFileReference(target: raw) != nil {
                     NSPasteboard.general.clearContents()
@@ -109,12 +129,28 @@ struct MarkdownOutputView: View {
                 NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
                 linkRefusal = nil
             case .refuse(let reason):
-                linkRefusal = "Link not opened: \(reason)."
+                linkRefusal = Self.refusalNotice(reason)
                 NSSound.beep()
             }
             return .handled
         })
     }
+
+    enum LinkRoute: Equatable { case system, scoped(target: String), refuse(notice: String) }
+
+    /// One rule for every surface: a file preview refuses every link before any
+    /// routing (it is passive and never a launch surface); in an answer, non-file
+    /// links keep normal system behavior and local targets (file URLs,
+    /// scheme-less paths) are scope-checked.
+    nonisolated static func linkRoute(for url: URL, isFilePreview: Bool) -> LinkRoute {
+        if isFilePreview { return .refuse(notice: refusalNotice(filePreviewLinkReason)) }
+        guard url.isFileURL || url.scheme == nil else { return .system }
+        return .scoped(target: url.isFileURL ? url.path : url.absoluteString)
+    }
+
+    nonisolated static func refusalNotice(_ reason: String) -> String { "Link not opened: \(reason)" }
+    nonisolated static let filePreviewLinkReason =
+        "Links stay closed in a file preview. Choose Show source to inspect the target."
 
     enum LocalFileAction: Equatable {
         case preview(path: String, kind: AgentFilePreviewKind)
@@ -126,7 +162,7 @@ struct MarkdownOutputView: View {
         let decision = ScopedInlineImage.previewDecision(target, roots: roots)
         guard let path = decision.path else {
             if case .blocked(let reason) = decision.kind { return .refuse(reason: reason) }
-            return .refuse(reason: "file is unavailable")
+            return .refuse(reason: "File is unavailable.")
         }
         if case .blocked = decision.kind { return .reveal(path: path) }
         return .preview(path: path, kind: decision.kind)
@@ -471,6 +507,12 @@ struct MarkdownOutputView: View {
 struct MarkdownTableView: View {
     let table: MarkdownOutputView.MarkdownTable
     var bodyFont: Font = .callout
+    /// Where the rows/columns the caps dropped can still be read.
+    var overflowHint = MarkdownTableView.overflowHint(filePreview: false)
+
+    nonisolated static func overflowHint(filePreview: Bool) -> String {
+        filePreview ? "choose Show source to inspect the loaded text" : "open the run's full answer artifact"
+    }
 
     private let cellMinWidth: CGFloat = 64
     private let cellMaxWidth: CGFloat = 320
@@ -544,11 +586,13 @@ struct MarkdownTableView: View {
         }
     }
 
-    private var disclosure: String? {
+    private var disclosure: String? { Self.disclosure(for: table, overflowHint: overflowHint) }
+
+    nonisolated static func disclosure(for table: MarkdownOutputView.MarkdownTable, overflowHint: String) -> String? {
         var parts: [String] = []
         if table.truncatedRows > 0 { parts.append("\(table.truncatedRows) more rows") }
         if table.truncatedColumns > 0 { parts.append("\(table.truncatedColumns) more columns") }
         guard !parts.isEmpty else { return nil }
-        return parts.joined(separator: " · ") + " not shown — open the run's full answer artifact."
+        return parts.joined(separator: " · ") + " not shown — \(overflowHint)."
     }
 }

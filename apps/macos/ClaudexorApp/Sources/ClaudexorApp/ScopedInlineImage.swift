@@ -165,6 +165,7 @@ struct ScopedInlineImage: View {
 
     nonisolated static func previewKind(path: String) -> AgentFilePreviewKind {
         let ext = URL(fileURLWithPath: path).pathExtension.lowercased()
+        if ["md", "markdown"].contains(ext) { return .markdown }
         if ArtifactCategory.semanticTextExtensions.contains(ext) || ["html", "htm"].contains(ext) {
             return .source
         }

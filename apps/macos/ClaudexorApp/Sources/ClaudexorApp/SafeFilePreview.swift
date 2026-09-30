@@ -4,6 +4,7 @@ import QuickLookUI
 import SwiftUI
 
 enum AgentFilePreviewKind: Equatable, Sendable {
+    case markdown
     case source
     case quickLook
     case blocked(reason: String)
@@ -48,7 +49,7 @@ struct SafeFilePreviewRequest: Identifiable {
         SafeFilePreviewRequest(
             url: url,
             kind: kind,
-            source: kind == .source ? try? boundedSource(at: url) : nil)
+            source: kind == .source || kind == .markdown ? try? boundedSource(at: url) : nil)
     }
 
     static func scopedLocalFile(
@@ -60,7 +61,7 @@ struct SafeFilePreviewRequest: Identifiable {
             let descriptor = try scopedRegularFileDescriptor(at: url, roots: roots)
             defer { Darwin.close(descriptor) }
             switch kind {
-            case .source:
+            case .source, .markdown:
                 let source = try boundedSource(openFileDescriptor: descriptor)
                 let staged = try ExternalArtifactHandoff.standard().stage(
                     data: source.bytes,
@@ -199,16 +200,24 @@ struct SafeFilePreviewRequest: Identifiable {
 
 struct SafeFilePreviewSheet: View {
     @Environment(\.dismiss) private var dismiss
+    @State private var showSource = false
     let request: SafeFilePreviewRequest
 
     var body: some View {
         VStack(spacing: 0) {
-            Text(request.displayName)
-                .font(.headline)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(Theme.Spacing.lg)
+            HStack {
+                Text(request.displayName)
+                    .font(.headline)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if request.kind == .markdown, request.source != nil {
+                    Toggle("Show source", isOn: $showSource)
+                        .toggleStyle(.checkbox)
+                        .help("Switch between formatted Markdown and its source text.")
+                }
+            }
+            .padding(Theme.Spacing.lg)
 
             if request.source?.wasTruncated == true {
                 Label(
@@ -239,14 +248,15 @@ struct SafeFilePreviewSheet: View {
 
     @ViewBuilder private var preview: some View {
         switch request.kind {
-        case .source:
+        case .source, .markdown:
             if let source = request.source {
-                ScrollView([.horizontal, .vertical]) {
-                    Text(source.text)
-                        .font(.system(.body, design: .monospaced))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(Theme.Spacing.lg)
+                if request.kind == .markdown && !showSource {
+                    ScrollView {
+                        MarkdownOutputView(markdown: source.text, bodyFont: .body, isFilePreview: true)
+                            .padding(Theme.Spacing.lg)
+                    }
+                } else {
+                    LiteralSourceView(text: source.text)
                 }
             } else {
                 ContentUnavailableView(
@@ -263,6 +273,78 @@ struct SafeFilePreviewSheet: View {
                 description: Text(reason))
         }
     }
+}
+
+/// Literal source in a TextKit view. A single SwiftUI `Text` lays out its whole
+/// string before it draws, which blocks the main thread for seconds at 256 KiB
+/// and about a minute at 1 MiB; TextKit draws the visible part first and lays
+/// out the rest while idle. Short source starts at the top-left corner. The
+/// view is passive: plain text, never editable, and no link or data detection,
+/// so markup in the file stays inert characters.
+struct LiteralSourceView: NSViewRepresentable {
+    let text: String
+
+    /// Remembers what is shown so an update never re-reads megabytes of text.
+    final class Coordinator { var shown: String? }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.drawsBackground = false
+        scroll.documentView = Self.makeTextView()
+        updateNSView(scroll, context: context)
+        return scroll
+    }
+
+    func updateNSView(_ scroll: NSScrollView, context: Context) {
+        guard context.coordinator.shown != text, let view = scroll.documentView as? NSTextView
+        else { return }
+        Self.show(text, in: view)
+        context.coordinator.shown = text
+    }
+
+    static func makeTextView() -> NSTextView {
+        let view = NSTextView(usingTextLayoutManager: false)
+        let unbounded = NSSize(
+            width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        view.isEditable = false
+        view.isSelectable = true
+        view.isRichText = false
+        view.importsGraphics = false
+        view.drawsBackground = false
+        view.isAutomaticLinkDetectionEnabled = false
+        view.isAutomaticDataDetectionEnabled = false
+        view.writingToolsBehavior = .none
+        view.textContainerInset = NSSize(width: Theme.Spacing.lg, height: Theme.Spacing.lg)
+        // Long lines scroll horizontally instead of wrapping.
+        view.textContainer?.containerSize = unbounded
+        view.textContainer?.widthTracksTextView = false
+        view.textContainer?.lineFragmentPadding = 0
+        view.layoutManager?.allowsNonContiguousLayout = true
+        view.maxSize = unbounded
+        view.isHorizontallyResizable = true
+        view.isVerticallyResizable = true
+        view.autoresizingMask = [.width, .height]
+        return view
+    }
+
+    static func show(_ text: String, in view: NSTextView) {
+        let font = NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        // Tabs advance on the character grid at every column. The default
+        // style has twelve stops and breaks the line at a tab beyond them.
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.tabStops = []
+        paragraph.defaultTabInterval = CGFloat(tabColumns) * font.maximumAdvancement.width
+        view.textStorage?.setAttributedString(NSAttributedString(string: text, attributes: [
+            .font: font, .foregroundColor: NSColor.labelColor, .paragraphStyle: paragraph,
+        ]))
+    }
+
+    static let tabColumns = 4
 }
 
 private struct QuickLookPreview: NSViewRepresentable {

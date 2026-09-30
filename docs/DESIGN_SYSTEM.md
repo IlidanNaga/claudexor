@@ -717,7 +717,7 @@ views in the shared design-system files; screens compose them.
     replaces it. Agent images render inline ONLY inside the thread's
     repoRoot / run dir (canonical-path scope, bounded decode, disclosed
     refusal outside the scope). Local file links use the same gate: safe formats
-    open from a staged snapshot in source/Quick Look, unsupported in-scope files
+    open from a staged snapshot in Markdown/source/Quick Look, unsupported in-scope files
     reveal in Finder, and executable or out-of-scope targets never launch.
   - **"What changed since this turn"** marker + an **attention state** (working /
     blocked / needs-permission / done) on the turn card and its thread row.
@@ -898,6 +898,22 @@ views in the shared design-system files; screens compose them.
   are never markdown-rendered as Outcome; they belong to the workspace Changes
   tab, parsed from `final/patch.diff`. Dense output uses solid `surface/raised`;
   never put Liquid Glass behind dense output.
+  File previews for `.md`/`.markdown` use this native renderer by default and
+  expose **Show source** to inspect the same loaded snapshot as literal text.
+  Their formatted view retains the 200,000-character and table bounds; omitted
+  content is disclosed and points at **Show source**. File reads remain capped
+  at 4 MiB with a visible notice when truncated. Images are never loaded, so a
+  preview fetches nothing on its own: a whole-line image reference stays literal
+  text and an inline one shows only its alt text. No link opens from a preview:
+  every click, web or local, shows a refusal that points at **Show source**,
+  because a snapshot is passive, never a launch surface, and carries no thread
+  scope to check targets against. Answer links keep their existing behavior.
+  HTML/SVG previews stay literal source; the separately
+  launched interactive web preview is unchanged. Literal source starts at the
+  top-left corner in a plain, read-only text view that draws the visible part
+  first and lays out the rest while idle, so opening a snapshot at the read cap
+  does not wait on the whole file. The formatted view keeps the shared
+  renderer's per-block cost.
 - **Evidence badges.** Header/timeline badges show output readiness
   (`pending/finalizing/ready/diagnostic`), requested/effective access, web policy,
   web evidence (`none/attempted/satisfied/failed/unverified`), tool errors,
