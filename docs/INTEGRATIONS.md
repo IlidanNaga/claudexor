@@ -53,6 +53,14 @@ descriptor and freeze that query choice for each operation; omission retains the
 legacy strict result shape. GET and ACK always use the exact stored bytes.
 The shared fixture is `packages/schema/fixtures/effort-resolution.json`.
 
+Codex raw-model catalogs list inference efforts rather than native agent modes.
+An existing `ultra` preference resolves within the vendor's ordered choices to
+the strongest supported ordinary generation effort (currently Astra `max`).
+The effort receipt preserves `requested: ultra`, the prepared value and independent
+provider observation; it discloses that raw calls do not execute native automatic
+delegation. Native Codex sessions retain their full Ultra mode. Catalog object
+shapes and the opt-in result contract are unchanged.
+
 ## Embedded Engine Runtime
 
 An embedding host reuses `claudexor-runtime-<version>.tar.gz`, the same closure

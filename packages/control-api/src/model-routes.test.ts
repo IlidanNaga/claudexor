@@ -152,60 +152,78 @@ describe("raw model operation HTTP surface", () => {
     );
   });
 
-  it("projects the real Codex catalog producer to the frozen legacy HTTP shape", async () => {
-    const models = parseCodexModelCatalog({
-      models: [{ slug: "test-model", supported_reasoning_levels: [] }],
-    });
-    expect(models[0]?.reasoningEffortsVerified).toBe(true);
-    const catalog = {
-      source: "codex",
-      credentialProfileId: "fixture",
-      accountFingerprint: null,
-      observedAt: "2026-09-12T00:00:00.000Z",
-      provenance: "provider_http",
-      models,
-      clientVersion: "0.156.1",
-      clientVersionSource: "verified_transport",
-    };
-    const accountView = {
-      source: "codex",
-      accounts: [
-        { credentialProfileId: "fixture", availability: "available", problem: null, catalog },
-      ],
-      partial: false,
-    };
-    const f = await fixture({
-      modelCatalog: async () => catalog,
-      modelAccountCatalog: async () => accountView,
-    });
-    const legacy = await f.request("/model-sources/codex/models");
-    expect(legacy.status).toBe(200);
-    expect(await legacy.json()).toEqual({
-      source: "codex",
-      credentialProfileId: "fixture",
-      accountFingerprint: null,
-      observedAt: "2026-09-12T00:00:00.000Z",
-      provenance: "provider_http",
-      models: [
-        {
-          id: "test-model",
-          label: null,
-          isDefault: false,
-          contextWindow: null,
-          maxContextWindow: null,
-          maxOutputTokens: null,
-          inputModalities: [],
-          reasoningEfforts: [],
-          defaultReasoningEffort: null,
-          supportedOptions: ["toolChoice", "cacheKey", "serviceTier", "processingPreference"],
-        },
-      ],
-    });
-    const modern = await f.request("/model-sources/codex/models?view=accounts");
-    expect(modern.status).toBe(200);
-    expect(await modern.json()).toEqual(accountView);
-    expect(models[0]?.reasoningEffortsVerified).toBe(true);
-  });
+  it.each([{ levels: [] }, { levels: ["high", "ultra"] }])(
+    "projects the real Codex catalog $levels to both frozen HTTP shapes",
+    async ({ levels }) => {
+      const models = parseCodexModelCatalog({
+        models: [
+          { slug: "test-model", supported_reasoning_levels: levels.map((effort) => ({ effort })) },
+        ],
+      });
+      expect(models[0]?.reasoningEffortsVerified).toBe(true);
+      const catalog = {
+        source: "codex",
+        credentialProfileId: "fixture",
+        accountFingerprint: null,
+        observedAt: "2026-09-12T00:00:00.000Z",
+        provenance: "provider_http",
+        models,
+        clientVersion: "0.156.1",
+        clientVersionSource: "verified_transport",
+      };
+      const accountView = {
+        source: "codex",
+        accounts: [
+          { credentialProfileId: "fixture", availability: "available", problem: null, catalog },
+        ],
+        partial: false,
+      };
+      const f = await fixture({
+        modelCatalog: async () => catalog,
+        modelAccountCatalog: async () => accountView,
+      });
+      const legacy = await f.request("/model-sources/codex/models");
+      expect(legacy.status).toBe(200);
+      expect(await legacy.json()).toEqual({
+        source: "codex",
+        credentialProfileId: "fixture",
+        accountFingerprint: null,
+        observedAt: "2026-09-12T00:00:00.000Z",
+        provenance: "provider_http",
+        models: [
+          {
+            id: "test-model",
+            label: null,
+            isDefault: false,
+            contextWindow: null,
+            maxContextWindow: null,
+            maxOutputTokens: null,
+            inputModalities: [],
+            reasoningEfforts: levels.filter((level) => level !== "ultra"),
+            defaultReasoningEffort: null,
+            supportedOptions: [
+              "toolChoice",
+              "cacheKey",
+              "serviceTier",
+              "processingPreference",
+              ...(levels.length ? ["reasoningEffort"] : []),
+            ],
+          },
+        ],
+      });
+      const modern = await f.request("/model-sources/codex/models?view=accounts");
+      expect(modern.status).toBe(200);
+      const publicModels = models.map(
+        ({ reasoningEffortPreferenceOrder: _order, ...model }) => model,
+      );
+      expect(await modern.json()).toEqual({
+        ...accountView,
+        accounts: [{ ...accountView.accounts[0], catalog: { ...catalog, models: publicModels } }],
+      });
+      expect(models[0]?.reasoningEffortsVerified).toBe(true);
+      if (levels.length) expect(models[0]?.reasoningEffortPreferenceOrder).toEqual(levels);
+    },
+  );
 
   it("requires idempotency before accepting refs and never enqueues an Agent Run", async () => {
     const createModelOperation = vi.fn(async () => detail());

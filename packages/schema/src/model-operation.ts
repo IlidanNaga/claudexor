@@ -224,6 +224,12 @@ export const ModelCatalogEntry = z
     maxOutputTokens: z.number().int().positive().nullable(),
     inputModalities: z.array(z.string()),
     reasoningEfforts: z.array(z.string()),
+    reasoningEffortPreferenceOrder: z
+      .array(NonBlankString)
+      .optional()
+      .describe(
+        "Internal vendor order for preference adaptation when it includes choices the raw transport cannot submit. Not accepted values; projected out of both public catalog views.",
+      ),
     reasoningEffortsVerified: z
       .boolean()
       .optional()

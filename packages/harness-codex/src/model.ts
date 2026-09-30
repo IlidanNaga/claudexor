@@ -5,13 +5,7 @@ import {
   codexProcessingCost,
 } from "./processing.js";
 import type { ProcessingReceipt, EffortResolution } from "@claudexor/schema";
-import {
-  resolveEffortEvidence,
-  effortRankLadder,
-  validateModel,
-  type ModelAdapter,
-  type ModelAdapterContext,
-} from "@claudexor/core";
+import { validateModel, type ModelAdapter, type ModelAdapterContext } from "@claudexor/core";
 import type {
   ControlModelCatalogResponse,
   ModelCallResult,
@@ -43,6 +37,7 @@ import {
 import { processingAdmissionProblem } from "./processing-refusal.js";
 import { ResponseFailureCapture } from "./failure-evidence.js";
 import { RequestDelivery } from "./request-delivery.js";
+import { codexModelEfforts, codexModelEffortResolution } from "./model-effort.js";
 
 const ENDPOINT = "https://chatgpt.com/backend-api/codex";
 const CLIENT = "claudexor";
@@ -151,6 +146,7 @@ export function parseCodexModelCatalog(value: unknown): ModelCatalogEntry[] {
     const efforts = reasoningEffortsVerified
       ? reportedEfforts.map((item) => text(record(item)?.effort)!)
       : [];
+    const projectedEfforts = codexModelEfforts(efforts);
     const modalities = Array.isArray(entry.input_modalities)
       ? entry.input_modalities.filter((item): item is string => typeof item === "string")
       : [];
@@ -164,15 +160,16 @@ export function parseCodexModelCatalog(value: unknown): ModelCatalogEntry[] {
       // Backend output-cap parameters are unsupported even when a model has a published output capacity.
       maxOutputTokens: capacity(entry.max_output_tokens),
       inputModalities: modalities,
-      reasoningEfforts: efforts,
+      ...projectedEfforts,
       reasoningEffortsVerified,
-      defaultReasoningEffort: text(entry.default_reasoning_level),
+      defaultReasoningEffort:
+        entry.default_reasoning_level === "ultra" ? null : text(entry.default_reasoning_level),
       supportedOptions: [
         "toolChoice",
         "cacheKey",
         "serviceTier",
         "processingPreference",
-        ...(efforts.length ? ["reasoningEffort"] : []),
+        ...(projectedEfforts.reasoningEfforts.length ? ["reasoningEffort"] : []),
         ...(entry.supports_parallel_tool_calls === true ? ["parallelToolCalls"] : []),
       ],
     };
@@ -356,17 +353,10 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
               clientVersionSource: catalog.clientVersionSource,
             },
           );
-        effortResolution = resolveEffortEvidence(
+        effortResolution = codexModelEffortResolution(
           request.options.reasoningEffort,
-          model.reasoningEfforts,
-          effortRankLadder(
-            catalog.models
-              .filter((entry) => entry.reasoningEffortsVerified === true)
-              .map((entry) => entry.reasoningEfforts),
-          ),
-          "account_catalog",
-          "reasoning.effort",
-          model.reasoningEffortsVerified !== true,
+          model,
+          catalog.models,
         );
         if (effortResolution.resolution === "rejected") {
           throw new CodexModelError("unsupported_parameter", effortResolution.reason!, {

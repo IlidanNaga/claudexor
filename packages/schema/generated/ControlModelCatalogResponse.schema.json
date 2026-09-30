@@ -122,6 +122,13 @@
                   "type": "string"
                 }
               },
+              "reasoningEffortPreferenceOrder": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/definitions/ControlModelCatalogResponse/properties/clientVersion/anyOf/0"
+                },
+                "description": "Internal vendor order for preference adaptation when it includes choices the raw transport cannot submit. Not accepted values; projected out of both public catalog views."
+              },
               "reasoningEffortsVerified": {
                 "type": "boolean",
                 "description": "Whether the provider supplied a fully parsed effort array, including a known empty array. Missing on historical catalogs means unverified."

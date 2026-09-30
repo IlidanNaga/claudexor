@@ -364,7 +364,8 @@ describe("exact-profile Codex model catalog", () => {
           contextWindow: 272000,
           maxContextWindow: 872000,
           maxOutputTokens: null,
-          reasoningEfforts: ["medium", "ultra"],
+          reasoningEfforts: ["medium"],
+          reasoningEffortPreferenceOrder: ["medium", "ultra"],
           defaultReasoningEffort: "medium",
           inputModalities: ["text", "image"],
         },
@@ -967,12 +968,22 @@ describe("single-generation Codex adapter", () => {
   });
   it("does not replace requested options with inferred actual values", async () => {
     const fixture = setup();
+    fixture.fetcher.mockResolvedValueOnce(
+      Response.json({
+        models: [
+          {
+            ...catalog.models[0],
+            supported_reasoning_levels: [{ effort: "medium" }, { effort: "high" }],
+          },
+        ],
+      }),
+    );
     const result = await fixture.adapter.invoke(
-      { ...fixture.request, options: { reasoningEffort: "ultra", serviceTier: "priority" } },
+      { ...fixture.request, options: { reasoningEffort: "high", serviceTier: "priority" } },
       fixture.context,
     );
     expect(JSON.parse(fixture.fetcher.mock.calls[1][1]!.body as string)).toMatchObject({
-      reasoning: { effort: "ultra" },
+      reasoning: { effort: "high" },
       service_tier: "priority",
     });
     expect(result.appliedOptions).toEqual({ reasoningEffort: "medium", serviceTier: "standard" });
