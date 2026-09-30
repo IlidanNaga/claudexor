@@ -808,7 +808,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
     for (;;) {
       const probe = processGroups.probeEmpty(handle);
       if (probe.status === "empty") return true;
-      if (probe.status === "unknown") return false;
+      // An exiting group may briefly deny probes; only empty proves death, within this grace.
       if (remaining <= 0) return false;
       const step = Math.min(100, remaining);
       await sleep(step);

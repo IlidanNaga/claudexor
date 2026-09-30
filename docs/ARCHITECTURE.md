@@ -2735,8 +2735,11 @@ and passive registry retain normal cancellation and unconfirmed-child custody.
 An ordinary daemon
 stop/restart no longer terminates an awaiting-user login runner (that regression
 killed the operator's own pending login in the 2026-07-21 incident); explicit
-`setup cancel` (the existing cancel API) and the login deadline's timeout escalation are the only
-signalling paths. Restart consumes an existing
+`setup cancel` and the login deadline's timeout escalation are the only signalling
+paths. Group probes keep polling within the existing grace through transient
+uncertainty (including macOS exit-time permission errors); only proven emptiness
+closes the credential-mutation window. Persistent uncertainty stays unconfirmed.
+Restart consumes an existing
 terminal result first, then adopts a live runner only on positive evidence — a
 matching durable handle, the same leader identity, and a nonempty process
 group; a proven-dead group with no receipt is the unrecoverable

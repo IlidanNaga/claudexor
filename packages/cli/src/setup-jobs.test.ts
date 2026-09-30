@@ -1645,6 +1645,89 @@ describe("setup jobs", () => {
     },
   );
 
+  it.each([
+    ["cancel", false],
+    ["timeout", false],
+    ["cancel", true],
+    ["timeout", true],
+  ] as const)(
+    "keeps the existing %s grace while group probes are unknown (persistent=%s)",
+    async (kind, persistent) => {
+      let ms = Date.now();
+      let killedAt: number | undefined;
+      let recover = false;
+      let probesAfterKill = 0;
+      const group = processGroupFixture({
+        leader: knownLeader(32),
+        onSignal: (signal) => {
+          if (signal === "SIGKILL") killedAt = ms;
+        },
+      });
+      const probe = group.service.probeEmpty.bind(group.service);
+      vi.spyOn(group.service, "probeEmpty").mockImplementation((handle) => {
+        if (killedAt !== undefined) {
+          probesAfterKill += 1;
+          if (!recover && (persistent || ms - killedAt < 100)) {
+            return { status: "unknown", pgid: handle.pgid, reason: "permission_denied" };
+          }
+        }
+        return probe(handle);
+      });
+      const bumps: string[] = [];
+      const manager = createSetupJobManager({
+        rootDir: join(root, `probe-grace-${kind}-${persistent}`),
+        platform: "darwin",
+        runnerPath: "/tmp/setup-login-runner.js",
+        openTerminal: fakeOpener,
+        now: () => new Date(ms),
+        monitorPollMs: 1,
+        terminationGraceMs: 200,
+        sleep: async (delay) => {
+          expect(manager.credentialMutationOpen("codex")).toBe(true);
+          ms += delay;
+        },
+        processGroups: group.service,
+        onCredentialStateMayHaveChanged: (harness) => bumps.push(harness),
+      });
+      await manager.start();
+      try {
+        const job = manager.create(LOGIN_REQUEST);
+        writeRunnerStateV2(
+          manager,
+          job.jobId,
+          group.leader,
+          "awaiting_permit",
+          new Date(ms).toISOString(),
+        );
+        await waitForPhase(manager, job.jobId, "awaiting_user");
+        expect(bumps).toEqual(["codex"]);
+        const done =
+          kind === "cancel"
+            ? await manager.cancel({ jobId: job.jobId })
+            : ((ms = Date.parse(job.deadlineAt!)),
+              await waitForTerminal(manager, job.jobId),
+              manager.status({ jobId: job.jobId }));
+        expect(group.signals).toEqual(["SIGTERM", "SIGKILL"]);
+        expect(probesAfterKill).toBeGreaterThanOrEqual(2);
+        if (persistent) {
+          expect(ms - killedAt!).toBe(200);
+          expect(done.outcome?.reason).toBe("termination_unconfirmed");
+          expect(manager.credentialMutationOpen("codex")).toBe(true);
+          expect(bumps).toEqual(["codex"]);
+          recover = true;
+          manager.reconcile({ jobId: job.jobId });
+        } else {
+          expect(ms - killedAt!).toBe(100);
+          expect(done.outcome?.reason).toBe(kind === "cancel" ? "cancelled_by_user" : "timed_out");
+        }
+        expect(manager.credentialMutationOpen("codex")).toBe(false);
+        expect(bumps).toEqual(["codex", "codex"]);
+      } finally {
+        await manager.shutdown();
+      }
+    },
+  );
+
   it("shares one login termination and preserves the timeout reason against concurrent cancel", async () => {
     let ms = Date.now();
     let concurrentCancel: Promise<unknown> | undefined;
