@@ -1,6 +1,7 @@
 import {
   prepareHarnessProcessing,
   admitPreparedProcessing,
+  stampCredentialProfileSelection,
   type HarnessAdapter,
   type PreparedHarnessProcessing,
 } from "@claudexor/core";
@@ -88,8 +89,9 @@ export interface ReviewerSpec {
   processing?: PreparedHarnessProcessing;
   processingAllowPaid?: boolean;
   authPreference?: AuthPreference | null;
-  /** Exact resolved profile used by this reviewer; null means pool/default. */
+  /** Exact resolved profile (null = pool/default); `profilePinned: false` = the pool chose it. */
   credentialProfile?: CredentialProfile | null;
+  profilePinned?: boolean;
 }
 
 export interface ReviewCandidateInput {
@@ -481,10 +483,7 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
         candidate_inventory_reason: candidateInventory.reason,
         review_scope: deltaBase ? "delta" : "full",
         ...(deltaBase
-          ? {
-              delta_base_sha: deltaBase,
-              delta_sha256: verifiedDeltaScope!.deltaSha256,
-            }
+          ? { delta_base_sha: deltaBase, delta_sha256: verifiedDeltaScope!.deltaSha256 }
           : {}),
         ...frozenMetadata,
       });
@@ -525,6 +524,7 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
           : {}),
         env: reviewerEnv,
       });
+      stampCredentialProfileSelection(spec, { pinned: reviewer.profilePinned !== false });
       if (input.onBeforeDispatch)
         spec.extra["processingAdmission"] = async (actual: HarnessRunSpec) => {
           // The adapter resolves the concrete profile/route while preparing

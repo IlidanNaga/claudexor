@@ -62,8 +62,11 @@ export async function selectedProfileAvailability(input: {
   model?: string | null;
   /** Only an already selected profile (explicit pin or durable binding) may
    * consume the adapter's bounded stale observation. Pool/rotation selection
-   * remains fresh-only. */
+   * remains fresh-only for it. */
   allowStale?: boolean;
+  /** This choice is not an explicit pin (a durable binding or a pool row):
+   * it may consume a `last_positive_after_timeout` stale basis (INV-135 #363). */
+  unpinned?: boolean;
 }): Promise<string | null> {
   if (!input.profileId) return null;
   let profile: CredentialProfile;
@@ -86,7 +89,10 @@ export async function selectedProfileAvailability(input: {
     await probeCredentialProfileStatus(profile, input.probe),
     input.quota,
   );
-  return profileStatusAdmits(profile, result, { allowStale: input.allowStale === true })
+  return profileStatusAdmits(profile, result, {
+    allowStale: input.allowStale === true,
+    unpinned: input.unpinned === true,
+  })
     ? "available"
     : (result.detail ?? `${result.availability}/${result.verification}`);
 }
@@ -198,22 +204,34 @@ export function vendorVerifiedProfileStatus(
   );
 }
 
-/** One readiness predicate shared by run admission and accounts projection. */
+/**
+ * One readiness predicate shared by run admission and accounts projection.
+ * Fresh readiness admits every caller. A stale observation (always
+ * unknown/not_run on a config-dir row) admits only by its basis: the generic
+ * last-known-good grace keeps an already selected route alive (`allowStale`:
+ * pin or durable binding), while a `last_positive_after_timeout` basis admits
+ * an UNPINNED choice alone — binding, pool, rotation, `next_up` — and never an
+ * explicit pin (owner-approved INV-135 amendment, #363).
+ */
 export function profileStatusAdmits(
   profile: Pick<CredentialProfile, "credential_kind">,
-  result: { availability: string; verification: string; stale?: boolean },
-  options: { allowStale?: boolean } = {},
+  result: { availability: string; verification: string; stale?: boolean; stale_basis?: string },
+  options: { allowStale?: boolean; unpinned?: boolean } = {},
 ): boolean {
   const verificationAdmits =
     result.verification === "passed" ||
     (profile.credential_kind === "api_key" && result.verification === "not_run");
-  const staleSelectedRoute =
-    options.allowStale === true &&
+  const staleConfigDir =
     profile.credential_kind === "config_dir_login" &&
     result.stale === true &&
     result.availability === "unknown" &&
     result.verification === "not_run";
-  return (result.availability === "available" && verificationAdmits) || staleSelectedRoute;
+  const staleAdmits =
+    staleConfigDir &&
+    (result.stale_basis === "last_positive_after_timeout"
+      ? options.unpinned === true
+      : options.allowStale === true);
+  return (result.availability === "available" && verificationAdmits) || staleAdmits;
 }
 
 /** One fail-closed profile doctor wrapper shared by Accounts and runtime

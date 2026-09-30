@@ -502,7 +502,9 @@ claudexor profiles                         # every account per harness + the inf
 claudexor accounts --json                  # read-only snapshot doorway for agents, with freshness/quota state
 claudexor auth login claude                # bootstrap sugar: sign into the claude-default row
 claudexor profiles add claude work         # register another account
-claudexor profiles login claude work       # the vendor's own login, scoped to the row's dir
+claudexor profiles login claude work       # direct vendor login in this terminal, scoped to the row's dir
+claudexor profiles add cursor work        # a separate Cursor account row
+claudexor profiles login cursor work       # daemon-managed login in this terminal; setup cancel/reconcile can recover it
 claudexor profiles disable claude work     # Enabled toggle: a disabled account is never routable
 claudexor profiles enable claude work
 claudexor profiles remove claude work      # remove the binding + any Claudexor-owned state/managed secret

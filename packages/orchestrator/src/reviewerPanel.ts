@@ -197,6 +197,7 @@ export async function resolveExplicitReviewerPanel(
           `reviewer credential profile "${entry.credentialProfileId}" cannot be resolved because the account-pool owner is unavailable`,
         );
       }
+      const profilePinned = Boolean(entry.credentialProfileId);
       const excludedProfileIds = new Set<string>();
       for (;;) {
         const credentialProfile = deps.resolveReviewerProfile
@@ -357,7 +358,7 @@ export async function resolveExplicitReviewerPanel(
           requestedEffort,
           authPreference,
           processingPreference: entry.processingPreference,
-          ...(deps.resolveReviewerProfile ? { credentialProfile } : {}),
+          ...(deps.resolveReviewerProfile ? { credentialProfile, profilePinned } : {}),
         });
         break;
       }
@@ -538,7 +539,7 @@ export async function resolveAutoReviewerPanel(
           requestedModel,
           requestedEffort,
           authPreference,
-          ...(deps.resolveReviewerProfile ? { credentialProfile } : {}),
+          ...(deps.resolveReviewerProfile ? { credentialProfile, profilePinned: false } : {}),
         });
         break;
       }

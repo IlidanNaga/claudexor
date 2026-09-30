@@ -129,4 +129,23 @@ describe("CredentialUnusableLedger (A7 bounded typed evidence)", () => {
     expect(ledger.live()).toHaveLength(1);
     expect(ledger.live()[0]?.code).toBe("verification_failed");
   });
+
+  it("records no verdict while a login window of that harness is open (#363)", () => {
+    let open = true;
+    const ledger = new CredentialUnusableLedger(
+      () => new Date(T0),
+      (harness) => open && harness === "claude",
+    );
+    ledger.record(obs({}));
+    ledger.record(obs({ harness_id: "codex" }));
+    expect(ledger.live().map((o) => o.harness_id)).toEqual(["codex"]);
+    open = false;
+    ledger.record(obs({}));
+    expect(
+      ledger
+        .live()
+        .map((o) => o.harness_id)
+        .sort(),
+    ).toEqual(["claude", "codex"]);
+  });
 });

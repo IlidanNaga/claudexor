@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { credentialProfileUnpinned } from "@claudexor/core";
 import type { CredentialProfile } from "@claudexor/schema";
 import {
   effectiveAuthPreference,
@@ -245,6 +246,40 @@ describe("profileStatusAdmits", () => {
         { availability: "unknown", verification: "not_run", stale: true },
         { allowStale: true },
       ),
+    ).toBe(false);
+  });
+
+  it("admits a last positive after a timeout for an unpinned choice only, never a pin (#363)", () => {
+    const lastPositive = {
+      availability: "unknown",
+      verification: "not_run",
+      stale: true,
+      stale_basis: "last_positive_after_timeout",
+    };
+    const lkg = { availability: "unknown", verification: "not_run", stale: true };
+    // Pool/rotation/next_up (unpinned) may consume the Cursor basis ...
+    expect(profileStatusAdmits(work, lastPositive, { unpinned: true })).toBe(true);
+    // ... a durable binding too (selected AND unpinned) ...
+    expect(profileStatusAdmits(work, lastPositive, { allowStale: true, unpinned: true })).toBe(
+      true,
+    );
+    // ... but an explicit pin keeps its strict verdict, and so does a default caller.
+    expect(profileStatusAdmits(work, lastPositive, { allowStale: true })).toBe(false);
+    expect(profileStatusAdmits(work, lastPositive)).toBe(false);
+    // The generic last-known-good grace is unchanged: selected routes only,
+    // so an unpinned pool never consumes it.
+    expect(profileStatusAdmits(work, lkg, { unpinned: true })).toBe(false);
+    expect(profileStatusAdmits(work, lkg, { allowStale: true })).toBe(true);
+    // Unknown without a stale positive admits nobody; api_key rows never ride it.
+    expect(
+      profileStatusAdmits(
+        work,
+        { availability: "unknown", verification: "not_run" },
+        { allowStale: true, unpinned: true },
+      ),
+    ).toBe(false);
+    expect(
+      profileStatusAdmits({ credential_kind: "api_key" }, lastPositive, { unpinned: true }),
     ).toBe(false);
   });
 
@@ -748,6 +783,8 @@ describe("default-subject auto-balance (INV-135 owner scope)", () => {
     expect(spec2?.credential_profile?.profile_id).toBe("a");
     expect(spec2?.session_id).toBe("se-2");
     expect(spec2?.resume_session_id).toBeNull();
+    // A rotation is an unpinned choice: its spawn may ride a bounded last positive (#363).
+    expect(spec2 && credentialProfileUnpinned(spec2)).toBe(true);
     // Without the route proof the profile-less spec must fail as-is.
     await expect(
       rotateSpecOnTypedLimit({ ...base, triedProfiles: new Set<string>() }),

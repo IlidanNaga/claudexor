@@ -342,7 +342,10 @@ typed 409. Cancel is asynchronous and
 resolves only after termination is proved; duplicate create returns the same
 active login instead of launching a second runner.
 `POST /v2/setup/jobs/:id/reconcile` is the sole replacement-fence recovery
-path. The execution mechanics behind these jobs — the bundled runner, the
+path. Full CLI `claudexor setup cancel <jobId>` and `claudexor setup reconcile
+<jobId>` are thin clients over the corresponding routes, with optional `--json`.
+Their success reports the operation's job state, not a completed authentication.
+`setup attach` remains interactive. The execution mechanics behind these jobs — the bundled runner, the
 journal authority, process-identity fences, and the same-harness capability
 smoke — are engine internals owned by `docs/ARCHITECTURE.md` (native login
 and setup jobs); API-key fallback goes through `/secrets` as a separate
