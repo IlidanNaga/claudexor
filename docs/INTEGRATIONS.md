@@ -464,7 +464,7 @@ completion; follow the handle with the status/result tools before claiming an
 answer, finished work, or applyability.
 The implemented tools include `claudexor_ask` (with `deepScan`), `claudexor_run`,
 `claudexor_best_of`, `claudexor_plan`, `claudexor_create`,
-`claudexor_thread_create`, `claudexor_thread_turn`,
+`claudexor_thread_create`, `claudexor_thread_turn`, `claudexor_thread_read`,
 `claudexor_status`, `claudexor_capabilities`
 (the derived AgentCapabilityCatalog: per-harness live capabilities, modes,
 the mutability matrix, run-control keys), and the read-only recovery tools
@@ -479,10 +479,20 @@ honors per-vendor rate-limit cooldowns),
 `claudexor_journal_recovery`. The destructive
 `claudexor_quarantine_journal` requires an exact partition fingerprint and
 explicit `quarantine_and_start_fresh` confirmation. One-shot runs and thread
-turns accept `credentialProfileId` as a strict account pin. Create a thread
-once, enqueue follow-ups with `claudexor_thread_turn`, then follow each returned
-`runId` with the ordinary status/result tools. If a turn returns only a queued
-`jobId`, use `claudexor_runs` to recover its `runId` after binding.
+turns accept `credentialProfileId` (CLI `--profile`) as a strict account pin.
+Create a thread once, enqueue follow-ups with `claudexor_thread_turn`, then
+follow each returned `runId` with the ordinary status/result tools. If a turn
+returns only a queued `jobId`, use `claudexor_runs` to recover its `runId`
+after binding.
+Thread create/turn accept an optional caller-owned `idempotencyKey`. An omitted
+key is generated per invocation; retry an unknown outcome with the same key
+and body, and use a new key for a deliberately new turn. Changed content under
+the same key conflicts. `claudexor_thread_turn` declares the durable
+`McpThreadTurnResult` handle as its outputSchema. `claudexor_thread_read`
+returns daemon-owned thread, turn and session records without starting work or
+a daemon; with no daemon running it fails with retryable `daemon_unavailable`.
+Final output remains on the run result surface. Thread tools do not add a
+separate budget or lifecycle.
 
 Tools declare MCP behavior annotations (readOnlyHint for every non-agent
 route — ask/plan are read-only) and, for run tools and
@@ -679,10 +689,12 @@ Terminal window.
 `session/new` creates a daemon thread (default `in_place`) and returns that
 thread id. `session/list`, `session/load`, `session/resume`, `session/close`,
 `session/prompt`, and `session/cancel` all resolve through the same `/v2`
-authority; no second in-memory session catalog exists. Images and embedded
-resources are uploaded/finalized into immutable daemon resource IDs before the
-turn enqueues. Blocked/failed daemon outcomes return ACP `refusal` plus typed
-`_meta.claudexor` run/status/apply evidence rather than a false `end_turn`.
+authority; no second in-memory session catalog exists. A prompt may pin its
+turn to one account with `_meta.claudexor.credentialProfileId`, the same strict
+pin MCP run tools accept. Images and embedded resources are uploaded/finalized
+into immutable daemon resource IDs before the turn enqueues. Blocked/failed
+daemon outcomes return ACP `refusal` plus typed `_meta.claudexor`
+run/status/apply evidence rather than a false `end_turn`.
 Terminal turns also carry the exact validated RunFacts receipt at
 `_meta.claudexor.runFacts` (`null` for active runs and legacy runs without a
 receipt). A missing/404 or transport-unavailable detail keeps the receipt

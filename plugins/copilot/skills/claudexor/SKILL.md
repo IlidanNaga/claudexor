@@ -55,9 +55,11 @@ Start read-only unless the user explicitly asked to change or create files.
    whenever the target repository could be ambiguous. Pass
    `credentialProfileId` to pin the run strictly to one account.
 6. For durable multi-turn work, call `claudexor_thread_create` once and enqueue
-   each follow-up with `claudexor_thread_turn`. Follow the returned `runId` with
-   the same status/result tools as a one-shot run; if only a queued `jobId` is
-   returned, use `claudexor_runs` to recover its `runId` after binding.
+   each follow-up with `claudexor_thread_turn`. Pass an `idempotencyKey` and
+   retry an unknown outcome with the same key and body. Follow the returned
+   `runId` with the same status/result tools as a one-shot run; if only a queued
+   `jobId` is returned, use `claudexor_runs` to recover its `runId` after
+   binding. `claudexor_thread_read` lists earlier turns without starting work.
 
 Run tools enqueue work and return a durable handle, not terminal output or
 proof of completion. Use `claudexor_runs`, `claudexor_inspect`,

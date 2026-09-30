@@ -45,6 +45,7 @@ export function validateRunControls(params: unknown): RunControlError | null {
     "tests",
     "paidBudget",
     "access",
+    "credentialProfileId",
     "protectedPathApprovals",
     "review",
     "reviewerPanel",

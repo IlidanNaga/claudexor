@@ -619,6 +619,125 @@ describe("mcp daemon body mapping", () => {
     }
   });
 
+  it("reuses the caller's turn key after a lost response, and distinguishes a new turn", async () => {
+    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+    const daemonRun = await import("./daemon-run.js");
+    const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
+      client: {} as never,
+      addr: { baseUrl: "http://x", token: "t" } as never,
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
+    });
+    const seen: Array<{ key: string | null; body: unknown }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        const key = new Headers(init?.headers).get("Idempotency-Key");
+        const body = JSON.parse(String(init?.body));
+        seen.push({ key, body });
+        if (seen.length === 1) throw new Error("connection lost after daemon acceptance");
+        if (seen.length === 3)
+          return {
+            ok: false,
+            status: 409,
+            json: async () => ({ code: "idempotency_conflict", error: "same key, different body" }),
+          } as never;
+        return {
+          ok: true,
+          status: 202,
+          json: async () => ({ jobId: "j", turnId: "t", threadId: "th", state: "queued" }),
+        } as never;
+      }),
+    );
+    try {
+      const runner = mcpSurfaceRunner();
+      const first = {
+        mode: "__thread_turn",
+        threadId: "th",
+        prompt: "first",
+        idempotencyKey: "logical-paid-turn",
+      };
+      await expect(runner(first)).rejects.toThrow("connection lost");
+      expect(await runner(first)).toMatchObject({ turnId: "t", threadId: "th" });
+      await expect(runner({ ...first, prompt: "other" })).rejects.toMatchObject({
+        code: "idempotency_conflict",
+      });
+      expect(
+        await runner({ ...first, prompt: "next", idempotencyKey: "next-intentional-turn" }),
+      ).toMatchObject({ turnId: "t" });
+      expect(seen.map((v) => v.key)).toEqual([
+        "logical-paid-turn",
+        "logical-paid-turn",
+        "logical-paid-turn",
+        "next-intentional-turn",
+      ]);
+      expect(seen[0]?.body).toEqual(seen[1]?.body);
+      expect(seen[2]?.body).not.toEqual(seen[0]?.body);
+    } finally {
+      ensureSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("reads the daemon thread detail without creating a run or starting an absent daemon", async () => {
+    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+    const daemonRun = await import("./daemon-run.js");
+    const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon");
+    const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
+      client: {} as never,
+      addr: { baseUrl: "http://x", token: "t" } as never,
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
+    });
+    const paths: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        paths.push(url);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            thread: {
+              id: "th-1",
+              title: "Audit",
+              repoRoot: "/tmp/project",
+              createdAt: "2026-09-24T00:00:00Z",
+              updatedAt: "2026-09-24T00:00:00Z",
+            },
+            sessions: [],
+            turns: [],
+          }),
+        } as never;
+      }),
+    );
+    try {
+      const runner = mcpSurfaceRunner();
+      const detail = await runner({ mode: "__thread_read", threadId: "th-1" });
+      expect(detail).toMatchObject({
+        summary: "thread th-1: 0 turn(s)",
+        thread: { id: "th-1" },
+        turns: [],
+      });
+      expect(paths).toEqual(["http://x/v2/threads/th-1"]);
+      expect(ensureSpy).not.toHaveBeenCalled();
+      connectSpy.mockResolvedValueOnce(null);
+      const absent = runner({ mode: "__thread_read", threadId: "th-1" });
+      await expect(absent).rejects.toMatchObject({ code: "daemon_unavailable", retryable: true });
+      await expect(absent).rejects.toThrow(/daemon is not running; thread read does not start/);
+      expect(ensureSpy).not.toHaveBeenCalled();
+      connectSpy.mockResolvedValueOnce(null);
+      await expect(
+        mcpSurfaceRunner({ requireExistingDaemon: true })({
+          mode: "__thread_read",
+          threadId: "th-1",
+        }),
+      ).rejects.toThrow(/delegation belt/);
+    } finally {
+      ensureSpy.mockRestore();
+      connectSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("preserves typed thread control problems", async () => {
     const { mcpSurfaceRunner } = await import("./mcp-runner.js");
     const daemonRun = await import("./daemon-run.js");

@@ -122,6 +122,7 @@ const MCP_TO_CLI = {
       "the CLI scalar projects to PaidBudget.finite; omission preserves the configured tagged budget",
   },
   access: { cli: "access" },
+  credentialProfileId: { cli: "profile" },
   review: {
     cli: null,
     tools: AGENT_RUN_TOOL_NAMES,
@@ -207,14 +208,12 @@ const CLI_ONLY_EXEMPT = {
     "structured CLI spelling of reviewerPanel; MCP carries the same entries as JSON objects, including credentialProfileId, rather than exposing a second flag",
   "max-turns":
     "per-run turn cap; embedder contract is CLI/HTTP-first, MCP exposure deferred (DT2.1-1)",
-  profile:
-    "per-run credential profile (INV-135); embedder contract is CLI/HTTP-first, MCP exposure deferred with the other run knobs (DT2.1-1)",
   "prompt-file":
     "terminal input plumbing (file/stdin prompt sources); MCP callers pass the prompt inline",
   target:
     "harness-install destination; operator/embedder provisioning surface, while MCP exposes no harness-install tool",
   thread:
-    "thread continuation is a CLI/HTTP embedder handle routed through POST /threads/:id/turns (D10); MCP one-shot tools still have no thread surface (deferred with DT2.1-1)",
+    "thread continuation is a CLI/HTTP embedder handle routed through POST /threads/:id/turns (D10); MCP continues threads through claudexor_thread_turn, not a one-shot argument",
   mode: "MCP encodes the mode in the TOOL NAME (claudexor_ask/plan/run/best_of/...)",
   attempts: "convergence knob; MCP one-shot surface exposes race width (n) only today",
   synthesis: "race synthesis knob; not exposed one-shot (racers get the engine default)",
@@ -347,14 +346,16 @@ for (const arg of mcpArgs) {
 
 // v2: tool-surface contract parity.
 // 1. Every tool declares MCP behavior annotations; a tool's read-only hint
-//    must match its actual nature (agent-mode run tools and explicitly
-//    destructive recovery are mutating; ask/plan are read-only).
+//    must match its actual nature (agent-mode run tools, thread create/turn and
+//    explicitly destructive recovery are mutating; ask/plan are read-only).
 // 2. Every prompt-taking run tool declares the structured outputSchema.
 // 3. The recovery tool set exists (hosts recover lost run handles).
 const MUTATING_TOOLS = new Set([
   "claudexor_run",
   "claudexor_best_of",
   "claudexor_create",
+  "claudexor_thread_create",
+  "claudexor_thread_turn",
   "claudexor_run_cancel",
   "claudexor_answer_interaction",
   "claudexor_quarantine_journal",

@@ -98,7 +98,7 @@ async function wireToolCall(tools: McpTool[], name: string, args: Record<string,
 }
 
 describe("Claudexor MCP server (SDK v2)", () => {
-  it("negotiates the client's 2025-06-18 era, lists 20 tools, and answers PING during a slow call", async () => {
+  it("negotiates the client's 2025-06-18 era, lists 21 tools, and answers PING during a slow call", async () => {
     const tools = defaultClaudexorTools(async (p) => {
       if (p.mode === "agent") {
         await sleep(500);
@@ -135,7 +135,7 @@ describe("Claudexor MCP server (SDK v2)", () => {
     const init = w.responses.find((r) => r.id === "init");
     expect(init?.result?.protocolVersion).toBe("2025-06-18");
     expect(init?.result?.serverInfo?.name).toBe("claudexor");
-    expect(w.responses.find((r) => r.id === 2)?.result?.tools).toHaveLength(20);
+    expect(w.responses.find((r) => r.id === 2)?.result?.tools).toHaveLength(21);
     const call = w.responses.find((r) => r.id === 3);
     expect(call?.result?.content?.[0]?.text).toContain("slow done");
   });
@@ -442,10 +442,11 @@ describe("Claudexor MCP server (SDK v2)", () => {
         ? { summary: "created", threadId: "th-1", title: "Audit" }
         : {
             summary: "queued",
+            jobId: "job-1",
             threadId: "th-1",
             turnId: "turn-1",
             runId: "run-1",
-            state: "queued",
+            runDir: "/tmp/run-1",
           };
     });
     const create = tools.find((tool) => tool.name === "claudexor_thread_create")!;
@@ -462,8 +463,12 @@ describe("Claudexor MCP server (SDK v2)", () => {
       properties: {
         model: { type: "string", pattern: "\\S" },
         credentialProfileId: { type: "string", pattern: "\\S" },
+        idempotencyKey: { type: "string", maxLength: 256 },
       },
     });
+    expect(
+      (create.inputSchema.properties as Record<string, unknown>)?.idempotencyKey,
+    ).toMatchObject({ maxLength: 256 });
 
     const created = await wireToolCall(tools, create.name, {
       repoPath: "/tmp/project",
@@ -474,6 +479,7 @@ describe("Claudexor MCP server (SDK v2)", () => {
       prompt: "continue",
       model: "gpt-6-sol",
       credentialProfileId: "work-secondary",
+      idempotencyKey: "turn-once",
     });
     const refused = await wireToolCall(tools, create.name, { repoPath: "relative" });
 
@@ -496,8 +502,47 @@ describe("Claudexor MCP server (SDK v2)", () => {
         prompt: "continue",
         model: "gpt-6-sol",
         credentialProfileId: "work-secondary",
+        idempotencyKey: "turn-once",
       },
     ]);
+    const read = tools.find((tool) => tool.name === "claudexor_thread_read")!;
+    expect(read.annotations?.readOnlyHint).toBe(true);
+    expect(read.inputSchema).toMatchObject({ required: ["threadId"], additionalProperties: false });
+  });
+
+  it("declares the thread-turn handle as an object-root outputSchema the SDK enforces", async () => {
+    const queued = {
+      summary: "queued turn t on thread th",
+      jobId: "job-1",
+      threadId: "th",
+      turnId: "t",
+      state: "queued",
+    };
+    const tools = defaultClaudexorTools(async () => queued);
+    const w = wire(tools);
+    await w.initialize();
+    w.send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+    await sleep(80);
+    await w.close();
+    const listed = (w.responses.find((r) => r.id === 1)?.result?.tools as any[]).find(
+      (tool) => tool.name === "claudexor_thread_turn",
+    );
+    // 2025-era hosts would otherwise receive {result: handle} instead of the handle.
+    expect(listed?.outputSchema?.type).toBe("object");
+    expect(listed?.outputSchema?.properties?.result).toBeUndefined();
+    expect(listed?.outputSchema?.anyOf).toHaveLength(2);
+    const call = await wireToolCall(tools, "claudexor_thread_turn", {
+      threadId: "th",
+      prompt: "go",
+    });
+    expect(call?.isError).not.toBe(true);
+    expect(call?.structuredContent).toEqual(queued);
+    const drifted = await wireToolCall(
+      defaultClaudexorTools(async () => ({ summary: "s", threadId: "th", turnId: "t" })),
+      "claudexor_thread_turn",
+      { threadId: "th", prompt: "go" },
+    );
+    expect(drifted?.isError).toBe(true);
   });
 
   it("preserves typed thread failures on the MCP wire", async () => {
