@@ -1,5 +1,14 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, isAbsolute, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { userConfigDir } from "@claudexor/util";
 import {
@@ -22,6 +31,7 @@ import {
 import { CURSOR_MANAGED_LOGIN, createCursorAdapter } from "@claudexor/harness-cursor";
 import { AGY_MANAGED_LOGIN, createAgyAdapter } from "@claudexor/harness-agy";
 import { ControlHarnessSetupHarness } from "@claudexor/schema";
+import { resolveHarnessBinary } from "@claudexor/core";
 
 describe("native login specs", () => {
   const resolver = (binary: string): string => `/normalized/bin/${binary}`;
@@ -183,6 +193,102 @@ describe("native login specs", () => {
       if (previous === undefined) delete process.env.CLAUDEXOR_CODEX_BIN;
       else process.env.CLAUDEXOR_CODEX_BIN = previous;
     }
+  });
+
+  describe("cursor login binary", () => {
+    const saved = {
+      HOME: process.env.HOME,
+      PATH: process.env.PATH,
+      CLAUDEXOR_CURSOR_BIN: process.env.CLAUDEXOR_CURSOR_BIN,
+    };
+    const roots: string[] = [];
+    beforeEach(() => {
+      delete process.env.CLAUDEXOR_CURSOR_BIN;
+    });
+    afterEach(() => {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+    });
+    // Resolution only: no case here runs a fixture, so its bytes are inert.
+    const exe = (path: string): string => {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, "resolved, never executed\n");
+      chmodSync(path, 0o755);
+      return path;
+    };
+    const link = (target: string, path: string): string => {
+      mkdirSync(dirname(path), { recursive: true });
+      symlinkSync(target, path);
+      return path;
+    };
+    /** `<root>/.local/bin/agent` -> the installer's `versions/<v>/cursor-agent`. */
+    const cursorAgent = (root: string): string =>
+      link(
+        exe(join(root, ".local", "share", "cursor-agent", "versions", "1", "cursor-agent")),
+        join(root, ".local", "bin", "agent"),
+      );
+    const sandbox = (): string => {
+      const root = mkdtempSync(join(tmpdir(), "cursor-login-bin-"));
+      roots.push(root);
+      return root;
+    };
+    const absoluteOr =
+      (names: Record<string, string>) =>
+      (binary: string): string | null =>
+        names[binary] ?? (isAbsolute(binary) ? binary : null);
+
+    // The installer's `agent` is a symlink, which Windows creates only with a
+    // privilege (and Cursor's Windows installer copies instead of linking).
+    it.skipIf(process.platform === "win32")(
+      "logs in through a verified Cursor agent when cursor-agent is absent, and says so",
+      () => {
+        const launcher = cursorAgent(sandbox());
+        expect(nativeLoginSpec("cursor", absoluteOr({ agent: launcher }))).toEqual({
+          binary: launcher,
+          args: ["login"],
+          displayCommand: "agent login",
+          loginMode: "url_disclosure",
+        });
+      },
+    );
+
+    it("never logs in through an unrelated agent", () => {
+      const unrelated = exe(join(sandbox(), "bin", "agent"));
+      const requested: string[] = [];
+      const resolve = absoluteOr({ agent: unrelated });
+      const spec = nativeLoginSpec("cursor", (binary) => {
+        requested.push(binary);
+        return resolve(binary);
+      });
+      expect(spec).toBeNull();
+      expect(requested).not.toContain(unrelated);
+    });
+
+    const emptyHome = mkdtempSync(join(tmpdir(), "cursor-login-host-"));
+    const hostHasCursorNames = ["cursor-agent", "agent"].some(
+      (name) => resolveHarnessBinary(name, { HOME: emptyHome, PATH: "" }) !== null,
+    );
+    rmSync(emptyHome, { recursive: true, force: true });
+
+    // POSIX-only as well: on Windows the default resolver takes only
+    // `.exe`/`.com` images, never the installer's linked `agent`.
+    it.skipIf(process.platform === "win32" || hostHasCursorNames)(
+      "the default resolver finds the installer's agent on the harness PATH",
+      () => {
+        const home = sandbox();
+        const launcher = cursorAgent(home);
+        process.env.HOME = home;
+        // The host's own PATH never answers: only the harness PATH prefixes.
+        process.env.PATH = "";
+        expect(nativeLoginSpec("cursor")).toMatchObject({
+          binary: launcher,
+          displayCommand: "agent login",
+        });
+      },
+    );
   });
 
   it("scrubs all provider credentials and redirects while retaining runtime network context", () => {

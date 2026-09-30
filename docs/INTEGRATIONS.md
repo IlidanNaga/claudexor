@@ -876,7 +876,16 @@ tagged-object variant yields its variant name. Skipped for an aborted run and
 under `evidence_policy: stream_only`. Pin: `fixtures/rollout/recorded-*.jsonl`
 (session-rollout records, not stream captures).
 
-**Cursor** — wire: `cursor-agent -p --output-format stream-json <sandbox
+**Cursor** — binary: `CLAUDEXOR_CURSOR_BIN`, else `cursor-agent` on the harness
+PATH, else Cursor's primary `agent` only when its realpath is the installer's
+`…/cursor-agent/versions/<v>/cursor-agent`; that `agent` is spawned by absolute
+path, resolved per call by discovery, doctor, status, models, the API-key
+smoke, runs and login, and never executed to identify it. This fallback covers
+Cursor's POSIX installer layout. On native Windows the shared resolver accepts
+executable images (`.exe`/`.com`) only; `.cmd`/`.ps1` launcher installations
+remain unavailable. This alias fallback does not add Windows `agent.exe`
+discovery or change explicit overrides and the existing `cursor-agent` route.
+Wire: `cursor-agent -p --output-format stream-json <sandbox
 args> [--stream-partial-output]` with the composed prompt on piped stdin (no
 positional prompt or native system-prompt flag — instructions ride a delimited
 prompt prefix; full access is refused pre-spawn). Events: `system/init` →

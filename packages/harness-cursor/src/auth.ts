@@ -4,7 +4,6 @@ import { runCapture } from "@claudexor/core";
 import { redactSecrets } from "@claudexor/util";
 import { resolveCursorBin } from "./bin.js";
 
-const BIN = resolveCursorBin();
 const CURSOR_LOGGED_OUT =
   /not logged in|not authenticated|unauthenticated|authentication required|no account|account\s*:\s*(?:none|unknown|not configured|-)(?:\s|$)|authenticated\s*:\s*(?:false|no|none|0)|logged in\s*:\s*(?:false|no|none|0)/i;
 const CURSOR_JSON_STATUS_UNSUPPORTED =
@@ -29,10 +28,11 @@ export async function probeCursorNativeAuth(
   capture: typeof runCapture = runCapture,
 ): Promise<CursorStatusObservation> {
   try {
+    const bin = resolveCursorBin();
     const profileScoped = Boolean(
       env?.["AGENT_CLI_CREDENTIAL_STORE"] || env?.["CURSOR_CONFIG_DIR"],
     );
-    const result = await capture(BIN, profileScoped ? ["status", "--format", "json"] : ["status"], {
+    const result = await capture(bin, profileScoped ? ["status", "--format", "json"] : ["status"], {
       env,
       timeoutMs: 10_000,
       abortSignal,
@@ -53,7 +53,7 @@ export async function probeCursorNativeAuth(
         result.code !== 0 &&
         cursorJsonStatusUnsupported(text)
       ) {
-        const fallback = await capture(BIN, ["status"], {
+        const fallback = await capture(bin, ["status"], {
           env,
           timeoutMs: 10_000,
           abortSignal,
