@@ -5,12 +5,14 @@
  * ledger's clearing contract lives HERE (profile enable/disable/create/remove
  * and secret set/delete each void exactly the verdicts about the credential
  * they touched), while the whole-ledger clear stays with the login/logout
- * lifecycle — claudexord's setup jobs and a client-reported direct profile
- * login alike. Clearing is fail-open by contract: over-clearing
- * costs at most one attempt rediscovering a refusal. The model-substitution
- * and pre-progress refusal ledgers clear at the same sites; their rows are
- * subscription account rows, so a secret mutation names none of them. The
- * Cursor status cache is dropped with the Claude auth-status LKG.
+ * lifecycle: claudexord's setup jobs, including Cursor profile login, at each
+ * opening/closing transition. Direct Claude/AGY profile login retains its
+ * documented observation gap. Clearing is
+ * fail-open by contract: over-clearing costs at most one attempt rediscovering
+ * a refusal. The model-substitution and pre-progress refusal ledgers clear at
+ * the same sites; a secret names their subjects through the registry rows
+ * whose `secret_ref` it is (an `oauth_token` row is a subscription account).
+ * The Cursor status cache is dropped with the Claude auth-status LKG.
  */
 import { loadConfig } from "@claudexor/config";
 import { invalidateDoctorCache } from "@claudexor/core";
@@ -56,29 +58,34 @@ export function bustCredentialStatusCaches(
   // name, and — for a bare managed name — the engine-default slot of whichever
   // harness reads it (adapter knowledge the daemon does not duplicate).
   for (const profile of loadConfig(noProjectRepoRoot()).global.credential_profiles) {
-    if (profile.secret_ref === subject.secretName)
-      credentialUnusableLedger.clearSubject(profile.harness_id, profile.profile_id);
+    if (profile.secret_ref !== subject.secretName) continue;
+    credentialUnusableLedger.clearSubject(profile.harness_id, profile.profile_id);
+    modelSubstitutionLedger.clearSubject(profile.harness_id, profile.profile_id);
+    // Moves the row's credential generation too: a try bound to the old
+    // secret neither records nor clears a mark about the new one (#363).
+    preProgressRefusalLedger.clearSubject(profile.harness_id, profile.profile_id);
   }
   if (!subject.secretName.includes(":")) credentialUnusableLedger.clearDefaultSubjects();
 }
 
-/** Clear the process-wide observations after a daemon login/logout lifecycle. */
+/** Clear the process-wide observations after a daemon login/logout lifecycle.
+ * The in-memory ledgers and generations move first: the quota registry read
+ * last is the one step that can fail. */
 export function bustGlobalCredentialStatusCaches(quotaRegistry: () => QuotaRegistry): void {
-  bustCredentialStatusCaches(quotaRegistry);
   credentialUnusableLedger.noteCredentialChange();
   modelSubstitutionLedger.noteCredentialChange();
   preProgressRefusalLedger.noteCredentialChange();
+  bustCredentialStatusCaches(quotaRegistry);
 }
 
-/** A native login command ran — a daemon setup job, or a client's direct
- * `claudexor profiles login` reported over the control API (#363) — so the
- * credential may have changed whatever its exit: the process-wide
- * observations plus that harness's auth-readiness projection. */
+/** A setup job's credential-mutation window opened or closed (#363): the
+ * native login may have changed the credential, whatever its exit — the
+ * process-wide observations plus that harness's auth-readiness projection. */
 export function bustLoginCredentialState(
   quotaRegistry: () => QuotaRegistry,
   authReadiness: Pick<AuthReadinessService, "invalidate">,
   harness: string,
 ): void {
-  bustGlobalCredentialStatusCaches(quotaRegistry);
   authReadiness.invalidate(harness);
+  bustGlobalCredentialStatusCaches(quotaRegistry);
 }

@@ -1,3 +1,6 @@
+import { uptime } from "node:os";
+import { performance } from "node:perf_hooks";
+import { credentialMutationWindowOpen } from "@claudexor/core";
 import { probeCursorNativeAuth, type CursorStatusObservation } from "./auth.js";
 
 type EnvMap = Record<string, string | null | undefined>;
@@ -88,25 +91,47 @@ async function awaitShared(
  * drops every positive and stops an in-flight probe from repopulating it; that
  * probe answers the callers already waiting on it unknown: its verdict may
  * describe the store before the change.
+ *
+ * Every age is MONOTONIC (`monotonicMs`): a wall-clock step can neither keep
+ * an answer alive nor expire it early. The wall clock only stamps the instant
+ * the vendor answered, for disclosure. While a login may be rewriting the
+ * cursor store (`mutating`, the daemon's setup lifecycle), a probe answers its
+ * callers live and nothing else: no reuse, no retained positive, no last
+ * positive behind a timeout — neither for a probe started inside the window
+ * nor for one that ends inside it.
  */
 export function createCursorStatusCoordinator(options: {
   probe: StatusProbe;
-  nowMs?: () => number;
+  monotonicMs?: () => number;
+  wallMs?: () => number;
+  mutating?: () => boolean;
   reuseMs?: number;
   lastPositiveMs?: number;
 }): { status: StatusProbe; clear(): void } {
-  const nowMs = options.nowMs ?? Date.now;
+  // Linux performance.now() excludes suspend. libuv's uptime uses /proc/uptime
+  // or CLOCK_BOOTTIME, both suspend-inclusive; its fallback truncates seconds.
+  // Use an upper age bound there (less than two seconds early expiry), never
+  // extend freshness through sleep or let a wall-clock change decide it.
+  const linuxUptime = !options.monotonicMs && process.platform === "linux";
+  const monotonicMs =
+    options.monotonicMs ?? (linuxUptime ? () => uptime() * 1000 : () => performance.now());
+  const clockUncertaintyMs = linuxUptime ? 1000 : 0;
+  const wallMs = options.wallMs ?? Date.now;
+  const mutating = options.mutating ?? (() => credentialMutationWindowOpen("cursor"));
   const reuseMs = options.reuseMs ?? CURSOR_STATUS_REUSE_MS;
   const lastPositiveMs = options.lastPositiveMs ?? CURSOR_STATUS_LAST_POSITIVE_MS;
   // One entry per store: its latest positive answer, reused as fresh inside
   // `reuseMs` and offered as stale evidence to a timeout inside `lastPositiveMs`.
-  const positives = new Map<string, { observation: Authenticated; atMs: number }>();
+  const positives = new Map<
+    string,
+    { observation: Authenticated; atMonotonicMs: number; observedAt: string }
+  >();
   const pending = new Map<string, Promise<CursorStatusObservation>>();
   let generation = 0;
   const livePositive = (key: string, withinMs: number) => {
     const entry = positives.get(key);
     if (!entry) return null;
-    const ageMs = Math.max(0, nowMs() - entry.atMs);
+    const ageMs = Math.max(0, monotonicMs() - entry.atMonotonicMs + clockUncertaintyMs);
     if (ageMs < withinMs) return { entry, ageMs };
     if (ageMs >= lastPositiveMs) positives.delete(key);
     return null;
@@ -116,7 +141,8 @@ export function createCursorStatusCoordinator(options: {
       const key = statusStoreKey(env);
       if (key === null) return options.probe(env, abortSignal);
       if (abortSignal?.aborted) return abortedProbe();
-      const fresh = livePositive(key, reuseMs);
+      const fenced = mutating();
+      const fresh = fenced ? null : livePositive(key, reuseMs);
       if (fresh) return fresh.entry.observation;
       let shared = pending.get(key);
       if (!shared) {
@@ -129,6 +155,9 @@ export function createCursorStatusCoordinator(options: {
           }))
           .then((observation): CursorStatusObservation => {
             if (startedGeneration !== generation) return supersededProbe();
+            // An answer read inside a mutation window is the vendor's live
+            // answer for its callers only; it seeds and consumes nothing.
+            const settled = !fenced && !mutating();
             if (observation.kind === "loggedOut") {
               positives.delete(key);
               return observation;
@@ -136,20 +165,24 @@ export function createCursorStatusCoordinator(options: {
             if (observation.kind === "unknown") {
               // Only a probe that did not answer may lean on the last positive
               // answer; it stays unknown and never refreshes that answer's age.
-              const stale = observation.timedOut ? livePositive(key, lastPositiveMs) : null;
+              const stale =
+                settled && observation.timedOut ? livePositive(key, lastPositiveMs) : null;
               return stale
                 ? {
                     ...observation,
-                    lastPositive: {
-                      observedAt: new Date(stale.entry.atMs).toISOString(),
-                      ageMs: stale.ageMs,
-                    },
+                    lastPositive: { observedAt: stale.entry.observedAt, ageMs: stale.ageMs },
                   }
                 : observation;
             }
-            const atMs = nowMs();
-            const stamped = { ...observation, observedAt: new Date(atMs).toISOString() };
-            positives.set(key, { observation: stamped, atMs });
+            const observedAt = new Date(wallMs()).toISOString();
+            const stamped = { ...observation, observedAt };
+            if (settled) {
+              positives.set(key, {
+                observation: stamped,
+                atMonotonicMs: monotonicMs(),
+                observedAt,
+              });
+            }
             return stamped;
           })
           .finally(() => {

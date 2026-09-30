@@ -72,6 +72,7 @@ import {
 } from "./setup-login-completion.js";
 import { setupRunnerFailureOutcome } from "./setup-runner-outcome.js";
 import { hasUnconfirmedSetupTermination } from "./setup-job-reducer.js";
+import * as CredentialWindow from "./setup-credential-window.js";
 
 const NO_PROJECT_ROOT = noProjectRepoRoot();
 const LOGIN_EXTENSION_MS = 15 * 60_000;
@@ -182,13 +183,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
   const iso = () => now().toISOString();
   const projectDeviceCode = (job: ControlSetupJob) =>
     projectSetupDeviceCode(job, store.paths(job.jobId).runnerDeviceCode);
-  function update(
-    jobId: string,
-    patch: Partial<ControlSetupJob>,
-    idempotency?: { key: string; client: string; request: unknown },
-  ): ControlSetupJob {
-    return store.update(jobId, patch, idempotency);
-  }
+  const update = CredentialWindow.observedUpdate(store, opts, logAfterMutation);
   const armDeviceCodeDisclosureWatcher = createDeviceCodeDisclosureWatcher({
     status: (jobId) => store.status(jobId),
     update: (jobId, patch) => void update(jobId, patch),
@@ -258,12 +253,10 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       }
       return job;
     }
-    job = update(jobId, {
+    return update(jobId, {
       nativeCommand: receipt,
       message: `Persisted hash-bound ${job.harness} native command evidence before verification.`,
     });
-    if (receipt.commandStarted) opts.onCredentialStateMayHaveChanged?.(job.harness);
-    return job;
   }
 
   function probeNativeSession(
@@ -595,17 +588,21 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
 
   async function observeAndPermit(jobId: string, state: SetupLoginRunnerState): Promise<void> {
     let job = store.status(jobId);
+    const authorizationFailure = job.execution?.permitIssuedAt
+      ? "termination_unconfirmed"
+      : "launch_failed";
     const manifest = manifestFor(jobId);
     if (!manifest) {
       finish(
         jobId,
         "failed",
-        "termination_unconfirmed",
+        authorizationFailure,
         `${job.harness} login manifest became unavailable after worker observation.`,
       );
       return;
     }
     const handle = parseProcessGroupHandle(state.processGroup);
+    // The running vendor may self-update; physical bytes bind initial permission only.
     if (
       !job.authorization ||
       job.authorization.executionId !== state.executionId ||
@@ -615,12 +612,12 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       manifest.manifestDigest !== job.authorization.manifestDigest ||
       JSON.stringify(manifest.executable) !== JSON.stringify(job.authorization.executable) ||
       JSON.stringify(manifest.args) !== JSON.stringify(job.authorization.args) ||
-      !verifyExecutableEvidence(job.authorization.executable)
+      (!job.execution?.permitIssuedAt && !verifyExecutableEvidence(job.authorization.executable))
     ) {
       finish(
         jobId,
         "failed",
-        "termination_unconfirmed",
+        authorizationFailure,
         `${job.harness} login command authorization changed before execution permit.`,
       );
       return;
@@ -629,7 +626,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       finish(
         jobId,
         "failed",
-        "termination_unconfirmed",
+        "launch_failed",
         `${job.harness} login worker identity changed before execution was permitted.`,
       );
       return;
@@ -649,7 +646,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       finish(
         jobId,
         "failed",
-        "termination_unconfirmed",
+        authorizationFailure,
         `${job.harness} login worker contradicts durable process-group evidence.`,
       );
       return;
@@ -678,11 +675,12 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
     if (!ACTIVE_SETUP_STATES.has(job.state) || job.phase === "cancelling") return;
     if (result.permitIssuedAt !== null) {
       const state = matchingState(jobId);
+      // A bound pre-command refusal can precede the runner's running-state write.
       if (
         !job.execution?.permitIssuedAt ||
         job.execution.permitIssuedAt !== result.permitIssuedAt ||
         !state ||
-        state.stage !== "running" ||
+        (result.commandStarted && state.stage !== "running") ||
         !stateMatchesDurableExecution(job, state) ||
         Date.parse(result.finishedAt) < Date.parse(result.permitIssuedAt)
       ) {
@@ -843,9 +841,21 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       await consumeLoginResult(jobId, result);
       return;
     }
-    // Extend updates this journaled authority without rewriting the sealed
-    // client_pty manifest. Check it before any freshly observed runner can be
-    // permitted, not only after the monitor handles that runner.
+    // A durable group can prove client/runner death even if its sidecar vanished.
+    const group = processGroupFromJob(job);
+    if (group && processGroups.probeEmpty(group).status === "empty") {
+      const lateResult = matchingResult(jobId);
+      if (lateResult) await consumeLoginResult(jobId, lateResult);
+      else
+        finish(
+          jobId,
+          "failed",
+          "interrupted",
+          `${job.harness} login process group ended without a terminal receipt; start a new login.`,
+        );
+      return;
+    }
+    // The mutable journal deadline governs deferred attach and Extend.
     if (loginDeadlineReached(job)) {
       await terminateLogin(jobId, "timed_out");
       return;
@@ -1294,14 +1304,12 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       supervisor.assertCreateAllowed();
       const jobs = store.list({ harness });
       let active = jobs.findLast((job) => ACTIVE_SETUP_STATES.has(job.state));
-      // A client_pty job no client ever attached (no runner state on disk) is
-      // an ORPHAN — no living login to protect, only a stale reservation that
-      // conflict-refused retries for the whole login window when the UI lost
-      // the attach command (hit live 2026-08-04). A new create supersedes it;
-      // a job with observed runner state keeps the full conflict discipline.
+      // Replace an unattached reservation only before durable permission;
+      // a missing sidecar cannot prove that a permitted vendor stopped.
       if (
         active &&
         active.transport === "client_pty" &&
+        !active.execution?.permitIssuedAt &&
         readRunnerState(store.paths(active.jobId).runnerState) === null
       ) {
         finish(
@@ -1313,12 +1321,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         active = undefined;
       }
       if (active) {
-        // Same target store → idempotent reuse. A DIFFERENT target (default vs
-        // profile, or two profiles) must refuse loudly: returning the other job
-        // would hand the caller a login into the wrong store. A different
-        // LOGIN FLOW for the same target refuses the same way (wave-1): a
-        // --browser-redirect request must never be silently answered with the
-        // active device-auth job.
+        // Reuse only the same store and flow; another target must refuse.
         if ((active.profileId ?? null) === (profileBinding?.profileId ?? null)) {
           const transportConflict = setupTransportConflict(active, request.transport);
           if (transportConflict) {
@@ -1507,6 +1510,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       armDeviceCodeDisclosureWatcher(jobId);
       return extended;
     },
+    credentialMutationOpen: (harness?: string) => CredentialWindow.open(store, harness),
     _store: store,
     _supervisorHealth: () => supervisor.health(),
   };

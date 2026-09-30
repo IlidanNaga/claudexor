@@ -125,6 +125,25 @@ describe("preProgressRefusalSubject", () => {
     expect(m.recorded).toHaveLength(2);
   });
 
+  it("reports whether the bound credential is still current: a mutation or an open login window ends it (#363)", () => {
+    const m = memory();
+    const spec = { credential_profile: row(), model_hint: "grok-4.7" };
+    const bound = preProgressRefusalSubject(m.store, "cursor", spec);
+    expect(bound?.current()).toBe(true);
+    m.mutate("cursor", "b");
+    expect(bound?.current()).toBe(true); // another account's change
+    m.mutate("cursor", "a");
+    expect(bound?.current()).toBe(false);
+    // Inside a login window the ledger's generation is no number at all: a
+    // try bound there is never current, nor is one bound before it.
+    const beforeWindow = preProgressRefusalSubject(m.store, "cursor", spec);
+    const windowStore: PreProgressRefusalMemory = { ...m.store, generation: () => Number.NaN };
+    const inside = preProgressRefusalSubject(windowStore, "cursor", spec);
+    expect(inside?.current()).toBe(false);
+    m.store.generation = () => Number.NaN;
+    expect(beforeWindow?.current()).toBe(false);
+  });
+
   it("keys the harness default model as null", () => {
     const m = memory();
     preProgressRefusalSubject(m.store, "cursor", {

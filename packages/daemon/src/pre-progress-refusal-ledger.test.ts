@@ -124,4 +124,25 @@ describe("PreProgressRefusalLedger (bounded self-expiring ordering evidence, #36
     expect(ids).not.toContain("p0");
     expect(ids).toContain("newest");
   });
+
+  it("inside an open login window of the harness records nothing and its generation is no number (#363)", () => {
+    let open: string | null = null;
+    const ledger = new PreProgressRefusalLedger(
+      () => new Date(T0),
+      (harness) => harness === open,
+    );
+    const before = ledger.generation("cursor", "a");
+    open = "cursor";
+    ledger.record(refused());
+    expect(ledger.live()).toEqual([]);
+    expect(Number.isNaN(ledger.generation("cursor", "a"))).toBe(true);
+    // A try bound inside the window can never match again, nor one bound before.
+    expect(ledger.generation("cursor", "a") === ledger.generation("cursor", "a")).toBe(false);
+    expect(ledger.generation("cursor", "a") === before).toBe(false);
+    // Another harness is untouched by this harness's window.
+    ledger.record(refused({ harness_id: "claude" }));
+    expect(ledger.live().map((o) => o.harness_id)).toEqual(["claude"]);
+    open = null;
+    expect(ledger.generation("cursor", "a")).toBe(before);
+  });
 });

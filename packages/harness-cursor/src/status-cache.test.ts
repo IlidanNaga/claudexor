@@ -45,12 +45,16 @@ function deferred() {
   return { promise, resolve };
 }
 
+/** `clock.now` is the MONOTONIC clock every age reads; `clock.wall` stamps
+ * only when the vendor answered (it tracks `now` unless a test steps it). */
 function harness(answers: Array<CursorStatusObservation | ReturnType<typeof deferred>>) {
-  const clock = { now: T0 };
+  const clock = { now: T0, wallOffset: 0, mutating: false };
   const calls: EnvMap[] = [];
   const signals: Array<AbortSignal | undefined> = [];
   const coordinator = createCursorStatusCoordinator({
-    nowMs: () => clock.now,
+    monotonicMs: () => clock.now,
+    wallMs: () => clock.now + clock.wallOffset,
+    mutating: () => clock.mutating,
     probe: async (env, signal) => {
       calls.push(env ?? {});
       signals.push(signal);
@@ -229,6 +233,82 @@ describe("Cursor status coordinator (#363)", () => {
     pending.resolve({ kind: "authenticated" });
     expect(await patient).toMatchObject({ kind: "authenticated" });
     expect(h.calls).toHaveLength(1);
+  });
+
+  it("ages every answer on the monotonic clock: a wall-clock step neither keeps nor expires it", async () => {
+    const h = harness([{ kind: "authenticated" }, TIMED_OUT, TIMED_OUT, { kind: "authenticated" }]);
+    const fresh = await h.coordinator.status(rowA());
+    // The wall clock jumps a day back, then an hour forward: reuse is unmoved.
+    h.clock.wallOffset = -24 * 60 * 60_000;
+    h.clock.now = T0 + CURSOR_STATUS_REUSE_MS - 1;
+    expect(await h.coordinator.status(rowA())).toEqual(fresh);
+    h.clock.wallOffset = 60 * 60_000;
+    expect(await h.coordinator.status(rowA())).toEqual(fresh);
+    expect(h.calls).toHaveLength(1);
+    // The last positive keeps the instant the vendor answered (wall) and an
+    // age measured on the monotonic clock, whatever the wall clock says now.
+    h.clock.now = T0 + CURSOR_STATUS_REUSE_MS;
+    expect(await h.coordinator.status(rowA())).toEqual({
+      ...TIMED_OUT,
+      lastPositive: { observedAt: new Date(T0).toISOString(), ageMs: CURSOR_STATUS_REUSE_MS },
+    });
+    // A backward wall step cannot make an expired last positive young again.
+    h.clock.now = T0 + CURSOR_STATUS_LAST_POSITIVE_MS;
+    h.clock.wallOffset = -CURSOR_STATUS_LAST_POSITIVE_MS;
+    expect(await h.coordinator.status(rowA())).toEqual(TIMED_OUT);
+    // A new answer is stamped with the (stepped) wall instant it arrived at.
+    expect(await h.coordinator.status(rowA())).toEqual({
+      kind: "authenticated",
+      observedAt: new Date(T0).toISOString(),
+    });
+  });
+
+  it("inside a credential-mutation window answers live and keeps or leans on nothing", async () => {
+    const h = harness([
+      { kind: "authenticated", email: "old@example.com" },
+      { kind: "authenticated", email: "mid@example.com" },
+      TIMED_OUT,
+      { kind: "authenticated", email: "new@example.com" },
+      TIMED_OUT,
+    ]);
+    await h.coordinator.status(rowA()); // a positive from BEFORE the window
+    h.clock.mutating = true;
+    h.clock.now = T0 + 1;
+    // No reuse of the pre-window answer: the store is asked live.
+    expect(await h.coordinator.status(rowA())).toMatchObject({ email: "mid@example.com" });
+    // A timeout inside the window never leans on any positive.
+    expect(await h.coordinator.status(rowA())).toEqual(TIMED_OUT);
+    expect(h.calls).toHaveLength(3);
+    h.clock.mutating = false;
+    h.coordinator.clear(); // the lifecycle's proven-death invalidation
+    h.clock.now = T0 + 2;
+    // After the window: a fresh answer is asked for, then reused as usual.
+    expect(await h.coordinator.status(rowA())).toMatchObject({ email: "new@example.com" });
+    expect(await h.coordinator.status(rowA())).toMatchObject({ email: "new@example.com" });
+    expect(h.calls).toHaveLength(4);
+    // Nothing observed inside the window became a last positive.
+    h.clock.now = T0 + 2 + CURSOR_STATUS_REUSE_MS;
+    expect(await h.coordinator.status(rowA())).toMatchObject({
+      lastPositive: { observedAt: new Date(T0 + 2).toISOString() },
+    });
+  });
+
+  it("an answer that ends inside a window, or starts inside one, is never retained", async () => {
+    const endsInside = deferred();
+    const startsInside = deferred();
+    const h = harness([endsInside, startsInside, TIMED_OUT, TIMED_OUT]);
+    const before = h.coordinator.status(rowA());
+    h.clock.mutating = true; // the window opens while the probe is in flight
+    endsInside.resolve({ kind: "authenticated", email: "a@example.com" });
+    expect(await before).toMatchObject({ kind: "authenticated" });
+    const inside = h.coordinator.status(rowA());
+    h.clock.mutating = false; // ...and closes (without an invalidation) before it ends
+    startsInside.resolve({ kind: "authenticated", email: "a@example.com" });
+    expect(await inside).toMatchObject({ kind: "authenticated" });
+    // Neither answer was kept: a later timeout has no last positive to lean on.
+    h.clock.now = T0 + 1;
+    expect(await h.coordinator.status(rowA())).toEqual(TIMED_OUT);
+    expect(h.calls).toHaveLength(3);
   });
 
   it("never shares an env that is not a scrubbed row file store", async () => {

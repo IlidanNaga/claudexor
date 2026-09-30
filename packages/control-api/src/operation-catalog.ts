@@ -146,14 +146,6 @@ const operations: ControlOperationDescriptor[] = [
     "ControlCredentialProfileDeleteResponse",
     { idempotency: "natural" },
   ),
-  j(
-    "POST",
-    "/v2/credential-profiles/:harness/:profileId/credential-change",
-    "mutating",
-    null,
-    "ControlCredentialProfileCredentialChangeResponse",
-    { idempotency: "natural" },
-  ),
   // The supported downgrade path of the unified-accounts startup migration:
   // run BEFORE installing an engine whose canonicalizers refuse the migrated
   // row's native locator. Naturally idempotent (a second call finds no record).

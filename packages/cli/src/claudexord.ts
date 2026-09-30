@@ -50,6 +50,7 @@ import { runtimeConcurrencyCaps } from "@claudexor/schema";
 import { scheduleStartupRetention } from "./retention-service.js";
 import { controlServices } from "./control-services.js";
 import { AuthReadinessService } from "@claudexor/gateway";
+import { bindCredentialMutationWindow } from "@claudexor/core";
 import { buildGateway } from "./registry.js";
 import { createSetupJobManager } from "./setup-jobs.js";
 import { bustLoginCredentialState } from "./credential-status-invalidation.js";
@@ -250,6 +251,11 @@ export async function main(): Promise<void> {
         onCredentialStateMayHaveChanged: (harness) =>
           bustLoginCredentialState(() => quotaStoreSlot.current(), authReadiness, harness),
       }),
+    );
+    // #363: every process-local credential observer reads the login window from
+    // the durable setup lifecycle; an unbound or recovering generation reads open.
+    bindCredentialMutationWindow((harness) =>
+      setupBinding.current().credentialMutationOpen(harness),
     );
     let control: DaemonControlApiServer | null = null;
     shutdownRuntime = new DaemonRuntimeShutdown({

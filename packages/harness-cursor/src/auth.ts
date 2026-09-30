@@ -10,7 +10,7 @@ const CURSOR_JSON_STATUS_UNSUPPORTED =
   /(?:unknown|unrecognized|unsupported|invalid|unimplemented)\s+(?:option|flag|argument)[^\n]*--format|--format[^\n]*(?:unknown|unrecognized|unsupported|invalid|unimplemented)\s+(?:option|flag|argument)|(?:unknown|unrecognized|unsupported|invalid|unimplemented)[^\n]*(?:--format|json status)/i;
 
 const MAX_CURSOR_ACCOUNT_EMAIL_LENGTH = 320;
-/** Wall-clock budget of one `cursor-agent status` child. */
+/** Budget of one `cursor-agent status` child, enforced by a timer the probe owns. */
 export const CURSOR_STATUS_TIMEOUT_MS = 10_000;
 
 /**
@@ -18,8 +18,9 @@ export const CURSOR_STATUS_TIMEOUT_MS = 10_000;
  * never leaves this parser. Only an anchored email principal may become an
  * Accounts identity; every other successful-but-unknown shape fails closed.
  * `observedAt` is when the vendor gave a reused positive answer (status-cache.ts).
- * An unknown observation stays unknown: `timedOut` marks a child killed at its
- * own budget, and `lastPositive` (set only by the status coordinator on such a
+ * An unknown observation stays unknown: `timedOut` means the probe's OWN
+ * budget expired before observed native exit or caller cancellation (never
+ * inferred from a signal or elapsed wall time). `lastPositive` (set only by the coordinator on such a
  * timeout) is the row store's bounded last positive answer — stale evidence
  * for unpinned admission alone, never authentication (#363, INV-135).
  */
@@ -38,22 +39,19 @@ export async function probeCursorNativeAuth(
   env?: Record<string, string | null | undefined>,
   abortSignal?: AbortSignal,
   capture: typeof runCapture = runCapture,
-  nowMs: () => number = Date.now,
+  budgetMs: number = CURSOR_STATUS_TIMEOUT_MS,
 ): Promise<CursorStatusObservation> {
   try {
     const profileScoped = Boolean(
       env?.["AGENT_CLI_CREDENTIAL_STORE"] || env?.["CURSOR_CONFIG_DIR"],
     );
-    const startedAtMs = nowMs();
-    const result = await capture(BIN, profileScoped ? ["status", "--format", "json"] : ["status"], {
-      env,
-      timeoutMs: CURSOR_STATUS_TIMEOUT_MS,
-      abortSignal,
-      cancelSignal: "SIGTERM",
-      cancelKillDelayMs: 0,
-    });
+    const status = (args: string[]) => ownedStatusChild(capture, args, env, abortSignal, budgetMs);
+    const { result, ownTimeout } = await status(
+      profileScoped ? ["status", "--format", "json"] : ["status"],
+    );
     const text = `${result.stdout}\n${result.stderr}`;
     if (result.code !== 0) {
+      if (ownTimeout) return cursorStatusUnanswered(result, budgetMs);
       // Older Cursor binaries may reject the JSON status flag. One bounded
       // text retry preserves profile-scoped readiness without treating a
       // failed JSON probe as proof that the account is logged out. A signal,
@@ -66,26 +64,15 @@ export async function probeCursorNativeAuth(
         result.code !== 0 &&
         cursorJsonStatusUnsupported(text)
       ) {
-        const fallbackStartedAtMs = nowMs();
-        const fallback = await capture(BIN, ["status"], {
-          env,
-          timeoutMs: CURSOR_STATUS_TIMEOUT_MS,
-          abortSignal,
-          cancelSignal: "SIGTERM",
-          cancelKillDelayMs: 0,
-        });
+        const { result: fallback, ownTimeout: fallbackTimeout } = await status(["status"]);
         const fallbackText = `${fallback.stdout}\n${fallback.stderr}`;
         if (fallback.code === 0 && fallback.signal === null) {
           const observed = cursorAuthenticatedObservation(fallbackText);
           if (observed) return observed;
           if (cursorStatusLoggedOut(fallbackText)) return { kind: "loggedOut" };
         }
-        // The text retry is the probe that went unanswered, not the JSON exit.
-        const fallbackUnanswered = cursorStatusUnanswered(fallback, fallbackStartedAtMs, nowMs);
-        if (fallbackUnanswered) return fallbackUnanswered;
+        if (fallbackTimeout) return cursorStatusUnanswered(fallback, budgetMs);
       }
-      const unanswered = cursorStatusUnanswered(result, startedAtMs, nowMs);
-      if (unanswered) return unanswered;
       return {
         kind: "unknown",
         error: `cursor-agent status failed (${result.code ?? result.signal ?? "unknown result"})`,
@@ -94,6 +81,7 @@ export async function probeCursorNativeAuth(
     if (profileScoped) {
       const jsonObservation = cursorJsonStatusObservation(result.stdout);
       if (jsonObservation) return jsonObservation;
+      if (ownTimeout) return cursorStatusUnanswered(result, budgetMs);
       // A successful JSON-capable probe owns the profile-scoped evidence. If
       // its output is malformed or an unknown shape, do not reinterpret stdout
       // or stderr through the legacy text grammar: diagnostics can mention an
@@ -107,6 +95,7 @@ export async function probeCursorNativeAuth(
     const authenticated = cursorAuthenticatedObservation(text);
     if (authenticated) return authenticated;
     if (cursorStatusLoggedOut(text)) return { kind: "loggedOut" };
+    if (ownTimeout) return cursorStatusUnanswered(result, budgetMs);
     // Status output can contain the signed-in account principal. Unknown
     // output is not evidence and must not be copied into doctor/setup logs.
     return {
@@ -122,18 +111,60 @@ export async function probeCursorNativeAuth(
 }
 
 /**
- * A child killed at its own budget did not answer: the login state is
- * unknown, which callers must never read as a logout (#363).
+ * One `cursor-agent status` child under a budget timer this probe OWNS (#363).
+ * `ownTimeout` means the timer was observed before caller cancellation or
+ * native child exit. Stdio may close later (an inherited pipe can outlive its
+ * parent); waiting for capture alone would mislabel that parent's exit. This
+ * orders host observations, not an unobservable kernel-level causal history.
+ */
+async function ownedStatusChild(
+  capture: typeof runCapture,
+  args: string[],
+  env: Record<string, string | null | undefined> | undefined,
+  abortSignal: AbortSignal | undefined,
+  budgetMs: number,
+): Promise<{ result: CaptureResult; ownTimeout: boolean }> {
+  const budget = new AbortController();
+  // First observed cause; a cooperative timeout can still exit with code 1.
+  const first: { cause: "timeout" | "cancel" | "exit" | null } = {
+    cause: abortSignal?.aborted ? "cancel" : null,
+  };
+  const onCancel = () => {
+    first.cause ??= "cancel";
+  };
+  abortSignal?.addEventListener("abort", onCancel, { once: true });
+  const timer = setTimeout(() => {
+    first.cause ??= "timeout";
+    budget.abort();
+  }, budgetMs);
+  try {
+    const result = await capture(BIN, args, {
+      env,
+      abortSignal: abortSignal ? AbortSignal.any([abortSignal, budget.signal]) : budget.signal,
+      cancelSignal: "SIGTERM",
+      cancelKillDelayMs: 0,
+      onExit: () => {
+        first.cause ??= "exit";
+      },
+    });
+    return { result, ownTimeout: first.cause === "timeout" };
+  } finally {
+    clearTimeout(timer);
+    abortSignal?.removeEventListener("abort", onCancel);
+  }
+}
+
+/**
+ * No recognized answer, and the probe's own budget was the first observed
+ * end cause: login state is unknown, never a logout (#363).
  */
 function cursorStatusUnanswered(
-  result: Pick<CaptureResult, "signal">,
-  startedAtMs: number,
-  nowMs: () => number,
-): CursorStatusObservation | null {
-  if (result.signal === null || nowMs() - startedAtMs < CURSOR_STATUS_TIMEOUT_MS) return null;
+  result: Pick<CaptureResult, "code" | "signal">,
+  budgetMs: number,
+): CursorStatusObservation {
   return {
     kind: "unknown",
-    error: `cursor-agent status did not answer within ${CURSOR_STATUS_TIMEOUT_MS / 1000}s (${result.signal}); login state unknown`,
+    error: `cursor-agent status did not answer within ${budgetMs / 1000}s (${result.signal ?? result.code ?? "killed"}); login state unknown`,
     timedOut: true,
   };
 }

@@ -1,94 +1,155 @@
-import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { execFileSync, spawn } from "node:child_process";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { DaemonControlApiServer, type DaemonControlApiOptions } from "@claudexor/control-api";
+import { bindCredentialMutationWindow, credentialMutationWindowOpen } from "@claudexor/core";
 import { createCursorAdapter } from "@claudexor/harness-cursor";
-import { ControlQuotaResponse, type CredentialProfile } from "@claudexor/schema";
+import type { ControlSetupJob, CredentialProfile } from "@claudexor/schema";
 import { parseArgs } from "./args.js";
-import { controlServices } from "./control-services.js";
 import { profilesCommandWithDeps } from "./credential-commands.js";
+import { bustLoginCredentialState } from "./credential-status-invalidation.js";
 import { modelSubstitutionLedger } from "./model-services.js";
+import { controlApiFetch } from "./live.js";
 import { registerConfigDirProfile } from "./profile-registration.js";
 import { credentialUnusableLedger, preProgressRefusalLedger } from "./run-orchestrator.js";
+import { attachSetupJob } from "./setup-attach-command.js";
+import { setupJobControlServices } from "./setup-job-control-services.js";
+import { createSetupJobManager } from "./setup-jobs.js";
 
-// #363 consumer regression: `claudexor profiles login` runs the vendor login in
-// the CLI process, while every observation that login can outdate (reused
-// Cursor status answers, ledger marks, the generations in-flight tries bind)
-// lives in the daemon. The REAL command reports through the REAL control route
-// to the REAL daemon services on an ephemeral loopback port; the Cursor status
-// coordinator probes a synthetic `cursor-agent`. Offline: no vendor, no
-// account, no installed daemon.
+// #363 consumer evidence over REAL processes, offline: `claudexor profiles
+// login cursor <id>` creates a client_pty setup job on the real control route,
+// attaches through the real setup-attach owner, the BUILT login runner
+// (bootstrap + detached worker) runs a synthetic `cursor-agent` whose login
+// the test scripts, and the real setup-job manager owns the credential-mutation
+// window with real process-group evidence. The Cursor status coordinator
+// probes the same synthetic store. No vendor, no account, no installed daemon.
 
-// The Cursor status probe binds its binary once, at module load.
 const vendor = vi.hoisted(() => {
-  const dir = `${(process.env.TMPDIR ?? "/tmp").replace(/\/+$/, "")}/claudexor-363-login-${process.pid}`;
+  const dir = `${(process.env.TMPDIR ?? "/tmp").replace(/\/+$/, "")}/claudexor-363-lifecycle-${process.pid}`;
   process.env.CLAUDEXOR_CURSOR_BIN = `${dir}/cursor-agent`;
   return { dir, bin: `${dir}/cursor-agent` };
 });
+const RUNNER = resolve(import.meta.dirname, "../dist/setup-login-runner.js");
 
-/** The synthetic store answers `status` with the state it held when the probe
- * STARTED (a probe describes the store before any later change). */
+/** `status` answers the store's current state; `login` follows `login-mode`. */
 function writeVendor(): void {
   mkdirSync(vendor.dir, { recursive: true });
+  const d = vendor.dir;
   writeFileSync(
     vendor.bin,
     [
       "#!/bin/sh",
-      `read -r state < "${vendor.dir}/state"`,
-      `read -r delay < "${vendor.dir}/delay"`,
-      `echo "$*" >> "${vendor.dir}/calls"`,
-      '[ "$delay" = 0 ] || /bin/sleep "$delay"',
-      'if [ "$state" = out ]; then echo \'{"authenticated":false}\';',
-      'else printf \'{"authenticated":true,"email":"%s"}\\n\' "$state"; fi',
+      `D="${d}"`,
+      'if [ "$1" = status ]; then',
+      '  echo status >> "$D/status-calls"',
+      '  read -r state < "$D/state"',
+      '  if [ "$state" = out ]; then echo \'{"authenticated":false}\';',
+      '  else printf \'{"authenticated":true,"email":"%s"}\\n\' "$state"; fi',
+      "  exit 0",
+      "fi",
+      '[ "$1" = login ] || exit 2',
+      'echo $$ > "$D/login-pid.tmp"; mv "$D/login-pid.tmp" "$D/login-pid"',
+      'read -r mode < "$D/login-mode"',
+      'case "$mode" in',
+      '  complete) cp "$D/login-next" "$D/state"; exit 0 ;;',
+      "  during)",
+      '    echo mid@example.com > "$D/state"; touch "$D/login-mid"',
+      '    while [ ! -f "$D/release" ]; do /bin/sleep 0.05; done',
+      '    cp "$D/login-next" "$D/state"; exit 0 ;;',
+      "  hang) trap 'exit 143' TERM; while :; do /bin/sleep 0.05; done ;;",
+      "  stubborn) trap '' TERM INT; exec /bin/sleep 30 ;;",
+      "esac",
+      "exit 3",
       "",
     ].join("\n"),
   );
   chmodSync(vendor.bin, 0o755);
 }
-const setStore = (state: string, delaySeconds = 0) => {
-  writeFileSync(join(vendor.dir, "state"), `${state}\n`);
-  writeFileSync(join(vendor.dir, "delay"), `${delaySeconds}\n`);
-};
-const statusCalls = (): number => {
+const vendorFile = (name: string) => join(vendor.dir, name);
+function scriptVendor(state: string, mode: string, next = "new@example.com"): void {
+  for (const name of ["status-calls", "login-pid", "login-mid", "release"]) {
+    rmSync(vendorFile(name), { force: true });
+  }
+  writeFileSync(vendorFile("state"), `${state}\n`);
+  writeFileSync(vendorFile("login-mode"), `${mode}\n`);
+  writeFileSync(vendorFile("login-next"), `${next}\n`);
+}
+const statusCalls = (): number =>
+  existsSync(vendorFile("status-calls"))
+    ? readFileSync(vendorFile("status-calls"), "utf8").split("\n").filter(Boolean).length
+    : 0;
+const alive = (pid: number): boolean => {
   try {
-    return readFileSync(join(vendor.dir, "calls"), "utf8").split("\n").filter(Boolean).length;
+    process.kill(pid, 0);
+    return true;
   } catch {
-    return 0;
+    return false;
   }
 };
-async function until(predicate: () => boolean): Promise<void> {
-  for (let i = 0; i < 250 && !predicate(); i++) await new Promise((r) => setTimeout(r, 20));
-  expect(predicate()).toBe(true);
+async function until(label: string, predicate: () => boolean, ms = 10_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
+    await new Promise((r) => setTimeout(r, 10));
+  }
 }
 
-/** The daemon side: the real control services behind the real HTTP route. */
+const TERMINAL = ["succeeded", "failed", "cancelled", "timed_out", "interrupted_unknown"];
+type Manager = ReturnType<typeof createSetupJobManager>;
+
+interface Daemon {
+  root: string;
+  manager: Manager;
+  addr: { baseUrl: string; token: string };
+  /** Harnesses the lifecycle invalidated, in order (window entry / close). */
+  bumps: string[];
+  job: () => ControlSetupJob;
+  artifact: (name: string) => string;
+  /** The runner worker (process-group leader) the job's permit was issued to. */
+  workerGroup: () => number;
+  restart: (options?: { beforeStart?: () => void }) => Promise<void>;
+}
+
 async function withDaemon<T>(
-  fn: (daemon: {
-    ensureDaemon: () => Promise<{ addr: { baseUrl: string; token: string } }>;
-    authReadiness: { invalidate: ReturnType<typeof vi.fn> };
-    quota: { noteCredentialChange: ReturnType<typeof vi.fn> };
-  }) => Promise<T>,
+  options: { loginTimeoutMs?: number; terminationGraceMs?: number },
+  fn: (daemon: Daemon) => Promise<T>,
 ): Promise<T> {
-  const authReadiness = { invalidate: vi.fn() };
-  const emptyQuota = ControlQuotaResponse.parse({
-    snapshots: [],
-    absences: [],
-    refreshed_at: null,
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "cx363-daemon-")));
+  const bumps: string[] = [];
+  const quota = { noteCredentialChange: () => {} };
+  const build = () =>
+    createSetupJobManager({
+      rootDir: root,
+      runnerPath: RUNNER,
+      monitorPollMs: 20,
+      verifyPollMs: 50,
+      terminationGraceMs: options.terminationGraceMs ?? 300,
+      ...(options.loginTimeoutMs ? { loginTimeoutMs: options.loginTimeoutMs } : {}),
+      onCredentialStateMayHaveChanged: (harness) => {
+        bumps.push(harness);
+        bustLoginCredentialState(() => quota as never, { invalidate() {} }, harness);
+      },
+    });
+  let manager = build();
+  await manager.start();
+  // claudexord's binding: observers read the window from the live generation.
+  let bound: Manager | null = manager;
+  bindCredentialMutationWindow((harness) => {
+    if (!bound) throw new Error("setup lifecycle generation is unavailable");
+    return bound.credentialMutationOpen(harness);
   });
-  const quota = { noteCredentialChange: vi.fn(), read: () => emptyQuota, removeSubject: () => 0 };
-  const services = controlServices(
-    undefined as never,
-    undefined as never,
-    undefined as never,
-    { invalidateCredentialProfile: () => ({}), listThreads: () => [] } as never,
-    { current: () => ({ list: () => [] }) } as never,
-    undefined as never,
-    authReadiness as never,
-    undefined as never,
-    (() => quota) as never,
-    async () => [],
-  );
-  const token = "cli-login-invalidation-fixture";
+  const token = "cx363-lifecycle";
   const server = new DaemonControlApiServer({
     token,
     daemon: {
@@ -97,170 +158,344 @@ async function withDaemon<T>(
       list: async () => [],
       cancel: async () => ({ cancelled: true }),
     } as never,
-    services: services as NonNullable<DaemonControlApiOptions["services"]>,
+    services: setupJobControlServices(() => manager) as NonNullable<
+      DaemonControlApiOptions["services"]
+    >,
   });
   const { host, port } = await server.start();
+  const artifact = (name: string) => {
+    const [only] = manager.list({ harness: "cursor" }).slice(-1);
+    return join(root, "setup-artifacts", only!.jobId, name);
+  };
+  const daemon: Daemon = {
+    root,
+    get manager() {
+      return manager;
+    },
+    addr: { baseUrl: `http://${host}:${port}`, token },
+    bumps,
+    job: () => manager.list({ harness: "cursor" }).slice(-1)[0]!,
+    artifact,
+    workerGroup: () =>
+      (
+        JSON.parse(readFileSync(artifact("runner-state.json"), "utf8")) as {
+          processGroup: { pgid: number };
+        }
+      ).processGroup.pgid,
+    restart: async ({ beforeStart } = {}) => {
+      // Logins survive an ordinary daemon stop (v3.0.3 S5).
+      bound = null;
+      await manager.shutdown();
+      manager._store.journal.close();
+      beforeStart?.();
+      manager = build();
+      await manager.start();
+      bound = manager;
+    },
+  };
   try {
-    return await fn({
-      ensureDaemon: async () => ({ addr: { baseUrl: `http://${host}:${port}`, token } }),
-      authReadiness,
-      quota,
-    });
+    return await fn(daemon);
   } finally {
+    bindCredentialMutationWindow(null);
+    for (const job of manager.list({ active: true })) await manager.cancel({ jobId: job.jobId });
+    await manager.shutdown();
+    manager._store.journal.close();
     await server.stop();
   }
 }
 
-type VendorOutcome = { status: number | null; signal: NodeJS.Signals | null; error?: Error };
+let profile: CredentialProfile;
+let prevConfig: string | undefined;
+let configDir: string;
+let interrupt: (() => void) | null;
+const cursor = createCursorAdapter();
 
-/** `claudexor profiles login cursor <id>` whose vendor login ends as given,
- * after rewriting the synthetic store to `nextState`. */
-async function cliLogin(
-  profile: CredentialProfile,
-  ensureDaemon: () => Promise<{ addr: { baseUrl: string; token: string } }>,
-  outcome: VendorOutcome,
-  nextState: string,
-): Promise<{ code: number; order: string[] }> {
-  const order: string[] = [];
-  const row = {
-    profile,
-    status: {
-      profile_id: profile.profile_id,
-      harness_id: "cursor",
-      availability: "unknown",
-      verification: "not_run",
+/** The real `claudexor profiles login cursor a`, attached through the real
+ * setup-attach owner to the built runner. */
+function cliLogin(daemon: Daemon, afterAttach?: () => Promise<void>): Promise<number> {
+  let gets = 0;
+  return profilesCommandWithDeps(parseArgs(["profiles", "login", "cursor", "a"]), false, {
+    daemonGet: async () => {
+      gets += 1;
+      const status =
+        gets === 1
+          ? {
+              profile_id: "a",
+              harness_id: "cursor",
+              availability: "unknown",
+              verification: "not_run",
+            }
+          : await cursor.probeCredentialProfile!(profile);
+      return {
+        profiles: [{ profile, status, identity: null }],
+        harnessAccounts: [],
+        accountPools: [],
+      };
     },
-    identity: null,
-  };
-  const code = await profilesCommandWithDeps(
-    parseArgs(["profiles", "login", "cursor", profile.profile_id]),
-    false,
-    {
-      daemonGet: async () => {
-        order.push("get");
-        return { profiles: [row], harnessAccounts: [], accountPools: [] };
-      },
-      spawnSync: ((binary: string, args: string[]) => {
-        order.push(`spawn ${binary.split("/").pop()} ${args.join(" ")}`);
-        setStore(nextState);
-        return { pid: 0, output: [], stdout: "", stderr: "", ...outcome };
-      }) as never,
-      ensureDaemon: async () => {
-        order.push("daemon");
-        return ensureDaemon();
-      },
+    ensureDaemon: async () => ({ addr: daemon.addr }),
+    attach: async (addr, jobId) => {
+      const code = await attachSetupJob(addr, jobId, {
+        runnerPath: RUNNER,
+        artifactRoot: join(daemon.root, "setup-artifacts"),
+      });
+      await afterAttach?.();
+      return code;
     },
-  );
-  return { code, order };
+    receiptExists: (jobId) =>
+      existsSync(join(daemon.root, "setup-artifacts", jobId, "runner-result.json")),
+    onInterrupt: (handler) => {
+      interrupt = handler;
+      return () => {
+        interrupt = null;
+      };
+    },
+    pollMs: 20,
+  });
 }
 
-const OUTCOMES: Array<[string, VendorOutcome]> = [
-  ["a completed login", { status: 0, signal: null }],
-  ["a failed login", { status: 1, signal: null }],
-  ["an interrupted login", { status: null, signal: "SIGINT" }],
-];
+const permitted = (daemon: Daemon) => () => {
+  const pidFile = vendorFile("login-pid");
+  const pid = existsSync(pidFile) ? Number(readFileSync(pidFile, "utf8").trim()) : 0;
+  return Boolean(daemon.job()?.execution?.permitIssuedAt) && Number.isSafeInteger(pid) && pid > 1;
+};
 
-describe("direct CLI profile login → daemon-owned credential invalidation (#363)", () => {
-  let profile: CredentialProfile;
-  let prevConfig: string | undefined;
-  let configDir: string;
+function seedObservations(): number {
+  preProgressRefusalLedger.noteCredentialChange();
+  preProgressRefusalLedger.record({ harness_id: "cursor", profile_id: "a", requested_model: "m" });
+  credentialUnusableLedger.record({
+    harness_id: "cursor",
+    profile_id: "a",
+    model: null,
+    code: "auth_revoked",
+    source: "attempt_stream",
+    detail: null,
+    observed_at: new Date().toISOString(),
+    expires_at: new Date(Date.now() + 60_000).toISOString(),
+  });
+  modelSubstitutionLedger.record({ harness_id: "cursor", profile_id: "a", requested_model: "m" });
+  return preProgressRefusalLedger.generation("cursor", "a");
+}
+const observationsVoid = () => {
+  expect(preProgressRefusalLedger.live()).toEqual([]);
+  expect(credentialUnusableLedger.live()).toEqual([]);
+  expect(modelSubstitutionLedger.live()).toEqual([]);
+};
 
-  beforeAll(() => writeVendor());
+describe("profiles login as a daemon setup job: credential-mutation window over real processes (#363)", () => {
+  beforeAll(() => {
+    if (!existsSync(RUNNER)) throw new Error(`build @claudexor/cli first: ${RUNNER} is missing`);
+    writeVendor();
+  });
   afterAll(() => rmSync(vendor.dir, { recursive: true, force: true }));
   beforeEach(() => {
     prevConfig = process.env.CLAUDEXOR_CONFIG_DIR;
-    configDir = join(vendor.dir, `config-${Math.random().toString(36).slice(2)}`);
-    mkdirSync(configDir, { recursive: true });
+    configDir = realpathSync(mkdtempSync(join(tmpdir(), "cx363-config-")));
     process.env.CLAUDEXOR_CONFIG_DIR = configDir;
-    rmSync(join(vendor.dir, "calls"), { force: true });
-    setStore("old@example.com");
     profile = registerConfigDirProfile({ harnessId: "cursor", profileId: "a" }).profile;
+    interrupt = null;
     vi.spyOn(console, "log").mockImplementation(() => {});
   });
   afterEach(() => {
     if (prevConfig === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
     else process.env.CLAUDEXOR_CONFIG_DIR = prevConfig;
     vi.restoreAllMocks();
+    rmSync(configDir, { recursive: true, force: true });
   });
 
-  it.each(OUTCOMES)(
-    "%s voids the daemon's evidence and generations before the verification re-read",
-    async (_label, outcome) => {
-      await withDaemon(async ({ ensureDaemon, authReadiness, quota }) => {
-        const refusal = { harness_id: "cursor", profile_id: "a", requested_model: "m" };
-        const sibling = { harness_id: "claude", profile_id: "work", requested_model: "m" };
-        preProgressRefusalLedger.noteCredentialChange();
-        preProgressRefusalLedger.record(refusal);
-        preProgressRefusalLedger.record(sibling);
-        const boundA = preProgressRefusalLedger.generation("cursor", "a");
-        const boundSibling = preProgressRefusalLedger.generation("claude", "work");
-        credentialUnusableLedger.record({
-          harness_id: "cursor",
-          profile_id: "a",
-          model: null,
-          code: "auth_revoked",
-          source: "attempt_stream",
-          detail: null,
-          observed_at: new Date().toISOString(),
-          expires_at: new Date(Date.now() + 60_000).toISOString(),
-        });
-        modelSubstitutionLedger.record({
-          harness_id: "cursor",
-          profile_id: "a",
-          requested_model: "m",
-        });
-
-        const { order } = await cliLogin(profile, ensureDaemon, outcome, "new@example.com");
-
-        // The report reaches the daemon after the vendor exits and BEFORE the
-        // status re-read, whatever the exit.
-        expect(order).toEqual(["get", "spawn cursor-agent login", "daemon", "get"]);
-        // A native login may rewrite an OS-user-scoped store: like a setup-job
-        // login, it voids every account's verdicts and moves every generation.
-        expect(preProgressRefusalLedger.live()).toEqual([]);
-        expect(preProgressRefusalLedger.generation("cursor", "a")).toBeGreaterThan(boundA);
-        expect(preProgressRefusalLedger.generation("claude", "work")).toBeGreaterThan(boundSibling);
-        expect(credentialUnusableLedger.live()).toEqual([]);
-        expect(modelSubstitutionLedger.live()).toEqual([]);
-        expect(authReadiness.invalidate).toHaveBeenCalledWith("cursor");
-        expect(quota.noteCredentialChange).toHaveBeenCalled();
+  it("a completed login voids everything observed before it and is verified by the daemon", async () => {
+    await withDaemon({}, async (daemon) => {
+      scriptVendor("old@example.com", "complete");
+      // A positive answer from BEFORE the login is live and reused.
+      expect(await cursor.probeCredentialProfile!(profile)).toMatchObject({
+        verification: "passed",
       });
-    },
-  );
-
-  it("a positive status answer from before the login is never reused after it", async () => {
-    await withDaemon(async ({ ensureDaemon }) => {
-      const cursor = createCursorAdapter();
-      const before = await cursor.probeCredentialProfile!(profile);
-      expect(before).toMatchObject({ availability: "available", verification: "passed" });
-      // The reuse window is live: a second ask does not spawn the vendor.
       await cursor.probeCredentialProfile!(profile);
       expect(statusCalls()).toBe(1);
-      // An unsuccessful login still rewrote the store (here: signed it out).
-      const { code } = await cliLogin(profile, ensureDaemon, { status: 1, signal: null }, "out");
-      expect(code).toBe(1);
-      const after = await cursor.probeCredentialProfile!(profile);
-      expect(statusCalls()).toBe(2);
-      expect(after).toMatchObject({ availability: "unavailable", verification: "not_run" });
+      const boundBefore = seedObservations();
+
+      expect(await cliLogin(daemon)).toBe(0);
+      expect(daemon.job()).toMatchObject({
+        state: "succeeded",
+        transport: "client_pty",
+        profileId: "a",
+        nativeCommand: { commandStarted: true, exitCode: 0, signal: null },
+      });
+      // Window entry at the permit, close at the receipt-proven end.
+      expect(daemon.bumps).toEqual(["cursor", "cursor"]);
+      expect(credentialMutationWindowOpen("cursor")).toBe(false);
+      observationsVoid();
+      expect(preProgressRefusalLedger.generation("cursor", "a")).toBeGreaterThan(boundBefore);
+      // After the window: the new store is read and reused as usual.
+      const calls = statusCalls();
+      expect(await cursor.probeCredentialProfile!(profile)).toMatchObject({
+        verification: "passed",
+      });
+      expect(statusCalls()).toBe(calls); // the post-login re-read already asked it
     });
   });
 
-  it("a status probe in flight across the login cannot restore its old answer", async () => {
-    await withDaemon(async ({ ensureDaemon }) => {
-      const cursor = createCursorAdapter();
-      // The probe starts on the old credential and is still running when the
-      // login ends and the daemon invalidates.
-      setStore("old@example.com", 1);
-      const inFlight = cursor.probeCredentialProfile!(profile);
-      await until(() => statusCalls() === 1);
-      await cliLogin(profile, ensureDaemon, { status: 0, signal: null }, "out");
-      const stale = await inFlight;
-      expect(stale.verification).not.toBe("passed");
-      expect(stale.availability).toBe("unknown");
-      // Its answer seeded nothing: the next ask spawns and reads the new store.
-      const after = await cursor.probeCredentialProfile!(profile);
-      expect(statusCalls()).toBe(2);
-      expect(after).toMatchObject({ availability: "unavailable" });
+  it("observations made DURING the login are answered live and kept by nothing", async () => {
+    await withDaemon({}, async (daemon) => {
+      scriptVendor("old@example.com", "during");
+      await cursor.probeCredentialProfile!(profile);
+      const login = cliLogin(daemon);
+      await until("the vendor to be mid-login", () => existsSync(vendorFile("login-mid")));
+      expect(daemon.bumps).toEqual(["cursor"]);
+      expect(credentialMutationWindowOpen("cursor")).toBe(true);
+      // Live answers, no reuse: each ask spawns the vendor's status.
+      const before = statusCalls();
+      const mid = await cursor.probeCredentialProfile!(profile);
+      await cursor.probeCredentialProfile!(profile);
+      expect(mid).toMatchObject({ availability: "available" });
+      expect(statusCalls()).toBe(before + 2);
+      // No ledger accepts an observation about the credential in flux.
+      expect(Number.isNaN(preProgressRefusalLedger.generation("cursor", "a"))).toBe(true);
+      seedObservations();
+      observationsVoid();
+
+      writeFileSync(vendorFile("release"), "");
+      expect(await login).toBe(0);
+      expect(daemon.bumps).toEqual(["cursor", "cursor"]);
+      expect(credentialMutationWindowOpen("cursor")).toBe(false);
+      expect(Number.isNaN(preProgressRefusalLedger.generation("cursor", "a"))).toBe(false);
     });
   });
+
+  it("Ctrl-C cancels through the daemon, which proves the vendor's group empty before closing (SIGINT)", async () => {
+    await withDaemon({}, async (daemon) => {
+      scriptVendor("old@example.com", "hang");
+      const login = cliLogin(daemon);
+      await until("the vendor login to run", permitted(daemon));
+      const vendorPid = Number(readFileSync(vendorFile("login-pid"), "utf8"));
+      const bootstrap = Number(
+        execFileSync("ps", ["-o", "ppid=", "-p", String(daemon.workerGroup())])
+          .toString()
+          .trim(),
+      );
+      // The terminal's SIGINT reaches its foreground group: this client and the
+      // attached bootstrap runner. The detached worker and vendor never see it.
+      process.kill(bootstrap, "SIGINT");
+      interrupt!();
+      expect(await login).toBe(130);
+      expect(daemon.job()).toMatchObject({
+        state: "cancelled",
+        outcome: { reason: "cancelled_by_user" },
+      });
+      expect(alive(vendorPid)).toBe(false);
+      expect(daemon.bumps).toEqual(["cursor", "cursor"]);
+      expect(credentialMutationWindowOpen("cursor")).toBe(false);
+    });
+  });
+
+  it("the monitor settles a SIGKILLed runner group before the client resumes", async () => {
+    await withDaemon({}, async (daemon) => {
+      scriptVendor("old@example.com", "hang");
+      const login = cliLogin(daemon, () =>
+        until(
+          "the monitor to prove group death",
+          () => daemon.job()?.outcome?.reason === "interrupted",
+        ),
+      );
+      await until("the vendor login to run", permitted(daemon));
+      const vendorPid = Number(readFileSync(vendorFile("login-pid"), "utf8"));
+      process.kill(-daemon.workerGroup(), "SIGKILL");
+      expect(await login).toBe(1);
+      const job = daemon.job();
+      expect(job).toMatchObject({ state: "failed", outcome: { reason: "interrupted" } });
+      expect(job.nativeCommand).toBeUndefined();
+      expect(alive(vendorPid)).toBe(false);
+      expect(daemon.bumps).toEqual(["cursor", "cursor"]);
+      expect(credentialMutationWindowOpen("cursor")).toBe(false);
+    });
+  });
+
+  it("the client's death closes nothing: the daemon holds the window until the vendor's receipt", async () => {
+    await withDaemon({}, async (daemon) => {
+      scriptVendor("old@example.com", "during");
+      const create = await controlApiFetch(daemon.addr, "/setup/jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          harness: "cursor",
+          action: "login",
+          authRequest: "subscription",
+          profileId: "a",
+          transport: "client_pty",
+        }),
+      });
+      expect(create.ok).toBe(true);
+      const { jobId } = (await create.json()) as { jobId: string };
+      // A client attaches exactly as `setup attach` does, then is SIGKILLed.
+      const client = spawn(
+        process.execPath,
+        [RUNNER, join(daemon.root, "setup-artifacts", jobId, "runner-manifest.json")],
+        {
+          stdio: "ignore",
+        },
+      );
+      await until("the vendor to be mid-login", () => existsSync(vendorFile("login-mid")));
+      client.kill("SIGKILL");
+      await new Promise((r) => client.once("exit", r));
+      await new Promise((r) => setTimeout(r, 200)); // several monitor ticks
+      expect(daemon.job()).toMatchObject({ state: "waiting_for_input", phase: "awaiting_user" });
+      expect(credentialMutationWindowOpen("cursor")).toBe(true);
+      expect(daemon.bumps).toEqual(["cursor"]);
+      // The vendor itself finishes: its receipt, not the client, ends the window.
+      writeFileSync(vendorFile("release"), "");
+      await until("the job to finish", () => TERMINAL.includes(daemon.job().state));
+      expect(daemon.job().state).toBe("succeeded");
+      expect(daemon.bumps).toEqual(["cursor", "cursor"]);
+      expect(credentialMutationWindowOpen("cursor")).toBe(false);
+    });
+  });
+
+  it("a restart never proves completion: a live login stays open, a dead one closes on proof", async () => {
+    await withDaemon({}, async (daemon) => {
+      scriptVendor("old@example.com", "hang");
+      const login = cliLogin(daemon);
+      await until("the vendor login to run", permitted(daemon));
+      const vendorPid = Number(readFileSync(vendorFile("login-pid"), "utf8"));
+      // Between generations the lifecycle is unbound: observers read it open.
+      await daemon.restart({
+        beforeStart: () => expect(credentialMutationWindowOpen("cursor")).toBe(true),
+      });
+      // The successor re-proved the live worker and adopted it: still open,
+      // and the restart itself invalidated nothing.
+      expect(daemon.job()).toMatchObject({ state: "waiting_for_input" });
+      expect(credentialMutationWindowOpen("cursor")).toBe(true);
+      expect(daemon.bumps).toEqual(["cursor"]);
+      // The runner group dies while the daemon is down: the next successor
+      // finds it empty with no receipt and closes the window on that proof.
+      const group = daemon.workerGroup();
+      await daemon.restart({ beforeStart: () => process.kill(-group, "SIGKILL") });
+      await until("the successor to settle", () => TERMINAL.includes(daemon.job().state));
+      expect(daemon.job()).toMatchObject({
+        state: "cancelled",
+        outcome: { reason: "cancelled_on_restart" },
+      });
+      expect(alive(vendorPid)).toBe(false);
+      expect(daemon.bumps).toEqual(["cursor", "cursor"]);
+      expect(credentialMutationWindowOpen("cursor")).toBe(false);
+      expect(await login).toBe(1);
+    });
+  });
+
+  it("a deadline alone never closes the window: only the proven death of a stubborn vendor does", async () => {
+    await withDaemon({ loginTimeoutMs: 1_500, terminationGraceMs: 2_000 }, async (daemon) => {
+      scriptVendor("old@example.com", "stubborn");
+      const login = cliLogin(daemon);
+      await until("the vendor login to run", permitted(daemon));
+      const vendorPid = Number(readFileSync(vendorFile("login-pid"), "utf8"));
+      // Past the deadline the daemon is TERMinating a vendor that ignores it.
+      await until("termination to begin", () => daemon.job().phase === "cancelling");
+      expect(Date.now()).toBeGreaterThanOrEqual(Date.parse(daemon.job().deadlineAt!));
+      expect(credentialMutationWindowOpen("cursor")).toBe(true);
+      expect(daemon.bumps).toEqual(["cursor"]);
+      expect(await login).toBe(1);
+      expect(daemon.job()).toMatchObject({ state: "timed_out", outcome: { reason: "timed_out" } });
+      expect(alive(vendorPid)).toBe(false);
+      expect(daemon.bumps).toEqual(["cursor", "cursor"]);
+      expect(credentialMutationWindowOpen("cursor")).toBe(false);
+    });
+  }, 20_000);
 });

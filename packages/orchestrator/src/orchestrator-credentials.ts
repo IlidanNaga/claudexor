@@ -244,7 +244,11 @@ export class OrchestratorCredentials {
         quota: this.vendorQuotaObservations(),
         transients,
         probe: adapter.probeCredentialProfile?.bind(adapter),
-        record: (obs) => this.host.recordCredentialUnusable(obs),
+        // #363: a verdict about a credential the try no longer holds — a
+        // login or profile change landed since it spawned — is not recorded.
+        record: (obs) => {
+          if (refusal?.current() ?? true) this.host.recordCredentialUnusable(obs);
+        },
       }),
       liveUnusable: this.host.credentialUnusable(),
       notePreProgressRefusal: () => refusal?.note(),

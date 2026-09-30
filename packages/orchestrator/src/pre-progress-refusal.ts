@@ -31,6 +31,9 @@ export interface PreProgressRefusalMemory {
 export interface PreProgressRefusalSubject {
   note(): void;
   noteServed(markers: AttemptOutputMarkers, delivered: boolean): void;
+  /** The account's credential is still the generation this try bound: no
+   * credential change since, and no login window open now. */
+  current(): boolean;
 }
 
 /**
@@ -86,6 +89,7 @@ export function preProgressRefusalSubject(
         memory.clear(harnessId, profile.profile_id, requestedModel);
       }
     },
+    current: unchanged,
   };
 }
 

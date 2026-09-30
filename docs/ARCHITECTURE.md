@@ -726,10 +726,16 @@ is coordinated the same way: concurrent reads of one row store — keyed by the
 auth-selecting `HOME`/`USERPROFILE`/`XDG_CONFIG_HOME`/`APPDATA`, so admission
 and a spawn with a lane state HOME share it — share one child, and a POSITIVE
 answer is reused as fresh for at most one minute, keeping the instant the
-vendor gave it as `last_verified_at`. A probe that did not answer is never
-cached: a child killed at its ten-second budget reports `did not answer within
-10s (…); login state unknown`, which is `unknown + not_run`, never a logout and
-never a pass. Its stale path serves the other side of routing (the INV-135
+vendor gave it as `last_verified_at`. Age uses a suspend-inclusive monotonic
+clock; Linux uptime's possible one-second quantization is conservatively
+bounded, so an observation can expire less than two seconds early. Wall time
+only stamps the observation, never extends its lifetime. Every age is measured on the monotonic
+clock; the wall clock only stamps that instant, so a clock step can neither
+keep an answer alive nor expire it. A probe that did not answer is never
+cached: a child killed by the probe's OWN ten-second budget timer reports
+`did not answer within 10s (…); login state unknown`, which is
+`unknown + not_run`, never a logout and never a pass — a caller's
+cancellation or a kill from outside is a plain unknown, not a timeout. Its stale path serves the other side of routing (the INV-135
 #363 amendment): only such a timeout, while the store's last positive answer is
 under five minutes old, projects that answer as `stale: true` with
 `stale_basis: last_positive_after_timeout`, its `stale_age_ms`, a detail naming
@@ -738,8 +744,12 @@ UNPINNED choices only — a bound row, the pool, rotation and `next_up` — neve
 an explicit pin (a pin whose probe timed out is still refused), while the
 generic grace above still serves only a selected route. A logged-out answer
 from the store drops its positive, as do Claudexor-handled credential
-mutations (including an in-flight probe); any other unknown answer never
-consults it, and no file in the row HOME is read as a substitute. The
+mutations (including an in-flight probe), and while a Claudexor-managed
+Cursor login's credential-mutation window is open (see the profile-login
+note under [Design constraints](#design-constraints)) the coordinator
+answers live and neither reuses, retains nor leans on any positive; any
+other unknown answer never consults it, and no file in the row HOME is read
+as a substitute. The
 adapter's spawn-time route check applies the same split. The engine stamps
 each spec whose row was an unpinned choice (a bound row, the pool, rotation, an
 unpinned or automatic reviewer seat) with that row's id in `spec.extra`; the
@@ -930,7 +940,10 @@ harness, row and requested model (the harness default model is its own key),
 lives in daemon memory for one hour, and clears when a later try on that row and
 model makes agent progress or ends cleanly, or on a credential-generation
 change. A try binds its row's credential generation before it spawns, so an
-outcome arriving after such a change neither records nor clears a mark. When
+outcome arriving after such a change neither records nor clears a mark; while
+a login of that harness holds its credential-mutation window the generation is
+no number at all, so a try bound before or inside the window never records or
+clears one (#363). When
 the default route is not ready and no registered row admits a
 lane, the lane refusal names every row with its own observed readiness
 (`<harness> has no ready account (<row>: <detail>; …)`) instead of the default
@@ -968,9 +981,10 @@ fresh vendor session with the thread's continuation packet instead of
 resuming a sibling's. `claudexor profiles login
 <harness> <id>` runs the vendor login with the named binding's exact scoped
 environment: codex rides the SAME durable device-code setup job as the default
-login (D-17); the other harnesses run the vendor command interactively in this
-terminal and then report the possible credential change to the daemon (see
-the profile-login note under [Design constraints](#design-constraints)).
+login (D-17); Cursor runs the vendor command in this terminal through a
+`client_pty` setup job and the existing `setup attach` owner. Claude/AGY keep
+their direct scoped terminal flow (see the profile-login note under
+[Design constraints](#design-constraints)).
 Credential custody remains an effective platform fact, so a scoped
 HOME may select Claudexor-owned vendor state without representing a separate
 OS-user credential.
@@ -1137,7 +1151,10 @@ clearing contract is threefold: bounded self-expiry (24h hard cap;
 entitlement/probe verdicts expire within the hour), a served model response
 for the same subject (wired where usage events already feed the quota
 registry), and any credential-generation change (login/logout/profile
-mutation). Consumption is one composition point: `readyProfilesForRotation`
+mutation). Nothing is recorded while a login of that harness holds its
+credential-mutation window, and a subscription row's verdict is recorded only
+while the credential its try bound is still current (#363). Consumption is one
+composition point: `readyProfilesForRotation`
 refuses a candidate a live observation condemns (model-scoped observations
 refuse only their own model), exhaustion rows name it typed
 (`rejected: credential_unusable`, never hidden behind `not_ready`), and the
@@ -1697,8 +1714,9 @@ is the caller's decision. The same composition point records a
 `ModelSubstitutionObservation` in the daemon's in-memory
 `ModelSubstitutionLedger`: bounded, newest-wins per account and requested model,
 kept for 30 minutes (observation retention, not a vendor reset time), never
-cleared by a later success, and voided with the credential generation at the
-unusable ledger's call sites. While one is live, Auto selection for that
+cleared by a later success, voided with the credential generation at the
+unusable ledger's call sites, and never recorded while a login of that harness
+holds its credential-mutation window (#363). While one is live, Auto selection for that
 requested model ranks the account after every other selectable account, oldest
 observation first, so a fully marked pool takes turns. The observation never
 excludes an account or exhausts a pool, and a pin or a usable preferred account
@@ -1763,7 +1781,6 @@ validator dump, and validates the per-run SSE cursor as a nonnegative integer
 - `POST /v2/credential-profiles`
 - `DELETE /v2/credential-profiles/:harness/:profileId`
 - `PATCH /v2/credential-profiles/:harness/:profileId`
-- `POST /v2/credential-profiles/:harness/:profileId/credential-change`
 - `GET /v2/filesystem/directories`
 - `GET /v2/global/events`
 - `POST /v2/handshake`
@@ -4341,23 +4358,51 @@ code touching one of these areas must honor it or change it explicitly here.
   first-wins auth-route receipt would misvalue metered usage as subscription
   entitlement against a finite cash cap. `nextEligibleProfile` skips
   cross-kind candidates; rotate between accounts of the SAME transport only.
-- `claudexor profiles login` for non-codex harnesses deliberately spawns the
-  vendor's own login command IN the operator's terminal (no daemon setup
-  job): vendor OAuth needs the user's TTY/browser interactively, and the
-  binding's Claudexor-owned HOME/config root scopes vendor state. Credential
-  custody remains platform-defined and may be OS-user-owned; Claudexor neither
-  reads nor copies it. There is no daemon setup receipt to journal, but the
-  observations the login can outdate live in the daemon: once the vendor
-  exits, whatever its exit, the CLI reports
-  `POST /v2/credential-profiles/:harness/:profileId/credential-change` and
-  the daemon runs the same login-lifecycle invalidation as a setup-job login
-  (every reused status answer and credential-ledger mark, every account's
-  credential generation, the harness's auth readiness; #363); a refused
-  report fails the command. The post-exit vendor doctor probe under the exact
-  binding environment is then the verification truth (exit code non-zero
-  unless the probe passes). Codex
-  profile login is the D-17
-  exception: it rides the SAME durable app-server device-code setup job as
-  the default codex login (restart-surviving runner, transient sidecar,
-  in-app/inline code disclosure), because the app-server flow needs no TTY. The daemon-owned setup jobs remain the path for
-  non-interactive/GUI-driven logins.
+- `claudexor profiles login cursor <id>` runs the vendor's own login in the
+  operator's terminal through the daemon's existing `client_pty` setup job.
+  The CLI reads the registered binding, creates its job and uses the sealed
+  manifest, one-use attachment and built runner. Vendor state remains in the
+  binding's scoped store; Claudexor neither reads nor copies credentials.
+  Claude/AGY profile login keeps its direct vendor terminal path, including
+  its known delayed-observation limitation (BACKLOG W-f). Non-Codex
+  `profiles login --json` refuses before preparing or starting a login.
+  Codex retains its durable device-code flow; GUI/non-interactive login uses
+  the existing setup API.
+- The setup journal owns the credential-mutation window from durable permit
+  through terminal verification. A hash-bound runner result or a positively
+  empty recorded process group establishes the command's end. Fresh profile
+  verification runs while the window remains open; terminalization closes it.
+  The existing monitor also settles a proven-empty group with no receipt as
+  interrupted, after checking once more for a result published during that
+  proof. A missing sidecar never releases a permitted job. An unattached
+  reservation without permission remains replaceable. A bound pre-command
+  failure is a launch failure; actual unknown termination retains custody.
+  Physical executable bytes are checked before permission; an already
+  permitted vendor's self-update does not invalidate its original sealed
+  command and recorded process identity.
+- Opening and closing each invalidate the process-wide caches, ledger marks
+  and credential generations plus that harness's auth readiness. While its
+  window is open, the Cursor status coordinator and Claude LKG neither reuse
+  nor retain observations; fresh probes still answer and may admit work.
+  Refusal marks and subscription-row unusable callbacks are generation-bound.
+  The aggregate doctor/status projections are invalidated at the transitions;
+  they can show an intermediate observation until close. Pre-existing late
+  model-substitution callbacks and default/API-key unusable callbacks do not
+  gain a new cross-generation guarantee. Descendants outliving a valid runner
+  receipt remain outside the command-completion proof. An unreadable bound
+  journal reads open; restart alone proves no closure. The hold is per harness,
+  not a blanket admission ban. A genuinely unconfirmed group still needs the
+  existing proof-based reconciliation.
+- The Cursor CLI requests cancellation on Ctrl-C, SIGHUP and SIGTERM. A lost
+  attachment without a runner receipt also requests cancellation; failed
+  delivery is visible and custody stays with the daemon. An already-attached
+  or fenced job names its id and the full CLI's `setup cancel <jobId>` and
+  `setup reconcile <jobId>` commands, which call the existing API. Cancellation
+  is asynchronous and reconcile requires positive termination evidence; these
+  commands do not claim that request acceptance means a finished login.
+  The packaged daemon's alternate `setup attach` role stays attach-only.
+  A hard-killed client cannot cancel; a live vendor retains its job until its
+  own result, explicit cancellation or the existing deadline. A permitted
+  historical unconfirmed row without provable group evidence remains a
+  disclosed recovery limitation. The interactive CLI exits zero only for a
+  succeeded verified job, or 130 after its handled interruption.

@@ -1,21 +1,20 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, describe, expect, it, vi } from "vitest";
-import { loadConfig } from "@claudexor/config";
-import { DaemonControlApiServer, type DaemonControlApiOptions } from "@claudexor/control-api";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { HarnessAdapter } from "@claudexor/core";
-import { credentialProfileUnpinned, runCapture } from "@claudexor/core";
+import {
+  bindCredentialMutationWindow,
+  credentialProfileUnpinned,
+  runCapture,
+} from "@claudexor/core";
 import { PreProgressRefusalLedger, type QuotaRegistry } from "@claudexor/daemon";
 import { Orchestrator } from "@claudexor/orchestrator";
-import { ConformanceReport, ControlQuotaResponse, HarnessManifest } from "@claudexor/schema";
-import { noProjectRepoRoot } from "@claudexor/util";
-import { parseArgs } from "./args.js";
-import { controlServices } from "./control-services.js";
-import { profilesCommandWithDeps } from "./credential-commands.js";
+import { ConformanceReport, HarnessManifest } from "@claudexor/schema";
 import {
   bustCredentialStatusCaches,
   bustGlobalCredentialStatusCaches,
+  bustLoginCredentialState,
 } from "./credential-status-invalidation.js";
 import { preProgressRefusalLedger } from "./run-orchestrator.js";
 
@@ -210,76 +209,32 @@ const noQuota = () => ({ noteCredentialChange() {} }) as unknown as QuotaRegistr
 const mutateAccountA = () =>
   bustCredentialStatusCaches(noQuota, { harnessId: "stub", profileId: "a" });
 
-/** `claudexor profiles login cursor c` whose vendor login FAILED — it may still
- * have rewritten a credential — reporting through the real control route to
- * the real daemon services on an ephemeral loopback port (#363). The CLI never
- * clears anything in its own process. */
-async function cliProfileLogin(): Promise<void> {
-  const configDir = process.env.CLAUDEXOR_CONFIG_DIR as string;
-  const bin = join(configDir, "cursor-agent");
-  writeFileSync(bin, "#!/bin/sh\nexit 1\n");
-  chmodSync(bin, 0o755);
-  const previousBin = process.env.CLAUDEXOR_CURSOR_BIN;
-  process.env.CLAUDEXOR_CURSOR_BIN = bin;
-  const emptyQuota = ControlQuotaResponse.parse({
-    snapshots: [],
-    absences: [],
-    refreshed_at: null,
-  });
-  const services = controlServices(
-    undefined as never,
-    undefined as never,
-    undefined as never,
-    { invalidateCredentialProfile: () => ({}), listThreads: () => [] } as never,
-    { current: () => ({ list: () => [] }) } as never,
-    undefined as never,
-    { invalidate() {} } as never,
-    undefined as never,
-    (() => ({ noteCredentialChange() {}, read: () => emptyQuota })) as never,
-    async () => [],
-  );
-  const token = "pre-progress-cli-login";
-  const server = new DaemonControlApiServer({
-    token,
-    daemon: {
-      enqueue: async () => ({ id: "unused", state: "queued" }),
-      status: async (id: string) => ({ id, state: "failed" }),
-      list: async () => [],
-      cancel: async () => ({ cancelled: true }),
-    } as never,
-    services: services as NonNullable<DaemonControlApiOptions["services"]>,
-  });
-  const { host, port } = await server.start();
-  const log = vi.spyOn(console, "log").mockImplementation(() => {});
-  try {
-    const profile = loadConfig(noProjectRepoRoot()).global.credential_profiles.find(
-      (entry) => entry.harness_id === "cursor",
-    );
-    const status = {
-      profile_id: "c",
-      harness_id: "cursor",
-      availability: "unknown",
-      verification: "not_run",
-    };
-    await profilesCommandWithDeps(parseArgs(["profiles", "login", "cursor", "c"]), false, {
-      daemonGet: async () => ({ profiles: [{ profile, status, identity: null }] }),
-      spawnSync: (() => ({
-        pid: 0,
-        output: [],
-        stdout: "",
-        stderr: "",
-        status: 1,
-        signal: null,
-      })) as never,
-      ensureDaemon: async () => ({ addr: { baseUrl: `http://${host}:${port}`, token } }),
-    });
-  } finally {
-    log.mockRestore();
-    await server.stop();
-    if (previousBin === undefined) delete process.env.CLAUDEXOR_CURSOR_BIN;
-    else process.env.CLAUDEXOR_CURSOR_BIN = previousBin;
-  }
-}
+/** A setup-job login window on the stub harness (#363): the daemon's durable
+ * setup lifecycle opens it at the execution permit and closes it at the
+ * vendor's proven death, running the real login-lifecycle invalidation at each
+ * transition; in between, every process-local observer reads it open. */
+let loginWindowOpen = false;
+const noReadiness = { invalidate() {} };
+const loginWindow = {
+  open() {
+    loginWindowOpen = true;
+    bustLoginCredentialState(noQuota, noReadiness, "stub");
+  },
+  close() {
+    loginWindowOpen = false;
+    bustLoginCredentialState(noQuota, noReadiness, "stub");
+  },
+};
+const setupJobLogin = () => {
+  loginWindow.open();
+  loginWindow.close();
+};
+beforeAll(() =>
+  bindCredentialMutationWindow(
+    (harness) => loginWindowOpen && (harness === undefined || harness === "stub"),
+  ),
+);
+afterAll(() => bindCredentialMutationWindow(null));
 
 for (const lane of ["ask", "agent"] as const) {
   describe(`pre-progress refusal carries across unpinned runs (${lane} lane, #363)`, () => {
@@ -335,7 +290,7 @@ for (const lane of ["ask", "agent"] as const) {
     it.each([
       ["a profile mutation", mutateAccountA],
       ["a login or logout", () => bustGlobalCredentialStatusCaches(noQuota)],
-      ["a direct CLI profile login", cliProfileLogin],
+      ["a setup-job login (window entry, proven close)", setupJobLogin],
     ])(
       "a refusal that ends after %s does not recreate the mark it voided",
       async (_label, mutate) => {
@@ -357,7 +312,7 @@ for (const lane of ["ask", "agent"] as const) {
 
     it.each([
       ["a profile mutation", mutateAccountA],
-      ["a direct CLI profile login", cliProfileLogin],
+      ["a setup-job login (window entry, proven close)", setupJobLogin],
     ])(
       "a served try that ends after %s cannot clear the changed credential's mark",
       async (_label, mutate) => {
@@ -390,6 +345,33 @@ for (const lane of ["ask", "agent"] as const) {
         });
       },
     );
+
+    it("a try whose refusal lands inside an open login window, or that starts inside one, records nothing", async () => {
+      await withTwoAccountPool(async () => {
+        const ledger = preProgressRefusalLedger;
+        ledger.noteCredentialChange();
+        const refusing = { a: "refuse_after_start", b: "serve" } as const;
+        try {
+          // The window opens while `a`'s session is in flight; the old
+          // session is refused before progress while it is still open.
+          const first = await run(lane, ledger, refusing, undefined, {
+            a: () => loginWindow.open(),
+          });
+          expect(first.spawns).toEqual(["a", "b"]);
+          expect(first.lifecycle).toBe("succeeded");
+          expect(marks(ledger)).toEqual([]);
+          // A try bound INSIDE the window is about a credential in flux too.
+          const inside = await run(lane, ledger, refusing);
+          expect(inside.spawns).toEqual(["a", "b"]);
+          expect(marks(ledger)).toEqual([]);
+        } finally {
+          loginWindow.close();
+        }
+        // After the proven close the account's refusals count again.
+        await run(lane, ledger, refusing);
+        expect(marks(ledger)).toEqual([["stub", "a", null]]);
+      });
+    });
 
     it("every spawn, rotated or not, carries the engine's pin fact to the adapter", async () => {
       await withTwoAccountPool(async () => {

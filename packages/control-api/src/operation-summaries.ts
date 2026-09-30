@@ -24,8 +24,6 @@ export const OPERATION_SUMMARIES: Record<string, string> = {
   "PATCH /v2/credential-profiles/:harness/:profileId":
     "Toggle a credential profile's enabled state (the accounts Enabled row).",
   "DELETE /v2/credential-profiles/:harness/:profileId": "Delete a harness credential profile.",
-  "POST /v2/credential-profiles/:harness/:profileId/credential-change":
-    "Report that a client-run native login for this profile ended (any exit); the daemon voids its credential observations like a setup-job login.",
   "POST /v2/accounts-migration/rollback":
     "Reverse the unified-accounts startup migration (the supported downgrade path): continuity keys return to the engine default and the auto-registered row leaves the registry.",
   "GET /v2/harnesses": "List installed harnesses and their availability.",

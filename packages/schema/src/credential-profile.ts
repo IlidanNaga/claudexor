@@ -546,26 +546,6 @@ export type ControlCredentialProfileDeleteResponse = z.infer<
   typeof ControlCredentialProfileDeleteResponse
 >;
 
-/** POST /credential-profiles/:harness/:id/credential-change — a client ran this
- * profile's native login in its own terminal (`claudexor profiles login`) and
- * reports that the credential may have changed, whatever the vendor's exit. The
- * daemon owns every observation that login can outdate, so it runs the same
- * login-lifecycle invalidation as a setup-job login (#363). */
-export const ControlCredentialProfileCredentialChangeResponse = z
-  .object({
-    profile: CredentialProfile.describe("The registry entry the reported login targeted."),
-    voided: z
-      .literal("all_accounts")
-      .describe(
-        "A native login may rewrite an OS-user-scoped store, so the daemon voided every account's reused status answers and credential-ledger marks and moved every account's credential generation, not only this profile's.",
-      ),
-  })
-  .strict()
-  .describe("Receipt for a client-reported native-login credential change.");
-export type ControlCredentialProfileCredentialChangeResponse = z.infer<
-  typeof ControlCredentialProfileCredentialChangeResponse
->;
-
 export const ControlCredentialProfileCreateResponse = z
   .object({ profile: CredentialProfile, status: CredentialProfileStatus })
   .strict()

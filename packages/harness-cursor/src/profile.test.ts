@@ -472,7 +472,9 @@ describe("Cursor config-dir credential profiles (INV-135)", () => {
       let next: CursorStatusObservation = { kind: "authenticated" };
       const coordinator = createCursorStatusCoordinator({
         probe: async () => next,
-        nowMs: () => now,
+        monotonicMs: () => now,
+        wallMs: () => now,
+        mutating: () => false,
       });
       const timeout: CursorStatusObservation = {
         kind: "unknown",

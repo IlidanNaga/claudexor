@@ -1,3 +1,4 @@
+import { credentialMutationWindowOpen } from "@claudexor/core";
 import type { ModelSubstitutionObservation } from "@claudexor/schema";
 import { ModelSubstitutionObservation as ModelSubstitutionObservationSchema } from "@claudexor/schema";
 
@@ -36,15 +37,22 @@ const MAX_ROWS = 64;
  *    generation, at the unusable ledger's call sites: a login/logout clears the
  *    WHOLE ledger (`noteCredentialChange`), a control-API profile mutation
  *    clears PER SUBJECT (`clearSubject`). A secret mutation names no subject
- *    here — model operations admit managed-login rows only.
+ *    here — model operations admit managed-login rows only;
+ * 4. no mark is recorded while a login may be rewriting that harness's
+ *    credential store (the daemon's setup-lifecycle window, #363); the
+ *    window's close clears the ledger.
  */
 export class ModelSubstitutionLedger {
   private rows = new Map<string, ModelSubstitutionObservation>();
 
-  constructor(private readonly now: () => Date = () => new Date()) {}
+  constructor(
+    private readonly now: () => Date = () => new Date(),
+    private readonly mutating: (harnessId: string) => boolean = credentialMutationWindowOpen,
+  ) {}
 
   /** Validate and stamp, newest-wins per (subject, requested model). */
   record(value: Omit<ModelSubstitutionObservation, "observed_at" | "expires_at">): void {
+    if (this.mutating(value.harness_id)) return;
     const at = this.now().getTime();
     const obs = ModelSubstitutionObservationSchema.parse({
       ...value,

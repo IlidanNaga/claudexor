@@ -1,3 +1,4 @@
+import { credentialMutationWindowOpen } from "@claudexor/core";
 import type { PreProgressRefusalObservation } from "@claudexor/schema";
 import { PreProgressRefusalObservation as PreProgressRefusalObservationSchema } from "@claudexor/schema";
 
@@ -35,7 +36,11 @@ const MAX_ROWS = 64;
  *    clears PER SUBJECT (`clearSubject`). Neither waits for runs in flight, so
  *    each also moves the account's `generation`: a try binds it before its
  *    session spawns, and an outcome that arrives after a change neither
- *    recreates a voided mark nor clears the changed credential's newer one.
+ *    recreates a voided mark nor clears the changed credential's newer one;
+ * 4. while a login may be rewriting the harness's credential store (the
+ *    daemon's setup-lifecycle window), the generation is NO number at all: a
+ *    try bound inside the window, or one whose outcome lands inside it, is
+ *    about a credential in flux and neither records nor clears (#363).
  */
 export class PreProgressRefusalLedger {
   private rows = new Map<string, PreProgressRefusalObservation>();
@@ -45,10 +50,14 @@ export class PreProgressRefusalLedger {
   private everyAccountChangedAt = 0;
   private accountChangedAt = new Map<string, number>();
 
-  constructor(private readonly now: () => Date = () => new Date()) {}
+  constructor(
+    private readonly now: () => Date = () => new Date(),
+    private readonly mutating: (harnessId: string) => boolean = credentialMutationWindowOpen,
+  ) {}
 
   /** Validate and stamp, newest-wins per (subject, requested model). */
   record(value: Omit<PreProgressRefusalObservation, "observed_at" | "expires_at">): void {
+    if (this.mutating(value.harness_id)) return;
     const at = this.now().getTime();
     const obs = PreProgressRefusalObservationSchema.parse({
       ...value,
@@ -82,6 +91,8 @@ export class PreProgressRefusalLedger {
   /** The account's credential generation: it moves only when a credential
    * change voids the account's verdicts, never with evidence or expiry. */
   generation(harnessId: string, profileId: string): number {
+    // NaN equals nothing, itself included: a window-bound try never matches.
+    if (this.mutating(harnessId)) return Number.NaN;
     return Math.max(
       this.everyAccountChangedAt,
       this.accountChangedAt.get(accountKey(harnessId, profileId)) ?? 0,

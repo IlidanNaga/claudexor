@@ -45,7 +45,6 @@ import { buildAgentCapabilityCatalog } from "./capabilities.js";
 import { settingsControlServices } from "./settings-service.js";
 import {
   bustCredentialStatusCaches,
-  bustLoginCredentialState,
   type CredentialMutationSubject,
 } from "./credential-status-invalidation.js";
 import { createSetupJobManager } from "./setup-jobs.js";
@@ -371,16 +370,13 @@ export function controlServices(
     // projection so the listing and the pool verdict cannot disagree.
     ...createCredentialProfilesService(quotaRegistry),
     // PATCH + DELETE /credential-profiles/:harness/:id — the Enabled toggle
-    // (with the migrated row's native_credentials_enabled downgrade mirror),
-    // the provable D-U4 removal and a client-run login's credential-change
-    // report, owned by credential-profile-mutations.ts.
+    // (with the migrated row's native_credentials_enabled downgrade mirror)
+    // and the provable D-U4 removal, owned by credential-profile-mutations.ts.
     ...credentialProfileMutations({
       threads,
       quotaRegistry,
       secretStore,
       bustStatusCaches,
-      noteLoginCredentialChange: (harnessId) =>
-        bustLoginCredentialState(quotaRegistry, authReadiness, harnessId),
       activeLoginJob: (harnessId, profileId) =>
         activeProfileLoginJob(setupJobs, harnessId, profileId),
     }),
