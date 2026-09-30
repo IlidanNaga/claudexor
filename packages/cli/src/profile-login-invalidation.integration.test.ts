@@ -127,7 +127,7 @@ interface Daemon {
 }
 
 async function withDaemon<T>(
-  options: { loginTimeoutMs?: number; terminationGraceMs?: number },
+  options: { loginTimeoutMs?: number; terminationGraceMs?: number; now?: () => Date },
   fn: (daemon: Daemon) => Promise<T>,
 ): Promise<T> {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "cx363-daemon-")));
@@ -140,6 +140,7 @@ async function withDaemon<T>(
       monitorPollMs: 20,
       verifyPollMs: 50,
       terminationGraceMs: options.terminationGraceMs ?? 300,
+      ...(options.now ? { now: options.now } : {}),
       ...(options.loginTimeoutMs ? { loginTimeoutMs: options.loginTimeoutMs } : {}),
       onCredentialStateMayHaveChanged: (harness) => {
         bumps.push(harness);
@@ -500,21 +501,34 @@ describe("profiles login as a daemon setup job: credential-mutation window over 
   });
 
   it("a deadline alone never closes the window: only the proven death of a stubborn vendor does", async () => {
-    await withDaemon({ loginTimeoutMs: 1_500, terminationGraceMs: 2_000 }, async (daemon) => {
-      scriptVendor("old@example.com", "stubborn");
-      const login = cliLogin(daemon);
-      await until("the vendor login to run", permitted(daemon));
-      const vendorPid = Number(readFileSync(vendorFile("login-pid"), "utf8"));
-      // Past the deadline the daemon is TERMinating a vendor that ignores it.
-      await until("termination to begin", () => daemon.job().phase === "cancelling");
-      expect(Date.now()).toBeGreaterThanOrEqual(Date.parse(daemon.job().deadlineAt!));
-      expect(credentialMutationWindowOpen("cursor")).toBe(true);
-      expect(daemon.bumps).toEqual(["cursor"]);
-      expect(await login).toBe(1);
-      expect(daemon.job()).toMatchObject({ state: "timed_out", outcome: { reason: "timed_out" } });
-      expect(alive(vendorPid)).toBe(false);
-      expect(daemon.bumps).toEqual(["cursor", "cursor"]);
-      expect(credentialMutationWindowOpen("cursor")).toBe(false);
-    });
+    let nowMs: number | undefined;
+    await withDaemon(
+      {
+        loginTimeoutMs: 30_000,
+        terminationGraceMs: 2_000,
+        now: () => new Date(nowMs ?? Date.now()),
+      },
+      async (daemon) => {
+        scriptVendor("old@example.com", "stubborn");
+        const login = cliLogin(daemon);
+        await until("the vendor login to run", permitted(daemon));
+        const vendorPid = Number(readFileSync(vendorFile("login-pid"), "utf8"));
+        // The deadline tests termination, not how quickly a loaded host starts Node.
+        nowMs = Date.parse(daemon.job().deadlineAt!);
+        // Past the deadline the daemon is TERMinating a vendor that ignores it.
+        await until("termination to begin", () => daemon.job().phase === "cancelling");
+        expect(nowMs).toBeGreaterThanOrEqual(Date.parse(daemon.job().deadlineAt!));
+        expect(credentialMutationWindowOpen("cursor")).toBe(true);
+        expect(daemon.bumps).toEqual(["cursor"]);
+        expect(await login).toBe(1);
+        expect(daemon.job()).toMatchObject({
+          state: "timed_out",
+          outcome: { reason: "timed_out" },
+        });
+        expect(alive(vendorPid)).toBe(false);
+        expect(daemon.bumps).toEqual(["cursor", "cursor"]);
+        expect(credentialMutationWindowOpen("cursor")).toBe(false);
+      },
+    );
   }, 20_000);
 });
