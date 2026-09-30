@@ -470,7 +470,7 @@ live model must match its recorded ladder/default, while a recorded-only model
 does not make another account stale. Effort ceilings are per MODEL, not per
 harness (gpt-6-astra and gpt-5.6-sol take `ultra`, gpt-5.4 stops at `xhigh`), so
 `effortLevelsForModel` narrows the harness-wide merged ladder for the routed
-model. The shared normalizer then passes an ADVERTISED level through verbatim,
+model on the native session surface. The shared normalizer passes an accepted level through verbatim,
 resolves a known unadvertised preference to the strongest supported level not
 above the request. Only when every supported level exceeds the request may the
 known minimum be used. Display tie-breaking between incomparable vendor chains
@@ -506,6 +506,7 @@ determines whether the prepared option was physically sent. The receipt is
 optional on historical records. Model operations retain `effortResolution` in the
 existing `ModelCallResult` resource only when creation opted into
 `captureEffortEvidence=true` (see [model operations](#caller-owned-model-operations)).
+
 Runs record it as `attempts[].effort_resolution` in
 `final/telemetry.yaml`, carried through `HarnessEvent.effort_resolution`. The
 attempt retains the final native execution's receipt after account rotation.
@@ -516,6 +517,18 @@ never injected assistant messages. These fields add no operation, generation,
 retry, account-selection or budget authority. A rejected final-route preference
 ends that attempt without account rotation, model/harness fallback or repair retry;
 ordinary availability failover retains its existing policy.
+
+Codex raw model calls expose ordinary inference efforts, while the native CLI's
+`ultra` selector also owns automatic task delegation. The raw adapter excludes
+that agent-mode selector from `reasoningEfforts` and retains the vendor's original
+`reasoningEffortPreferenceOrder` internally through operation-local catalog parsing.
+The existing preference resolver chooses the strongest accepted generation effort
+not above the original request in that vendor order (currently `ultra` → `max`
+for Astra), with a downward receipt and no claim of native delegation. It does
+not copy the CLI's underlying per-agent effort or invent a replacement ladder.
+Both public catalog views project the internal order out, preserving their object
+shapes. Native session Ultra remains unchanged and is implemented by the CLI.
+
 Managed catalogs also carry optional `reasoningEffortsVerified` on `ModelCatalogEntry`:
 true records a fully parsed vendor array (including known empty), while false or
 historical absence prevents an incomplete catalog from claiming known absence or

@@ -4,6 +4,8 @@
 
 ### Patch Changes
 
+- Adapt Codex raw-model Ultra preferences to the strongest supported generation effort in the vendor order, preserve explicit effort evidence, and keep native Ultra delegation unchanged (#368).
+
 - Updated dependencies
   - @claudexor/schema@3.17.2
   - @claudexor/delivery@3.17.2

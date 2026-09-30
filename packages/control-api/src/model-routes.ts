@@ -106,7 +106,7 @@ export async function handleModelRoute(
         res,
         200,
         input.value.view === "accounts"
-          ? ControlModelAccountCatalogResponse.parse(value.value)
+          ? publicModelAccountCatalog(value.value)
           : legacyModelCatalog(value.value),
       ),
     );
@@ -225,8 +225,31 @@ function legacyModelCatalog(value: unknown) {
   return {
     ...catalog,
     models: catalog.models.map(
-      ({ processing: _processing, reasoningEffortsVerified: _effortVerified, ...model }) => model,
+      ({
+        processing: _processing,
+        reasoningEffortsVerified: _effortVerified,
+        reasoningEffortPreferenceOrder: _preferenceOrder,
+        ...model
+      }) => model,
     ),
+  };
+}
+
+/** Preference order is operation-local adaptation evidence, not a new public
+ * catalog field. Preserve the negotiated account shape as well as the legacy one. */
+function publicModelAccountCatalog(value: unknown) {
+  const view = ControlModelAccountCatalogResponse.parse(value);
+  return {
+    ...view,
+    accounts: view.accounts.map((account) => ({
+      ...account,
+      catalog: account.catalog && {
+        ...account.catalog,
+        models: account.catalog.models.map(
+          ({ reasoningEffortPreferenceOrder: _preferenceOrder, ...model }) => model,
+        ),
+      },
+    })),
   };
 }
 

@@ -4,6 +4,8 @@
 
 ### Patch Changes
 
+- Adapt Codex raw-model Ultra preferences to the strongest supported generation effort in the vendor order, preserve explicit effort evidence, and keep native Ultra delegation unchanged (#368).
+
 - Preserve native input-size refusals without account retries or unrelated quota resets, publish measured ASK input budgets, distinguish proven undelivered Codex model requests, and move large Claude and AGY inputs off process arguments.
 - Updated dependencies
   - @claudexor/schema@3.17.2
