@@ -36,8 +36,8 @@ const MAX_ROWS = 64;
  * 3. a credential-generation change voids the verdicts about the changed
  *    generation, at the unusable ledger's call sites: a login/logout clears the
  *    WHOLE ledger (`noteCredentialChange`), a control-API profile mutation
- *    clears PER SUBJECT (`clearSubject`). A secret mutation names no subject
- *    here — model operations admit managed-login rows only;
+ *    clears PER SUBJECT (`clearSubject`). Secret mutations also clear every
+ *    matching registry subject, including subscription OAuth rows;
  * 4. no mark is recorded while a login may be rewriting that harness's
  *    credential store (the daemon's setup-lifecycle window, #363); the
  *    window's close clears the ledger.

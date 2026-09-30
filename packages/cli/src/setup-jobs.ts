@@ -855,7 +855,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         );
       return;
     }
-    // The mutable journal deadline governs deferred attach and Extend.
+    // Check the journal deadline before permission; Extend preserves the sealed manifest.
     if (loginDeadlineReached(job)) {
       await terminateLogin(jobId, "timed_out");
       return;
@@ -1321,7 +1321,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         active = undefined;
       }
       if (active) {
-        // Reuse only the same store and flow; another target must refuse.
+        // Reuse only the same store and flow: another target would log into the wrong account.
         if ((active.profileId ?? null) === (profileBinding?.profileId ?? null)) {
           const transportConflict = setupTransportConflict(active, request.transport);
           if (transportConflict) {

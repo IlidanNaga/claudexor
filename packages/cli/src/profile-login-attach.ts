@@ -167,6 +167,7 @@ export async function profileLoginViaSetupJob(
     unsubscribe();
   }
   if (job.state !== "succeeded") print(`${label} login ${job.state}: ${job.message}`);
+  if (job.outcome?.reason === "termination_unconfirmed") print(setupRecoveryHint(job.jobId));
   print(await input.statusLine());
   if (interrupted) return INTERRUPTED_EXIT;
   return job.state === "succeeded" ? 0 : 1;

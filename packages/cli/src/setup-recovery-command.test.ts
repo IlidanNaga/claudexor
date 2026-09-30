@@ -143,6 +143,31 @@ describe("profile login terminal recovery", () => {
     expect(stdout).toContain("setup cancel setup-test-1");
     expect(stdout).toContain("setup reconcile setup-test-1");
   });
+  it.each(["termination_unconfirmed", "command_failed"])(
+    "prints recovery on the followed %s outcome only when termination needs proof",
+    async (reason) => {
+      capture();
+      let calls = 0;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => Response.json(++calls === 1 ? job() : job("failed", reason))),
+      );
+      expect(
+        await profileLoginViaSetupJob(input, {
+          ensureDaemon: async () => ({ addr }),
+          attach: async () => 1,
+          receiptExists: () => true,
+        }),
+      ).toBe(1);
+      expect(calls).toBe(2);
+      expect(stdout.includes("setup reconcile setup-test-1")).toBe(
+        reason === "termination_unconfirmed",
+      );
+      expect(stdout.includes("setup cancel setup-test-1")).toBe(
+        reason === "termination_unconfirmed",
+      );
+    },
+  );
   it.each(["SIGINT", "SIGHUP", "SIGTERM"] as const)(
     "%s shares daemon cancellation and removes its handlers",
     async (signal) => {

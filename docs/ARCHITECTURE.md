@@ -729,10 +729,9 @@ answer is reused as fresh for at most one minute, keeping the instant the
 vendor gave it as `last_verified_at`. Age uses a suspend-inclusive monotonic
 clock; Linux uptime's possible one-second quantization is conservatively
 bounded, so an observation can expire less than two seconds early. Wall time
-only stamps the observation, never extends its lifetime. Every age is measured on the monotonic
-clock; the wall clock only stamps that instant, so a clock step can neither
-keep an answer alive nor expire it. A probe that did not answer is never
-cached: a child killed by the probe's OWN ten-second budget timer reports
+only stamps the observation; clock steps neither extend nor expire it.
+A probe with no recognized answer whose ten-second budget expires before
+observed native exit or caller cancellation reports
 `did not answer within 10s (…); login state unknown`, which is
 `unknown + not_run`, never a logout and never a pass — a caller's
 cancellation or a kill from outside is a plain unknown, not a timeout. Its stale path serves the other side of routing (the INV-135
@@ -759,7 +758,10 @@ answer …` status event (`auth_status_stale`; never answer text). An explicit
 pin, or any unstamped spec, whose spawn-time probe times out refuses as
 `login state is unknown`, naming the last positive as unpinned-only, and every
 other unconfirmed row refuses the same way rather than with login advice. A
-model-inventory read, which launches nothing, may still read on it.
+model-inventory read, which launches nothing, may still read on it. The
+Accounts catalog projection remains stricter for a named account: it reports
+unknown status and does not offer catalog reading on stale evidence. This
+conservative projection does not change standalone inventory or run admission.
 Adapters declare the physical credential transport they support (`config_file`,
 `env_var`, `oauth_token_env`, `os_keychain`, `http_header`, or `none`) plus the
 containment strategy that keeps it honest. A transport may be platform-scoped;
@@ -2713,7 +2715,7 @@ and passive registry retain normal cancellation and unconfirmed-child custody.
 An ordinary daemon
 stop/restart no longer terminates an awaiting-user login runner (that regression
 killed the operator's own pending login in the 2026-07-21 incident); explicit
-`setup jobs cancel` and the login deadline's timeout escalation are the only
+`setup cancel` (the existing cancel API) and the login deadline's timeout escalation are the only
 signalling paths. Restart consumes an existing
 terminal result first, then adopts a live runner only on positive evidence — a
 matching durable handle, the same leader identity, and a nonempty process
@@ -2724,8 +2726,10 @@ becomes `interrupted_unknown` and is never auto-replayed. Terminal outcomes dist
 `completed`, `not_supported`, `launch_failed`, `command_failed`,
 `auth_not_ready`, `capability_verification_failed`,
 `credential_route_mismatch`, `timed_out`, `cancelled_by_user`,
-`cancelled_on_restart`, `interrupted_unknown`, and
-`termination_unconfirmed`.
+`cancelled_on_restart`, `interrupted`, `interrupted_unknown`, and
+`termination_unconfirmed`. `interrupted` records a live monitor proving the
+recorded group empty without a result; `cancelled_on_restart` describes that
+evidence during restart reconciliation.
 
 The checksummed, fsync-before-ACK global journal is the only setup lifecycle and
 event authority. Per-job `0700` directories under the daemon data root contain
