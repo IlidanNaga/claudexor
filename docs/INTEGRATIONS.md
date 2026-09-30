@@ -900,7 +900,7 @@ discovery or change explicit overrides and the existing `cursor-agent` route.
 Wire: `cursor-agent -p --output-format stream-json <sandbox
 args> [--stream-partial-output]` with the composed prompt on piped stdin (no
 positional prompt or native system-prompt flag — instructions ride a delimited
-prompt prefix; full access is refused pre-spawn). Events: `system/init` →
+prompt prefix; Full uses the native disabled-sandbox arguments). Events: `system/init` →
 `started` (session id under
 `chatId`/`chat_id`/`session_id`, version-tolerant); `assistant` →
 `message` — with `--stream-partial-output`, a frame with `timestamp_ms` and

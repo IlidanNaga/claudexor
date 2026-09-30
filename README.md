@@ -93,7 +93,7 @@ composer](docs/assets/app-agent-run.jpg)
   Explicit directory execution supports direct work and selected-input copies
   without Git; Doctor reports Git availability, and
   the app's Workspace Git check explains whether a Git-backed shape is admitted.
-- At least one logged-in vendor CLI — `codex`, `claude`, `cursor-agent`,
+- At least one logged-in vendor CLI — `codex`, `claude`, `cursor-agent` (or Cursor’s `agent`),
   `opencode`, or `agy` (Antigravity, for a Gemini subscription) — OR a
   provider API key (adapters accept `OPENAI_API_KEY`,
   `ANTHROPIC_API_KEY`, ... as fallbacks; the raw-API route needs only a key).
