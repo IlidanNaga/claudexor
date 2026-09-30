@@ -11,6 +11,8 @@ import type { PinnedVendorCliVersion } from "@claudexor/util";
  * transport's own verified level (`CODEX_HTTP_CLIENT_VERSION`,
  * http-client-version.ts), raised to a newer installed CLI. Bump this pin
  * ONLY while re-recording the effort snapshot (and re-checking the manifest's
- * known-model hints) against the same CLI build.
+ * known-model hints) against the same CLI build. Re-probe the native turn-text
+ * input bound before updating capability-profile.ts's input-limit provenance;
+ * a new unverified CLI version intentionally publishes no input bound.
  */
 export const CODEX_VENDOR_CLI_VERSION: PinnedVendorCliVersion = "0.156.1";

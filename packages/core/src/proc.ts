@@ -78,6 +78,8 @@ export interface SpawnOptions {
   keepStdinOpen?: boolean;
   /** Called once after spawn with a live stdin handle (see keepStdinOpen). */
   onSpawn?: (io: ChildStdin) => void;
+  /** Native child exit observed before stdio close/drain; does not complete capture. */
+  onExit?: (code: number | null, signal: NodeJS.Signals | null) => void;
 }
 
 /** Minimal live stdin handle for bidirectional CLI protocols. */
@@ -136,6 +138,7 @@ export async function* spawnProcess(
     detached: true,
   });
   if (typeof child.pid === "number") registerChildProcess(child.pid, cmd);
+  child.once("exit", (code, signal) => opts.onExit?.(code, signal));
 
   let resolveClosed!: () => void;
   const closed = new Promise<void>((resolve) => {
@@ -462,6 +465,7 @@ export async function runCaptureRaw(
     detached: true,
   });
   if (typeof child.pid === "number") registerChildProcess(child.pid, cmd);
+  child.once("exit", (code, signal) => opts.onExit?.(code, signal));
   let captureChildClosed = false;
   child.once("close", () => {
     captureChildClosed = true;

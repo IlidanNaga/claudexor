@@ -9,6 +9,7 @@ import {
   RouteCredentialUnusablePayload,
 } from "@claudexor/schema";
 import { quotaConstraintAppliesToModel } from "@claudexor/budget";
+import { stampCredentialProfileSelection } from "@claudexor/core";
 import {
   credentialPoolExhausted,
   liveUnusableFor,
@@ -18,6 +19,7 @@ import {
   type QuotaBlock,
 } from "./credential-cooldown.js";
 import type { AttemptOutputMarkers } from "./attemptOutputMarkers.js";
+import { refusedBeforeProgress } from "./pre-progress-refusal.js";
 import {
   reactiveRotationEvidence,
   rotationRetryEligible,
@@ -415,6 +417,7 @@ export function planReactiveRotation(args: {
  * Callers invoke this only after the try ended in a terminal error.
  */
 export async function rotateSpecOnTypedLimit(args: {
+  requestRefused?: boolean;
   spec: HarnessRunSpec;
   harnessId: string;
   attemptId: string;
@@ -433,6 +436,9 @@ export async function rotateSpecOnTypedLimit(args: {
   /** Live typed `credential_unusable` observations for this decision epoch —
    * candidates they condemn are refused with a typed reason. */
   liveUnusable?: readonly CredentialUnusableObservation[];
+  /** #363: remember THIS row's started-then-refused try for later unpinned
+   * runs (ordering evidence only; never consulted by this decision). */
+  notePreProgressRefusal?: () => void;
   triedProfiles: Set<string>;
   markers: AttemptOutputMarkers;
   sawTypedLimit: boolean;
@@ -479,6 +485,7 @@ export async function rotateSpecOnTypedLimit(args: {
     }
     return null;
   }
+  if (current && refusedBeforeProgress(evidence, args.markers)) args.notePreProgressRefusal?.();
   const route = limitSubjectRoute(
     current,
     args.defaultRouteWasVendorNative === true ? "local_session" : null,
@@ -549,19 +556,13 @@ export async function rotateSpecOnTypedLimit(args: {
     const subjectLimit =
       subjectBlock ??
       (evidence.sawTypedLimit ? { resets_at: args.lastLimit?.resetsAt ?? null } : null);
-    // The pool terminal REQUIRES evidence: "credential_pool_exhausted" claims
-    // the credential layer refused the run, so either the triggering subject
-    // must carry limit/unusable evidence or some POOL-MEMBER row must carry
-    // headroom/cooldown/unusable evidence (`poolMemberEvidence` — rows for
-    // identities rotation could never select, e.g. an api_key sibling under a
-    // subscription subject, never count). A structural pre-progress death
-    // over an empty (or evidence-free) pool proves nothing about credentials —
-    // fail as-is and keep the TRUE failure (a vanilla user's crashed run must
-    // never terminalize as a pool refusal). The already-emitted
-    // `route.profile.rotation_exhausted` event stays: rotation WAS consulted
-    // and had nowhere to go; only the terminal's claim is evidence-gated.
+    // A pool terminal must explain the CURRENT failure. Earlier or untried
+    // accounts' quota stays diagnostic; it cannot erase this subject's
+    // structural failure or invent a reset that would repair its request.
     const subjectEvidence = subjectLimit !== null || subjectUnusable !== null;
-    const poolEvidence = candidates.some(poolMemberEvidence);
+    const poolEvidence = candidates.some(
+      (candidate) => candidate.profile_id === current?.profile_id && poolMemberEvidence(candidate),
+    );
     if (!subjectEvidence && !poolEvidence) return null;
     return {
       poolExhausted: credentialPoolExhausted({
@@ -576,10 +577,13 @@ export async function rotateSpecOnTypedLimit(args: {
       }),
     };
   }
-  return HarnessRunSpecSchema.parse({
+  const rotated = HarnessRunSpecSchema.parse({
     ...args.spec,
     session_id: args.newSessionId(),
     credential_profile: rotation,
     resume_session_id: null,
   });
+  // A rotation is an unpinned choice by construction: a pin returned above.
+  stampCredentialProfileSelection(rotated, { pinned: false });
+  return rotated;
 }

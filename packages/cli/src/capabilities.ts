@@ -26,6 +26,7 @@ import {
 import { delegationCapabilityFor } from "./delegation-capability.js";
 import { probeGitCapability } from "@claudexor/workspace";
 import { effectiveSetupLoginCapability } from "./setup-login-capability.js";
+import { catalogInputLimits } from "@claudexor/orchestrator";
 
 /** MCP tool names from the server's own descriptor producer (noop runner). */
 export function mcpToolNames(): readonly string[] {
@@ -82,6 +83,7 @@ export async function buildAgentCapabilityCatalog(): Promise<AgentCapabilityCata
       const enabled = cfg.global.harnesses[s.id]?.enabled !== false;
       return {
         id: s.id,
+        ...(profile?.input_limits ? { inputLimits: catalogInputLimits(profile.input_limits) } : {}),
         enabled,
         displayName: s.manifest?.display_name ?? s.id,
         status: s.status,

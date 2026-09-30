@@ -6,7 +6,7 @@ import {
   ModelCallRequest,
   ModelCallResult,
 } from "@claudexor/schema";
-import { createCodexModelAdapter } from "./model.js";
+import { createCodexModelAdapter, parseCodexModelCatalog } from "./model.js";
 
 function fixture(levels: string[] | null = ["low", "max"], observed?: string) {
   const dispatch = vi.fn(async () => {});
@@ -84,6 +84,8 @@ it.each([
   ["future-native", ["future-native"], "future-native", "exact"],
   ["Future.Native/2027", ["Future.Native/2027"], "Future.Native/2027", "exact"],
   ["none", ["none", "high"], "none", "exact"],
+  ["max", ["low", "max", "ultra"], "max", "exact"],
+  ["future-native", ["low", "future-native", "ultra"], "future-native", "exact"],
   ["xhigh", [], null, "omitted"],
 ] as const)(
   "resolves %s in the exact account catalog before its only POST",
@@ -95,7 +97,7 @@ it.each([
     expect(JSON.stringify(request)).toBe(frozen);
     expect(result.outcome).toBe("completed");
     expect(f.fetch.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
-    const body = JSON.parse(f.fetch.mock.calls[1]![1]!.body as string);
+    const body = JSON.parse(await new Response(f.fetch.mock.calls[1]![1]!.body).text());
     expect(body.reasoning?.effort ?? null).toBe(submitted);
     expect(ModelCallResult.parse(result)).toMatchObject({
       effortResolution: { requested, submitted, resolution, source: "account_catalog" },
@@ -159,3 +161,87 @@ it.each([{ levels: null }, { levels: [] }])(
     expect(f.fetch.mock.calls.map(([, init]) => init?.method ?? "GET")).toEqual(["GET", "POST"]);
   },
 );
+
+it.each([
+  ["max", ["low", "medium", "high", "xhigh", "max", "ultra"]],
+  ["xhigh", ["low", "medium", "high", "xhigh", "ultra"]],
+] as const)(
+  "adapts native Ultra to the route's %s generation effort after catalog parsing",
+  async (submitted, levels) => {
+    const f = fixture([...levels], submitted);
+    const catalog = ControlModelCatalogResponse.parse(await f.adapter.catalog(f.context));
+    expect(catalog.models[0]).toMatchObject({
+      reasoningEfforts: levels.filter((level) => level !== "ultra"),
+      reasoningEffortPreferenceOrder: levels,
+      reasoningEffortsVerified: true,
+    });
+    const request = { ...f.request, options: { reasoningEffort: "ultra" } };
+    const original = JSON.stringify(request);
+    const result = await f.adapter.invoke(request, { ...f.context, catalog });
+    expect(f.fetch.mock.calls.map(([, init]) => init?.method ?? "GET")).toEqual(["GET", "POST"]);
+    const body = JSON.parse(await new Response(f.fetch.mock.calls[1]![1]!.body).text());
+    expect(body.reasoning.effort).toBe(submitted);
+    expect(JSON.stringify(request)).toBe(original);
+    expect(result.outcome).toBe("completed");
+    expect(result.effortResolution).toMatchObject({
+      requested: "ultra",
+      submitted,
+      observed: submitted,
+      resolution: "downward",
+      parameter: "reasoning.effort",
+      source: "account_catalog",
+      reason: expect.stringContaining("do not execute"),
+    });
+    expect(result.appliedOptions.reasoningEffort).toBe(submitted);
+    expect(f.dispatch).toHaveBeenCalledTimes(1);
+  },
+);
+
+it("re-projects a verified historical operation-local catalog without claiming provider observation", async () => {
+  const f = fixture(["low", "max", "ultra"]);
+  const catalog = ControlModelCatalogResponse.parse(await f.adapter.catalog(f.context));
+  catalog.models[0]!.reasoningEfforts = catalog.models[0]!.reasoningEffortPreferenceOrder!;
+  delete catalog.models[0]!.reasoningEffortPreferenceOrder;
+  const result = await f.adapter.invoke(
+    { ...f.request, options: { reasoningEffort: "ultra" } },
+    { ...f.context, catalog },
+  );
+  expect(result.outcome).toBe("completed");
+  expect(result.effortResolution).toMatchObject({
+    requested: "ultra",
+    submitted: "max",
+    resolution: "downward",
+    observed: null,
+  });
+  expect(result.appliedOptions.reasoningEffort).toBeUndefined();
+});
+
+it("does not publish a native-only default as a raw generation default", () => {
+  const [model] = parseCodexModelCatalog({
+    models: [
+      {
+        slug: "target",
+        supported_reasoning_levels: [{ effort: "high" }, { effort: "ultra" }],
+        default_reasoning_level: "ultra",
+        multi_agent_reasoning_effort: "high",
+      },
+    ],
+  });
+  expect(model).toMatchObject({ reasoningEfforts: ["high"], defaultReasoningEffort: null });
+});
+
+it("does not invent an Ultra replacement when vendor orders contradict each other", async () => {
+  const f = fixture(["max", "low", "ultra"]);
+  const result = await f.adapter.invoke(
+    { ...f.request, options: { reasoningEffort: "ultra" } },
+    f.context,
+  );
+  expect(result.problem?.code).toBe("unsupported_parameter");
+  expect(result.effortResolution).toMatchObject({
+    requested: "ultra",
+    submitted: null,
+    resolution: "rejected",
+  });
+  expect(f.dispatch).not.toHaveBeenCalled();
+  expect(f.fetch.mock.calls.map(([, init]) => init?.method ?? "GET")).toEqual(["GET"]);
+});

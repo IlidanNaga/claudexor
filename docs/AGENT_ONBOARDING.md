@@ -46,7 +46,12 @@ It is strict: skipping a step is how the 2026-07-21 incident happened.
    `claudexor profiles login <harness> <profile-id>` when the harness requires
    a named binding (Antigravity does). Claudexor runs the vendor CLI's own
    login under the effective platform policy; a profile HOME is not a promise
-   of separate credential custody on every OS. For codex the default is
+   of separate credential custody on every OS. Cursor `profiles login` uses
+   a daemon setup job attached to the same terminal; `claudexor setup cancel`
+   and `claudexor setup reconcile` expose its existing recovery operations.
+   Claude/AGY profile login retains its direct vendor terminal path.
+   Non-Codex `profiles login --json` remains unsupported; it creates no job.
+   For codex the default is
    device-auth: the app/CLI shows a URL and one-time code without a Terminal.
    Complete the link in a
    **private browser window, or a browser profile signed into no other OpenAI

@@ -73,7 +73,7 @@ export const ControlRunStartRequest = z
       .string()
       .optional()
       .describe(
-        "System-level instructions layered onto every task-producing lane; delivered natively (append-system-prompt / developer_instructions) or as a delimited prompt prefix.",
+        "System-level instructions layered onto every task-producing lane; delivered natively (append-system-prompt-file / developer_instructions) or as a delimited prompt prefix.",
       ),
     /** Immutable daemon resource ids; upload/finalize happens before enqueue. */
     attachments: z

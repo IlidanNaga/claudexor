@@ -2,6 +2,7 @@ import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { createServer } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DurableJournal } from "@claudexor/journal";
 import type { ModelAdapter } from "@claudexor/core";
@@ -134,6 +135,113 @@ async function fixture(
 }
 
 describe("model operations over the existing daemon command substrate", () => {
+  it("refines a journaled send only after native connection non-delivery, retaining its attempt and replay", async () => {
+    const listener = createServer();
+    await new Promise<void>((resolve) => listener.listen(0, "127.0.0.1", resolve));
+    const address = listener.address();
+    if (!address || typeof address === "string") throw new Error("fixture listener missing");
+    await new Promise<void>((resolve) => listener.close(() => resolve()));
+    const nativeFetch = globalThis.fetch;
+    const posts = vi.fn();
+    const adapter = createCodexModelAdapter({
+      now: () => 1900000000000,
+      clientVersion: async () => ({ version: "0.156.1", source: "verified_transport" }),
+      readAuthFile: async () =>
+        JSON.stringify({
+          auth_mode: "chatgpt",
+          tokens: {
+            account_id: "fixture",
+            access_token: `fixture.${Buffer.from('{"exp":2100000000}').toString("base64url")}.signature`,
+          },
+        }),
+      fetch: async (_url, init) => {
+        if (init?.method !== "POST") return Response.json({ models: [{ slug: "test-model" }] });
+        const running = f.store.records()[0]!;
+        expect(f.operations.inspect(running.id).dispatch).toMatchObject({
+          state: "started",
+          startedAt: expect.any(String),
+        });
+        posts();
+        return nativeFetch(`http://127.0.0.1:${address.port}`, init);
+      },
+    });
+    const f = await fixture((input, context) =>
+      adapter.invoke(input, {
+        ...context,
+        profile: {
+          ...context.profile,
+          isolation_locator: join(process.env.CLAUDEXOR_CONFIG_DIR!, "profiles", "fixture"),
+        },
+      }),
+    );
+    const created = await f.operations.create(f.upload(), "connection-proof");
+    const done = await f.terminal(created.id);
+    expect(done).toMatchObject({
+      state: "failed",
+      dispatch: {
+        state: "not_started",
+        startedAt: expect.any(String),
+        route: { model: "test-model" },
+      },
+      problem: {
+        code: "transport_not_delivered",
+        retryable: true,
+        context: {
+          generationStarted: false,
+          stage: "fetch",
+          errorCode: "ECONNREFUSED",
+          requestDelivery: { basis: "connect_failure", handedOffBytes: null },
+        },
+      },
+    });
+    const stored = f.operations.readResult(created.id);
+    expect(ModelCallResult.parse(JSON.parse(stored.bytes.toString()))).toMatchObject({
+      outcome: "failed",
+      message: null,
+      usage: { input_tokens: null },
+      cost: { knowledge: "unknown", cashUsd: null },
+    });
+    const replay = await f.operations.create(f.upload(), "connection-proof");
+    expect(replay.id).toBe(created.id);
+    expect(replay.dispatch).toEqual(done.dispatch);
+    expect(f.operations.readResult(created.id).bytes.equals(stored.bytes)).toBe(true);
+    expect(posts).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a publication failure after a no-generation proof unresolved", async () => {
+    const f = await fixture(async (_request, context) => {
+      await context.onDispatch(route);
+      return {
+        ...result(),
+        outcome: "failed",
+        message: null,
+        problem: {
+          code: "transport_not_delivered",
+          message: "fixture proof",
+          retryable: true,
+          fieldErrors: {},
+          requiredActions: [],
+          evidenceRefs: [],
+          context: {
+            generationStarted: false,
+            requestDelivery: { state: "not_delivered", basis: "incomplete_upload" },
+          },
+        },
+      };
+    });
+    const ref = f.upload();
+    vi.spyOn(f.resources, "publishModel").mockImplementation(() => {
+      throw new Error("fixture publication unavailable");
+    });
+    const created = await f.operations.create(ref, "proof-not-published");
+    const done = await f.terminal(created.id);
+    expect(done).toMatchObject({
+      state: "interrupted",
+      dispatch: { state: "unknown", startedAt: expect.any(String) },
+      response: { state: "absent" },
+    });
+  });
+
   it.each([undefined, false, true])(
     "captures effort only with negotiated intent (%s) through HTTP, restart, replay and ACK",
     async (captureEffortEvidence) => {
@@ -151,7 +259,7 @@ describe("model operations over the existing daemon command substrate", () => {
           }),
         fetch: async (_url, init) => {
           if (init?.method === "POST") {
-            posts(JSON.parse(String(init.body)).reasoning.effort);
+            posts(JSON.parse(await new Response(init.body).text()).reasoning.effort);
             return new Response(
               `data: ${JSON.stringify({ type: "response.completed", response: { model: "test-model", output: [] } })}\n\n`,
             );
@@ -519,7 +627,7 @@ describe("model operations over the existing daemon command substrate", () => {
     const posts = vi.fn();
     const fetcher = vi.fn<typeof fetch>(async (_url, init) => {
       if (init?.method === "POST") {
-        posts(JSON.parse(String(init.body)).service_tier);
+        posts(JSON.parse(await new Response(init.body).text()).service_tier);
         return Response.json(
           { error: { code: "resource_unavailable", param: "service_tier" } },
           { status: 429, headers: { "x-request-id": "custody-refusal" } },

@@ -5,13 +5,7 @@ import {
   codexProcessingCost,
 } from "./processing.js";
 import type { ProcessingReceipt, EffortResolution } from "@claudexor/schema";
-import {
-  resolveEffortEvidence,
-  effortRankLadder,
-  validateModel,
-  type ModelAdapter,
-  type ModelAdapterContext,
-} from "@claudexor/core";
+import { validateModel, type ModelAdapter, type ModelAdapterContext } from "@claudexor/core";
 import type {
   ControlModelCatalogResponse,
   ModelCallResult,
@@ -42,6 +36,8 @@ import {
 } from "./http-client-version.js";
 import { processingAdmissionProblem } from "./processing-refusal.js";
 import { ResponseFailureCapture } from "./failure-evidence.js";
+import { RequestDelivery } from "./request-delivery.js";
+import { codexModelEfforts, codexModelEffortResolution } from "./model-effort.js";
 
 const ENDPOINT = "https://chatgpt.com/backend-api/codex";
 const CLIENT = "claudexor";
@@ -150,6 +146,7 @@ export function parseCodexModelCatalog(value: unknown): ModelCatalogEntry[] {
     const efforts = reasoningEffortsVerified
       ? reportedEfforts.map((item) => text(record(item)?.effort)!)
       : [];
+    const projectedEfforts = codexModelEfforts(efforts);
     const modalities = Array.isArray(entry.input_modalities)
       ? entry.input_modalities.filter((item): item is string => typeof item === "string")
       : [];
@@ -163,15 +160,16 @@ export function parseCodexModelCatalog(value: unknown): ModelCatalogEntry[] {
       // Backend output-cap parameters are unsupported even when a model has a published output capacity.
       maxOutputTokens: capacity(entry.max_output_tokens),
       inputModalities: modalities,
-      reasoningEfforts: efforts,
+      ...projectedEfforts,
       reasoningEffortsVerified,
-      defaultReasoningEffort: text(entry.default_reasoning_level),
+      defaultReasoningEffort:
+        entry.default_reasoning_level === "ultra" ? null : text(entry.default_reasoning_level),
       supportedOptions: [
         "toolChoice",
         "cacheKey",
         "serviceTier",
         "processingPreference",
-        ...(efforts.length ? ["reasoningEffort"] : []),
+        ...(projectedEfforts.reasoningEfforts.length ? ["reasoningEffort"] : []),
         ...(entry.supports_parallel_tool_calls === true ? ["parallelToolCalls"] : []),
       ],
     };
@@ -254,6 +252,7 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
         model: request.model,
       };
       let dispatched = false;
+      let delivery: RequestDelivery | undefined;
       const capture = new ResponseFailureCapture(context.captureFailureEvidence);
       let processing: ProcessingReceipt | undefined;
       let effortResolution: EffortResolution | undefined;
@@ -354,17 +353,10 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
               clientVersionSource: catalog.clientVersionSource,
             },
           );
-        effortResolution = resolveEffortEvidence(
+        effortResolution = codexModelEffortResolution(
           request.options.reasoningEffort,
-          model.reasoningEfforts,
-          effortRankLadder(
-            catalog.models
-              .filter((entry) => entry.reasoningEffortsVerified === true)
-              .map((entry) => entry.reasoningEfforts),
-          ),
-          "account_catalog",
-          "reasoning.effort",
-          model.reasoningEffortsVerified !== true,
+          model,
+          catalog.models,
         );
         if (effortResolution.resolution === "rejected") {
           throw new CodexModelError("unsupported_parameter", effortResolution.reason!, {
@@ -388,7 +380,9 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
           },
         };
         const body = JSON.stringify(buildResponsesRequest(physicalRequest, route));
+        delivery = new RequestDelivery(body);
         const requestHeaders = new Headers(headers(auth));
+        requestHeaders.set("Content-Length", String(delivery.bytes.length));
         if (nativeContinuation) {
           requestHeaders.set(
             "x-codex-turn-state",
@@ -413,7 +407,7 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
         const response = await fetcher(`${ENDPOINT}/responses`, {
           method: "POST",
           headers: requestHeaders,
-          body,
+          ...delivery.request(),
           signal: context.signal,
           redirect: "error",
         });
@@ -438,9 +432,16 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
         );
       } catch (error) {
         const result = emptyModelResult({ ...route, model: null });
-        result.outcome = dispatched ? "unknown" : "failed";
-        result.problem =
-          error instanceof CodexModelError
+        const proof = dispatched ? delivery?.notDelivered() : null;
+        result.outcome = dispatched && !proof ? "unknown" : "failed";
+        result.problem = proof
+          ? new CodexModelError(
+              "transport_not_delivered",
+              "The complete Codex request was not delivered; generation did not start.",
+              { generationStarted: false, requestDelivery: proof },
+              true,
+            ).problem
+          : error instanceof CodexModelError
             ? error.problem
             : new CodexModelError(
                 dispatched
@@ -454,7 +455,11 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
                     ? "The model operation was cancelled before dispatch."
                     : "The Codex model request could not be prepared.",
               ).problem;
-        if (dispatched) capture.caught(error);
+        if (dispatched) {
+          capture.caught(error);
+          if (delivery && !proof && result.problem)
+            result.problem.context.requestDelivery = delivery.facts();
+        }
         return withTurnState(dispatched ? capture.finish(result) : result);
       }
     },

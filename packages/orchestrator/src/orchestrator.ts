@@ -1,3 +1,9 @@
+import {
+  applyWorkEnvelope,
+  promptWithPointers as renderPromptWithPointers,
+  threadContextPointer,
+} from "./prompt-framing.js";
+import { requestRefusalFailure } from "./runTerminalResults.js";
 import { delegationBeltFor } from "./delegationBelt.js";
 import {
   bindProcessingAdmission,
@@ -16,7 +22,6 @@ import {
   observeNativeSessionEvent,
   resumeSessionForProfile,
   rotateSpecOnTypedLimit,
-  selectedProfileAvailability,
 } from "./credential-profiles.js";
 import {
   OrchestratorCredentials,
@@ -24,6 +29,7 @@ import {
   rotatedSpecInLaneHome,
 } from "./orchestrator-credentials.js";
 import { accountPoolRows } from "./account-pool.js";
+import type { PreProgressRefusalMemory } from "./pre-progress-refusal.js";
 import { writeRunTelemetryArtifact } from "./runTelemetryWriter.js";
 import {
   buildFileBackedSynthesisInput,
@@ -56,6 +62,7 @@ import {
   isWorkingCandidate,
   partitionCandidates,
   toCandidateEvidence,
+  unanimousDeclaredFailure,
 } from "./candidateEvidence.js";
 import { capabilityIntents } from "@claudexor/gateway";
 import {
@@ -355,6 +362,8 @@ export interface OrchestratorDeps {
   credentialUnusable?: () => readonly CredentialUnusableObservation[];
   /** Evidence sink for a fresh differential-probe verdict (A7). */
   recordCredentialUnusable?: (obs: CredentialUnusableObservation) => void;
+  /** #363 cross-run pre-progress refusal memory; it only orders the pool. */
+  preProgressRefusals?: PreProgressRefusalMemory;
   /** Typed per-harness run refusal while that harness's unified-accounts
    * migration is incomplete (crash between phases; INV-137). Null = not blocked. */
   accountsMigrationGate?: (harnessId: string) => { reason: string } | null;
@@ -1074,6 +1083,7 @@ export class Orchestrator {
     quotaAbsences: () => this.deps.quotaAbsences?.() ?? [],
     credentialUnusable: () => this.deps.credentialUnusable?.() ?? [],
     recordCredentialUnusable: (obs) => this.deps.recordCredentialUnusable?.(obs),
+    preProgressRefusals: () => this.deps.preProgressRefusals,
     authPreferenceForHarness: (repoRoot, harnessId, runPreference) =>
       this.authPreferenceForHarness(repoRoot, harnessId, runPreference),
   });
@@ -1305,48 +1315,19 @@ export class Orchestrator {
       // profile-admitted route joins even an AUTO pool (the run spawns with
       // the profile's transport, so the default store's state is not the
       // routing truth). Capability/manifest gating above still applies.
-      let profileAdmitted = false;
       const profileAdapter = this.deps.registry.get(id);
-      const profileProbe = profileAdapter?.probeCredentialProfile?.bind(profileAdapter);
       const explicitPin = this.credentials.effectiveProfileId(input, id);
-      const model = input.models?.[id] ?? cfgEntry?.default_model ?? null;
       // Pins and bound/pool rows are checked against their own readiness.
-      const rowCandidateIds: string[] = [];
-      if (explicitPin) {
-        rowCandidateIds.push(explicitPin);
-      } else if (status.status !== "ok") {
-        const pool = accountPoolRows(
-          this.config(input.repoRoot)?.global.credential_profiles ?? [],
-          id,
-        );
-        const bound = input.threadAccountBindings?.[id] ?? null;
-        rowCandidateIds.push(
-          ...(bound && pool.some((row) => row.profile_id === bound) ? [bound] : []),
-          ...pool.map((row) => row.profile_id).filter((rowId) => rowId !== bound),
-        );
-      }
-      let lastRowVerdict: string | null = null;
-      for (const candidateId of rowCandidateIds) {
-        const verdict = await selectedProfileAvailability({
-          registry: this.config(input.repoRoot)?.global.credential_profiles ?? [],
-          profileId: candidateId,
-          harnessId: id,
-          probe: profileProbe,
-          // `verification: passed` from the local store only means a login file
-          // is present. The poller's authenticated vendor call is the only
-          // liveness evidence; admission must act on it or dispatch may use a revoked token.
-          quota: vendorQuota,
-          unusable: liveUnusable,
-          model,
-          // Only an explicit/bound route may consume bounded stale LKG evidence.
-          allowStale: explicitPin !== null || input.threadAccountBindings?.[id] === candidateId,
-        });
-        if (verdict === "available") {
-          profileAdmitted = true;
-          break;
-        }
-        lastRowVerdict = verdict;
-      }
+      const rows = await this.credentials.admitRouteRows({
+        input,
+        harnessId: id,
+        defaultReady: status.status === "ok",
+        model: input.models?.[id] ?? cfgEntry?.default_model ?? null,
+        quota: vendorQuota,
+        unusable: liveUnusable,
+        probe: profileAdapter?.probeCredentialProfile?.bind(profileAdapter),
+      });
+      const profileAdmitted = rows.admitted;
       if (profileAdmitted) {
         // A valid account row restores manifest intent truth when the default store failed.
         if (status.status !== "ok") {
@@ -1358,12 +1339,17 @@ export class Orchestrator {
           statusById.set(id, status);
         }
       } else if (explicitPin) {
-        // An explicit pin that is not ready refuses/drops the lane; a
-        // not-ready UNPINNED row merely leaves the default doctor verdict in
-        // charge (the gates below keep the refusal honest when neither a row
-        // nor a default login exists).
-        const why = `${id} credential profile is not ready: ${lastRowVerdict}`;
+        // An explicit pin that is not ready refuses/drops the lane; not-ready
+        // UNPINNED rows are named below, and the default doctor verdict speaks
+        // only when neither a row nor a default login exists.
+        const why = `${id} credential profile is not ready: ${rows.pinVerdict}`;
         dropLane(id, "credential", why);
+        continue;
+      }
+      // #363: registered rows own this lane, so their observed states — not
+      // the default login's doctor advice — explain why none was admitted.
+      if (rows.unreadyRows && (status.status === "unavailable" || !explicitPool)) {
+        dropLane(id, "credential", rows.unreadyRows);
         continue;
       }
       if (status.status === "unavailable" && !profileAdmitted) {
@@ -2053,28 +2039,6 @@ export class Orchestrator {
     });
   }
 
-  /**
-   * D-16: apply the resolved WorkReport transport to a built spec — set the
-   * envelope output_schema (constrained/side_tool routes) and APPEND the fenced
-   * metadata instruction (validated routes, e.g. cursor). Mutates the spec in
-   * place and returns the mode the answer unwrap consumes. Called at every
-   * task-producing spec-build site so the transport is never wired one-off.
-   */
-  private applyWorkEnvelope(
-    spec: HarnessRunSpec,
-    workEnvelope: ResolvedWorkReportEnvelope,
-  ): WorkReportEnvelopeMode {
-    if (workEnvelope.outputSchema !== undefined) spec.output_schema = workEnvelope.outputSchema;
-    const instruction = workEnvelope.mode.instruction;
-    if (instruction) {
-      spec.instructions =
-        spec.instructions && spec.instructions.trim()
-          ? `${spec.instructions}\n\n${instruction}`
-          : instruction;
-    }
-    return workEnvelope.mode;
-  }
-
   private routeSpecKnobs(
     routed: RoutedAdapter,
     contract: ActiveTaskContract,
@@ -2247,7 +2211,7 @@ export class Orchestrator {
       const briefPath = join(paths.contextDir, "THREAD.md");
       store.writeText(briefPath, result.packetMarkdown);
       return {
-        pointerLine: `Earlier conversation context for this thread is at: ${briefPath} — read it before answering.`,
+        pointerLine: threadContextPointer(briefPath),
       };
     } catch (err) {
       // Continuity is best-effort — a packet-build failure must never fail the
@@ -2438,6 +2402,7 @@ export class Orchestrator {
       raw_context_packet: rawContextPacket,
       stream_deltas: streamDeltas,
     });
+    if (runInput) this.credentials.stampProfileSelection(spec, runInput, adapter.id);
     bindProcessingAdmission(
       spec,
       ledger,
@@ -2459,7 +2424,7 @@ export class Orchestrator {
           : this.routeBillingKnowledge(billingInput, adapter.id);
     if (interaction) spec.extra["interactionChannel"] = interaction;
     const workEnvelope = this.workReportEnvelopeFor(routed, contract, Boolean(interaction));
-    const workReportMode: WorkReportEnvelopeMode = this.applyWorkEnvelope(spec, workEnvelope);
+    const workReportMode: WorkReportEnvelopeMode = applyWorkEnvelope(spec, workEnvelope);
     const inactivityMs = harnessInactivityTimeoutMs(this.config(contract.repo.root));
 
     // Named once: the attempt record, the CandidateRun and the terminal gate all
@@ -2539,6 +2504,8 @@ export class Orchestrator {
           ? AbortSignal.any([signal, attemptAbort.signal])
           : attemptAbort.signal;
         activeSessionId = runSpec.session_id;
+        // #363: bound before the spawn — a credential change mid-try voids it.
+        const refusal = this.credentials.bindPreProgressRefusal(adapter.id, runSpec);
         const transientStart = telemetry.transientFailures.length;
         const rateLimitStart = telemetry.rateLimits.length;
         let rawPatch: RawGitPatchEnvelope | null = null;
@@ -2657,6 +2624,7 @@ export class Orchestrator {
           clearFileBackedContext();
         }
 
+        if (telemetry.requestRefusal) break;
         const newTransients = telemetry.transientFailures.slice(transientStart);
         // #31: the centralized retry gate reads the classified `retryable` verdict.
         const sawRetryable = newTransients.some((f) => f.retryable);
@@ -2667,6 +2635,8 @@ export class Orchestrator {
           ? directoryCapture.files?.noChanges === true
           : currentDiff.trim().length === 0;
         const deliverableEmpty = workspaceUnchanged && answer.text().length === 0;
+        const delivered = !harnessErrored && !deliverableEmpty && !signal?.aborted;
+        this.credentials.noteTryServed(refusal, telemetry.outputMarkers, delivered);
         // W5.4 + A2 failover: a typed-limit hit OR a structural pre-progress
         // death rebuilds the spec on a NEW session under the next profile.
         if (harnessErrored && runInput && !signal?.aborted) {
@@ -2685,9 +2655,10 @@ export class Orchestrator {
                 triedProfiles,
                 spec.model_hint ?? null,
               ),
-            ...this.credentials.rotationObservations(adapter, spec, newTransients),
+            ...this.credentials.rotationObservations(adapter, spec, newTransients, refusal),
             triedProfiles,
             markers: telemetry.outputMarkers,
+            requestRefused: Boolean(telemetry.requestRefusal),
             sawTypedLimit,
             sawRetryable,
             attemptErrored: harnessErrored,
@@ -2754,7 +2725,7 @@ export class Orchestrator {
     }
     // A pool-exhausted terminal is rotation's verdict, not the transient
     // machinery's — no `route.transient.exhausted` rides along with it.
-    if (harnessErrored && !poolExhausted && !processingRefusal) {
+    if (harnessErrored && !poolExhausted && !processingRefusal && !telemetry.requestRefusal) {
       emitTransientExhausted(
         (t, p) => log?.emit(t, p),
         adapter.id,
@@ -2931,9 +2902,11 @@ export class Orchestrator {
       telemetry,
       ...(secretDiffRefusal ? { secretDiffRefusal } : {}),
       // A5: the typed refusal survives NORMAL attempt finalization (no throw).
-      ...(poolExhausted || processingRefusal
-        ? { declaredFailure: declaredFailure(processingRefusal ?? poolExhausted) }
-        : {}),
+      ...(telemetry.requestRefusal
+        ? { declaredFailure: requestRefusalFailure(telemetry.requestRefusal) }
+        : poolExhausted || processingRefusal
+          ? { declaredFailure: declaredFailure(processingRefusal ?? poolExhausted) }
+          : {}),
       outcomeClass: finalized.outcomeClass,
       applied,
     };
@@ -5036,7 +5009,11 @@ export class Orchestrator {
         attemptTelemetries.push({ attemptId, harnessId: adapter.id, telemetry: run.telemetry });
         // Cancellation/deadline keeps priority over a belt failure finalized concurrently.
         if (input.signal?.aborted || processingBudgetDenial) break;
-        if (run.telemetry.effortResolution?.resolution === "rejected") break;
+        if (
+          run.telemetry.requestRefusal ||
+          run.telemetry.effortResolution?.resolution === "rejected"
+        )
+          break;
         if (delegateFailure.candidateFailureKind(run)) {
           const failure = delegateFailure.candidateFailureTerminal(run, "convergence");
           if (run.files) {
@@ -5502,6 +5479,7 @@ export class Orchestrator {
               : (convDeclared?.category ?? "internal"),
         code: processingBudgetMapping?.code ?? convDeclared?.code ?? null,
         resetsAt: convDeclared?.resetsAt ?? null,
+        requestRefusal: convDeclared?.requestRefusal,
         safeMessage: convNeedsDecision
           ? `review escalated to a human decision after ${attempt} attempt(s)`
           : facts.reason === "stuck_no_progress"
@@ -5672,6 +5650,7 @@ export class Orchestrator {
                 )
               : null) ?? args.fallbackHome,
         });
+        this.credentials.stampProfileSelection(spec, input, adapter.id);
         const plannerAbort = new AbortController();
         spec.extra["abortSignal"] = input.signal
           ? AbortSignal.any([input.signal, plannerAbort.signal])
@@ -5686,7 +5665,7 @@ export class Orchestrator {
           routed.supportsInteractive,
         );
         if (planInteraction) spec.extra["interactionChannel"] = planInteraction;
-        const planWorkMode = this.applyWorkEnvelope(
+        const planWorkMode = applyWorkEnvelope(
           spec,
           this.workReportEnvelopeFor(routed, contract, Boolean(planInteraction)),
         );
@@ -6189,10 +6168,11 @@ export class Orchestrator {
           env_inheritance: envInheritance(this.config(input.repoRoot)),
           env: homeEnv,
         });
+        this.credentials.stampProfileSelection(spec, input, routed.adapter.id);
         // D-16: compile the WorkReport transport onto the reducer spec (the
         // reducer is non-interactive) so its output is unwrapped + finalized
         // through the shared attempt contract, not a fourth deliverable predicate.
-        const workReportMode = this.applyWorkEnvelope(
+        const workReportMode = applyWorkEnvelope(
           spec,
           this.workReportEnvelopeFor(routed, contract, false),
         );
@@ -6498,13 +6478,11 @@ export class Orchestrator {
           : null;
         // D-16d: the continuation packet pointer rides after the lane pointer so
         // the fresh session is re-grounded in the exhausted attempt's work.
-        const promptWithPointers = [
+        const promptWithPointers = renderPromptWithPointers(
           explorerPrompt,
           laneContinuity?.pointerLine,
           continuationPointer,
-        ]
-          .filter((p): p is string => Boolean(p))
-          .join("\n\n");
+        );
         const spec = HarnessRunSpec.parse({
           session_id: newId("ses"),
           intent: opts.intent,
@@ -6532,6 +6510,7 @@ export class Orchestrator {
                 )
               : null) ?? roHome.env,
         });
+        this.credentials.stampProfileSelection(spec, input, adapter.id);
         const reportAbort = new AbortController();
         spec.extra["abortSignal"] = input.signal
           ? AbortSignal.any([input.signal, reportAbort.signal])
@@ -6552,7 +6531,7 @@ export class Orchestrator {
           contract,
           Boolean(reportInteraction),
         );
-        const readonlyWorkMode: WorkReportEnvelopeMode = this.applyWorkEnvelope(
+        const readonlyWorkMode: WorkReportEnvelopeMode = applyWorkEnvelope(
           spec,
           readonlyWorkEnvelope,
         );
@@ -6677,6 +6656,8 @@ export class Orchestrator {
                   extra: { ...spec.extra },
                 });
           activeSessionId = runSpec.session_id;
+          // #363: bound before the spawn — a credential change mid-try voids it.
+          const refusal = this.credentials.bindPreProgressRefusal(adapter.id, runSpec);
           const transientStart = telemetry.transientFailures.length;
           const rateLimitStart = telemetry.rateLimits.length;
           log.emit("harness.started", {
@@ -6760,10 +6741,13 @@ export class Orchestrator {
           }
 
           if (streamBudgetDenied) break;
+          if (telemetry.requestRefusal) break;
           const newTransients = telemetry.transientFailures.slice(transientStart);
           const sawRetryable = newTransients.some((f) => f.retryable);
           const sawTypedLimit = telemetry.rateLimits.length > rateLimitStart;
           const reportSoFar = answer.text();
+          const delivered = !harnessError && reportSoFar.length > 0 && !input.signal?.aborted;
+          this.credentials.noteTryServed(refusal, telemetry.outputMarkers, delivered);
           // W5.4 + A2 reactive failover, READ-ONLY lane (same contract as the
           // candidate lane: typed limit or structural pre-progress death).
           if (harnessError && !input.signal?.aborted) {
@@ -6782,9 +6766,10 @@ export class Orchestrator {
                   triedProfiles,
                   spec.model_hint ?? null,
                 ),
-              ...this.credentials.rotationObservations(adapter, spec, newTransients),
+              ...this.credentials.rotationObservations(adapter, spec, newTransients, refusal),
               triedProfiles,
               markers: telemetry.outputMarkers,
+              requestRefused: Boolean(telemetry.requestRefusal),
               sawTypedLimit,
               sawRetryable,
               attemptErrored: harnessError !== null,
@@ -6857,7 +6842,7 @@ export class Orchestrator {
           preStreamFailureSource: "readonly-pre-stream",
         });
       }
-      if (harnessError && !poolExhausted && !processingRefusal) {
+      if (harnessError && !poolExhausted && !processingRefusal && !telemetry.requestRefusal) {
         emitTransientExhausted(
           (t, p) => log.emit(t, p),
           adapter.id,
@@ -6928,9 +6913,11 @@ export class Orchestrator {
           report,
           error: harnessError,
           telemetry,
-          ...(poolExhausted || processingRefusal
-            ? { declaredFailure: declaredFailure(processingRefusal ?? poolExhausted) }
-            : {}),
+          ...(telemetry.requestRefusal
+            ? { declaredFailure: requestRefusalFailure(telemetry.requestRefusal) }
+            : poolExhausted || processingRefusal
+              ? { declaredFailure: declaredFailure(processingRefusal ?? poolExhausted) }
+              : {}),
         });
         if (opts.deepScan) {
           store.writeText(
@@ -7062,6 +7049,7 @@ export class Orchestrator {
           if (
             last &&
             last.status === "failed" &&
+            !last.telemetry.requestRefusal &&
             fallbackModel &&
             fallbackModel !== firstModel &&
             !budgetStopped &&
@@ -7231,6 +7219,7 @@ export class Orchestrator {
           eventRefs: roEventRefs,
           runDir: paths.root,
           resetsAt: roDeclared?.resetsAt ?? null,
+          requestRefusal: roDeclared?.requestRefusal,
           vendorFailure: attemptVendorFailure(attemptTelemetries, last?.attemptId),
           nextActions: harnessFailureNextActions(roCategory),
         });
@@ -7293,10 +7282,7 @@ export class Orchestrator {
     const succeeded = succeededReadonly;
     if (opts.deepScan && succeeded.length === 0) {
       const blocked = attempts.some((a) => a.status === "blocked");
-      // QA-050/QA-019: an all-denied scan (finite-zero, or every scout refused
-      // before spawn) is a BUDGET failure, not harness_error — route it through
-      // the shared classifier. Only a pure-denial scan (no scout actually errored
-      // in the harness) qualifies, so a real explorer failure is never masked.
+      // QA-050/QA-019: only a pure-denial scan may claim a budget failure.
       const scanBudgetMapping =
         budgetStopped && !blocked && attempts.every((a) => a.budgetDenied === true)
           ? classifyBudgetFailure({ denial: budgetDenial, terminal: ledger.terminal() })
@@ -7331,14 +7317,17 @@ export class Orchestrator {
           }),
         );
       } else {
-        // #31: classify the scout failures; keep the scan-specific width hint but
-        // drop the unconditional auth line unless the cause was a real auth failure.
+        // Mixed causes stay generic; only unanimous evidence may name the scan's cause.
+        const declared = blocked ? null : unanimousDeclaredFailure(attempts);
         const scanCategory = dominantHarnessFailureCategory(
           attemptTelemetries.flatMap((a) => a.telemetry.transientFailures),
         );
         writeFailure(store, paths, {
           phase: "harness",
-          category: blocked ? "policy" : "harness_error",
+          category: blocked ? "policy" : (declared?.category ?? "harness_error"),
+          code: declared?.code,
+          resetsAt: declared?.resetsAt,
+          requestRefusal: declared?.requestRefusal,
           safeMessage: message || "all explorers failed",
           eventRefs: attempts.map((a) => `attempts/${a.attemptId}/events.jsonl`),
           runDir: paths.root,
@@ -7349,10 +7338,7 @@ export class Orchestrator {
           ],
         });
       }
-      // QA-036: with ZERO successful explorers there is no synthesizable
-      // deliverable, so a blocked scan can no longer read as a succeeded
-      // "needs review" run (exit 0). An empty scan is a failure whether the
-      // explorers were blocked or errored.
+      // QA-036: no successful explorer means no synthesizable deliverable.
       store.writeText(
         join(paths.finalDir, "summary.md"),
         `# Run ${runId} (${opts.mode})\n\n- Lifecycle: ${scanFailFacts.lifecycle}${scanFailFacts.reason ? ` (${scanFailFacts.reason})` : ""}\n\n${message}\n`,

@@ -62,6 +62,67 @@
           "items": {
             "type": "object",
             "properties": {
+              "inputLimits": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "scope": {
+                      "type": "string",
+                      "const": "turn_text",
+                      "description": "All text input items in one native turn; separate instructions are excluded."
+                    },
+                    "unit": {
+                      "type": "string",
+                      "const": "unicode_scalars"
+                    },
+                    "limit": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "source": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "verified_against": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Native runtime version against which the bound was observed."
+                    },
+                    "askPromptBudget": {
+                      "type": "object",
+                      "properties": {
+                        "shape": {
+                          "type": "string",
+                          "const": "ordinary_initial_attempt",
+                          "description": "Ordinary ASK initial attempt, including thread-turn continuity; excludes deep-scan and automatic continuation attempts."
+                        },
+                        "engineOverheadMax": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "shape",
+                        "engineOverheadMax"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "scope",
+                    "unit",
+                    "limit",
+                    "source",
+                    "verified_against"
+                  ],
+                  "additionalProperties": false,
+                  "description": "Adapter-owned observed input bound, not a predictive refusal or a model-window claim."
+                }
+              },
               "processingPreferences": {
                 "type": "array",
                 "items": {

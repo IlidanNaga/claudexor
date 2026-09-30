@@ -1,5 +1,14 @@
 # @claudexor/policy
 
+## 3.17.2
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.17.2
+  - @claudexor/context@3.17.2
+  - @claudexor/util@3.17.2
+
 ## 3.17.1
 
 ### Patch Changes

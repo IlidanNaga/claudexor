@@ -230,6 +230,14 @@ export class SetupJobStore {
     return rows.map(cloneJob);
   }
 
+  /** Read-only predicate over the live projection, without cloning every job:
+   * the credential-mutation window is read on hot observer paths (#363). */
+  some(predicate: (job: Readonly<ControlSetupJob>) => boolean): boolean {
+    this.assertAvailable();
+    for (const job of this.jobs.values()) if (predicate(job)) return true;
+    return false;
+  }
+
   snapshot(jobId: string): ControlSetupJobSnapshot {
     this.assertAvailable();
     return {

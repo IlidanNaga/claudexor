@@ -1,11 +1,13 @@
 import type {
   CredentialProfile,
   ModelSubstitutionObservation,
+  PreProgressRefusalObservation,
   QuotaSnapshot,
 } from "@claudexor/schema";
 import { quotaConstraintAppliesToModel } from "@claudexor/budget";
 import { profileQuotaBlock } from "./credential-cooldown.js";
 import { limitSubjectRoute, profileHeadroomBreach } from "./credential-profile-rotation.js";
+import { liveRefusalMarks } from "./pre-progress-refusal.js";
 
 /**
  * Quota-aware ACCOUNT POOL of the unified account model (INV-135 rewrite,
@@ -22,11 +24,14 @@ import { limitSubjectRoute, profileHeadroomBreach } from "./credential-profile-r
  * Ties break deterministically by profile id (ascending).
  *
  * One key precedes that order among the SELECTABLE rows (1 and 2): a row with a
- * live model-substitution observation for the requested model — it recently
- * answered this model's request with a different model — ranks after every
- * other selectable row, oldest observation first, so a fully marked pool takes
- * turns instead of re-picking its top-headroom row. The mark never excludes a
- * row and never makes a pool exhausted. Only model operations pass it.
+ * live mark for the requested model ranks after every other selectable row,
+ * oldest mark first (a row's newest mark counts), so a fully marked pool takes
+ * turns instead of re-picking its top-headroom row. Two observations mark a
+ * row: a model-substitution observation — it recently answered this model's
+ * request with a different model (model operations only) — and a pre-progress
+ * refusal observation — its started session recently refused this model's
+ * request before any progress (#363, Agent Runs). A mark never excludes a row
+ * and never makes a pool exhausted.
  *
  * The pool contains SUBSCRIPTION-kind rows only: an api_key row is a paid
  * route and is never silently selected (INV-061); it remains an explicit pin
@@ -93,15 +98,17 @@ export function rankAccountPool(args: {
   model?: string | null;
   /** Live model-substitution observations; only this harness and model apply. */
   substitutions?: readonly ModelSubstitutionObservation[];
+  /** Live pre-progress refusal observations; only this harness and model apply. */
+  refusals?: readonly PreProgressRefusalObservation[];
 }): PoolCandidate[] {
   const now = Date.now();
-  const substitutedAt = new Map<string, number>();
+  const markedAt = liveRefusalMarks(args.refusals ?? [], args.harnessId, args.model, now);
   for (const obs of args.substitutions ?? []) {
     if (obs.harness_id !== args.harnessId || obs.requested_model !== args.model) continue;
     const observed = Date.parse(obs.observed_at);
     const expires = Date.parse(obs.expires_at);
     if (!Number.isFinite(observed) || !Number.isFinite(expires) || expires <= now) continue;
-    substitutedAt.set(obs.profile_id, observed);
+    markedAt.set(obs.profile_id, Math.max(observed, markedAt.get(obs.profile_id) ?? observed));
   }
   const candidates: PoolCandidate[] = [];
   for (const profile of accountPoolRows(args.registry, args.harnessId)) {
@@ -156,17 +163,12 @@ export function rankAccountPool(args: {
     verdict.kind === "fresh_headroom" ? 0 : verdict.kind === "unknown" ? 1 : 2;
   // Exhausted rows keep their place at the end whatever their mark says.
   const orderOf = (candidate: PoolCandidate): number =>
-    candidate.verdict.kind === "exhausted"
-      ? 2
-      : substitutedAt.has(candidate.profile.profile_id)
-        ? 1
-        : 0;
+    candidate.verdict.kind === "exhausted" ? 2 : markedAt.has(candidate.profile.profile_id) ? 1 : 0;
   return candidates.sort((a, b) => {
     const byOrder = orderOf(a) - orderOf(b);
     if (byOrder !== 0) return byOrder;
     if (orderOf(a) === 1) {
-      const byAge =
-        substitutedAt.get(a.profile.profile_id)! - substitutedAt.get(b.profile.profile_id)!;
+      const byAge = markedAt.get(a.profile.profile_id)! - markedAt.get(b.profile.profile_id)!;
       if (byAge !== 0) return byAge;
     }
     const byRank = rankOf(a.verdict) - rankOf(b.verdict);

@@ -55,6 +55,16 @@ Read these together before changing shared behavior:
 - `benchmarks/runner` holds the SWE-bench benchmark runner and is part of the
   pnpm workspace.
 
+## Native input transport changes
+
+Keep native text limits separate from model windows and process argument limits.
+Preserve exact payload bytes and instruction roles. Verify both oversized and
+ordinary inputs, final typed failures, account failover, resume and cleanup.
+HTTP delivery proof must distinguish local handoff from provider acceptance:
+exercise partial/full uploads, unchanged proxy ownership, unsupported observation,
+replay and crash custody on the supported Node floor and bundled runtime. Test
+lazy dispatcher initialization from the built artifact as well as source modules.
+
 ## Development Commands
 
 Use the repository package manager and keep generated schema output checked.

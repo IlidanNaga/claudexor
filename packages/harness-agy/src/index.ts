@@ -392,6 +392,17 @@ async function* runAgy(
   spec: HarnessRunSpec,
   prepareProfileKeychain: (home: string, platform?: NodeJS.Platform) => void,
 ): AsyncIterable<HarnessEvent> {
+  const input = promptWithInstructions(spec);
+  if (!input) {
+    yield {
+      type: "error",
+      session_id: spec.session_id,
+      ts: nowIso(),
+      error: "agy requires nonempty input for headless execution",
+    };
+    yield { type: "completed", session_id: spec.session_id, ts: nowIso() };
+    return;
+  }
   const profile = spec.credential_profile;
   // Л-4: no engine-default credential — an unpinned agy run has nothing to
   // route. Typed stream refusal (error then completed), the one refusal
@@ -433,7 +444,8 @@ async function* runAgy(
     // The vendor probe/run remains the final transport authority.
   }
 
-  const args = ["-p", promptWithInstructions(spec), "--output-format", "stream-json"];
+  // AGY 1.1.13 selects print mode from piped stdin only without a print/prompt flag.
+  const args = ["--output-format", "stream-json"];
   // Л-18: without --add-dir agy resolves relative paths against its own app
   // data dir instead of the workspace (live-proven §1.2d).
   args.push("--add-dir", spec.cwd);
@@ -445,6 +457,7 @@ async function* runAgy(
   yield* runCliHarness({
     bin: AGY_BIN(),
     args,
+    input,
     spec,
     env: route.env,
     label: "agy",

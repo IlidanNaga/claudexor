@@ -2,9 +2,9 @@ import { readFileSync, realpathSync } from "node:fs";
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { HarnessRunSpec, type HarnessEvent } from "@claudexor/schema";
-import type { CliRunLoopOptions } from "@claudexor/core";
+import { runCapture, type CliRunLoopOptions } from "@claudexor/core";
 import {
   cleanupCursorSmokeBase,
   createCursorAdapter,
@@ -18,6 +18,22 @@ import {
   smokeIsolatedApiKey,
 } from "./index.js";
 import { probeCursorNativeAuth } from "./auth.js";
+
+const PROFILE_ENV = {
+  AGENT_CLI_CREDENTIAL_STORE: "file",
+  CURSOR_CONFIG_DIR: "/tmp/profile/.cursor",
+};
+
+/** A capture that never answers until its abort signal fires (the probe's own
+ * budget or a caller's cancel), then reports the kill the way runCapture does. */
+const untilAborted =
+  (killed: () => { code: number | null; signal: string | null }) =>
+  (_bin: string, _argv: string[], opts: { abortSignal?: AbortSignal }) =>
+    new Promise((resolve) => {
+      const done = () => resolve({ ...killed(), stdout: "", stderr: "" });
+      if (opts.abortSignal?.aborted) done();
+      else opts.abortSignal?.addEventListener("abort", done, { once: true });
+    });
 
 const nativeProbe = (authed: boolean, probeError: string | null = null) =>
   authed
@@ -172,6 +188,168 @@ describe("cursor auth status parsing", () => {
     );
     expect(result).toEqual({ kind: "unknown", error: "cursor-agent status failed (SIGTERM)" });
     expect(calls).toEqual([["status", "--format", "json"]]);
+  });
+
+  it("reports a probe killed by its OWN budget timer as an unanswered, unknown login state (#363)", async () => {
+    const result = await probeCursorNativeAuth(
+      PROFILE_ENV,
+      undefined,
+      untilAborted(() => ({ code: null, signal: "SIGKILL" })) as never,
+      20,
+    );
+    expect(result).toEqual({
+      kind: "unknown",
+      error: "cursor-agent status did not answer within 0.02s (SIGKILL); login state unknown",
+      timedOut: true,
+    });
+    // Never the logged-out verdict, which alone may carry login advice.
+    expect(result.kind).not.toBe("loggedOut");
+  });
+
+  it("never reports a caller's cancellation as an unanswered probe, however long it ran (#363)", async () => {
+    const caller = new AbortController();
+    const pending = probeCursorNativeAuth(
+      PROFILE_ENV,
+      caller.signal,
+      untilAborted(() => ({ code: null, signal: "SIGTERM" })) as never,
+      60_000,
+    );
+    caller.abort();
+    const result = await pending;
+    expect(result).toEqual({ kind: "unknown", error: "cursor-agent status failed (SIGTERM)" });
+    expect(result).not.toHaveProperty("timedOut");
+  });
+
+  it("never infers a timeout from elapsed wall time: a clock step or an outside kill is not one (#363)", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const result = await probeCursorNativeAuth(PROFILE_ENV, undefined, (async () => {
+        // The wall clock jumps an hour and an outside actor kills the child,
+        // all long before the probe's own budget could fire.
+        vi.setSystemTime(Date.now() + 60 * 60_000);
+        return { code: null, signal: "SIGKILL", stdout: "", stderr: "" };
+      }) as never);
+      expect(result).toEqual({ kind: "unknown", error: "cursor-agent status failed (SIGKILL)" });
+      expect(result).not.toHaveProperty("timedOut");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives an unsupported-JSON text fallback its own budget: only ITS timer makes a timeout (#363)", async () => {
+    const run = async (fallback: "budget" | "outside") => {
+      const calls: string[][] = [];
+      const result = await probeCursorNativeAuth(
+        PROFILE_ENV,
+        undefined,
+        (async (_bin: string, argv: string[], opts: { abortSignal?: AbortSignal }) => {
+          calls.push(argv);
+          if (argv.includes("--format")) {
+            await new Promise((resolve) => setTimeout(resolve, 15)); // most of ITS budget
+            return { code: 2, signal: null, stdout: "", stderr: "unknown option --format" };
+          }
+          if (fallback === "outside")
+            return { code: null, signal: "SIGKILL", stdout: "", stderr: "" };
+          return untilAborted(() => ({ code: null, signal: "SIGKILL" }))(_bin, argv, opts);
+        }) as never,
+        20,
+      );
+      expect(calls).toEqual([["status", "--format", "json"], ["status"]]);
+      return result;
+    };
+    expect(await run("budget")).toEqual({
+      kind: "unknown",
+      error: "cursor-agent status did not answer within 0.02s (SIGKILL); login state unknown",
+      timedOut: true,
+    });
+    // A retry killed from outside is no timeout, even though both children
+    // together outlasted one budget.
+    const outside = await run("outside");
+    expect(outside).toEqual({ kind: "unknown", error: "cursor-agent status failed (2)" });
+    expect(outside).not.toHaveProperty("timedOut");
+  });
+
+  it("tells the owned timeout, a caller cancel and an outside SIGKILL apart on a real child (#363)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "claudexor-cursor-status-child-"));
+    let childIndex = 0;
+    const withReadyChild = async (
+      check: (capture: typeof runCapture, pid: number) => Promise<void>,
+    ) => {
+      const pidFile = join(dir, `pid-${childIndex++}`);
+      const cleanup = new AbortController();
+      let onExit: NonNullable<Parameters<typeof runCapture>[2]>["onExit"];
+      // Deliberately slower than the tested 80ms budget. Start the real child
+      // first: process startup and host load are not the probe cause under test.
+      const script = [
+        "const fs = require('node:fs')",
+        `const file = ${JSON.stringify(pidFile)}`,
+        "setTimeout(() => { fs.writeFileSync(file + '.tmp', String(process.pid)); fs.renameSync(file + '.tmp', file); }, 200)",
+        "setInterval(() => {}, 1000)",
+      ].join(";");
+      const captured = runCapture(process.execPath, ["-e", script], {
+        abortSignal: cleanup.signal,
+        cancelSignal: "SIGTERM",
+        cancelKillDelayMs: 0,
+        onExit: (code, signal) => onExit?.(code, signal),
+      });
+      const capture: typeof runCapture = (_bin, _args, opts) => {
+        onExit = opts?.onExit;
+        const abort = () => cleanup.abort();
+        if (opts?.abortSignal?.aborted) abort();
+        else opts?.abortSignal?.addEventListener("abort", abort, { once: true });
+        return captured.finally(() => opts?.abortSignal?.removeEventListener("abort", abort));
+      };
+      const ready = async () => {
+        // Directory notifications are hints and can be missed/coalesced. Read
+        // the atomic receipt itself with a fixture-only bound before arming
+        // the probe budget; expiry still enters owned-child cleanup below.
+        const deadline = Date.now() + 10_000;
+        while (!cleanup.signal.aborted && Date.now() < deadline) {
+          const pid = existsSync(pidFile) ? Number(readFileSync(pidFile, "utf8").trim()) : 0;
+          if (Number.isSafeInteger(pid) && pid > 1) return pid;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        throw new Error("fixture child did not publish a valid PID before readiness deadline");
+      };
+      try {
+        const pid = await Promise.race([
+          ready(),
+          captured.then(() => {
+            throw new Error("fixture child exited before readiness");
+          }),
+        ]);
+        await check(capture, pid);
+      } finally {
+        cleanup.abort();
+        await captured;
+      }
+    };
+    try {
+      await withReadyChild(async (capture) => {
+        expect(await probeCursorNativeAuth(PROFILE_ENV, undefined, capture, 80)).toMatchObject({
+          kind: "unknown",
+          timedOut: true,
+        });
+      });
+      await withReadyChild(async (capture) => {
+        const caller = new AbortController();
+        const cancelled = probeCursorNativeAuth(PROFILE_ENV, caller.signal, capture, 30_000);
+        caller.abort();
+        const cancelledResult = await cancelled;
+        expect(cancelledResult.kind).toBe("unknown");
+        expect(cancelledResult).not.toHaveProperty("timedOut");
+      });
+      await withReadyChild(async (capture, pid) => {
+        const killed = probeCursorNativeAuth(PROFILE_ENV, undefined, capture, 30_000);
+        process.kill(pid, "SIGKILL");
+        expect(await killed).toEqual({
+          kind: "unknown",
+          error: "cursor-agent status failed (SIGKILL)",
+        });
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("does not retry an ordinary non-zero probe without explicit JSON-option evidence", async () => {

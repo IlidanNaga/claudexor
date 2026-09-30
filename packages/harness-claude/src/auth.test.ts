@@ -826,7 +826,7 @@ describe("Claude transport-aware source selection", () => {
     expect(cliOptions?.env?.ANTHROPIC_API_KEY).toBeNull();
     expect(events).toContainEqual(
       expect.objectContaining({
-        type: "message",
+        type: "status",
         payload: { auth_status_stale: true, auth_status_stale_age_ms: 42 },
       }),
     );

@@ -1,5 +1,19 @@
 # @claudexor/control-api
 
+## 3.17.2
+
+### Patch Changes
+
+- Adapt Codex raw-model Ultra preferences to the strongest supported generation effort in the vendor order, preserve explicit effort evidence, and keep native Ultra delegation unchanged (#368).
+
+- Updated dependencies
+  - @claudexor/schema@3.17.2
+  - @claudexor/delivery@3.17.2
+  - @claudexor/event-log@3.17.2
+  - @claudexor/workspace@3.17.2
+  - @claudexor/secrets@3.17.2
+  - @claudexor/util@3.17.2
+
 ## 3.17.1
 
 ### Patch Changes
