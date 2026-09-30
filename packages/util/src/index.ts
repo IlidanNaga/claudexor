@@ -30,8 +30,9 @@ import { fileURLToPath } from "node:url";
 import { CLAUDEXOR_VERSION } from "./version.js";
 
 /** Generate a short unique id, optionally prefixed (e.g. "run-3f2a...."). */
+export const SHORT_ID_LENGTH = 12;
 export function newId(prefix = ""): string {
-  const id = randomUUID().replace(/-/g, "").slice(0, 12);
+  const id = randomUUID().replace(/-/g, "").slice(0, SHORT_ID_LENGTH);
   return prefix ? `${prefix}-${id}` : id;
 }
 

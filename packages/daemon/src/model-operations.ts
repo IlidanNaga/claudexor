@@ -175,7 +175,13 @@ export class ModelOperations {
       evidence.usage = result.usage;
       evidence.cost = result.cost;
       evidence.problem = result.problem;
-      if (evidence.dispatch.state === "started") {
+      const notDelivered =
+        result.outcome === "failed" &&
+        result.problem?.code === "transport_not_delivered" &&
+        result.problem.context.generationStarted === false &&
+        (result.problem.context.requestDelivery as { state?: unknown } | undefined)?.state ===
+          "not_delivered";
+      if (evidence.dispatch.state === "started" && !notDelivered) {
         evidence.dispatch = {
           ...evidence.dispatch,
           state: result.outcome === "unknown" ? "unknown" : "response_received",
@@ -204,6 +210,11 @@ export class ModelOperations {
         readyAt: ready.toISOString(),
         expiresAt: new Date(ready.getTime() + RESPONSE_RETENTION_MS).toISOString(),
       };
+      // Refine only a complete terminal proof. The earlier attempted-send
+      // stamp/route survive; a crash or publication failure still reads unknown.
+      if (notDelivered && evidence.dispatch.state === "started") {
+        evidence.dispatch = { ...evidence.dispatch, state: "not_started" };
+      }
       // DaemonServer's existing terminal update atomically publishes this
       // compact receipt. Bodies never enter JobRecord.params/result.
       return ModelOperationReceipt.parse({ lifecycle, ...evidence });

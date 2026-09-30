@@ -831,8 +831,9 @@ re-record the `recorded-*` fixture and re-verify the expectations; the
 fixture-freshness gate discloses drift.
 
 **Claude Code** — wire: `claude -p … --output-format stream-json --verbose`
-(one-shot prompt as argv; interactive runs add `--input-format stream-json`
-and deliver the prompt plus an `initialize` control handshake on stdin).
+(one-shot prompt uses `--input-format text` and stdin; interactive runs keep
+`stream-json` stdin with their `initialize` handshake). System additions use
+`--append-system-prompt-file`, preserving their role without argv payloads.
 Events: `system/init` → `started` (carries `native_session_id` for
 `--resume`); `system/api_retry` → typed `status` (kind `api_retry`, typed
 `rate_limit`/`transient` enrichment); `assistant` content blocks → `message` /
@@ -907,8 +908,10 @@ fabricated ISO instant (the daemon's quota registry bounds the resulting
 cooldown at end-of-that-day UTC). Other transient conditions still surface as
 generic `error` events — honest degradation, never invented status.
 
-**Antigravity CLI (`agy`)** — wire: `agy -p "<prompt>" --output-format
-stream-json --model <slug> --mode <plan|accept-edits> --add-dir <cwd>`
+**Antigravity CLI (`agy`)** — wire: `agy --output-format stream-json
+--model <slug> --mode <plan|accept-edits> --add-dir <cwd>` with the composed
+prompt on piped stdin, without a print flag (agy 1.1.13 selects print mode
+from non-empty non-TTY stdin)
 (`--dangerously-skip-permissions` for full access; `--conversation <id>`
 resumes). Events: `init` → `started` (the vendor `conversation_id` is the
 resumable native session id); `step_update` with `step_type: "tool"` → a

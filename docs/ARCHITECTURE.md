@@ -643,8 +643,12 @@ the argv prompt only instructs the harness to read it, and the file is removed
 before every diff/gate/review (including native retries). This prevents
 `spawn E2BIG` without truncating evidence or polluting the candidate patch.
 
-Cursor prompts use the vendor's one-shot stdin contract through the shared CLI
-run loop; prompt bytes never ride process argv. Codex instead owns one native
+Cursor and AGY prompts use the shared CLI loop's one-shot stdin. AGY omits
+print flags so its native stdin reader selects print mode. Claude one-shot uses
+text stdin; interactive/image runs retain their sole stream-json stdin owner.
+Claude instructions append through an adapter-owned UTF-8 file, removed when
+the child ends, never through argv or user-role text (`instructions-file.ts`).
+Codex owns one native
 `app-server --stdio` JSON-RPC child per Claudexor run. The adapter keeps the run
 active while a native turn, active goal continuation, or run-owned background
 terminal exists. Native thread/turn ids are control handles, not durable engine
@@ -1120,14 +1124,10 @@ UI surfaces the exhaustion instead of implying a switch. Exhaustion is also a
 TYPED terminal: a reactive rotation-eligible failure with nowhere to go
 terminalizes the attempt on `credential_pool_exhausted` (category
 `harness_unavailable` — nothing malfunctioned) only when the triggering
-subject or a POOL-MEMBER row carries limit/unusable evidence — rows for
-identities rotation could never select (wrong kind, outside policy, not
-ready) never count, and an evidence-free structural death keeps its TRUE
-failure — through NORMAL attempt
-finalization, BEFORE the transient gate could burn same-profile retries on the
-already-refused subject, and the run terminal lifts `code` + `resetsAt` onto
-`final/failure.yaml` in every lane (race unanimity, convergence last-result,
-read-only chain). `resetsAt` folds the EARLIEST known reset WITHIN the pool —
+subject carries limit/unusable evidence. Earlier or untried accounts cannot
+replace its structural failure with a quota claim. Normal finalization lifts
+`code` and `resetsAt` onto `final/failure.yaml` in every lane before transient
+retry (race unanimity, convergence last-result, read-only chain). `resetsAt` folds the EARLIEST known reset WITHIN the pool —
 the triggering subject's own observed limit included; a limit-evidenced member
 with an unknown reset makes it null — deliberately the within-pool opposite of
 the across-candidates LATEST rule. At preflight under `rotate`, the selected
@@ -1572,7 +1572,14 @@ caller rereads current authorization. Selection hands its exact-profile catalog
 to this operation's invocation, which rechecks the current account fingerprint;
 no catalog or credentials are cached across operations. Unknown fingerprints
 retain fresh discovery and cannot authorize native continuation reuse.
-Its single inference POST follows a durable dispatch receipt.
+Its single inference POST follows a durable dispatch receipt. Exact JSON bytes
+stream with Content-Length. `request-delivery.ts` observes public callbacks on
+the existing dispatcher; its lazy `dispatcher-accessor.cts` preserves native
+cold initialization, proxy, TLS and pool ownership. Positive connector or
+incomplete-upload proof yields `transport_not_delivered`; full handoff or
+unobserved transport stays unknown. `ModelOperations` refines the terminal to
+`not_started` only after publishing proof, retaining the attempted-send timestamp
+and route. Crash/publication failure stays unknown. No adapter retry is added.
 The caller's canonical instruction messages retain their roles and ordered text
 parts in Ouroboros history. Codex's provider-specific wire projection maps each
 canonical `system` message to the high-priority `developer` role because this
@@ -3478,11 +3485,16 @@ the rapid-refill breaker `rapid_refill_breaker` → `capacity_exhausted` with a
 typed cause), the `compact_boundary` system frame → a compaction event, and the
 top-level typed `rate_limit_event` → the existing `rate_limit` signal (a routine
 `allowed` heartbeat surfaces nothing and never arms rotation). Codex exec's
-recorded oversized-input case (0.153.3 and 0.156.1, byte-identical) surfaces
-a stderr JSON-RPC error (`input_error_code: input_too_large`) before model
-execution, without a typed context stream frame. The Codex adapter has no
-token-window context mapping; this character-limit capture does not establish
-a token-window limit. A terminal `capacity_exhausted` with no completed
+recorded oversized-input refusal remains separate: the app-server preserves
+RPC data and emits `request_refusal`, which reaches final failure as
+`input_too_large` with Unicode-scalar measurements and no quota reset. It stops
+account rotation, same-harness fallback-model and convergence retries; ordinary
+failover remains unchanged. `capability_profile.input_limits` declares the
+verified native turn-text bound only on the observed CLI version. The catalog's
+`inputLimits` entry's `askPromptBudget` subtracts shared thread-pointer framing for ordinary
+ASK initial attempts (`prompt-framing.ts`), including thread turns. Other shapes
+remain unbudgeted; no predictive native refusal or guessed model window is added.
+The native input cap excludes separate instructions and is not token capacity. A terminal `capacity_exhausted` with no completed
 WorkReport maps to `interrupted / context_capacity_exhausted`.
 
 One-shot continuation (D-16d): when an eligible terminal `capacity_exhausted`

@@ -42,6 +42,7 @@ import {
 } from "./http-client-version.js";
 import { processingAdmissionProblem } from "./processing-refusal.js";
 import { ResponseFailureCapture } from "./failure-evidence.js";
+import { RequestDelivery } from "./request-delivery.js";
 
 const ENDPOINT = "https://chatgpt.com/backend-api/codex";
 const CLIENT = "claudexor";
@@ -254,6 +255,7 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
         model: request.model,
       };
       let dispatched = false;
+      let delivery: RequestDelivery | undefined;
       const capture = new ResponseFailureCapture(context.captureFailureEvidence);
       let processing: ProcessingReceipt | undefined;
       let effortResolution: EffortResolution | undefined;
@@ -388,7 +390,9 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
           },
         };
         const body = JSON.stringify(buildResponsesRequest(physicalRequest, route));
+        delivery = new RequestDelivery(body);
         const requestHeaders = new Headers(headers(auth));
+        requestHeaders.set("Content-Length", String(delivery.bytes.length));
         if (nativeContinuation) {
           requestHeaders.set(
             "x-codex-turn-state",
@@ -413,7 +417,7 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
         const response = await fetcher(`${ENDPOINT}/responses`, {
           method: "POST",
           headers: requestHeaders,
-          body,
+          ...delivery.request(),
           signal: context.signal,
           redirect: "error",
         });
@@ -438,9 +442,16 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
         );
       } catch (error) {
         const result = emptyModelResult({ ...route, model: null });
-        result.outcome = dispatched ? "unknown" : "failed";
-        result.problem =
-          error instanceof CodexModelError
+        const proof = dispatched ? delivery?.notDelivered() : null;
+        result.outcome = dispatched && !proof ? "unknown" : "failed";
+        result.problem = proof
+          ? new CodexModelError(
+              "transport_not_delivered",
+              "The complete Codex request was not delivered; generation did not start.",
+              { generationStarted: false, requestDelivery: proof },
+              true,
+            ).problem
+          : error instanceof CodexModelError
             ? error.problem
             : new CodexModelError(
                 dispatched
@@ -454,7 +465,11 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
                     ? "The model operation was cancelled before dispatch."
                     : "The Codex model request could not be prepared.",
               ).problem;
-        if (dispatched) capture.caught(error);
+        if (dispatched) {
+          capture.caught(error);
+          if (delivery && !proof && result.problem)
+            result.problem.context.requestDelivery = delivery.facts();
+        }
         return withTurnState(dispatched ? capture.finish(result) : result);
       }
     },

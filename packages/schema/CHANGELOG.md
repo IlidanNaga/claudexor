@@ -1,5 +1,12 @@
 # @claudexor/schema
 
+## 3.17.2
+
+### Patch Changes
+
+- Preserve native input-size refusals without account retries or unrelated quota resets, publish measured ASK input budgets, distinguish proven undelivered Codex model requests, and move large Claude and AGY inputs off process arguments.
+  - @claudexor/util@3.17.2
+
 ## 3.17.1
 
 ### Patch Changes

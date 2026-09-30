@@ -97,7 +97,11 @@ function setup(
     fetcher,
     token,
     adapter: createCodexModelAdapter({
-      fetch: fetcher,
+      fetch: async (url, init) =>
+        fetcher(
+          url,
+          init?.method === "POST" ? { ...init, body: await new Response(init.body).text() } : init,
+        ),
       readAuthFile,
       now,
       clientVersion: async () => clientVersion,

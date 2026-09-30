@@ -1,3 +1,9 @@
+import {
+  applyWorkEnvelope,
+  promptWithPointers as renderPromptWithPointers,
+  threadContextPointer,
+} from "./prompt-framing.js";
+import { requestRefusalFailure } from "./runTerminalResults.js";
 import { delegationBeltFor } from "./delegationBelt.js";
 import {
   bindProcessingAdmission,
@@ -56,6 +62,7 @@ import {
   isWorkingCandidate,
   partitionCandidates,
   toCandidateEvidence,
+  unanimousDeclaredFailure,
 } from "./candidateEvidence.js";
 import { capabilityIntents } from "@claudexor/gateway";
 import {
@@ -2032,28 +2039,6 @@ export class Orchestrator {
     });
   }
 
-  /**
-   * D-16: apply the resolved WorkReport transport to a built spec — set the
-   * envelope output_schema (constrained/side_tool routes) and APPEND the fenced
-   * metadata instruction (validated routes, e.g. cursor). Mutates the spec in
-   * place and returns the mode the answer unwrap consumes. Called at every
-   * task-producing spec-build site so the transport is never wired one-off.
-   */
-  private applyWorkEnvelope(
-    spec: HarnessRunSpec,
-    workEnvelope: ResolvedWorkReportEnvelope,
-  ): WorkReportEnvelopeMode {
-    if (workEnvelope.outputSchema !== undefined) spec.output_schema = workEnvelope.outputSchema;
-    const instruction = workEnvelope.mode.instruction;
-    if (instruction) {
-      spec.instructions =
-        spec.instructions && spec.instructions.trim()
-          ? `${spec.instructions}\n\n${instruction}`
-          : instruction;
-    }
-    return workEnvelope.mode;
-  }
-
   private routeSpecKnobs(
     routed: RoutedAdapter,
     contract: ActiveTaskContract,
@@ -2226,7 +2211,7 @@ export class Orchestrator {
       const briefPath = join(paths.contextDir, "THREAD.md");
       store.writeText(briefPath, result.packetMarkdown);
       return {
-        pointerLine: `Earlier conversation context for this thread is at: ${briefPath} — read it before answering.`,
+        pointerLine: threadContextPointer(briefPath),
       };
     } catch (err) {
       // Continuity is best-effort — a packet-build failure must never fail the
@@ -2439,7 +2424,7 @@ export class Orchestrator {
           : this.routeBillingKnowledge(billingInput, adapter.id);
     if (interaction) spec.extra["interactionChannel"] = interaction;
     const workEnvelope = this.workReportEnvelopeFor(routed, contract, Boolean(interaction));
-    const workReportMode: WorkReportEnvelopeMode = this.applyWorkEnvelope(spec, workEnvelope);
+    const workReportMode: WorkReportEnvelopeMode = applyWorkEnvelope(spec, workEnvelope);
     const inactivityMs = harnessInactivityTimeoutMs(this.config(contract.repo.root));
 
     // Named once: the attempt record, the CandidateRun and the terminal gate all
@@ -2639,6 +2624,7 @@ export class Orchestrator {
           clearFileBackedContext();
         }
 
+        if (telemetry.requestRefusal) break;
         const newTransients = telemetry.transientFailures.slice(transientStart);
         // #31: the centralized retry gate reads the classified `retryable` verdict.
         const sawRetryable = newTransients.some((f) => f.retryable);
@@ -2672,6 +2658,7 @@ export class Orchestrator {
             ...this.credentials.rotationObservations(adapter, spec, newTransients, refusal),
             triedProfiles,
             markers: telemetry.outputMarkers,
+            requestRefused: Boolean(telemetry.requestRefusal),
             sawTypedLimit,
             sawRetryable,
             attemptErrored: harnessErrored,
@@ -2738,7 +2725,7 @@ export class Orchestrator {
     }
     // A pool-exhausted terminal is rotation's verdict, not the transient
     // machinery's — no `route.transient.exhausted` rides along with it.
-    if (harnessErrored && !poolExhausted && !processingRefusal) {
+    if (harnessErrored && !poolExhausted && !processingRefusal && !telemetry.requestRefusal) {
       emitTransientExhausted(
         (t, p) => log?.emit(t, p),
         adapter.id,
@@ -2915,9 +2902,11 @@ export class Orchestrator {
       telemetry,
       ...(secretDiffRefusal ? { secretDiffRefusal } : {}),
       // A5: the typed refusal survives NORMAL attempt finalization (no throw).
-      ...(poolExhausted || processingRefusal
-        ? { declaredFailure: declaredFailure(processingRefusal ?? poolExhausted) }
-        : {}),
+      ...(telemetry.requestRefusal
+        ? { declaredFailure: requestRefusalFailure(telemetry.requestRefusal) }
+        : poolExhausted || processingRefusal
+          ? { declaredFailure: declaredFailure(processingRefusal ?? poolExhausted) }
+          : {}),
       outcomeClass: finalized.outcomeClass,
       applied,
     };
@@ -5020,7 +5009,11 @@ export class Orchestrator {
         attemptTelemetries.push({ attemptId, harnessId: adapter.id, telemetry: run.telemetry });
         // Cancellation/deadline keeps priority over a belt failure finalized concurrently.
         if (input.signal?.aborted || processingBudgetDenial) break;
-        if (run.telemetry.effortResolution?.resolution === "rejected") break;
+        if (
+          run.telemetry.requestRefusal ||
+          run.telemetry.effortResolution?.resolution === "rejected"
+        )
+          break;
         if (delegateFailure.candidateFailureKind(run)) {
           const failure = delegateFailure.candidateFailureTerminal(run, "convergence");
           if (run.files) {
@@ -5486,6 +5479,7 @@ export class Orchestrator {
               : (convDeclared?.category ?? "internal"),
         code: processingBudgetMapping?.code ?? convDeclared?.code ?? null,
         resetsAt: convDeclared?.resetsAt ?? null,
+        requestRefusal: convDeclared?.requestRefusal,
         safeMessage: convNeedsDecision
           ? `review escalated to a human decision after ${attempt} attempt(s)`
           : facts.reason === "stuck_no_progress"
@@ -5671,7 +5665,7 @@ export class Orchestrator {
           routed.supportsInteractive,
         );
         if (planInteraction) spec.extra["interactionChannel"] = planInteraction;
-        const planWorkMode = this.applyWorkEnvelope(
+        const planWorkMode = applyWorkEnvelope(
           spec,
           this.workReportEnvelopeFor(routed, contract, Boolean(planInteraction)),
         );
@@ -6178,7 +6172,7 @@ export class Orchestrator {
         // D-16: compile the WorkReport transport onto the reducer spec (the
         // reducer is non-interactive) so its output is unwrapped + finalized
         // through the shared attempt contract, not a fourth deliverable predicate.
-        const workReportMode = this.applyWorkEnvelope(
+        const workReportMode = applyWorkEnvelope(
           spec,
           this.workReportEnvelopeFor(routed, contract, false),
         );
@@ -6484,13 +6478,11 @@ export class Orchestrator {
           : null;
         // D-16d: the continuation packet pointer rides after the lane pointer so
         // the fresh session is re-grounded in the exhausted attempt's work.
-        const promptWithPointers = [
+        const promptWithPointers = renderPromptWithPointers(
           explorerPrompt,
           laneContinuity?.pointerLine,
           continuationPointer,
-        ]
-          .filter((p): p is string => Boolean(p))
-          .join("\n\n");
+        );
         const spec = HarnessRunSpec.parse({
           session_id: newId("ses"),
           intent: opts.intent,
@@ -6539,7 +6531,7 @@ export class Orchestrator {
           contract,
           Boolean(reportInteraction),
         );
-        const readonlyWorkMode: WorkReportEnvelopeMode = this.applyWorkEnvelope(
+        const readonlyWorkMode: WorkReportEnvelopeMode = applyWorkEnvelope(
           spec,
           readonlyWorkEnvelope,
         );
@@ -6749,6 +6741,7 @@ export class Orchestrator {
           }
 
           if (streamBudgetDenied) break;
+          if (telemetry.requestRefusal) break;
           const newTransients = telemetry.transientFailures.slice(transientStart);
           const sawRetryable = newTransients.some((f) => f.retryable);
           const sawTypedLimit = telemetry.rateLimits.length > rateLimitStart;
@@ -6776,6 +6769,7 @@ export class Orchestrator {
               ...this.credentials.rotationObservations(adapter, spec, newTransients, refusal),
               triedProfiles,
               markers: telemetry.outputMarkers,
+              requestRefused: Boolean(telemetry.requestRefusal),
               sawTypedLimit,
               sawRetryable,
               attemptErrored: harnessError !== null,
@@ -6848,7 +6842,7 @@ export class Orchestrator {
           preStreamFailureSource: "readonly-pre-stream",
         });
       }
-      if (harnessError && !poolExhausted && !processingRefusal) {
+      if (harnessError && !poolExhausted && !processingRefusal && !telemetry.requestRefusal) {
         emitTransientExhausted(
           (t, p) => log.emit(t, p),
           adapter.id,
@@ -6919,9 +6913,11 @@ export class Orchestrator {
           report,
           error: harnessError,
           telemetry,
-          ...(poolExhausted || processingRefusal
-            ? { declaredFailure: declaredFailure(processingRefusal ?? poolExhausted) }
-            : {}),
+          ...(telemetry.requestRefusal
+            ? { declaredFailure: requestRefusalFailure(telemetry.requestRefusal) }
+            : poolExhausted || processingRefusal
+              ? { declaredFailure: declaredFailure(processingRefusal ?? poolExhausted) }
+              : {}),
         });
         if (opts.deepScan) {
           store.writeText(
@@ -7053,6 +7049,7 @@ export class Orchestrator {
           if (
             last &&
             last.status === "failed" &&
+            !last.telemetry.requestRefusal &&
             fallbackModel &&
             fallbackModel !== firstModel &&
             !budgetStopped &&
@@ -7222,6 +7219,7 @@ export class Orchestrator {
           eventRefs: roEventRefs,
           runDir: paths.root,
           resetsAt: roDeclared?.resetsAt ?? null,
+          requestRefusal: roDeclared?.requestRefusal,
           vendorFailure: attemptVendorFailure(attemptTelemetries, last?.attemptId),
           nextActions: harnessFailureNextActions(roCategory),
         });
@@ -7284,10 +7282,7 @@ export class Orchestrator {
     const succeeded = succeededReadonly;
     if (opts.deepScan && succeeded.length === 0) {
       const blocked = attempts.some((a) => a.status === "blocked");
-      // QA-050/QA-019: an all-denied scan (finite-zero, or every scout refused
-      // before spawn) is a BUDGET failure, not harness_error — route it through
-      // the shared classifier. Only a pure-denial scan (no scout actually errored
-      // in the harness) qualifies, so a real explorer failure is never masked.
+      // QA-050/QA-019: only a pure-denial scan may claim a budget failure.
       const scanBudgetMapping =
         budgetStopped && !blocked && attempts.every((a) => a.budgetDenied === true)
           ? classifyBudgetFailure({ denial: budgetDenial, terminal: ledger.terminal() })
@@ -7322,14 +7317,17 @@ export class Orchestrator {
           }),
         );
       } else {
-        // #31: classify the scout failures; keep the scan-specific width hint but
-        // drop the unconditional auth line unless the cause was a real auth failure.
+        // Mixed causes stay generic; only unanimous evidence may name the scan's cause.
+        const declared = blocked ? null : unanimousDeclaredFailure(attempts);
         const scanCategory = dominantHarnessFailureCategory(
           attemptTelemetries.flatMap((a) => a.telemetry.transientFailures),
         );
         writeFailure(store, paths, {
           phase: "harness",
-          category: blocked ? "policy" : "harness_error",
+          category: blocked ? "policy" : (declared?.category ?? "harness_error"),
+          code: declared?.code,
+          resetsAt: declared?.resetsAt,
+          requestRefusal: declared?.requestRefusal,
           safeMessage: message || "all explorers failed",
           eventRefs: attempts.map((a) => `attempts/${a.attemptId}/events.jsonl`),
           runDir: paths.root,
@@ -7340,10 +7338,7 @@ export class Orchestrator {
           ],
         });
       }
-      // QA-036: with ZERO successful explorers there is no synthesizable
-      // deliverable, so a blocked scan can no longer read as a succeeded
-      // "needs review" run (exit 0). An empty scan is a failure whether the
-      // explorers were blocked or errored.
+      // QA-036: no successful explorer means no synthesizable deliverable.
       store.writeText(
         join(paths.finalDir, "summary.md"),
         `# Run ${runId} (${opts.mode})\n\n- Lifecycle: ${scanFailFacts.lifecycle}${scanFailFacts.reason ? ` (${scanFailFacts.reason})` : ""}\n\n${message}\n`,

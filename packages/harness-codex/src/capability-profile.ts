@@ -1,7 +1,17 @@
 import {
   HarnessCapabilityProfile as HarnessCapabilityProfileSchema,
   type HarnessCapabilityProfile,
+  type HarnessInputLimit,
 } from "@claudexor/schema";
+
+/** Recorded native RPC boundary; move this provenance only with a matching probe. */
+export const CODEX_TURN_INPUT_LIMIT: HarnessInputLimit = {
+  scope: "turn_text",
+  unit: "unicode_scalars",
+  limit: 1_048_576,
+  source: "codex.app-server.turn/start",
+  verified_against: "codex-cli 0.156.1",
+};
 
 /** One manifest-owned declaration of the managed login's stdin contract. */
 export const CODEX_MANAGED_LOGIN = { stdin: "none" } as const;

@@ -1,5 +1,17 @@
 # @claudexor/control-api
 
+## 3.17.2
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.17.2
+  - @claudexor/delivery@3.17.2
+  - @claudexor/event-log@3.17.2
+  - @claudexor/workspace@3.17.2
+  - @claudexor/secrets@3.17.2
+  - @claudexor/util@3.17.2
+
 ## 3.17.1
 
 ### Patch Changes

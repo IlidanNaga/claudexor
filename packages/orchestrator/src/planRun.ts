@@ -15,6 +15,8 @@ import { BudgetLedger } from "@claudexor/budget";
 import type { AttemptTelemetry } from "./attemptTelemetry.js";
 import { readOnlyNoSuccessTerminal, type AttemptOutcomeClass } from "./attemptFinalize.js";
 import { cancelledResult, writeFailure } from "./runTerminals.js";
+import { requestRefusalFailure } from "./runTerminalResults.js";
+import { unanimousDeclaredFailure } from "./candidateEvidence.js";
 import { type BudgetDenial, budgetFailureRecord, classifyBudgetFailure } from "./budgetFailure.js";
 import { extractPlanQuestions } from "./planQuestions.js";
 import { emitPlanTerminal, resolvePlanTerminalFacts } from "./planTerminal.js";
@@ -61,16 +63,10 @@ export interface PlanRunDeps {
   maxCouncilMembers?: number;
 }
 
-/**
- * Council plan strategy (INV-031 / D31). Round 1: every member drafts a plan
- * in parallel, REUSING the same planner spawn (native plan mode, read-only,
- * own lane home on a thread turn). Drafts land as file-backed run artifacts.
- * Merge: ONE extra planner iteration on the PRIMARY (intent=synthesize) whose
- * prompt POINTS at the surviving draft files by absolute path — the tagged
- * Open-Questions parser then runs on the MERGE output only, producing the
- * same final artifacts a solo plan produces (downstream unchanged). A failed
- * member stays failed; its narrowly eligible unverified text may still be input.
- */
+/** Council (INV-031/D31) drafts in parallel through the ordinary read-only
+ * planner, then the primary synthesizes surviving file-backed inputs.
+ * Only the merged plan supplies final questions/artifacts. Failed members stay
+ * failed even when their narrowly eligible unverified text informs the merge. */
 export async function runCouncilPlan(
   deps: PlanRunDeps,
   args: {
@@ -232,6 +228,7 @@ export async function runCouncilPlan(
         planAttempts,
         attemptTelemetries,
         budgetDenial: councilBudgetDenial,
+        aggregateFailure: true,
         preservedDrafts,
       },
       "all council members failed",
@@ -478,9 +475,7 @@ export function finalizePlanRun(
   };
 }
 
-/** Shared typed-failure tail for a plan run where NO plan body was produced
- * (every planner failed, or the council merge failed). Mirrors the solo
- * plans.length===0 path so both surfaces disclose identically. */
+/** Shared failure projection when solo planning or Council produces no plan. */
 export function writePlanHarnessFailure(
   deps: PlanRunDeps,
   ctx: {
@@ -493,24 +488,21 @@ export function writePlanHarnessFailure(
     ledger: BudgetLedger;
     planAttempts: PlanAttemptSummary[];
     attemptTelemetries: { attemptId: string; harnessId: string; telemetry: AttemptTelemetry }[];
-    /** QA-050: the typed budget denial captured when a planner slot was refused
-     * pre-spawn, so plan/council terminals emit a budget failure (typed code +
-     * remediation) instead of a harness auth/setup template. */
+    /** QA-050: preserve a planner's pre-spawn budget denial. */
     budgetDenial?: BudgetDenial | null;
     preservedDrafts?: string[];
+    aggregateFailure?: boolean;
   },
   fallbackMessage: string,
 ): OrchestratorResult {
   const { contract, taskId, runId, store, paths, log, ledger, planAttempts } = ctx;
   const blocked = planAttempts.some((p) => p.status === "blocked");
-  // QA-050: a budget refusal (pre-spawn denial, or a settled budget terminal)
-  // is a BUDGET failure across plan + council, not a harness one.
+  // QA-050: budget and policy precedence is independent of input refusals.
   const budgetMapping =
     !blocked && (ctx.budgetDenial || ledger.terminal())
       ? classifyBudgetFailure({ denial: ctx.budgetDenial ?? null, terminal: ledger.terminal() })
       : null;
-  // QA-047 root cause 3: a proven-success draft can NEVER read "failed". Only
-  // non-success attempts feed failure lines; drafts are preserved evidence.
+  // QA-047: successful drafts remain preserved evidence, never failure lines.
   const failedLines = planAttempts
     .filter((p) => p.status !== "success")
     .map((p) => `${p.attemptId}/${p.harnessId}: ${p.error ?? "failed"}`);
@@ -544,24 +536,34 @@ export function writePlanHarnessFailure(
       }),
     );
   } else {
+    const refusals = (ctx.aggregateFailure ? planAttempts : planAttempts.slice(-1)).map(
+      (p) =>
+        ctx.attemptTelemetries.find((a) => a.attemptId === p.attemptId)?.telemetry.requestRefusal,
+    );
+    const declared = blocked
+      ? null
+      : unanimousDeclaredFailure(
+          refusals.map((refusal) => ({
+            declaredFailure: refusal && requestRefusalFailure(refusal),
+          })),
+        );
     const harnessCategory = dominantHarnessFailureCategory(
       ctx.attemptTelemetries.flatMap((attempt) => attempt.telemetry.transientFailures),
     );
     writeFailure(store, paths, {
       phase: "harness",
-      category: blocked ? "policy" : "harness_error",
+      category: blocked ? "policy" : (declared?.category ?? "harness_error"),
+      code: declared?.code,
+      requestRefusal: declared?.requestRefusal,
       safeMessage: message,
       eventRefs: planAttempts.map((p) => `attempts/${p.attemptId}/events.jsonl`),
       runDir: paths.root,
       nextActions: harnessFailureNextActions(harnessCategory),
     });
   }
-  // D-16 r9: when NO planner blocked/budget-failed and some ran out of
-  // context, the terminal is interrupted — not a generic harness failure.
+  // D-16: context exhaustion stays interrupted after policy/budget precedence.
   const anyInterrupted = planAttempts.some((p) => p.outcomeClass === "interrupted");
-  // The Plan failure tail has no canonical final/plan.md by definition. Reuse
-  // the read-only deliverable owner so a policy-blocked raw response cannot be
-  // promoted to a successful "Needs review" run after its plan was discarded.
+  // No canonical plan: the read-only owner must not promote discarded raw output.
   const noPlanTerminal = readOnlyNoSuccessTerminal({
     webBlocked: blocked,
     hasDeliverable: false,

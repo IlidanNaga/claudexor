@@ -30,6 +30,8 @@ import {
 } from "./processing.js";
 import { AuthCapabilities } from "./platform-auth.js";
 import { InteractionRequest, LiveInputCapability } from "./harness-interaction.js";
+import { HarnessInputLimit, HarnessRequestRefusal } from "./harness-input.js";
+export * from "./harness-input.js";
 export * from "./platform-auth.js";
 // Re-exported so sibling contract modules keep one import path for the type.
 export { EffortHint } from "./effort.js";
@@ -360,6 +362,7 @@ export const HarnessCapabilityProfile = z
     isolation: IsolationCapabilities,
     /** Every accepted media class has a finite MIME/size/count/transport declaration. */
     attachment_inputs: z.array(AttachmentInputClass).default([]),
+    input_limits: z.array(HarnessInputLimit).optional(),
     /**
      * The adapter can inject engine-owned MCP servers into the harness sandbox
      * (the generalized browser-MCP seam): claude via `--mcp-config` inline JSON,
@@ -552,14 +555,14 @@ export const HarnessRunSpec = z
      * Optional caller-supplied system-level instructions layered on top of the
      * prompt for TASK-PRODUCING lanes (primary, candidate, planner, explorer)
      * — never reviewers, synthesis, or the auth smoke.
-     * Adapters deliver it natively (claude `--append-system-prompt`, codex
+     * Adapters deliver it natively (claude `--append-system-prompt-file`, codex
      * `developer_instructions`) or as a delimited prompt prefix.
      */
     instructions: z
       .string()
       .optional()
       .describe(
-        "Caller-supplied system-level instructions for task-producing lanes; delivered natively (append-system-prompt / developer_instructions) or as a delimited prompt prefix.",
+        "Caller-supplied system-level instructions for task-producing lanes; delivered natively (append-system-prompt-file / developer_instructions) or as a delimited prompt prefix.",
       ),
     cwd: z.string().describe("Working directory the harness process runs in."),
     access: AccessProfile.default("workspace_write"),
@@ -721,6 +724,7 @@ export type InputTokenUsage = z.infer<typeof InputTokenUsage>;
 /** Normalized event emitted by every adapter (the SSOT of adapter output). */
 export const HarnessEvent = z
   .object({
+    request_refusal: HarnessRequestRefusal.optional(),
     effort_resolution: EffortResolution.optional(),
     processing: ProcessingReceipt.optional(),
     processing_cost_basis: ProcessingCostBasis.optional(),

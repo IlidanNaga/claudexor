@@ -91,6 +91,7 @@ import {
   isControlRequestFrame,
 } from "./interactive.js";
 import { createClaudeLiveInput, type ClaudeLiveInput } from "./live-input.js";
+import { withClaudeInstructionsFile } from "./instructions-file.js";
 import { CLAUDE_MODEL_INVENTORY, probeClaudeModels } from "./model-probe.js";
 
 export const CLAUDE_PROVIDER_ENV_DENYLIST = PROVIDER_SECRET_ENV.filter(
@@ -641,12 +642,9 @@ export function claudeArgsForSpec(
   /** What the installed CLI advertises; the recorded snapshot by default so
    * arg-shape callers stay synchronous and the probe stays optional. */
   advertisedEfforts: readonly EffortHint[] = CLAUDE_EFFORT_SNAPSHOT,
+  instructionsPath?: string,
 ): string[] {
-  // Interactive sessions deliver the prompt as a stream-json user message on
-  // stdin (the control protocol's transport); one-shot runs keep the prompt arg.
-  // `--permission-prompt-tool stdio` is the live-verified switch that routes
-  // permission prompts (AskUserQuestion included) onto the control channel as
-  // control_request frames instead of headless auto-denial.
+  // Both paths use stdin; the interactive control protocol keeps sole ownership.
   const args = interactive
     ? [
         "-p",
@@ -663,7 +661,8 @@ export function claudeArgsForSpec(
       ]
     : [
         "-p",
-        spec.prompt,
+        "--input-format",
+        "text",
         "--output-format",
         "stream-json",
         "--verbose",
@@ -673,10 +672,8 @@ export function claudeArgsForSpec(
   args.push(...claudeProcessingArgs(spec));
   // W-C4 live deltas (engine-gated to single-candidate lanes; parser tags payload.delta).
   if (spec.stream_deltas) args.push("--include-partial-messages");
-  // Resolve against what the INSTALLED CLI advertises: an advertised level goes
-  // through verbatim (so a newer binary's level needs no code change here), a
-  // rankable one clamps, and anything else sends no flag rather than a level the
-  // vendor would reject. Null = not requested OR not tunable -> pass no flag.
+  // Use the installed CLI's ladder: pass advertised levels, clamp rankable
+  // preferences, and omit unsupported or unrequested levels.
   const eff = normalizeEffort(
     spec.effort_hint,
     advertisedEfforts,
@@ -685,15 +682,11 @@ export function claudeArgsForSpec(
   if (eff) args.push("--effort", eff);
   if (spec.max_turns !== null && spec.max_turns > 0)
     args.push("--max-turns", String(spec.max_turns));
-  // Per-run caller instructions APPEND to (never replace) the default system
-  // prompt, current-invocation-only. The engine withholds them from synthesis,
-  // reviewers, and the auth smoke.
-  if (spec.instructions && spec.instructions.trim())
-    args.push("--append-system-prompt", spec.instructions);
-  // Structured output: constrain the FINAL message to the caller's JSON
-  // Schema. LIVE-VERIFIED (2.1.165): `--json-schema <inline JSON>` with
-  // --output-format stream-json. Passed only when the engine set it (the
-  // engine gates on the json_schema_output capability).
+  if (spec.instructions?.trim()) {
+    if (!instructionsPath) throw new Error("Claude system instructions require an owned file");
+    args.push("--append-system-prompt-file", instructionsPath);
+  }
+  // The engine gates native final-output constraints on json_schema_output.
   if (spec.output_schema !== undefined && spec.output_schema !== null) {
     args.push("--json-schema", JSON.stringify(spec.output_schema));
   }
@@ -915,7 +908,6 @@ async function* runClaude(
   const effort = await claudeRunEffortResolution(spec, runtime, abortSignalFromSpec(spec));
   spec = applyClaudeRunProcessing(spec, nativeEnv.CLAUDE_CONFIG_DIR, useSubscription);
   const processing = spec.processing;
-  const args = claudeArgsForSpec(spec, interactive, useSubscription, effort.advertised);
   yield effort.event;
   throwIfEffortRejected(effort.resolution);
   // Scrub all provider secrets, then re-add only this route's credential.
@@ -940,39 +932,47 @@ async function* runClaude(
       .filter((server) => server.required)
       .map((server) => server.name),
   });
-  yield* runtime.runCliHarness({
-    bin: BIN,
-    args,
-    spec,
-    env,
-    label: "claude",
-    redact: redactSecrets,
-    parseEvent: (obj, sessionId) => {
-      const parsed = baseParser(obj, sessionId);
-      const processed = observeProcessing ? observeProcessing(obj, parsed, sessionId) : parsed;
-      const out = live.observe(obj, processed, sessionId);
-      if (out) {
-        for (const ev of out) {
-          // Keep every event attributable to its fixed auth route.
-          ev.credential_route = credentialRoute;
-          ev.credential_source = credentialSource;
-          if (profile) ev.credential_profile_id = profile.profile_id;
+  yield* withClaudeInstructionsFile(spec.instructions, (instructionsPath) =>
+    runtime.runCliHarness({
+      bin: BIN,
+      args: claudeArgsForSpec(
+        spec,
+        interactive,
+        useSubscription,
+        effort.advertised,
+        instructionsPath,
+      ),
+      spec,
+      env,
+      label: "claude",
+      redact: redactSecrets,
+      parseEvent: (obj, sessionId) => {
+        const parsed = baseParser(obj, sessionId);
+        const processed = observeProcessing ? observeProcessing(obj, parsed, sessionId) : parsed;
+        const out = live.observe(obj, processed, sessionId);
+        if (out) {
+          for (const ev of out) {
+            // Keep every event attributable to its fixed auth route.
+            ev.credential_route = credentialRoute;
+            ev.credential_source = credentialSource;
+            if (profile) ev.credential_profile_id = profile.profile_id;
+          }
         }
-      }
-      return out;
-    },
-    stopAfterEvent: (event) => event.payload?.["code"] === "required_mcp_startup_failed",
-    ...(interactive
-      ? {
-          session: {
-            initialStdin: initialSessionFrames(spec.prompt, attachmentBlocks),
-            matches: isControlRequestFrame,
-            handle: (obj, io) => handleControlRequestFrame(obj, io, spec.session_id, channel),
-            // Hold stdin while live messages or background work remain.
-            closeStdinOn: (obj) => live.closeStdinOn(spec.session_id, obj),
-            onIo: live.onIo,
-          },
-        }
-      : {}),
-  });
+        return out;
+      },
+      stopAfterEvent: (event) => event.payload?.["code"] === "required_mcp_startup_failed",
+      ...(interactive
+        ? {
+            session: {
+              initialStdin: initialSessionFrames(spec.prompt, attachmentBlocks),
+              matches: isControlRequestFrame,
+              handle: (obj, io) => handleControlRequestFrame(obj, io, spec.session_id, channel),
+              // Hold stdin while live messages or background work remain.
+              closeStdinOn: (obj) => live.closeStdinOn(spec.session_id, obj),
+              onIo: live.onIo,
+            },
+          }
+        : { input: spec.prompt }),
+    }),
+  );
 }
