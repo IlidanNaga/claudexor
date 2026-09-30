@@ -12,7 +12,7 @@ import {
   type QuotaSnapshot,
 } from "@claudexor/schema";
 import { controlServices } from "./control-services.js";
-import { credentialUnusableLedger } from "./run-orchestrator.js";
+import { credentialUnusableLedger, preProgressRefusalLedger } from "./run-orchestrator.js";
 import { modelSubstitutionLedger } from "./model-services.js";
 import { bustGlobalCredentialStatusCaches } from "./credential-status-invalidation.js";
 import { registerConfigDirProfile } from "./profile-registration.js";
@@ -35,6 +35,8 @@ const gatewayMock = vi.hoisted(() => ({
     {
       availability: "available" | "unavailable" | "unknown";
       verification: "passed" | "failed" | "not_run";
+      stale?: boolean;
+      stale_basis?: "last_positive_after_timeout";
     }
   >,
 }));
@@ -56,6 +58,8 @@ vi.mock("./registry.js", async (importOriginal) => {
             harness_id: profile.harness_id,
             availability: readiness.availability,
             verification: readiness.verification,
+            ...("stale" in readiness ? { stale: readiness.stale } : {}),
+            ...("stale_basis" in readiness ? { stale_basis: readiness.stale_basis } : {}),
             verification_source: "local_store" as const,
             detail: "live profile probe disabled in projection unit test",
             last_verified_at: null,
@@ -385,6 +389,13 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
     expect(base.harnessAccounts).toEqual([]);
     const claudeBase = base.accountPools.find((pool) => pool.harness_id === "claude");
     expect(claudeBase?.next_up.kind).toBe("none");
+    // #363: an unready row is named with what its probe observed, never
+    // reported as "not signed in" (unknown is not a logout).
+    const baseReason = claudeBase?.next_up.kind === "none" ? claudeBase.next_up.reason : "";
+    expect(baseReason).toBe(
+      "no enabled account is ready (work: live profile probe disabled in projection unit test)",
+    );
+    expect(baseReason).not.toMatch(/signed in|log ?in/i);
 
     // A ready enabled row IS the unpinned route (unified model: unpinned
     // routing = quota-aware pool; there is no separate native default).
@@ -402,6 +413,29 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
     expect(none.accountPools.find((pool) => pool.harness_id === "claude")?.next_up.kind).toBe(
       "none",
     );
+  });
+
+  it("next_up admits a last positive after a timeout like pool routing, never the generic stale grace (#363)", async () => {
+    registerConfigDirProfile({ harnessId: "claude", profileId: "a-lkg" });
+    registerConfigDirProfile({ harnessId: "claude", profileId: "b-last-positive" });
+    gatewayMock.profileReadinessById = {
+      "a-lkg": { availability: "unknown", verification: "not_run", stale: true },
+      "b-last-positive": {
+        availability: "unknown",
+        verification: "not_run",
+        stale: true,
+        stale_basis: "last_positive_after_timeout",
+      },
+    };
+    const listing = ControlCredentialProfilesResponse.parse(await services().credentialProfiles());
+    expect(listing.accountPools.find((pool) => pool.harness_id === "claude")?.next_up).toEqual({
+      kind: "profile",
+      profileId: "b-last-positive",
+    });
+    // The row itself still reads stale unknown, never a verified login.
+    expect(
+      listing.profiles.find((entry) => entry.profile.profile_id === "b-last-positive")?.status,
+    ).toMatchObject({ availability: "unknown", verification: "not_run", stale: true });
   });
 
   it("readiness-probes disabled profile-isolated rows without making them routable", async () => {
@@ -442,7 +476,10 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
     const listing = ControlCredentialProfilesResponse.parse(await services().credentialProfiles());
     expect(listing.harnessAccounts).toEqual([]);
     const claude = listing.accountPools.find((value) => value.harness_id === "claude");
-    expect(claude?.next_up).toMatchObject({ kind: "none" });
+    expect(claude?.next_up).toMatchObject({
+      kind: "none",
+      reason: expect.stringContaining("no enabled account is signed in"),
+    });
   });
 
   it("returns one opt-in snapshot whose rows and pool verdict share one fresh doctor read", async () => {
@@ -853,6 +890,47 @@ describe("A7 per-subject unusable-ledger clearing on control-API credential muta
     expect(modelSubstitutionLedger.live().map((o) => o.profile_id)).toEqual(["other"]);
     bustGlobalCredentialStatusCaches(() => ({ noteCredentialChange }) as never);
     expect(modelSubstitutionLedger.live()).toEqual([]);
+  });
+
+  it("an oauth_token row's secret_ref names it to the refusal and substitution ledgers too (#363)", async () => {
+    updateGlobalConfig((cfg) => ({
+      ...cfg,
+      credential_profiles: [
+        {
+          profile_id: "oauth",
+          harness_id: "claude",
+          display_name: "OAuth",
+          credential_kind: "oauth_token",
+          isolation_locator: null,
+          secret_ref: "claude_oauth:oauth",
+          enabled: true,
+          created_at: null,
+        },
+      ],
+    }));
+    preProgressRefusalLedger.noteCredentialChange();
+    modelSubstitutionLedger.noteCredentialChange();
+    const mark = (profileId: string) => ({
+      harness_id: "claude",
+      profile_id: profileId,
+      requested_model: "m",
+    });
+    preProgressRefusalLedger.record(mark("oauth"));
+    preProgressRefusalLedger.record(mark("other"));
+    modelSubstitutionLedger.record(mark("oauth"));
+    modelSubstitutionLedger.record(mark("other"));
+    const bound = preProgressRefusalLedger.generation("claude", "oauth");
+    const sibling = preProgressRefusalLedger.generation("claude", "other");
+    const svc = services();
+    await svc.setSecret({ name: "claude_oauth:oauth", value: "rotated-token" });
+    // The subscription row the secret IS: its marks are void and a try bound
+    // to the old token can neither record nor clear one about the new token.
+    expect(preProgressRefusalLedger.live().map((o) => o.profile_id)).toEqual(["other"]);
+    expect(modelSubstitutionLedger.live().map((o) => o.profile_id)).toEqual(["other"]);
+    expect(preProgressRefusalLedger.generation("claude", "oauth")).not.toBe(bound);
+    expect(preProgressRefusalLedger.generation("claude", "other")).toBe(sibling);
+    await svc.deleteSecret("claude_oauth:oauth");
+    expect(preProgressRefusalLedger.generation("claude", "oauth")).not.toBe(bound);
   });
 
   it("deleteSecret clears the referencing profile's subject too", async () => {

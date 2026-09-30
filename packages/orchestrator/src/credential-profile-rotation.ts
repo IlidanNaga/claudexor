@@ -9,6 +9,7 @@ import {
   RouteCredentialUnusablePayload,
 } from "@claudexor/schema";
 import { quotaConstraintAppliesToModel } from "@claudexor/budget";
+import { stampCredentialProfileSelection } from "@claudexor/core";
 import {
   credentialPoolExhausted,
   liveUnusableFor,
@@ -18,6 +19,7 @@ import {
   type QuotaBlock,
 } from "./credential-cooldown.js";
 import type { AttemptOutputMarkers } from "./attemptOutputMarkers.js";
+import { refusedBeforeProgress } from "./pre-progress-refusal.js";
 import {
   reactiveRotationEvidence,
   rotationRetryEligible,
@@ -433,6 +435,9 @@ export async function rotateSpecOnTypedLimit(args: {
   /** Live typed `credential_unusable` observations for this decision epoch —
    * candidates they condemn are refused with a typed reason. */
   liveUnusable?: readonly CredentialUnusableObservation[];
+  /** #363: remember THIS row's started-then-refused try for later unpinned
+   * runs (ordering evidence only; never consulted by this decision). */
+  notePreProgressRefusal?: () => void;
   triedProfiles: Set<string>;
   markers: AttemptOutputMarkers;
   sawTypedLimit: boolean;
@@ -479,6 +484,7 @@ export async function rotateSpecOnTypedLimit(args: {
     }
     return null;
   }
+  if (current && refusedBeforeProgress(evidence, args.markers)) args.notePreProgressRefusal?.();
   const route = limitSubjectRoute(
     current,
     args.defaultRouteWasVendorNative === true ? "local_session" : null,
@@ -576,10 +582,13 @@ export async function rotateSpecOnTypedLimit(args: {
       }),
     };
   }
-  return HarnessRunSpecSchema.parse({
+  const rotated = HarnessRunSpecSchema.parse({
     ...args.spec,
     session_id: args.newSessionId(),
     credential_profile: rotation,
     resume_session_id: null,
   });
+  // A rotation is an unpinned choice by construction: a pin returned above.
+  stampCredentialProfileSelection(rotated, { pinned: false });
+  return rotated;
 }
