@@ -1,5 +1,27 @@
 # @claudexor/orchestrator
 
+## 3.17.2
+
+### Patch Changes
+
+- Preserve native input-size refusals without account retries or unrelated quota resets, publish measured ASK input budgets, distinguish proven undelivered Codex model requests, and move large Claude and AGY inputs off process arguments.
+- Updated dependencies
+  - @claudexor/schema@3.17.2
+  - @claudexor/arbitration@3.17.2
+  - @claudexor/budget@3.17.2
+  - @claudexor/config@3.17.2
+  - @claudexor/context@3.17.2
+  - @claudexor/core@3.17.2
+  - @claudexor/delivery@3.17.2
+  - @claudexor/event-log@3.17.2
+  - @claudexor/gateway@3.17.2
+  - @claudexor/policy@3.17.2
+  - @claudexor/review@3.17.2
+  - @claudexor/workspace@3.17.2
+  - @claudexor/synthesis@3.17.2
+  - @claudexor/artifact-store@3.17.2
+  - @claudexor/util@3.17.2
+
 ## 3.17.1
 
 ### Patch Changes

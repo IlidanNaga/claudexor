@@ -80,7 +80,7 @@ export {
   ensureCodexApiAuth,
   probeLogin,
 } from "./auth.js";
-import { CODEX_CAPABILITY_PROFILE } from "./capability-profile.js";
+import { CODEX_CAPABILITY_PROFILE, CODEX_TURN_INPUT_LIMIT } from "./capability-profile.js";
 export { CODEX_MANAGED_LOGIN } from "./capability-profile.js";
 import {
   CODEX_FILE_AUTH_ARGS,
@@ -424,10 +424,7 @@ export function createCodexAdapter(deps: Partial<CodexRuntimeDeps> = {}): Harnes
           read_files: true,
           // mcp_servers.browser.*` overrides (live-verified) — gated on web policy.
           browser_tool: true,
-          // LIVE-VERIFIED (codex 0.137): `codex exec --output-schema <FILE>`.
           json_schema_output: true,
-          // D-16: `--output-schema` constrains the FINAL MESSAGE, so a no-caller WorkReport
-          // envelope must wrap the markdown deliverable as `output: string` (final_message).
           work_report_transport: "constrained",
           structured_output_channel: "final_message",
           web_policy: "native",
@@ -457,6 +454,9 @@ export function createCodexAdapter(deps: Partial<CodexRuntimeDeps> = {}): Harnes
         },
         capability_profile: {
           ...CODEX_CAPABILITY_PROFILE,
+          ...(version === CODEX_TURN_INPUT_LIMIT.verified_against
+            ? { input_limits: [CODEX_TURN_INPUT_LIMIT] }
+            : {}),
           auth: {
             ...CODEX_CAPABILITY_PROFILE.auth,
             preferred_source: nativeSessionAvailable

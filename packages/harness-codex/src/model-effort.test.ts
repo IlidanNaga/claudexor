@@ -95,7 +95,7 @@ it.each([
     expect(JSON.stringify(request)).toBe(frozen);
     expect(result.outcome).toBe("completed");
     expect(f.fetch.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
-    const body = JSON.parse(f.fetch.mock.calls[1]![1]!.body as string);
+    const body = JSON.parse(await new Response(f.fetch.mock.calls[1]![1]!.body).text());
     expect(body.reasoning?.effort ?? null).toBe(submitted);
     expect(ModelCallResult.parse(result)).toMatchObject({
       effortResolution: { requested, submitted, resolution, source: "account_catalog" },

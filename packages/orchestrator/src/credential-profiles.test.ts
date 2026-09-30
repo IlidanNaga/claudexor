@@ -1145,6 +1145,33 @@ describe("A7 differential probe wiring in rotateSpecOnTypedLimit", () => {
     });
   });
 
+  it.each([false, true])(
+    "grounds structural pool exhaustion in the current profile registry row (%s)",
+    async (currentBlocked) => {
+      const reset = new Date(Date.now() + 60_000).toISOString();
+      const current = snap("a", currentBlocked ? 1 : 0);
+      const sibling = snap("b", 1);
+      for (const snapshot of [current, sibling]) snapshot.constraints[0]!.resets_at = reset;
+      const out = await rotateSpecOnTypedLimit({
+        ...base,
+        sawTypedLimit: false,
+        sawRetryable: false,
+        snapshots: [current, sibling],
+        probeReadyProfiles: async () => ready("a", "b"),
+        triedProfiles: new Set<string>(),
+      });
+      if (currentBlocked) {
+        expect(out && "poolExhausted" in out).toBe(true);
+        expect(out && "poolExhausted" in out ? out.poolExhausted : null).toMatchObject({
+          code: "credential_pool_exhausted",
+          resetsAt: reset,
+        });
+      } else {
+        expect(out).toBeNull();
+      }
+    },
+  );
+
   it("the DEAD subject's typed-limit reset never becomes the pool's reopen promise", async () => {
     // Pool of one: the dead, limited subject itself. Its typed stream limit
     // names a reset — but a dead credential's window reopening will never

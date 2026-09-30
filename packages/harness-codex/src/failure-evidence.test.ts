@@ -389,7 +389,7 @@ function adapterFixture(respond: () => Response | Promise<Response>) {
     fetch: async (_url, init) => {
       if (init?.method === "POST") {
         posts(init);
-        expect(init.body).not.toContain("captureFailureEvidence");
+        expect(await new Response(init.body).text()).not.toContain("captureFailureEvidence");
         return respond();
       }
       return Response.json({ models: [{ slug: "one", service_tiers: [{ id: "flex" }] }] });

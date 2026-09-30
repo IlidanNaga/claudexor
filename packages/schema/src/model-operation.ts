@@ -348,7 +348,9 @@ export const ModelDispatch = z
     route: ModelRoute.nullable(),
   })
   .strict()
-  .describe("Started means the physical send may have begun, not proof the upstream accepted it.");
+  .describe(
+    "Started means the physical send may have begun, not proof the upstream accepted it. A terminal not_started may refine that attempted send only with typed proof no complete inference request was delivered; startedAt and route retain the attempt.",
+  );
 export type ModelDispatch = z.infer<typeof ModelDispatch>;
 
 export const ModelResponseCustody = z

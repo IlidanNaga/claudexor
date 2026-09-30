@@ -355,6 +355,47 @@
                       },
                       "default": []
                     },
+                    "input_limits": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "scope": {
+                            "type": "string",
+                            "const": "turn_text",
+                            "description": "All text input items in one native turn; separate instructions are excluded."
+                          },
+                          "unit": {
+                            "type": "string",
+                            "const": "unicode_scalars"
+                          },
+                          "limit": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "source": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "verified_against": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "Native runtime version against which the bound was observed."
+                          }
+                        },
+                        "required": [
+                          "scope",
+                          "unit",
+                          "limit",
+                          "source",
+                          "verified_against"
+                        ],
+                        "additionalProperties": false,
+                        "description": "Adapter-owned observed input bound, not a predictive refusal or a model-window claim."
+                      }
+                    },
                     "mcp_injection": {
                       "type": "boolean",
                       "default": false,

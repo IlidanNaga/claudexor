@@ -3,6 +3,7 @@ export * from "./requestRequirements.js";
 export * from "./delegationBudgetAuthority.js";
 export * from "./routing-failure.js";
 export * from "./live-input.js";
+export { catalogInputLimits } from "./prompt-framing.js";
 export { assertCouncilWidth } from "./council.js";
 export {
   effectiveAuthPreference,
