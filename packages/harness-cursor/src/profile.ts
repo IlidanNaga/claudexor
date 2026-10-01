@@ -216,7 +216,10 @@ function cursorProfileNativeStatus(
       ...base,
       availability: "available",
       verification: "passed",
-      detail: "Cursor login verified in the profile HOME file store",
+      verification_source: probe.vendorAuthenticated ? "vendor" : "local_store",
+      detail: probe.vendorAuthenticated
+        ? "Cursor server accepted the profile HOME login"
+        : "Cursor login verified in the profile HOME file store",
       // A reused positive answer keeps the instant the vendor gave it.
       last_verified_at: probe.observedAt ?? nowIso(),
     });

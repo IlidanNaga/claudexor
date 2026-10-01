@@ -926,6 +926,11 @@ share chat/session state. No token is ever
 copied between stores, no env ever receives a host-Keychain bridge, and
 `CURSOR_API_KEY` is scrubbed from profiled native
 runs — the named identity is exactly its file store or a typed refusal.
+The Cursor status receipt distinguishes a successful server `getMe` response
+with typed `userInfo` from the vendor CLI's token-only fallback after a server
+error. Only the former supplies vendor verification; bare authentication booleans,
+legacy text, and stale observations do not become current server proof. Unrecognized
+vendor output keeps its existing readiness classification and unknown billing.
 The Accounts-only Cursor probe receipt also carries an optional email parsed
 from the CLI's narrow typed status grammar. Projections reuse
 the status invocation they already need; no credential file is read, no raw
@@ -3213,7 +3218,10 @@ sample counts and auth routing survive. A new explicitly unpriced attempt
 clears the cost average; auth-only updates preserve compatible observations.
 Mixed review panels classify
 each observed amount separately from its prospective billing basis;
-their aggregate is never blindly charged as cash. Candidate and reviewer
+their aggregate is never blindly charged as cash. Panel admission keeps
+declared Processing costs and already-observed slot costs;
+an unvisited ordinary slot without a receipt does not invent an unknown-cost
+hold. Later included slots cannot erase an observed paid or unknown hold. Candidate and reviewer
 retries classify EACH usage event by that event/current typed credential
 route and Processing evidence; a native→API-key retry cannot hide later metered spend under the first
 native route, and an undisclosed route remains cost-unverifiable. A typed auth
@@ -3378,7 +3386,23 @@ auth-route evidence: verified included ordinary service proves
 `subscription_entitlement`, so that route survives
 `paid_fallback: never` and ranks with a real economy tuple instead of reading as
 unknown/paid. Surfaces project the rationale verbatim (run detail) and never
-reconstruct the order from prose. A deep-scan swarm reserves n>1 subscription
+reconstruct the order from prose. A named account's ordinary billing evidence
+requires its fresh vendor-backed verification: an authenticated adapter response,
+or the existing exact-profile vendor observation over a passing local probe.
+Local store presence and stale readiness do not prove subscription entitlement.
+Default-store doctor evidence applies only to a profile-less route. The admission
+probe is reused for ranking and the initial reservation. Each physical dispatch
+reads its actual account's current verification again, including when the account
+ID is unchanged, and re-admits it against the existing budget lease and
+paid-fallback policy. This includes inline continuity summaries, rotation and runs
+without Processing controls. A newer vendor observation is not frozen to the
+initial selection; a valid positive reservation estimate remains independent of
+billing verification. A Plan refused before any physical send releases its lease
+and retains the typed policy cause; started work without cost evidence stays unknown. A policy
+refusal is a configuration failure, separate from a monetary-cap or provider
+failure. The ranking rationale remains the
+original selection evidence; the execution receipt names the account that ran.
+A deep-scan swarm reserves n>1 subscription
 scouts under a finite cap against the per-run estimate floor (mirroring the
 candidate loop), so later scouts are not refused for lacking a per-attempt cash
 quote; a scout the gate still refuses before spawn is recorded as a failed attempt

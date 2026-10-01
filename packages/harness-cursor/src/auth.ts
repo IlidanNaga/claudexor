@@ -25,7 +25,7 @@ export const CURSOR_STATUS_TIMEOUT_MS = 10_000;
  * for unpinned admission alone, never authentication (#363, INV-135).
  */
 export type CursorStatusObservation =
-  | { kind: "authenticated"; email?: string; observedAt?: string }
+  | { kind: "authenticated"; email?: string; observedAt?: string; vendorAuthenticated?: true }
   | { kind: "loggedOut" }
   | {
       kind: "unknown";
@@ -195,7 +195,24 @@ function cursorJsonStatusObservation(text: string): CursorStatusObservation | nu
   );
   if (!verdict) return null;
   if (record[verdict] !== true) return { kind: "loggedOut" };
+  // Native status catches getMe errors and still reports isAuthenticated.
+  // Only its successful server response carries these typed userInfo fields.
+  const userInfo =
+    record.userInfo && typeof record.userInfo === "object" && !Array.isArray(record.userInfo)
+      ? (record.userInfo as Record<string, unknown>)
+      : null;
+  const vendorAuthenticated =
+    record.status === "authenticated" &&
+    record.isAuthenticated === true &&
+    userInfo !== null &&
+    (["email", "firstName", "lastName", "createdAt"].some(
+      (key) => typeof userInfo[key] === "string",
+    ) ||
+      ["userId", "teamId"].some(
+        (key) => typeof userInfo[key] === "number" && Number.isInteger(userInfo[key]),
+      ));
   const candidates = [
+    ...(vendorAuthenticated ? [userInfo?.email] : []),
     record.email,
     (record.account as Record<string, unknown> | null)?.email,
     (record.user as Record<string, unknown> | null)?.email,
@@ -206,7 +223,11 @@ function cursorJsonStatusObservation(text: string): CursorStatusObservation | nu
       candidate.length <= MAX_CURSOR_ACCOUNT_EMAIL_LENGTH &&
       /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(candidate),
   );
-  return email ? { kind: "authenticated", email } : { kind: "authenticated" };
+  return {
+    kind: "authenticated",
+    ...(email ? { email } : {}),
+    ...(vendorAuthenticated ? { vendorAuthenticated: true as const } : {}),
+  };
 }
 
 export function cursorStatusAuthenticated(code: number | null, text: string): boolean {

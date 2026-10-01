@@ -9,6 +9,7 @@
  */
 import type {
   AuthPreference,
+  AuthVerification,
   CredentialProfile,
   CredentialProfileStatus,
   CredentialUnusableObservation,
@@ -28,6 +29,7 @@ import type { EventLog } from "@claudexor/event-log";
 import { accountPoolRows } from "./account-pool.js";
 import { PoolRouteFlags, resolveAccountForRun } from "./account-resolution.js";
 import type { AttemptOutputMarkers } from "./attemptOutputMarkers.js";
+import { profileBillingVerification } from "./auth-route-classification.js";
 import { currentSubjectProber, readyProfilesForRotation } from "./credential-differential.js";
 import {
   resolveCredentialProfile,
@@ -107,6 +109,33 @@ export function rotatedSpecInLaneHome(
   if (!previousLane || previous.env?.["HOME"] !== previousLane["HOME"]) return rotated;
   const rotatedLane = laneEnvFor(rotated.credential_profile?.profile_id ?? null);
   return rotatedLane ? { ...rotated, env: rotatedLane } : rotated;
+}
+
+type ProfileProbe = (profile: CredentialProfile) => Promise<CredentialProfileStatus>;
+
+/** The profile probes ONE admission pass made, recorded as they happen so the
+ * billing read (#260) reuses the verdict that admitted a row instead of
+ * probing it again. Latest wins: the selection's own probe overwrites an
+ * earlier gate probe of the same row. */
+export class AdmissionProfileProbes {
+  private readonly made = new Map<string, Promise<CredentialProfileStatus>>();
+
+  record(probe: ProfileProbe | undefined): ProfileProbe | undefined {
+    return (
+      probe &&
+      ((profile) => {
+        const status = probe(profile);
+        this.made.set(`${profile.harness_id}\0${profile.profile_id}`, status);
+        return status;
+      })
+    );
+  }
+
+  /** This exact row's recorded probe, else the adapter probe itself. */
+  reuse(profile: CredentialProfile, probe: ProfileProbe | undefined): ProfileProbe | undefined {
+    const made = this.made.get(`${profile.harness_id}\0${profile.profile_id}`);
+    return made ? () => made : probe;
+  }
 }
 
 export class OrchestratorCredentials {
@@ -418,12 +447,14 @@ export class OrchestratorCredentials {
     model: string | null,
     log: EventLog | undefined,
     defaultRoute: "local_session" | "api_key" | null,
+    probes?: AdmissionProfileProbes,
   ): Promise<CredentialProfile | null> {
     const adapter = this.host.registry().get(harnessId);
     const registry = this.host.config(input.repoRoot)?.global.credential_profiles ?? [];
     const profileCardinality = credentialProfilePolicyState({ adapter, registry });
     if (profileCardinality.ambiguous)
       throw credentialProfilePolicyProblem(profileCardinality, "credential_profile_ambiguous");
+    const probe = adapter?.probeCredentialProfile?.bind(adapter);
     return resolveAccountForRun({
       harnessId,
       registry,
@@ -433,7 +464,7 @@ export class OrchestratorCredentials {
       quota: this.vendorQuotaObservations(),
       unusable: this.host.credentialUnusable(),
       refusals: this.host.preProgressRefusals()?.live(),
-      probe: adapter?.probeCredentialProfile?.bind(adapter),
+      probe: probes ? probes.record(probe) : probe,
       pinnedProfile: this.resolveCredentialProfile(input, harnessId),
       boundProfileId: input.threadAccountBindings?.[harnessId] ?? null,
       threadId: input.threadId ?? null,
@@ -448,5 +479,24 @@ export class OrchestratorCredentials {
       notePoolApiKeyRoute: () => this.poolApiKeyRoutes.note(input, harnessId),
       emit: (type, payload) => log?.emit(type, payload),
     });
+  }
+
+  /** Billing verification for the EXACT profile quota admission selected
+   * (#260): the default doctor's auth sources describe another credential
+   * store, so they never classify a named profile. The pass's recorded probe
+   * is reused; the adapter is probed only when this pass never probed the row. */
+  async selectedProfileBillingVerification(
+    profile: CredentialProfile,
+    probes?: AdmissionProfileProbes,
+  ): Promise<AuthVerification> {
+    const adapter = this.host.registry().get(profile.harness_id);
+    const adapterProbe = adapter?.probeCredentialProfile?.bind(adapter);
+    const probe = probes ? probes.reuse(profile, adapterProbe) : adapterProbe;
+    return profileBillingVerification(
+      vendorVerifiedProfileStatus(
+        await probeCredentialProfileStatus(profile, probe),
+        this.vendorQuotaObservations(),
+      ),
+    );
   }
 }

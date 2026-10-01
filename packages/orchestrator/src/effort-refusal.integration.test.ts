@@ -196,6 +196,21 @@ it.each([
         ["sibling", sibling],
       ]),
       reviewers: [],
+      // Both candidate lanes are vendor-verified; these tests isolate effort
+      // refusal and transport fallback, not default-login billing inheritance.
+      quotaSnapshots: () =>
+        profiles.map((profile) => ({
+          subject: {
+            harness,
+            credential_route: "vendor_native",
+            plan_label: null,
+            subject_id: profile.profile_id,
+          },
+          constraints: [],
+          source: harness === "codex" ? "codex_app_server" : "claude_oauth_usage",
+          observed_at: new Date().toISOString(),
+          freshness: "fresh",
+        })),
     }).run({
       repoRoot: root,
       mode,
