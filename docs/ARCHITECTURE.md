@@ -283,7 +283,9 @@ at every wire boundary.
   all three run modes enqueue through the daemon `/v2` control API. Until MCP
   Tasks stabilize, MCP returns a durable run handle and exposes explicit
   status/result/cancel/interaction tools; it does not hold a tool call open or
-  advertise Tasks. ACP uses the official TypeScript SDK at stable protocol v1;
+  advertise Tasks. MCP persistent-thread create/turn pass an optional caller key
+  to the daemon's existing idempotent journal; read projects its thread detail
+  without starting a run or a daemon. ACP uses the official TypeScript SDK at stable protocol v1;
   its session IDs are daemon thread IDs and list/load/resume/close/prompt/cancel
   all project the same `/v2` thread authority. ACP images and embedded resources
   are finalized through the daemon attachment pipeline before a turn enqueues.
@@ -842,6 +844,12 @@ Codex's direct `model/list` and quota app-server probes use that same producer,
 so a GUI-launched daemon can discover models and quota from the CLI it found
 during login. Host toolchain PATH is composed before a scoped HOME patch;
 credential homes and provider-variable scrubbing remain specific to each probe.
+The shared `spawnProcess`/`runCaptureRaw` helpers also request `windowsHide`:
+every child they start is a fully piped background process. On Windows this
+requests a hidden console for the direct child at spawn; it does not control
+grandchildren or windows the child opens later. Interactive sign-in
+(`profiles login`, the Terminal/ConPTY setup runner) and `setup attach` do not
+use those helpers and keep their own visible-terminal policy.
 
 ### Credential profiles (INV-135, unified account model)
 
