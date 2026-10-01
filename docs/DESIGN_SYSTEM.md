@@ -904,10 +904,11 @@ views in the shared design-system files; screens compose them.
   content is disclosed and points at **Show source**. File reads remain capped
   at 4 MiB with a visible notice when truncated. Images are never loaded, so a
   preview fetches nothing on its own: a whole-line image reference stays literal
-  text and an inline one shows only its alt text. No link opens from a preview:
-  every click, web or local, shows a refusal that points at **Show source**,
-  because a snapshot is passive, never a launch surface, and carries no thread
-  scope to check targets against. Answer links keep their existing behavior.
+  text and an inline one shows only its alt text. Manual links use the same
+  policy as answers: web/system links open through their normal handler, while
+  absolute local-file links use the originating run's project/run scope and the existing
+  document preview or Finder action. Staged snapshots retain that scope;
+  their temporary storage directory does not grant additional file access.
   HTML/SVG previews stay literal source; the separately
   launched interactive web preview is unchanged. Literal source starts at the
   top-left corner in a plain, read-only text view that draws the visible part

@@ -32,24 +32,30 @@ struct SafeFilePreviewRequest: Identifiable {
     let kind: AgentFilePreviewKind
     let source: BoundedSource?
     let displayName: String
+    let fileScopeRoots: [String]
 
     init(
         url: URL,
         kind: AgentFilePreviewKind,
         source: BoundedSource? = nil,
-        displayName: String? = nil
+        displayName: String? = nil,
+        fileScopeRoots: [String] = []
     ) {
         self.url = url
         self.kind = kind
         self.source = source
         self.displayName = displayName ?? url.lastPathComponent
+        self.fileScopeRoots = fileScopeRoots
     }
 
-    static func localFile(url: URL, kind: AgentFilePreviewKind) -> SafeFilePreviewRequest {
+    static func localFile(
+        url: URL, kind: AgentFilePreviewKind, fileScopeRoots: [String] = []
+    ) -> SafeFilePreviewRequest {
         SafeFilePreviewRequest(
             url: url,
             kind: kind,
-            source: kind == .source || kind == .markdown ? try? boundedSource(at: url) : nil)
+            source: kind == .source || kind == .markdown ? try? boundedSource(at: url) : nil,
+            fileScopeRoots: fileScopeRoots)
     }
 
     static func scopedLocalFile(
@@ -81,7 +87,8 @@ struct SafeFilePreviewRequest: Identifiable {
             url: snapshot.0,
             kind: kind,
             source: snapshot.1,
-            displayName: url.lastPathComponent)
+            displayName: url.lastPathComponent,
+            fileScopeRoots: roots)
     }
 
     static func boundedSource(
@@ -252,7 +259,9 @@ struct SafeFilePreviewSheet: View {
             if let source = request.source {
                 if request.kind == .markdown && !showSource {
                     ScrollView {
-                        MarkdownOutputView(markdown: source.text, bodyFont: .body, isFilePreview: true)
+                        MarkdownOutputView(
+                            markdown: source.text, fileScopeRoots: request.fileScopeRoots,
+                            bodyFont: .body, isFilePreview: true)
                             .padding(Theme.Spacing.lg)
                     }
                 } else {

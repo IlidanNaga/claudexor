@@ -19,9 +19,8 @@ struct MarkdownOutputView: View {
     /// Conversation answers use body-sized prose; dense secondary surfaces
     /// retain the compact callout default.
     var bodyFont: Font = .callout
-    /// A file snapshot is passive: image references stay text and no link opens,
-    /// web or local (a snapshot is never a launch surface and carries no thread
-    /// scope); answer links keep their existing behavior.
+    /// A file snapshot never fetches images automatically. Manual links use the
+    /// same system/scoped-file handling as answers.
     var isFilePreview = false
     /// A visible, dismissible refusal for a blocked file-link click (sol #14):
     /// out-of-scope or unsafe-type targets never fail silently.
@@ -35,9 +34,7 @@ struct MarkdownOutputView: View {
                     .font(.caption).foregroundStyle(.orange)
                     .textSelection(.enabled)
                     .onTapGesture { self.linkRefusal = nil }
-                    .help(isFilePreview
-                          ? "Tap to dismiss. Links stay closed in a file preview."
-                          : "Tap to dismiss. Agent-produced files open only inside this thread's scope, and only for safe document/image types.")
+                    .help("Tap to dismiss. Agent-produced files open only inside this thread's scope, and only for safe document/image types.")
             }
             ForEach(blocks) { block in
                 switch block.kind {
@@ -93,9 +90,8 @@ struct MarkdownOutputView: View {
         // revealed in Finder, while out-of-scope paths remain refused.
         .environment(\.openURL, OpenURLAction { url in
             let raw: String
-            switch Self.linkRoute(for: url, isFilePreview: isFilePreview) {
+            switch Self.linkRoute(for: url) {
             case .system: return .systemAction
-            case .refuse(let notice): linkRefusal = notice; return .discarded
             case .scoped(let target): raw = target
             }
             guard let model else {
@@ -136,22 +132,16 @@ struct MarkdownOutputView: View {
         })
     }
 
-    enum LinkRoute: Equatable { case system, scoped(target: String), refuse(notice: String) }
+    enum LinkRoute: Equatable { case system, scoped(target: String) }
 
-    /// One rule for every surface: a file preview refuses every link before any
-    /// routing (it is passive and never a launch surface); in an answer, non-file
-    /// links keep normal system behavior and local targets (file URLs,
-    /// scheme-less paths) are scope-checked.
-    nonisolated static func linkRoute(for url: URL, isFilePreview: Bool) -> LinkRoute {
-        if isFilePreview { return .refuse(notice: refusalNotice(filePreviewLinkReason)) }
+    /// Manual links share one rule across answers and file previews: non-file
+    /// links keep system behavior; local targets use the existing scope gate.
+    nonisolated static func linkRoute(for url: URL) -> LinkRoute {
         guard url.isFileURL || url.scheme == nil else { return .system }
         return .scoped(target: url.isFileURL ? url.path : url.absoluteString)
     }
 
     nonisolated static func refusalNotice(_ reason: String) -> String { "Link not opened: \(reason)" }
-    nonisolated static let filePreviewLinkReason =
-        "Links stay closed in a file preview. Choose Show source to inspect the target."
-
     enum LocalFileAction: Equatable {
         case preview(path: String, kind: AgentFilePreviewKind)
         case reveal(path: String)

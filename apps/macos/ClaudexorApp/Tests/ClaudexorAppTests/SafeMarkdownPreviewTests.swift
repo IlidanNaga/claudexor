@@ -39,6 +39,7 @@ import Testing
 
         #expect(request.kind == .markdown)
         #expect(request.displayName == "report.md")
+        #expect(request.fileScopeRoots == [root.path])
         #expect(request.url != file)
         #expect(request.source?.bytes == before)
         #expect(request.source?.wasTruncated == false)
@@ -115,25 +116,19 @@ import Testing
         #expect(try Data(contentsOf: scoped.url) == prefix)
     }
 
-    private let filePreviewRefusal = MarkdownOutputView.LinkRoute.refuse(notice:
-        "Link not opened: Links stay closed in a file preview. "
-            + "Choose Show source to inspect the target.")
-
-    @Test func nonFileLinksOpenThroughTheSystemInAnAnswerAndAreRefusedInAFilePreview() throws {
+    @Test func manualNonFileLinksKeepTheSystemRouteAcrossMarkdownSurfaces() throws {
         for target in ["https://example.com/report", "HTTP://EXAMPLE.COM/a", "mailto:team@example.com"] {
             let url = try #require(URL(string: target))
-            #expect(MarkdownOutputView.linkRoute(for: url, isFilePreview: false) == .system)
-            #expect(MarkdownOutputView.linkRoute(for: url, isFilePreview: true) == filePreviewRefusal)
+            #expect(MarkdownOutputView.linkRoute(for: url) == .system)
         }
-        // A preview refuses before any scheme is routed, so no handler is ever consulted.
+        // Preserve the existing system handler policy, without a preview-only allowlist.
         for target in ["javascript:alert(1)", "x-custom-scheme://launch", "tel:+15555550100"] {
             let url = try #require(URL(string: target))
-            #expect(MarkdownOutputView.linkRoute(for: url, isFilePreview: true) == filePreviewRefusal)
+            #expect(MarkdownOutputView.linkRoute(for: url) == .system)
         }
     }
 
-    @Test func localLinksAreRefusedInAFilePreviewAndScopeCheckedInAnAnswer() throws {
-        let refusal = filePreviewRefusal
+    @Test func manualLocalLinksUseTheExistingScopeRouteAcrossMarkdownSurfaces() throws {
         for (target, scoped) in [
             ("file:///etc/hosts", "/etc/hosts"),
             ("FILE:///etc/hosts", "/etc/hosts"),
@@ -143,8 +138,7 @@ import Testing
             ("#anchor", "#anchor"),
         ] {
             let url = try #require(URL(string: target))
-            #expect(MarkdownOutputView.linkRoute(for: url, isFilePreview: true) == refusal)
-            #expect(MarkdownOutputView.linkRoute(for: url, isFilePreview: false)
+            #expect(MarkdownOutputView.linkRoute(for: url)
                 == .scoped(target: scoped))
         }
     }

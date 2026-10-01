@@ -83,5 +83,8 @@ func stagedArtifactPreview(
     guard let data else { throw CocoaError(.fileReadUnknown) }
     let url = try ExternalArtifactHandoff.standard()
         .stage(data: data, suggestedName: (path as NSString).lastPathComponent)
-    return .localFile(url: url, kind: ScopedInlineImage.previewKind(path: path))
+    let task = model.task(runId, at: locationID)
+    return .localFile(
+        url: url, kind: ScopedInlineImage.previewKind(path: path),
+        fileScopeRoots: [task?.repoRoot, task?.runDir].compactMap { $0 })
 }
