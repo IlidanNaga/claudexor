@@ -77,6 +77,9 @@ describe("remote setup attach", () => {
       stdio: "inherit",
       detached: false,
     });
+    // The interactive terminal attachment stays visible; only background
+    // helpers hide their Windows console.
+    expect(invocation.options).not.toHaveProperty("windowsHide");
     expect(invocation.options.env).toMatchObject({
       PATH: "C:\\Tools",
       TERM: "xterm-256color",

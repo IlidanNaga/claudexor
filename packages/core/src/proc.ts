@@ -131,6 +131,8 @@ export async function* spawnProcess(
     cwd: opts.cwd,
     env,
     stdio: ["pipe", "pipe", "pipe"],
+    // Fully piped background children; interactive login/attach own their terminal policy.
+    windowsHide: true,
     // Put the child in its own process group so we can signal the WHOLE tree.
     // Harnesses spawn grandchildren (shell tools, MCP servers); without this a
     // cancel/timeout signals only the direct child and grandchildren leak,
@@ -462,6 +464,7 @@ export async function runCaptureRaw(
     cwd: opts.cwd,
     env,
     stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true,
     detached: true,
   });
   if (typeof child.pid === "number") registerChildProcess(child.pid, cmd);

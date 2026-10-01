@@ -288,6 +288,7 @@ jobs:
           packages/schema/src/platform-auth-policy.test.ts
           packages/core/src/process-identity.test.ts
           packages/core/src/process-tree.test.ts
+          packages/core/src/proc-windows-hide.test.ts
           packages/core/src/capabilities.test.ts
           packages/core/src/win32-conpty-helper.test.ts
           packages/harness-agy/src/conformance.test.ts
