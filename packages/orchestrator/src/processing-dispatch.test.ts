@@ -77,7 +77,7 @@ describe("exact prepared processing before physical dispatch", () => {
       quotaAdmission: { profile: null },
       settings: null,
     };
-    bindProcessingAdmission(input, ledger, lease.lease_id, "fixture", "a01", seen);
+    bindProcessingAdmission(input, ledger, lease, "fixture", "a01", seen);
     const consume = async () => {
       for await (const _ of runModelGovernedRoute(route, input)) {
       }
@@ -105,7 +105,7 @@ describe("exact prepared processing before physical dispatch", () => {
         yield* [];
       },
     } as unknown as HarnessAdapter;
-    bindProcessingAdmission(input, ledger, lease.lease_id, "fixture", "a01");
+    bindProcessingAdmission(input, ledger, lease, "fixture", "a01");
     for await (const _ of runModelGovernedRoute(
       {
         adapter,

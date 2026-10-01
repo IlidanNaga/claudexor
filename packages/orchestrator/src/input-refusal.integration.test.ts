@@ -104,7 +104,21 @@ function fixture(run: (spec: HarnessRunSpec) => AsyncIterable<HarnessEvent>) {
       last_verified_at: new Date().toISOString(),
     }),
   };
-  return { root, adapter };
+  // The named accounts have their own vendor proof, independently of the
+  // default doctor. Refusal tests then exercise the intended account order.
+  const vendorSnapshots: QuotaSnapshot[] = profiles.map((profile) => ({
+    subject: {
+      harness: "codex",
+      credential_route: "vendor_native",
+      plan_label: null,
+      subject_id: profile.profile_id,
+    },
+    constraints: [],
+    source: "codex_app_server",
+    observed_at: new Date().toISOString(),
+    freshness: "fresh",
+  }));
+  return { root, adapter, vendorSnapshots };
 }
 const common = (spec: HarnessRunSpec) => ({
   session_id: spec.session_id,
@@ -123,7 +137,7 @@ it.each([
   "$mode (attempts=$attempts) preserves typed input refusal through final artifacts without rotating or retrying",
   async ({ mode, attempts, ...options }) => {
     const calls: string[] = [];
-    const { root, adapter } = fixture(async function* (spec) {
+    const { root, adapter, vendorSnapshots } = fixture(async function* (spec) {
       calls.push(`${spec.credential_profile?.profile_id}:${spec.model_hint}`);
       yield { ...common(spec), type: "error", error: "request refused", request_refusal: refusal };
       yield { ...common(spec), type: "completed", payload: { harness_reported_error: true } };
@@ -132,6 +146,7 @@ it.each([
     const result = await new Orchestrator({
       registry: new Map([[adapter.id, adapter]]),
       reviewers: [],
+      quotaSnapshots: () => vendorSnapshots,
     }).run({
       repoRoot: root,
       mode,
@@ -173,7 +188,7 @@ it.each([
 
 it.each(["structural", "quota"] as const)("keeps useful %s account failover", async (cause) => {
   const calls: string[] = [];
-  const { root, adapter } = fixture(async function* (spec) {
+  const { root, adapter, vendorSnapshots } = fixture(async function* (spec) {
     const profile = spec.credential_profile!.profile_id;
     calls.push(profile);
     if (profile === "a") {
@@ -193,6 +208,7 @@ it.each(["structural", "quota"] as const)("keeps useful %s account failover", as
   const result = await new Orchestrator({
     registry: new Map([[adapter.id, adapter]]),
     reviewers: [],
+    quotaSnapshots: () => vendorSnapshots,
   }).run({
     repoRoot: root,
     mode: "ask",
@@ -211,7 +227,7 @@ it.each([false, true])(
   "does not borrow earlier/untried quota for a later structural failure (earlier quota=%s)",
   async (earlierQuota) => {
     const calls: string[] = [];
-    const { root, adapter } = fixture(async function* (spec) {
+    const { root, adapter, vendorSnapshots } = fixture(async function* (spec) {
       const profile = spec.credential_profile!.profile_id;
       calls.push(profile);
       if (earlierQuota && profile === "a")
@@ -252,7 +268,13 @@ it.each([false, true])(
     const result = await new Orchestrator({
       registry: new Map([[adapter.id, adapter]]),
       reviewers: [],
-      quotaSnapshots: () => snapshots,
+      quotaSnapshots: () => [
+        ...snapshots,
+        ...vendorSnapshots.filter(
+          (row) =>
+            !snapshots.some((override) => override.subject.subject_id === row.subject.subject_id),
+        ),
+      ],
     }).run({
       repoRoot: root,
       mode: "ask",
@@ -275,7 +297,7 @@ it.each([false, true])(
 
 it("input refusal skips the same-harness model retry without inventing a new cross-harness ASK route", async () => {
   const calls: string[] = [];
-  const { root, adapter } = fixture(async function* (spec) {
+  const { root, adapter, vendorSnapshots } = fixture(async function* (spec) {
     calls.push(`codex:${spec.model_hint}`);
     yield { ...common(spec), type: "error", error: "request refused", request_refusal: refusal };
     yield { ...common(spec), type: "completed" };
@@ -298,6 +320,7 @@ it("input refusal skips the same-harness model retry without inventing a new cro
       ["sibling", sibling],
     ]),
     reviewers: [],
+    quotaSnapshots: () => vendorSnapshots,
   }).run({
     repoRoot: root,
     mode: "ask",
@@ -319,7 +342,7 @@ it.each([
 ])("$mode aggregate preserves input refusal only when every cause agrees", async (strategy) => {
   for (const mixed of [false, true]) {
     const calls: string[] = [];
-    const { root, adapter } = fixture(async function* (spec) {
+    const { root, adapter, vendorSnapshots } = fixture(async function* (spec) {
       calls.push("codex");
       yield { ...common(spec), type: "error", error: "input refused", request_refusal: refusal };
       yield { ...common(spec), type: "completed", payload: { harness_reported_error: true } };
@@ -347,6 +370,7 @@ it.each([
         ["sibling", sibling],
       ]),
       reviewers: [],
+      quotaSnapshots: () => vendorSnapshots,
     }).run({
       repoRoot: root,
       prompt: "12345678901",
@@ -376,7 +400,7 @@ it.each([false, true])(
   "solo Plan reports the last failed route (input refusal=%s)",
   async (lastRefuses) => {
     const calls: string[] = [];
-    const { root, adapter } = fixture(async function* (spec) {
+    const { root, adapter, vendorSnapshots } = fixture(async function* (spec) {
       calls.push("codex");
       yield {
         ...common(spec),
@@ -409,6 +433,7 @@ it.each([false, true])(
         ["sibling", sibling],
       ]),
       reviewers: [],
+      quotaSnapshots: () => vendorSnapshots,
     }).run({
       repoRoot: root,
       mode: "plan",

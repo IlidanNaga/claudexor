@@ -5,7 +5,12 @@ import {
   type BudgetLedger,
 } from "@claudexor/budget";
 import type { PreparedHarnessProcessing, ProcessingAdmission } from "@claudexor/core";
-import type { BillingKnowledge, CostEvidence, HarnessRunSpec } from "@claudexor/schema";
+import type {
+  BillingKnowledge,
+  BudgetLease,
+  CostEvidence,
+  HarnessRunSpec,
+} from "@claudexor/schema";
 import type { ReviewerSpec } from "@claudexor/review";
 import type { AttemptUsageCost } from "./attemptUsageCost.js";
 import type { BudgetDenial } from "./budgetFailure.js";
@@ -113,14 +118,24 @@ function reprice(
  * callback, which receives each actual prepared profile/model before spawn. */
 export function processingAdmissionForLease(
   ledger: BudgetLedger,
-  leaseId: string,
+  lease: BudgetLease,
   harnessId: string,
   attemptId: string | null,
   onDenied?: (denial: BudgetDenial) => void,
 ): ProcessingAdmission {
+  // A positive reservation floor is independent of account entitlement. Never
+  // carry an old included/zero verdict into a newly unknown or metered route.
+  const estimate = lease.cost.estimatedUsd;
   return (actual) => {
-    const cost = preparedCost(actual, harnessId);
-    if (!cost) return;
+    const prepared = preparedCost(actual, harnessId);
+    if (!prepared) return;
+    const cost: CostEvidence =
+      prepared.knowledge === "unknown" &&
+      prepared.estimatedUsd === null &&
+      estimate != null &&
+      estimate > 0
+        ? { ...prepared, estimatedUsd: estimate, knowledge: "estimated" }
+        : prepared;
     if (
       actual.extra["paidFallback"] === "never" &&
       cost.billing !== "subscription_entitlement" &&
@@ -135,23 +150,24 @@ export function processingAdmissionForLease(
         { category: "config_error" },
       );
     }
-    reprice(ledger, leaseId, cost, harnessId, attemptId, onDenied);
+    reprice(ledger, lease.lease_id, cost, harnessId, attemptId, onDenied);
   };
 }
 
 export function bindProcessingAdmission(
   spec: HarnessRunSpec,
   ledger: BudgetLedger,
-  leaseId: string,
+  lease: BudgetLease,
   harnessId: string,
   attemptId: string | null,
   onDenied?: (denial: BudgetDenial) => void,
   admission?: ProcessingAdmission,
 ): ProcessingAdmission {
   const bound =
-    admission ?? processingAdmissionForLease(ledger, leaseId, harnessId, attemptId, onDenied);
+    admission ?? processingAdmissionForLease(ledger, lease, harnessId, attemptId, onDenied);
   spec.extra["processingAdmission"] = bound;
-  spec.extra["markPhysicalDispatchStarted"] = () => ledger.markPhysicalDispatchStarted(leaseId);
+  spec.extra["markPhysicalDispatchStarted"] = () =>
+    ledger.markPhysicalDispatchStarted(lease.lease_id);
   return bound;
 }
 

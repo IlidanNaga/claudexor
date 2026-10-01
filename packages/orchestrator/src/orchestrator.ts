@@ -114,6 +114,7 @@ import type {
   RuntimeConcurrencyCaps,
   AuthPreference,
   CredentialProfile,
+  BudgetLease,
   ImplementationTransport,
   RawGitPatchEnvelope,
   WebPolicySupport,
@@ -127,6 +128,7 @@ import {
 } from "./planRun.js";
 import {
   runPlannerAttempt as executePlannerAttempt,
+  plannerAttemptSummary,
   type PlannerAttemptArgs,
   type PlannerAttemptDeps,
   type PlannerAttemptOutcome,
@@ -274,7 +276,6 @@ import {
   unrecoveredToolErrorFailure,
   unwrapWorkReportEnvelope,
   webEvidenceFailure,
-  type AttemptOutcomeClass,
   type ResolvedWorkReportEnvelope,
   type WorkReportEnvelopeMode,
 } from "./attemptFinalize.js";
@@ -2194,6 +2195,9 @@ export class Orchestrator {
         processing,
         processingAdmission,
         physicalDispatchStarted,
+        billingVerificationForProfile: (profile) =>
+          this.credentials.selectedProfileBillingVerification(profile),
+        paidFallback: this.config(runInput.repoRoot).global.routing.paid_fallback,
       });
       const result = buildContinuation(req);
       // Disclose on every lane and stamp the turn (INV-137: never silent).
@@ -2273,7 +2277,7 @@ export class Orchestrator {
     paths: ReturnType<ArtifactStore["runPaths"]>,
     wsm: WorkspaceManager,
     ledger: BudgetLedger,
-    processingLease: { id: string; onDenied: (denial: BudgetDenial) => void },
+    processingLease: { lease: BudgetLease; onDenied: (denial: BudgetDenial) => void },
     access: AccessProfile,
     onHarnessEvent: ((event: HarnessEvent) => void) | undefined,
     signal: AbortSignal | undefined,
@@ -2326,7 +2330,7 @@ export class Orchestrator {
       : undefined;
     const processingAdmission = processingAdmissionForLease(
       ledger,
-      processingLease.id,
+      processingLease.lease,
       adapter.id,
       attemptId,
       processingLease.onDenied,
@@ -2350,7 +2354,7 @@ export class Orchestrator {
           log,
           capturedProcessing,
           processingAdmission,
-          () => ledger.markPhysicalDispatchStarted(processingLease.id),
+          () => ledger.markPhysicalDispatchStarted(processingLease.lease.lease_id),
         )
       : null;
     const artifactRelativeDir = routed.browserRequirement.effective
@@ -2405,7 +2409,7 @@ export class Orchestrator {
     bindProcessingAdmission(
       spec,
       ledger,
-      processingLease.id,
+      processingLease.lease,
       adapter.id,
       attemptId,
       processingLease.onDenied,
@@ -3101,7 +3105,7 @@ export class Orchestrator {
       routed: RoutedAdapter;
       attemptId: string;
       label: string;
-      leaseId: string;
+      lease: BudgetLease;
     }
     let budgetStopped = false;
     // QA-050: keep the ledger's typed denial so the zero-candidate terminal
@@ -3148,7 +3152,7 @@ export class Orchestrator {
         routed,
         attemptId,
         label: `Candidate ${LABELS[i] ?? i + 1}`,
-        leaseId: lease.lease?.lease_id ?? "",
+        lease: lease.lease!,
       });
     }
 
@@ -3160,14 +3164,14 @@ export class Orchestrator {
     let candidateContinuationCount = 0;
     const runSlot = async (slot: CandidateSlot, slotIdx: number): Promise<void> => {
       if (input.signal?.aborted) {
-        ledger.cancel(slot.leaseId);
+        ledger.cancel(slot.lease.lease_id);
         return;
       }
       // Leases are granted upfront (before spend exists); a worker still
       // re-checks the circuit breaker so queued slots beyond the parallel wave
       // do not start after earlier candidates already blew the hard cap.
       if (budgetStopped || ledger.tier() === "hard") {
-        ledger.cancel(slot.leaseId);
+        ledger.cancel(slot.lease.lease_id);
         log.emit("budget.lease.created", {
           granted: false,
           reason: "budget exhausted (hard cap reached)",
@@ -3254,7 +3258,7 @@ export class Orchestrator {
           wsm,
           ledger,
           {
-            id: slot.leaseId,
+            lease: slot.lease,
             onDenied: (denial) => {
               budgetStopped = true;
               budgetDenial ??= denial;
@@ -3282,7 +3286,7 @@ export class Orchestrator {
             slot.routed.supportsInteractive,
           ),
           (streamedUsd) => {
-            ledger.updateHold(slot.leaseId, streamedUsd);
+            ledger.updateHold(slot.lease.lease_id, streamedUsd);
             if (ledger.tier() !== "hard") return false;
             budgetStopped = true;
             return true;
@@ -3294,7 +3298,7 @@ export class Orchestrator {
           harnessHome,
         );
         ledger.settle(
-          slot.leaseId,
+          slot.lease.lease_id,
           attemptUsageCostSettlement(
             run.cost,
             run.costEstimated,
@@ -3388,7 +3392,7 @@ export class Orchestrator {
                   wsm,
                   ledger,
                   {
-                    id: contLeaseId,
+                    lease: contLease.lease!,
                     onDenied: (denial) => {
                       budgetStopped = true;
                       budgetDenial ??= denial;
@@ -3482,7 +3486,7 @@ export class Orchestrator {
         envelope = undefined;
       } catch (err) {
         const failureCost = AC.attemptFailureCost(err, "post-stream-error", 0);
-        ledger.settle(slot.leaseId, failureCost.settlement);
+        ledger.settle(slot.lease.lease_id, failureCost.settlement);
         const message = safeErrorMessage(err);
         const declared = declaredFailure(err);
         const infraPhase: "workspace" | "harness" =
@@ -3823,7 +3827,7 @@ export class Orchestrator {
             wsm,
             ledger,
             {
-              id: lease.lease!.lease_id,
+              lease: lease.lease!,
               onDenied: (denial) => {
                 budgetStopped = true;
                 budgetDenial ??= denial;
@@ -4865,7 +4869,7 @@ export class Orchestrator {
             wsm,
             ledger,
             {
-              id: lease.lease!.lease_id,
+              lease: lease.lease!,
               onDenied: (denial) => {
                 exhausted = true;
                 processingBudgetDenial ??= denial;
@@ -5589,7 +5593,7 @@ export class Orchestrator {
         this.routeBillingKnowledge(input, harnessId, routed),
       inactivityTimeoutMs: (repoRoot) => harnessInactivityTimeoutMs(this.config(repoRoot)),
       quotaEventSink: this.deps.quotaEventSink,
-      prepare: async (args) => {
+      prepare: async (args, processingAdmission, physicalDispatchStarted) => {
         const { input, contract, taskId, runId, log, store, paths, routed, attemptId } = args;
         const adapter = routed.adapter;
         const knobs = this.routeSpecKnobs(routed, contract, undefined, input.effort);
@@ -5613,6 +5617,9 @@ export class Orchestrator {
               paths,
               this.execRootOf(input),
               log,
+              this.harnessSpecKnobs(contract, knobs, args.intent),
+              processingAdmission,
+              physicalDispatchStarted,
             )
           : null;
         const spec = HarnessRunSpec.parse({
@@ -5809,13 +5816,7 @@ export class Orchestrator {
 
     const plans: { id: string; text: string }[] = [];
     let fallbackFrom: string | null = null;
-    const planAttempts: {
-      attemptId: string;
-      harnessId: string;
-      status: "success" | "failed" | "blocked";
-      outcomeClass?: AttemptOutcomeClass;
-      error: string | null;
-    }[] = [];
+    const planAttempts: ReturnType<typeof plannerAttemptSummary>[] = [];
     const attemptTelemetries: {
       attemptId: string;
       harnessId: string;
@@ -5850,13 +5851,7 @@ export class Orchestrator {
           // terminal names the refused route and does not read "all planners
           // failed"; capture the typed denial for the budget classifier.
           planBudgetDenial ??= outcome.budgetDenial ?? null;
-          planAttempts.push({
-            attemptId,
-            harnessId: outcome.harnessId,
-            status: outcome.status,
-            outcomeClass: outcome.outcomeClass,
-            error: outcome.error,
-          });
+          planAttempts.push(plannerAttemptSummary(outcome));
           break;
         }
         if (outcome.telemetry)
@@ -5865,13 +5860,7 @@ export class Orchestrator {
             harnessId: outcome.harnessId,
             telemetry: outcome.telemetry,
           });
-        planAttempts.push({
-          attemptId,
-          harnessId: outcome.harnessId,
-          status: outcome.status,
-          outcomeClass: outcome.outcomeClass,
-          error: outcome.error,
-        });
+        planAttempts.push(plannerAttemptSummary(outcome));
         if (outcome.status !== "success") {
           if (outcome.telemetry?.effortResolution?.resolution === "rejected") break;
           const next = adapters[idx + 1];
@@ -6423,6 +6412,16 @@ export class Orchestrator {
         }
         return { status: "budget_denied", reason: lease.reason ?? "budget lease denied" };
       }
+      const processingAdmission = processingAdmissionForLease(
+        ledger,
+        lease.lease!,
+        adapter.id,
+        attemptId,
+        (denial) => {
+          budgetStopped = true;
+          budgetDenial ??= denial;
+        },
+      );
       // As with planners, the granted lease owns profile/continuity/spec
       // preparation. Contain a pre-stream rejection as this attempt's failure;
       // parallel siblings can then finish before the shared HOME is disposed.
@@ -6461,6 +6460,9 @@ export class Orchestrator {
               paths,
               this.execRootOf(input),
               log,
+              this.harnessSpecKnobs(contract, knobs, opts.intent),
+              processingAdmission,
+              () => ledger.markPhysicalDispatchStarted(lease.lease!.lease_id),
             )
           : null;
         // D-16d: the continuation packet pointer rides after the lane pointer so
@@ -6551,7 +6553,7 @@ export class Orchestrator {
         const message = `read-only attempt setup failed: ${safeErrorMessage(preparation.error)}`;
         AC.settleGrantedAttemptLease({
           ledger,
-          leaseId: lease.lease?.lease_id ?? "",
+          leaseId: lease.lease!.lease_id,
           attemptId,
           harnessId: adapter.id,
           costUsd: 0,
@@ -6602,13 +6604,11 @@ export class Orchestrator {
       bindProcessingAdmission(
         spec,
         ledger,
-        lease.lease!.lease_id,
+        lease.lease!,
         adapter.id,
         attemptId,
-        (denial) => {
-          budgetStopped = true;
-          budgetDenial ??= denial;
-        },
+        undefined,
+        processingAdmission,
       );
       const retryPolicy = transientRetryPolicy(this.config(input.repoRoot));
       let activeSessionId = spec.session_id;
@@ -6822,7 +6822,7 @@ export class Orchestrator {
         input.signal?.removeEventListener("abort", onAbort);
         AC.settleGrantedAttemptLease({
           ledger,
-          leaseId: lease.lease?.lease_id ?? "",
+          leaseId: lease.lease!.lease_id,
           attemptId,
           harnessId: adapter.id,
           costUsd: cost,

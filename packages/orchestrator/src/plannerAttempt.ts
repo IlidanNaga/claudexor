@@ -1,5 +1,6 @@
 import {
   bindProcessingAdmission,
+  processingAdmissionForLease,
   processingAttemptCostEvidence,
   updateProcessingStreamHold,
   ProcessingBudgetAdmissionError,
@@ -11,6 +12,7 @@ import {
   AnswerAssembly,
   countsAsAgentProgress,
   type InteractionChannel,
+  type ProcessingAdmission,
   withInactivityWatchdog,
 } from "@claudexor/core";
 import type { EventLog } from "@claudexor/event-log";
@@ -43,6 +45,7 @@ import {
 import { settleGrantedAttemptLease } from "./attemptUsageCost.js";
 import { observeNativeSessionEvent } from "./credential-profiles.js";
 import type { BudgetDenial } from "./budgetFailure.js";
+import { declaredFailure, type DeclaredFailure } from "./runTerminalResults.js";
 import { runModelGovernedRoute } from "./modelGovernance.js";
 import type { RoutedAdapter, RunInput } from "./orchestrator.js";
 import {
@@ -68,6 +71,19 @@ export interface PlannerAttemptOutcome {
   telemetry: AttemptTelemetry | null;
   budgetDenied: boolean;
   budgetDenial?: BudgetDenial | null;
+  declaredFailure?: DeclaredFailure;
+}
+
+/** Preserve the same typed outcome in solo, Council and merge failure paths. */
+export function plannerAttemptSummary(outcome: PlannerAttemptOutcome) {
+  return {
+    attemptId: outcome.attemptId,
+    harnessId: outcome.harnessId,
+    status: outcome.status,
+    outcomeClass: outcome.outcomeClass,
+    error: outcome.error,
+    declaredFailure: outcome.declaredFailure,
+  };
 }
 
 /** Inputs shared by solo fallback, Council drafts, and the Council merge. */
@@ -107,7 +123,11 @@ export interface PreparedPlannerAttempt {
 /** Narrow owner boundary: Orchestrator prepares its private route/session
  * fields; this module owns the planner lease, stream, telemetry, and outcome. */
 export interface PlannerAttemptDeps {
-  prepare(args: PlannerAttemptArgs): Promise<PreparedPlannerAttempt>;
+  prepare(
+    args: PlannerAttemptArgs,
+    admission: ProcessingAdmission,
+    started: () => void,
+  ): Promise<PreparedPlannerAttempt>;
   billingKnowledge(
     input: RunInput,
     harnessId: string,
@@ -163,10 +183,16 @@ export async function runPlannerAttempt(
     };
   }
 
+  let physicalStarted = false;
+  const markStarted = () => {
+    physicalStarted = true;
+    ledger.markPhysicalDispatchStarted(lease.lease!.lease_id);
+  };
+  const admission = processingAdmissionForLease(ledger, lease.lease!, adapter.id, attemptId);
   // Preparation belongs to the granted lease. No harness lifecycle event is
   // emitted until every route/session/spec field and telemetry seed exists.
   const preparation = await (async () => {
-    const prepared = await deps.prepare(args);
+    const prepared = await deps.prepare(args, admission, markStarted);
     return {
       ...prepared,
       attemptEventsPath: join(paths.attemptsDir, attemptId, "events.jsonl"),
@@ -184,15 +210,17 @@ export async function runPlannerAttempt(
     (error: unknown) => ({ ok: false as const, error }),
   );
   if (!preparation.ok) {
-    settleGrantedAttemptLease({
-      ledger,
-      leaseId: lease.lease?.lease_id ?? "",
-      attemptId,
-      harnessId: adapter.id,
-      costUsd: 0,
-      costEstimated: false,
-      preStreamFailureSource: "planner-pre-stream",
-    });
+    if (!physicalStarted) ledger.cancel(lease.lease!.lease_id);
+    else
+      settleGrantedAttemptLease({
+        ledger,
+        leaseId: lease.lease?.lease_id ?? "",
+        attemptId,
+        harnessId: adapter.id,
+        costUsd: 0,
+        costEstimated: false,
+        preStreamFailureSource: "planner-pre-stream",
+      });
     return {
       attemptId,
       harnessId: adapter.id,
@@ -216,7 +244,8 @@ export async function runPlannerAttempt(
     answer,
     telemetry,
   } = preparation.value;
-  bindProcessingAdmission(spec, ledger, lease.lease!.lease_id, adapter.id, attemptId);
+  bindProcessingAdmission(spec, ledger, lease.lease!, adapter.id, attemptId, undefined, admission);
+  spec.extra["markPhysicalDispatchStarted"] = markStarted;
   const onAbort = () => {
     void adapter.cancel?.(spec.session_id)?.catch(() => {});
   };
@@ -228,6 +257,7 @@ export async function runPlannerAttempt(
   let costEstimated = false;
   let harnessError: string | null = null;
   let processingDenial: BudgetDenial | null = null;
+  let declared: DeclaredFailure | undefined;
   const budgetSignalState = { quotaPressureDisclosed: false };
   try {
     log.emit("harness.started", {
@@ -298,20 +328,23 @@ export async function runPlannerAttempt(
     }
   } catch (error) {
     harnessError = safeErrorMessage(error);
+    declared = declaredFailure(error);
     if (error instanceof ProcessingBudgetAdmissionError) processingDenial = error.denial;
   } finally {
     input.signal?.removeEventListener("abort", onAbort);
-    settleGrantedAttemptLease({
-      ledger,
-      leaseId: lease.lease?.lease_id ?? "",
-      attemptId,
-      harnessId: adapter.id,
-      costUsd: cost,
-      costEstimated,
-      authMode: telemetry.authMode,
-      usageCost: telemetry.usageCost,
-      preStreamFailureSource: "planner-pre-stream",
-    });
+    if (!physicalStarted) ledger.cancel(lease.lease!.lease_id);
+    else
+      settleGrantedAttemptLease({
+        ledger,
+        leaseId: lease.lease?.lease_id ?? "",
+        attemptId,
+        harnessId: adapter.id,
+        costUsd: cost,
+        costEstimated,
+        authMode: telemetry.authMode,
+        usageCost: telemetry.usageCost,
+        preStreamFailureSource: "planner-pre-stream",
+      });
   }
 
   const planUnwrapped = unwrapWorkReportEnvelope(answer.machineText() ?? "", planWorkMode, {
@@ -368,6 +401,7 @@ export async function runPlannerAttempt(
       telemetry,
       budgetDenied: processingDenial !== null,
       ...(processingDenial ? { budgetDenial: processingDenial } : {}),
+      ...(declared?.category || declared?.code ? { declaredFailure: declared } : {}),
     };
   }
   const text = planText || "(no output)";

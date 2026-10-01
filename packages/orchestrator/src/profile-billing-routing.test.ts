@@ -762,3 +762,314 @@ describe("model fallback billing", () => {
     if (denied) expect(failureText(result)).toContain("finite_zero");
   });
 });
+
+it.each([false, true])(
+  "keeps two parallel unknown-cost scouts admitted with finite headroom (api=%s)",
+  async (api) => {
+    const lane = codexLane("logged_out", "local_passed", false, 0.2);
+    let releaseFirst!: () => void;
+    const secondAdmission = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const run = lane.adapter.run.bind(lane.adapter);
+    lane.adapter.run = async function* (spec) {
+      for await (const event of run(spec)) {
+        yield event.type === "started" && api
+          ? { ...event, credential_route: "managed_api_key" }
+          : event;
+        if (event.type === "started") await secondAdmission;
+      }
+    };
+    const reprices: unknown[] = [];
+    const reserves: unknown[] = [];
+    const reserve = BudgetLedger.prototype.reserve;
+    vi.spyOn(BudgetLedger.prototype, "reserve").mockImplementation(function (
+      this: BudgetLedger,
+      req,
+    ) {
+      const result = reserve.call(this, req);
+      reserves.push(JSON.parse(JSON.stringify({ req, result })));
+      if (req.attemptId === "a02" && !result.granted) releaseFirst();
+      return result;
+    });
+    const reprice = BudgetLedger.prototype.repriceReservedLease;
+    vi.spyOn(BudgetLedger.prototype, "repriceReservedLease").mockImplementation(function (
+      this: BudgetLedger,
+      id,
+      cost,
+    ) {
+      const result = reprice.call(this, id, cost);
+      reprices.push({ cost, result });
+      if (reprices.length === 2) releaseFirst();
+      return result;
+    });
+    const result = await withConfig("when_unavailable", ["a"], async () => {
+      if (api) {
+        const config = join(process.env.CLAUDEXOR_CONFIG_DIR!, "config.yaml");
+        writeFileSync(
+          config,
+          readFileSync(config, "utf8")
+            .replace("credential_kind: config_dir_login", "credential_kind: api_key")
+            .replace(/isolation_locator: .*/, "isolation_locator: null")
+            .replace("secret_ref: null", "secret_ref: openai:a"),
+        );
+      }
+      return ask(lane, [], "a", {
+        deepScan: true,
+        n: 2,
+        paidBudget: { kind: "finite", maxUsd: 2 },
+      });
+    });
+    expect(lane.ran, JSON.stringify({ result, reserves, reprices })).toHaveLength(2);
+  },
+);
+
+it.each([false, true])(
+  "preserves config_error for same-profile Plan paid-fallback refusal before physical dispatch (unlimited=%s)",
+  async (unlimited) => {
+    const lane = codexLane("verified");
+    const snapshots = [vendorHonored("a")];
+    const discover = lane.adapter.discover.bind(lane.adapter);
+    lane.adapter.discover = async () => {
+      const m = await discover();
+      return HarnessManifest.parse({ ...m, capabilities: { ...m.capabilities, plan: true } });
+    };
+    let modelReads = 0;
+    lane.adapter.models = async () => {
+      if (++modelReads === 1) snapshots.splice(0);
+      return [{ id: "model-a", label: null, context_window: null, routes: [] }];
+    };
+    const result = await withConfig("never", ["a"], () =>
+      ask(lane, snapshots, "a", {
+        mode: "plan",
+        models: { codex: "model-a" },
+        paidBudget: unlimited ? { kind: "unlimited" } : { kind: "finite", maxUsd: 2 },
+        review: false,
+      }),
+    );
+    const failure = new ArtifactStore(result.runDir).readYaml<{ category: string }>(
+      join(result.runDir, "final/failure.yaml"),
+    );
+    expect(lane.ran).toEqual([]);
+    expect(failure?.category).toBe("config_error");
+  },
+);
+
+it.each([false, true])(
+  "keeps an ordinary unknown or API-key single route working at positive cap (api=%s)",
+  async (api) => {
+    const lane = codexLane("verified", "local_passed", false, 0.2);
+    const result = await withConfig("when_unavailable", ["a"], async () => {
+      if (api) {
+        const config = join(process.env.CLAUDEXOR_CONFIG_DIR!, "config.yaml");
+        writeFileSync(
+          config,
+          readFileSync(config, "utf8")
+            .replace("credential_kind: config_dir_login", "credential_kind: api_key")
+            .replace(/isolation_locator: .*/, "isolation_locator: null")
+            .replace("secret_ref: null", "secret_ref: openai:a"),
+        );
+      }
+      return ask(lane, [], "a", { paidBudget: { kind: "finite", maxUsd: 2 } });
+    });
+    expect(result.lifecycle, result.summary).toBe("succeeded");
+    expect(lane.ran).toEqual(["a"]);
+    expect(billingOf(result)).toBe(api ? "metered" : "unknown");
+  },
+);
+
+describe.each(["ask", "plan", "agent"] as const)(
+  "current billing for inline continuity in %s",
+  (mode) => {
+    it.each([
+      { revoke: false, processing: false, cap: 0 },
+      { revoke: true, processing: false, cap: 0 },
+      { revoke: false, processing: true, cap: 0 },
+      { revoke: true, processing: true, cap: 0 },
+      { revoke: true, processing: false, cap: 2 },
+      { revoke: true, processing: true, cap: 2 },
+    ])(
+      "current exact profile before summary revoke=$revoke processing=$processing cap=$cap",
+      async ({ revoke, processing, cap }) => {
+        const lane = codexLane("verified");
+        const discover = lane.adapter.discover.bind(lane.adapter);
+        lane.adapter.discover = async () => {
+          const m = await discover();
+          return HarnessManifest.parse({ ...m, capabilities: { ...m.capabilities, plan: true } });
+        };
+        const snapshots: QuotaSnapshot[] = [vendorHonored("a")];
+        const sends: Array<{
+          summary: boolean;
+          profile: string | null;
+          probes: number;
+          billing: unknown;
+          paidFallback: unknown;
+        }> = [];
+        const run = lane.adapter.run.bind(lane.adapter);
+        lane.adapter.run = async function* (spec) {
+          sends.push({
+            summary: spec.prompt.includes("successor agent"),
+            profile: spec.credential_profile?.profile_id ?? null,
+            probes: lane.probes.length,
+            billing: spec.extra["routeBillingKnowledge"],
+            paidFallback: spec.extra["paidFallback"],
+          });
+          yield* run(spec);
+        };
+        if (processing)
+          lane.adapter.prepareProcessing = async () => ({
+            model: "model-a",
+            receipt: {
+              requested: "standard",
+              submitted: "standard",
+              submittedNative: "standard",
+              observed: "unknown",
+              observedNative: [],
+              reason: null,
+              source: "fixture",
+            },
+            costBasis: { nativeMode: "standard", kind: "unknown", source: "fixture" },
+          });
+        let modelReads = 0;
+        lane.adapter.models = async () => {
+          if (++modelReads === 1 && revoke) snapshots.splice(0);
+          return [{ id: "model-a", label: null, context_window: null, routes: [] }];
+        };
+        const result = await withConfig("when_unavailable", ["a"], () =>
+          new Orchestrator({
+            registry: new Map([["codex", lane.adapter]]),
+            reviewers: [],
+            quotaSnapshots: () => snapshots,
+          }).run({
+            repoRoot: initializedRepo(),
+            prompt: "continue the thread",
+            mode,
+            harnesses: ["codex"],
+            credentialProfileId: "a",
+            models: { codex: "model-a" },
+            web: "auto",
+            inPlace: mode === "agent",
+            review: false,
+            ...(processing ? { processingPreference: "standard" as const } : {}),
+            paidBudget: { kind: "finite", maxUsd: cap },
+            threadId: "thread-independent-scope",
+            threadContinuity: {
+              turnId: "t9",
+              profileId: "a",
+              laneCheckpoints: [],
+              priorTurns: Array.from({ length: 8 }, (_, i) => ({
+                id: "t" + i,
+                prompt: "prior task ".repeat(700),
+                runId: null,
+              })),
+            },
+          }),
+        );
+        const trace = {
+          mode,
+          revoke,
+          processing,
+          sends,
+          probes: lane.probes,
+          modelReads,
+          lifecycle: result.lifecycle,
+          summary: result.summary,
+        };
+        if (!revoke || cap > 0)
+          expect(sends.find((send) => send.summary)?.probes).toBeGreaterThan(1);
+        expect(sends.filter((send) => send.summary).length, JSON.stringify(trace)).toBe(
+          revoke && cap === 0 ? 0 : 1,
+        );
+        if (!revoke || cap > 0) expect(result.lifecycle, JSON.stringify(trace)).toBe("succeeded");
+      },
+    );
+  },
+);
+
+describe("eligible mixed pools", () => {
+  it.each([false, true])(
+    "primary preference does not borrow vendor proof (confirmed=%s)",
+    async (confirmed) => {
+      const named = codexLane("verified");
+      const calls: string[] = [];
+      const originalRun = named.adapter.run.bind(named.adapter);
+      named.adapter.run = async function* (spec) {
+        calls.push("named");
+        yield* originalRun(spec);
+      };
+      const sibling: HarnessAdapter = {
+        ...named.adapter,
+        id: "sibling",
+        probeCredentialProfile: undefined,
+        discover: async () => ({ ...(await named.adapter.discover())!, id: "sibling" }),
+        doctor: async (spec) => ({ ...(await named.adapter.doctor(spec)), harness_id: "sibling" }),
+        run: async function* (spec) {
+          calls.push("sibling");
+          const common = { session_id: spec.session_id, ts: new Date().toISOString() };
+          yield { ...common, type: "started", credential_route: "vendor_native" };
+          yield { ...common, type: "message", text: "done", final: true };
+          yield { ...common, type: "completed" };
+        },
+      };
+      const result = await withConfig("when_unavailable", ["a"], () =>
+        new Orchestrator({
+          registry: new Map([
+            ["codex", named.adapter],
+            ["sibling", sibling],
+          ]),
+          reviewers: [],
+          quotaSnapshots: () => (confirmed ? [vendorHonored("a")] : []),
+        }).run({
+          repoRoot: initializedRepo(),
+          prompt: "hello",
+          mode: "ask",
+          harnesses: ["codex", "sibling"],
+          primaryHarness: "codex",
+          web: "auto",
+        }),
+      );
+      expect(result.lifecycle, result.summary).toBe("succeeded");
+      expect(calls).toEqual([confirmed ? "named" : "sibling"]);
+      expect(billingOf(result)).toBe(confirmed ? "subscription_entitlement" : "unknown");
+    },
+  );
+});
+
+it("keeps actually started unpriced Plan work unknown instead of cancelling its lease", async () => {
+  const lane = codexLane("verified");
+  const discover = lane.adapter.discover.bind(lane.adapter);
+  lane.adapter.discover = async () => {
+    const m = await discover();
+    return HarnessManifest.parse({ ...m, capabilities: { ...m.capabilities, plan: true } });
+  };
+  lane.adapter.run = async function* (spec) {
+    lane.ran.push(spec.credential_profile?.profile_id ?? null);
+    const common = {
+      session_id: spec.session_id,
+      ts: new Date().toISOString(),
+      credential_route: "managed_api_key" as const,
+    };
+    yield { ...common, type: "started" };
+    yield { ...common, type: "error", error: "fixture worker ended without usage" };
+    yield { ...common, type: "completed" };
+  };
+  const result = await withConfig("when_unavailable", ["a"], async () => {
+    const path = join(process.env.CLAUDEXOR_CONFIG_DIR!, "config.yaml");
+    writeFileSync(
+      path,
+      readFileSync(path, "utf8")
+        .replace("credential_kind: config_dir_login", "credential_kind: api_key")
+        .replace(/isolation_locator: .*/, "isolation_locator: null")
+        .replace("secret_ref: null", "secret_ref: openai:a"),
+    );
+    return ask(lane, [], "a", {
+      mode: "plan",
+      paidBudget: { kind: "finite", maxUsd: 2 },
+      review: false,
+    });
+  });
+  expect(lane.ran).toEqual(["a"]);
+  expect(result.lifecycle).toBe("failed");
+  expect(result.facts.reason).toBe("cost_unverifiable");
+  expect(failureText(result)).toContain("budget");
+});

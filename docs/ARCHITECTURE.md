@@ -920,6 +920,11 @@ share chat/session state. No token is ever
 copied between stores, no env ever receives a host-Keychain bridge, and
 `CURSOR_API_KEY` is scrubbed from profiled native
 runs — the named identity is exactly its file store or a typed refusal.
+The Cursor status receipt distinguishes a successful server `getMe` response
+with typed `userInfo` from the vendor CLI's token-only fallback after a server
+error. Only the former supplies vendor verification; bare authentication booleans,
+legacy text, and stale observations do not become current server proof. Unrecognized
+vendor output keeps its existing readiness classification and unknown billing.
 The Accounts-only Cursor probe receipt also carries an optional email parsed
 from the CLI's narrow typed status grammar. Projections reuse
 the status invocation they already need; no credential file is read, no raw
@@ -3373,14 +3378,18 @@ auth-route evidence: verified included ordinary service proves
 `paid_fallback: never` and ranks with a real economy tuple instead of reading as
 unknown/paid. Surfaces project the rationale verbatim (run detail) and never
 reconstruct the order from prose. A named account's ordinary billing evidence
-comes from its own profile probe and authenticated vendor observation; local
-store presence and stale profile readiness do not prove subscription entitlement.
+requires its fresh vendor-backed verification: an authenticated adapter response,
+or the existing exact-profile vendor observation over a passing local probe.
+Local store presence and stale readiness do not prove subscription entitlement.
 Default-store doctor evidence applies only to a profile-less route. The admission
 probe is reused for ranking and the initial reservation. Each physical dispatch
 reads its actual account's current verification again, including when the account
 ID is unchanged, and re-admits it against the existing budget lease and
-paid-fallback policy. This applies after rotation and without processing controls;
-a newer vendor observation is not frozen to the initial selection. A policy
+paid-fallback policy. This includes inline continuity summaries, rotation and runs
+without Processing controls. A newer vendor observation is not frozen to the
+initial selection; a valid positive reservation estimate remains independent of
+billing verification. A Plan refused before any physical send releases its lease
+and retains the typed policy cause; started work without cost evidence stays unknown. A policy
 refusal is a configuration failure, separate from a monetary-cap or provider
 failure. The ranking rationale remains the
 original selection evidence; the execution receipt names the account that ran.
