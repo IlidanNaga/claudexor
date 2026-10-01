@@ -22,7 +22,7 @@ import {
 } from "@claudexor/schema";
 import { AnswerAssembly, type HarnessAdapter, type ProcessingAdmission } from "@claudexor/core";
 import type { ContinuityTurn } from "./continuity.js";
-import { runModelGovernedRoute, type ModelGovernedRoute } from "./modelGovernance.js";
+import { admitCurrentProfileDispatch, type ModelGovernedRoute } from "./modelGovernance.js";
 
 /** Default wall-clock ceiling for one inline summary pass. */
 export const SUMMARY_TIMEOUT_MS = 60_000;
@@ -140,16 +140,8 @@ export async function summarizeThreadPrefix(params: SummaryRunParams): Promise<s
         markPhysicalDispatchStarted: params.physicalDispatchStarted,
       },
     });
-    const route: ModelGovernedRoute = {
-      adapter: params.adapter,
-      knownModels: [],
-      quotaAdmission: { profile: params.credentialProfile },
-      settings: null,
-      authRouteEstimate: params.authPreference === "api_key" ? "api_key" : "local_session",
-      billingVerificationForProfile: params.billingVerificationForProfile,
-      paidFallback: params.paidFallback,
-    };
-    for await (const raw of runModelGovernedRoute(route, spec)) {
+    await admitCurrentProfileDispatch(params, spec);
+    for await (const raw of params.adapter.run(spec)) {
       if (abort.signal.aborted) return null;
       const event = raw as HarnessEventType;
       if (event.type === "error") return null;

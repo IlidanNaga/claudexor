@@ -189,6 +189,26 @@ export async function assertRouteModelsAllowed(
   }
 }
 
+/** Refresh account evidence and admit one send without replacing captured Processing. */
+export async function admitCurrentProfileDispatch(
+  routed: Pick<ModelGovernedRoute, "billingVerificationForProfile" | "paidFallback">,
+  spec: HarnessRunSpec,
+): Promise<void> {
+  if (spec.credential_profile && routed.billingVerificationForProfile) {
+    // The dispatched row can differ from admission after rotation/model fallback.
+    // Default-store readiness and the original row's entitlement never follow it.
+    spec.extra["routeBillingKnowledge"] = billingKnowledgeForAuthRoute({
+      route:
+        spec.credential_profile.credential_kind === "api_key" ? "managed_api_key" : "vendor_native",
+      verification: await routed.billingVerificationForProfile(spec.credential_profile),
+    });
+  }
+  spec.extra["paidFallback"] = routed.paidFallback;
+  await admitPreparedProcessing(spec);
+  const markStarted = spec.extra["markPhysicalDispatchStarted"];
+  if (typeof markStarted === "function") (markStarted as () => void)();
+}
+
 /**
  * Authoritative per-spawn model gate. Admission validates the initially routed
  * account early; this guard rebinds the same strict truth contract to the
@@ -239,19 +259,7 @@ export async function* runModelGovernedRoute(
       );
     }
   }
-  if (spec.credential_profile && routed.billingVerificationForProfile) {
-    // The dispatched row can differ from admission after rotation/model fallback.
-    // Default-store readiness and the original row's entitlement never follow it.
-    spec.extra["routeBillingKnowledge"] = billingKnowledgeForAuthRoute({
-      route:
-        spec.credential_profile.credential_kind === "api_key" ? "managed_api_key" : "vendor_native",
-      verification: await routed.billingVerificationForProfile(spec.credential_profile),
-    });
-  }
-  spec.extra["paidFallback"] = routed.paidFallback;
-  await admitPreparedProcessing(spec);
-  const markStarted = spec.extra["markPhysicalDispatchStarted"];
-  if (typeof markStarted === "function") (markStarted as () => void)();
+  await admitCurrentProfileDispatch(routed, spec);
   if (spec.processing?.reason === "processing_control_unavailable") {
     yield {
       type: "status",
