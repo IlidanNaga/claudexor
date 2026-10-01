@@ -29,6 +29,8 @@
  * gets) refuses as before, and no gate ever swaps one list for another to
  * admit a model.
  */
+import { billingKnowledgeForAuthRoute } from "@claudexor/budget";
+import type { AuthVerification, PaidFallback } from "@claudexor/schema";
 import type { HarnessAdapter } from "@claudexor/core";
 import {
   HarnessUnavailableError,
@@ -68,6 +70,8 @@ export interface ModelGovernedRoute {
   /** Effective account after profile preflight/rotation. Model truth must come
    * from this same identity, never the default credential store. */
   quotaAdmission: { profile: CredentialProfile | null };
+  billingVerificationForProfile?: (profile: CredentialProfile) => Promise<AuthVerification>;
+  paidFallback?: PaidFallback;
   settings: { defaultModel: string | null; fallbackModel: string | null } | null;
 }
 
@@ -235,6 +239,16 @@ export async function* runModelGovernedRoute(
       );
     }
   }
+  if (spec.credential_profile && routed.billingVerificationForProfile) {
+    // The dispatched row can differ from admission after rotation/model fallback.
+    // Default-store readiness and the original row's entitlement never follow it.
+    spec.extra["routeBillingKnowledge"] = billingKnowledgeForAuthRoute({
+      route:
+        spec.credential_profile.credential_kind === "api_key" ? "managed_api_key" : "vendor_native",
+      verification: await routed.billingVerificationForProfile(spec.credential_profile),
+    });
+  }
+  spec.extra["paidFallback"] = routed.paidFallback;
   await admitPreparedProcessing(spec);
   const markStarted = spec.extra["markPhysicalDispatchStarted"];
   if (typeof markStarted === "function") (markStarted as () => void)();

@@ -1,12 +1,12 @@
 import {
   bindProcessingAdmission,
+  processingAttemptCostEvidence,
   updateProcessingStreamHold,
   ProcessingBudgetAdmissionError,
 } from "./processing-dispatch.js";
 import { join } from "node:path";
-import { processingCostEvidence } from "./processing-routing.js";
 import type { ArtifactStore, RunPaths } from "@claudexor/artifact-store";
-import { attemptCostEvidence, type BudgetLedger } from "@claudexor/budget";
+import type { BudgetLedger } from "@claudexor/budget";
 import {
   AnswerAssembly,
   countsAsAgentProgress,
@@ -111,6 +111,7 @@ export interface PlannerAttemptDeps {
   billingKnowledge(
     input: RunInput,
     harnessId: string,
+    routed: RoutedAdapter,
   ): "metered" | "subscription_entitlement" | "unknown";
   inactivityTimeoutMs(repoRoot: string): number;
   quotaEventSink?: (harnessId: string, event: HarnessEvent) => void;
@@ -127,12 +128,12 @@ export async function runPlannerAttempt(
     attemptId,
     intent: args.intent,
     harnessId: adapter.id,
-    cost: attemptCostEvidence(
+    cost: processingAttemptCostEvidence(
       adapter.id,
       attemptId,
       args.reservationEstimateUsd,
-      deps.billingKnowledge(input, adapter.id),
-      processingCostEvidence(routed.processing, "unknown", [`harness:${adapter.id}`]),
+      deps.billingKnowledge(input, adapter.id, routed),
+      routed.processing,
     ),
   });
   if (!lease.granted) {

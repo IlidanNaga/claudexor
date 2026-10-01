@@ -1,10 +1,32 @@
-import type { BudgetLedger } from "@claudexor/budget";
-import type { ProcessingAdmission } from "@claudexor/core";
-import type { CostEvidence, HarnessRunSpec } from "@claudexor/schema";
+import {
+  attemptCostEvidence,
+  routeCostEvidence,
+  RoutingPreflightError,
+  type BudgetLedger,
+} from "@claudexor/budget";
+import type { PreparedHarnessProcessing, ProcessingAdmission } from "@claudexor/core";
+import type { BillingKnowledge, CostEvidence, HarnessRunSpec } from "@claudexor/schema";
 import type { ReviewerSpec } from "@claudexor/review";
 import type { AttemptUsageCost } from "./attemptUsageCost.js";
 import type { BudgetDenial } from "./budgetFailure.js";
 import { processingCostEvidence } from "./processing-routing.js";
+
+/** Compose initial lease evidence once from the admitted account and processing. */
+export function processingAttemptCostEvidence(
+  harnessId: string,
+  attemptId: string,
+  estimatedUsd: number | undefined,
+  billing: BillingKnowledge,
+  processing: PreparedHarnessProcessing | undefined,
+): CostEvidence {
+  return attemptCostEvidence(
+    harnessId,
+    attemptId,
+    estimatedUsd,
+    billing,
+    processingCostEvidence(processing, billing, [`harness:${harnessId}`]),
+  );
+}
 
 /** A budget refusal before native dispatch, never an adapter or auth failure. */
 export class ProcessingBudgetAdmissionError extends Error {
@@ -19,37 +41,51 @@ export class ProcessingBudgetAdmissionError extends Error {
 }
 
 function preparedCost(spec: HarnessRunSpec, harnessId: string): CostEvidence | undefined {
-  if (!spec.processing || !spec.processing_cost_basis) return undefined;
-  // A concrete profile on the prepared spec is authoritative. The extra is
-  // only a resolver/fallback for routes that have no profile identity yet.
-  const profileBilling =
-    spec.credential_profile?.credential_kind === "api_key"
-      ? "metered"
-      : spec.credential_profile
-        ? "subscription_entitlement"
-        : undefined;
   const resolver = spec.extra["routeBillingKnowledge"];
   const resolved =
-    profileBilling ??
-    (typeof resolver === "function"
+    typeof resolver === "function"
       ? (resolver as (actual: HarnessRunSpec) => unknown)(spec)
-      : resolver);
+      : resolver;
   const ordinary =
-    resolved === "metered" || resolved === "subscription_entitlement" || resolved === "unknown"
-      ? resolved
-      : spec.credential_profile?.credential_kind === "api_key"
-        ? "metered"
+    spec.credential_profile?.credential_kind === "api_key"
+      ? "metered"
+      : resolved === "metered" || resolved === "subscription_entitlement" || resolved === "unknown"
+        ? resolved
         : spec.credential_profile
-          ? "subscription_entitlement"
+          ? "unknown"
           : spec.auth_preference === "api_key"
             ? "metered"
             : spec.auth_preference === "subscription"
               ? "subscription_entitlement"
               : "unknown";
-  return processingCostEvidence(
-    { model: spec.model_hint, receipt: spec.processing, costBasis: spec.processing_cost_basis },
-    ordinary,
-    [`harness:${harnessId}`, `profile:${spec.credential_profile?.profile_id ?? "default"}`],
+  const provenance = [
+    `harness:${harnessId}`,
+    `profile:${spec.credential_profile?.profile_id ?? "default"}`,
+  ];
+  const processing =
+    spec.processing && spec.processing_cost_basis
+      ? processingCostEvidence(
+          {
+            model: spec.model_hint,
+            receipt: spec.processing,
+            costBasis: spec.processing_cost_basis,
+          },
+          ordinary,
+          provenance,
+        )
+      : undefined;
+  // Ordinary dispatches also re-admit the exact row after a rotation. No
+  // processing controls are required to consume account billing evidence.
+  return (
+    processing ??
+    (spec.credential_profile && resolver !== undefined
+      ? routeCostEvidence({
+          billing: ordinary,
+          knowledge: ordinary === "subscription_entitlement" ? "exact" : "unknown",
+          source: "credential-profile-verification",
+          provenance,
+        })
+      : undefined)
   );
 }
 
@@ -84,7 +120,22 @@ export function processingAdmissionForLease(
 ): ProcessingAdmission {
   return (actual) => {
     const cost = preparedCost(actual, harnessId);
-    if (cost) reprice(ledger, leaseId, cost, harnessId, attemptId, onDenied);
+    if (!cost) return;
+    if (
+      actual.extra["paidFallback"] === "never" &&
+      cost.billing !== "subscription_entitlement" &&
+      cost.billing !== "proven_zero"
+    ) {
+      // Rotation must preserve the original paid-fallback policy as well as
+      // the monetary cap. Reuse the routing refusal taxonomy, not auth failure.
+      throw Object.assign(
+        new RoutingPreflightError(
+          `paid_fallback: never refused ${harnessId} profile ${actual.credential_profile?.profile_id ?? "default"} with ${cost.billing} billing before dispatch`,
+        ),
+        { category: "config_error" },
+      );
+    }
+    reprice(ledger, leaseId, cost, harnessId, attemptId, onDenied);
   };
 }
 

@@ -7,6 +7,7 @@ import { requestRefusalFailure } from "./runTerminalResults.js";
 import { delegationBeltFor } from "./delegationBelt.js";
 import {
   bindProcessingAdmission,
+  processingAttemptCostEvidence,
   processingAdmissionForLease,
   updateProcessingStreamHold,
   ProcessingBudgetAdmissionError,
@@ -24,6 +25,7 @@ import {
   rotateSpecOnTypedLimit,
 } from "./credential-profiles.js";
 import {
+  AdmissionProfileProbes,
   OrchestratorCredentials,
   reviewerProfileResolver,
   rotatedSpecInLaneHome,
@@ -77,6 +79,7 @@ import type {
   AccessProfile,
   AuthSourceReadiness,
   AuthVerification,
+  PaidFallback,
   DeepScanSynthesis,
   RouteRankingRationale,
   RouteDropStage,
@@ -322,12 +325,12 @@ import {
 import { type CandidateEvidence, arbitrate } from "@claudexor/arbitration";
 import { type SynthesisMode, buildSynthesisPlan, decideSynthesis } from "@claudexor/synthesis";
 import {
-  attemptCostEvidence,
   billingKnowledgeForAuthRoute,
   attemptUsageCostSettlement,
   BudgetLedger,
   isBudgetTerminal,
   type RouterCandidate,
+  RoutingPreflightError,
   explainRanking,
   loadHarnessMetrics,
   promptFingerprint,
@@ -684,8 +687,13 @@ export interface RoutedAdapter {
     model: string | null;
     profile: CredentialProfile | null;
     route: "vendor_native" | "managed_api_key" | null;
+    /** Billing verification of THAT profile (#260); null = no profile, so the
+     * default doctor's sources classify the route. */
     profileVerification: AuthVerification | null;
   };
+  /** Exact-account verification for each physical dispatch, including rotation. */
+  billingVerificationForProfile?: (profile: CredentialProfile) => Promise<AuthVerification>;
+  paidFallback?: PaidFallback;
   /** Manifest `synthesize` capability (#27 / D-6): only such routes are eligible
    * to run the deep-scan bounded synthesis reducer over the scout reports. */
   supportsSynthesize: boolean;
@@ -1242,9 +1250,11 @@ export class Orchestrator {
       dropped.push(detail);
       droppedLanes.push({ harnessId, stage, detail });
     };
-    // One observation set for the whole admission pass, so two lanes cannot be
-    // judged against different vendor epochs.
+    // Initial lane readiness shares one quota observation. Selection and each
+    // physical dispatch still consume the latest exact-profile evidence.
     const vendorQuota = this.credentials.vendorQuotaObservations();
+    // Billing later reuses the probe that admitted each row (#260).
+    const admissionProbes = new AdmissionProfileProbes();
     const liveUnusable = this.deps.credentialUnusable?.() ?? [];
     for (const id of ids) {
       const adapter = this.deps.registry.get(id);
@@ -1321,6 +1331,9 @@ export class Orchestrator {
       // the profile's transport, so the default store's state is not the
       // routing truth). Capability/manifest gating above still applies.
       const profileAdapter = this.deps.registry.get(id);
+      const profileProbe = admissionProbes.record(
+        profileAdapter?.probeCredentialProfile?.bind(profileAdapter),
+      );
       const explicitPin = this.credentials.effectiveProfileId(input, id);
       // Pins and bound/pool rows are checked against their own readiness.
       const rows = await this.credentials.admitRouteRows({
@@ -1330,7 +1343,7 @@ export class Orchestrator {
         model: input.models?.[id] ?? cfgEntry?.default_model ?? null,
         quota: vendorQuota,
         unusable: liveUnusable,
-        probe: profileAdapter?.probeCredentialProfile?.bind(profileAdapter),
+        probe: profileProbe,
       });
       const profileAdmitted = rows.admitted;
       if (profileAdmitted) {
@@ -1446,12 +1459,7 @@ export class Orchestrator {
               this.authPreferenceForHarness(input.repoRoot, id, input.authPreference),
               status.authSources,
             ),
-          quotaAdmission: {
-            model: null,
-            profile: null,
-            route: null,
-            profileVerification: null,
-          },
+          quotaAdmission: { model: null, profile: null, route: null, profileVerification: null },
           supportsSynthesize: manifest.capabilities.synthesize,
           supportsInteractive: manifest.capabilities.interactive,
           liveInput: manifest.capability_profile.live_input,
@@ -1511,6 +1519,7 @@ export class Orchestrator {
             model,
             log,
             routed.authRouteEstimate,
+            admissionProbes,
           );
         } catch (err) {
           // AUTO drops typed lane-local unavailability only when a sibling
@@ -1537,12 +1546,15 @@ export class Orchestrator {
                 ? ("vendor_native" as const)
                 : null;
         const profileVerification = profile
-          ? await this.credentials.profileAuthVerification(profile)
+          ? await this.credentials.selectedProfileBillingVerification(profile, admissionProbes)
           : null;
         return {
           prepared: {
             ...routed,
             quotaAdmission: { model, profile, route, profileVerification },
+            paidFallback: this.config(input.repoRoot).global.routing.paid_fallback,
+            billingVerificationForProfile: (actual: CredentialProfile) =>
+              this.credentials.selectedProfileBillingVerification(actual),
           },
           refused: null,
         };
@@ -1707,9 +1719,10 @@ export class Orchestrator {
         // engine default. Profile A's cooldown never excludes profile B or the
         // default on the same harness and route.
         const credentialSubjectId = r.quotaAdmission.profile?.profile_id ?? null;
-        // QA-034: the typed auth-route evidence (doctor source verification x the
-        // resolved route) is AUTHORITATIVE for billing knowledge in the router —
-        // a VERIFIED native route proves subscription_entitlement, so it survives
+        // QA-034: the typed auth-route evidence (the admitted profile's own
+        // verification, else doctor source verification, x the resolved route)
+        // is AUTHORITATIVE for billing knowledge in the router — a VERIFIED
+        // native route proves subscription_entitlement, so it survives
         // paid_fallback:never and ranks with a real economy tuple instead of
         // reading as unknown/paid. Absent (unknown route) falls back to the
         // metric-derived billingKnowledge below.
@@ -2398,16 +2411,15 @@ export class Orchestrator {
       processingLease.onDenied,
       processingAdmission,
     );
-    const billingInput = runInput ?? ({ repoRoot: contract.repo.root } as RunInput);
-    // Keep billing route-bound until admission observes the actual prepared
-    // profile. The resolver is evaluated per physical dispatch; preparedCost
-    // gives an actual profile precedence over this pool fallback.
+    // Profile-less processing keeps its existing route estimate. Named rows
+    // receive their own verification at the shared physical-dispatch gate.
     spec.extra["routeBillingKnowledge"] = (actual: HarnessRunSpec) =>
-      actual.credential_profile?.credential_kind === "api_key"
-        ? "metered"
-        : actual.credential_profile
-          ? "subscription_entitlement"
-          : this.routeBillingKnowledge(billingInput, adapter.id);
+      actual.credential_profile
+        ? "unknown"
+        : this.routeBillingKnowledge(
+            runInput ?? ({ repoRoot: contract.repo.root } as RunInput),
+            adapter.id,
+          );
     if (interaction) spec.extra["interactionChannel"] = interaction;
     const workEnvelope = this.workReportEnvelopeFor(routed, contract, Boolean(interaction));
     const workReportMode: WorkReportEnvelopeMode = applyWorkEnvelope(spec, workEnvelope);
@@ -2431,7 +2443,7 @@ export class Orchestrator {
     let cost = 0;
     let costEstimated = false;
     let harnessErrored = false;
-    let processingRefusal: ProcessingBudgetAdmissionError | null = null;
+    let processingRefusal: ProcessingBudgetAdmissionError | RoutingPreflightError | null = null;
     let poolExhausted: Error | null = null; // A5: typed pool-exhausted refusal
     const deltaFlood = { count: 0, disclosed: false }; // W-C4 per-attempt delta budget
     // QA-024: emit the belt-failure disclosure event at most once per attempt.
@@ -2601,7 +2613,10 @@ export class Orchestrator {
           // gate and required-actions read a typed category, not a bare boolean.
           harnessErrored = true;
           errors.push(safeErrorMessage(err));
-          if (err instanceof ProcessingBudgetAdmissionError) {
+          if (
+            err instanceof ProcessingBudgetAdmissionError ||
+            err instanceof RoutingPreflightError
+          ) {
             processingRefusal = err;
             break;
           }
@@ -3103,16 +3118,12 @@ export class Orchestrator {
         attemptId,
         intent: this.candidateIntent(input),
         harnessId: routed.adapter.id,
-        cost: attemptCostEvidence(
+        cost: processingAttemptCostEvidence(
           routed.adapter.id,
           attemptId,
           this.reservationEstimateUsd(input, i > 0),
-          this.routeBillingKnowledge(input, routed.adapter.id),
-          processingCostEvidence(
-            routed.processing,
-            this.routeBillingKnowledge(input, routed.adapter.id),
-            [`harness:${routed.adapter.id}`],
-          ),
+          this.routeBillingKnowledge(input, routed.adapter.id, routed),
+          routed.processing,
         ),
       });
       log.emit("budget.lease.created", {
@@ -3340,16 +3351,12 @@ export class Orchestrator {
               attemptId: contAttemptId,
               intent: this.candidateIntent(input),
               harnessId: adapter.id,
-              cost: attemptCostEvidence(
+              cost: processingAttemptCostEvidence(
                 adapter.id,
                 contAttemptId,
                 this.estimateUsdFloor(input.repoRoot),
-                this.routeBillingKnowledge(input, adapter.id),
-                processingCostEvidence(
-                  slot.routed.processing,
-                  this.routeBillingKnowledge(input, slot.routed.adapter.id),
-                  [`harness:${adapter.id}`],
-                ),
+                this.routeBillingKnowledge(input, adapter.id, slot.routed),
+                slot.routed.processing,
               ),
             });
             if (contLease.granted) {
@@ -3767,16 +3774,12 @@ export class Orchestrator {
         attemptId: "synth",
         intent: "synthesize",
         harnessId: synthRouted.adapter.id,
-        cost: attemptCostEvidence(
+        cost: processingAttemptCostEvidence(
           synthRouted.adapter.id,
           "synth",
           this.reservationEstimateUsd(input),
-          this.routeBillingKnowledge(input, synthRouted.adapter.id),
-          processingCostEvidence(
-            synthRouted.processing,
-            this.routeBillingKnowledge(input, synthRouted.adapter.id),
-            [`harness:${synthRouted.adapter.id}`],
-          ),
+          this.routeBillingKnowledge(input, synthRouted.adapter.id, synthRouted),
+          synthRouted.processing,
         ),
       });
       if (lease.granted) {
@@ -4825,16 +4828,12 @@ export class Orchestrator {
           attemptId,
           intent: "repair",
           harnessId: adapter.id,
-          cost: attemptCostEvidence(
+          cost: processingAttemptCostEvidence(
             adapter.id,
             attemptId,
             this.reservationEstimateUsd(input),
-            this.routeBillingKnowledge(input, adapter.id),
-            processingCostEvidence(
-              routed.processing,
-              this.routeBillingKnowledge(input, routed.adapter.id),
-              [`harness:${adapter.id}`],
-            ),
+            this.routeBillingKnowledge(input, adapter.id, routed),
+            routed.processing,
           ),
         });
         if (!lease.granted) {
@@ -5586,7 +5585,8 @@ export class Orchestrator {
   /** Bind private route/session preparation to the planner-attempt owner. */
   private plannerAttemptDeps(): PlannerAttemptDeps {
     return {
-      billingKnowledge: (input, harnessId) => this.routeBillingKnowledge(input, harnessId),
+      billingKnowledge: (input, harnessId, routed) =>
+        this.routeBillingKnowledge(input, harnessId, routed),
       inactivityTimeoutMs: (repoRoot) => harnessInactivityTimeoutMs(this.config(repoRoot)),
       quotaEventSink: this.deps.quotaEventSink,
       prepare: async (args) => {
@@ -6082,7 +6082,14 @@ export class Orchestrator {
   private routeBillingKnowledge(
     input: RunInput,
     harnessId: string,
+    routed?: RoutedAdapter,
   ): "metered" | "subscription_entitlement" | "unknown" {
+    if (routed?.quotaAdmission.profile) {
+      return billingKnowledgeForAuthRoute({
+        route: routed.quotaAdmission.route,
+        verification: routed.quotaAdmission.profileVerification ?? "not_run",
+      }) as "metered" | "subscription_entitlement" | "unknown";
+    }
     // A selected profile's credential_kind decides billing (round-18 #2).
     const profileRoute = this.credentials.profileAuthRoute(input, harnessId);
     if (profileRoute) return profileRoute === "api_key" ? "metered" : "subscription_entitlement";
@@ -6119,14 +6126,12 @@ export class Orchestrator {
         // The reducer admits under a finite estimate floor (mirror of the n>1
         // scout reserve) so a subscription route is not refused for lacking a
         // cash quote.
-        attemptCostEvidence(
+        processingAttemptCostEvidence(
           harnessId,
           attemptId,
           this.estimateUsdFloor(input.repoRoot),
-          this.routeBillingKnowledge(input, harnessId),
-          processingCostEvidence(routed?.processing, this.routeBillingKnowledge(input, harnessId), [
-            `harness:${harnessId}`,
-          ]),
+          this.routeBillingKnowledge(input, harnessId, routed),
+          routed?.processing,
         ),
       buildSpec: async (routed, homeEnv, prompt, attemptId) => {
         const knobs = this.routeSpecKnobs(routed, contract, undefined, input.effort);
@@ -6383,16 +6388,12 @@ export class Orchestrator {
         // (mirror of the candidate loop): the first top-level scout reserves
         // without a floor; later scouts and every real Delegate child pass the
         // repo floor because they overlap an existing family unit.
-        cost: attemptCostEvidence(
+        cost: processingAttemptCostEvidence(
           adapter.id,
           attemptId,
           this.reservationEstimateUsd(input, opts.deepScan && idx > 0),
-          this.routeBillingKnowledge(input, adapter.id),
-          processingCostEvidence(
-            routed.processing,
-            this.routeBillingKnowledge(input, routed.adapter.id),
-            [`harness:${adapter.id}`],
-          ),
+          this.routeBillingKnowledge(input, adapter.id, routed),
+          routed.processing,
         ),
       });
       if (!lease.granted) {
@@ -6621,7 +6622,7 @@ export class Orchestrator {
       let costEstimated = false;
       let harnessError: string | null = null;
       let streamBudgetDenied = false;
-      let processingRefusal: ProcessingBudgetAdmissionError | null = null;
+      let processingRefusal: ProcessingBudgetAdmissionError | RoutingPreflightError | null = null;
       let poolExhausted: Error | null = null; // A5: typed pool-exhausted refusal
       try {
         const triedProfiles = new Set<string>(); // W5.4 failover: each profile at most once
@@ -6718,7 +6719,10 @@ export class Orchestrator {
             }
           } catch (err) {
             harnessError = safeErrorMessage(err);
-            if (err instanceof ProcessingBudgetAdmissionError) {
+            if (
+              err instanceof ProcessingBudgetAdmissionError ||
+              err instanceof RoutingPreflightError
+            ) {
               processingRefusal = err;
               break;
             }

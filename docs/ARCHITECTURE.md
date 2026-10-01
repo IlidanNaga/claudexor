@@ -3372,7 +3372,19 @@ auth-route evidence: verified included ordinary service proves
 `subscription_entitlement`, so that route survives
 `paid_fallback: never` and ranks with a real economy tuple instead of reading as
 unknown/paid. Surfaces project the rationale verbatim (run detail) and never
-reconstruct the order from prose. A deep-scan swarm reserves n>1 subscription
+reconstruct the order from prose. A named account's ordinary billing evidence
+comes from its own profile probe and authenticated vendor observation; local
+store presence and stale profile readiness do not prove subscription entitlement.
+Default-store doctor evidence applies only to a profile-less route. The admission
+probe is reused for ranking and the initial reservation. Each physical dispatch
+reads its actual account's current verification again, including when the account
+ID is unchanged, and re-admits it against the existing budget lease and
+paid-fallback policy. This applies after rotation and without processing controls;
+a newer vendor observation is not frozen to the initial selection. A policy
+refusal is a configuration failure, separate from a monetary-cap or provider
+failure. The ranking rationale remains the
+original selection evidence; the execution receipt names the account that ran.
+A deep-scan swarm reserves n>1 subscription
 scouts under a finite cap against the per-run estimate floor (mirroring the
 candidate loop), so later scouts are not refused for lacking a per-attempt cash
 quote; a scout the gate still refuses before spawn is recorded as a failed attempt
