@@ -2619,7 +2619,8 @@ runs. The request `loginFlow` selects the secondary app-server
 `browser_callback` (`account/login/start {chatgptDeviceCode}` → `chatgpt`
 authUrl) or the legacy Terminal `browser_redirect` (localhost callback). Claude
 (`claude auth login`, the claude.ai subscription route with no version-varying
-flag) and Cursor (`cursor-agent login`) use daemon-hosted URL disclosure; Claude
+flag) and Cursor (`cursor-agent login`, or `agent login` through a verified
+Cursor `agent`) use daemon-hosted URL disclosure; Claude
 accepts its one-shot completion input over the transient sidecar, while Cursor
 self-completes by vendor polling. Antigravity uses the same disclosure/input
 shape but declares terminal stdin because the vendor rejects a plain pipe.

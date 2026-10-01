@@ -2,8 +2,8 @@ import { namespacedSecretRefBase, resolveSecret } from "@claudexor/secrets";
 import type { AuthPreference } from "@claudexor/schema";
 import { runCapture, type CaptureResult } from "@claudexor/core";
 import { redactSecrets } from "@claudexor/util";
+import { resolveCursorBin } from "./bin.js";
 
-const BIN = process.env.CLAUDEXOR_CURSOR_BIN || "cursor-agent";
 const CURSOR_LOGGED_OUT =
   /not logged in|not authenticated|unauthenticated|authentication required|no account|account\s*:\s*(?:none|unknown|not configured|-)(?:\s|$)|authenticated\s*:\s*(?:false|no|none|0)|logged in\s*:\s*(?:false|no|none|0)/i;
 const CURSOR_JSON_STATUS_UNSUPPORTED =
@@ -42,10 +42,12 @@ export async function probeCursorNativeAuth(
   budgetMs: number = CURSOR_STATUS_TIMEOUT_MS,
 ): Promise<CursorStatusObservation> {
   try {
+    const bin = resolveCursorBin();
     const profileScoped = Boolean(
       env?.["AGENT_CLI_CREDENTIAL_STORE"] || env?.["CURSOR_CONFIG_DIR"],
     );
-    const status = (args: string[]) => ownedStatusChild(capture, args, env, abortSignal, budgetMs);
+    const status = (args: string[]) =>
+      ownedStatusChild(capture, bin, args, env, abortSignal, budgetMs);
     const { result, ownTimeout } = await status(
       profileScoped ? ["status", "--format", "json"] : ["status"],
     );
@@ -119,6 +121,7 @@ export async function probeCursorNativeAuth(
  */
 async function ownedStatusChild(
   capture: typeof runCapture,
+  bin: string,
   args: string[],
   env: Record<string, string | null | undefined> | undefined,
   abortSignal: AbortSignal | undefined,
@@ -138,7 +141,7 @@ async function ownedStatusChild(
     budget.abort();
   }, budgetMs);
   try {
-    const result = await capture(BIN, args, {
+    const result = await capture(bin, args, {
       env,
       abortSignal: abortSignal ? AbortSignal.any([abortSignal, budget.signal]) : budget.signal,
       cancelSignal: "SIGTERM",

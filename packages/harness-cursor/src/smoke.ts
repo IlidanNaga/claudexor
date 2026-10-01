@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { providerScrubEnv, runCapture } from "@claudexor/core";
 import { redactSecrets } from "@claudexor/util";
-import { BIN } from "./index.js";
+import { resolveCursorBin } from "./bin.js";
 
 export type CursorApiSmokeResult = { ok: boolean; detail: string };
 
@@ -125,7 +125,7 @@ export async function smokeIsolatedApiKey(
       CURSOR_API_KEY: key,
     };
     const r = await (options.runCapture ?? runCapture)(
-      BIN,
+      resolveCursorBin(),
       ["-p", "--output-format", "stream-json", "--mode", "plan", "--trust", "Reply exactly OK"],
       {
         env,
