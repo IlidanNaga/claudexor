@@ -131,9 +131,7 @@ export async function* spawnProcess(
     cwd: opts.cwd,
     env,
     stdio: ["pipe", "pipe", "pipe"],
-    // These fully piped helpers start background children. Request a hidden
-    // Windows console at spawn; interactive sign-in and terminal attachment
-    // use separate spawns with their own visible-terminal policy.
+    // Fully piped background children; interactive login/attach own their terminal policy.
     windowsHide: true,
     // Put the child in its own process group so we can signal the WHOLE tree.
     // Harnesses spawn grandchildren (shell tools, MCP servers); without this a
