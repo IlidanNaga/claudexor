@@ -534,90 +534,113 @@ describe("mcp daemon body mapping", () => {
     }
   });
 
-  it("creates a persistent thread and enqueues a turn through the control API", async () => {
-    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
-    const daemonRun = await import("./daemon-run.js");
-    const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
-      client: {} as never,
-      addr: { baseUrl: "http://x", token: "t" } as never,
-      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
-    });
-    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string, init?: { body?: string }) => {
-        requests.push({
-          url,
-          body: JSON.parse(init?.body ?? "{}") as Record<string, unknown>,
-        });
-        return {
-          ok: true,
-          status: 200,
-          json: async () =>
-            url.endsWith("/threads")
-              ? {
-                  id: "th-1",
-                  title: "Audit",
-                  createdAt: "2026-09-24T00:00:00Z",
-                  updatedAt: "2026-09-24T00:00:00Z",
-                }
-              : {
-                  jobId: "job-1",
-                  threadId: "th-1",
-                  turnId: "turn-1",
-                  runId: "run-1",
-                  runDir: "/tmp/run-1",
-                },
-        } as never;
-      }),
-    );
-    try {
-      const runner = mcpSurfaceRunner();
-      const created = (await runner({
-        mode: "__thread_create",
-        repoPath: "/tmp/project",
-        title: "Audit",
-        credentialProfileId: "work-secondary",
-        access: "workspace_write",
-      })) as Record<string, unknown>;
-      const turn = (await runner({
-        mode: "__thread_turn",
-        threadId: "th-1",
-        prompt: "continue",
-        primaryHarness: "codex",
-        model: "gpt-6-sol",
-        effort: "high",
-        credentialProfileId: "work-secondary",
-      })) as Record<string, unknown>;
+  it.each([undefined, "in_place", "isolated"] as const)(
+    "creates a persistent thread and discloses workspace %s",
+    async (workspace) => {
+      const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+      const daemonRun = await import("./daemon-run.js");
+      const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
+        client: {} as never,
+        addr: { baseUrl: "http://x", token: "t" } as never,
+        engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
+      });
+      const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string, init?: { body?: string }) => {
+          requests.push({
+            url,
+            body: JSON.parse(init?.body ?? "{}") as Record<string, unknown>,
+          });
+          return {
+            ok: true,
+            status: 200,
+            json: async () =>
+              url.endsWith("/threads")
+                ? {
+                    id: "th-1",
+                    title: "Audit",
+                    repoRoot: "/tmp/canonical-project",
+                    workspaceMode: workspace ?? "in_place",
+                    createdAt: "2026-09-24T00:00:00Z",
+                    updatedAt: "2026-09-24T00:00:00Z",
+                  }
+                : {
+                    jobId: "job-1",
+                    threadId: "th-1",
+                    turnId: "turn-1",
+                    runId: "run-1",
+                    runDir: "/tmp/run-1",
+                  },
+          } as never;
+        }),
+      );
+      try {
+        const runner = mcpSurfaceRunner();
+        const created = (await runner({
+          mode: "__thread_create",
+          repoPath: "/tmp/project",
+          title: "Audit",
+          ...(workspace ? { workspace } : {}),
+          credentialProfileId: "work-secondary",
+          access: "workspace_write",
+        })) as Record<string, unknown>;
+        const turn = (await runner({
+          mode: "__thread_turn",
+          threadId: "th-1",
+          prompt: "continue",
+          primaryHarness: "codex",
+          model: "gpt-6-sol",
+          effort: "high",
+          credentialProfileId: "work-secondary",
+        })) as Record<string, unknown>;
 
-      expect(requests).toEqual([
-        {
-          url: "http://x/v2/threads",
-          body: {
-            title: "Audit",
-            scope: { kind: "project", root: "/tmp/project" },
-            credentialProfileId: "work-secondary",
-            access: "workspace_write",
+        expect(requests).toEqual([
+          {
+            url: "http://x/v2/threads",
+            body: {
+              title: "Audit",
+              ...(workspace ? { workspace } : {}),
+              scope: { kind: "project", root: "/tmp/project" },
+              credentialProfileId: "work-secondary",
+              access: "workspace_write",
+            },
           },
-        },
-        {
-          url: "http://x/v2/threads/th-1/turns",
-          body: {
-            prompt: "continue",
-            primaryHarness: "codex",
-            model: "gpt-6-sol",
-            effort: "high",
-            credentialProfileId: "work-secondary",
+          {
+            url: "http://x/v2/threads/th-1/turns",
+            body: {
+              prompt: "continue",
+              primaryHarness: "codex",
+              model: "gpt-6-sol",
+              effort: "high",
+              credentialProfileId: "work-secondary",
+            },
           },
-        },
-      ]);
-      expect(created).toMatchObject({ threadId: "th-1" });
-      expect(turn).toMatchObject({ threadId: "th-1", turnId: "turn-1", runId: "run-1" });
-    } finally {
-      ensureSpy.mockRestore();
-      vi.unstubAllGlobals();
-    }
-  });
+        ]);
+        expect(created).toMatchObject({
+          threadId: "th-1",
+          repoRoot: "/tmp/canonical-project",
+          workspaceMode: workspace ?? "in_place",
+        });
+        expect(created.summary).toContain("/tmp/canonical-project");
+        expect(created.summary).not.toContain("/tmp/project");
+        expect(created.summary).toContain("No model was started.");
+        if (workspace === "isolated") {
+          expect(created.summary).toContain("isolated persistent worktree");
+          expect(created.summary).toContain("first write turn");
+          expect(created.summary).toContain("thread Apply");
+          expect(created.summary).not.toContain("edit the project directory directly");
+        } else {
+          expect(created.summary).toContain("workspace: in_place");
+          expect(created.summary).toContain("Write turns edit the project directory directly");
+        }
+        expect(turn).toMatchObject({ threadId: "th-1", turnId: "turn-1", runId: "run-1" });
+      } finally {
+        ensureSpy.mockRestore();
+        vi.unstubAllGlobals();
+      }
+    },
+  );
 
   it("reuses the caller's turn key after a lost response, and distinguishes a new turn", async () => {
     const { mcpSurfaceRunner } = await import("./mcp-runner.js");

@@ -100,10 +100,15 @@ export async function threadQuery(
         "daemon returned an invalid thread response",
       );
     }
+    const project = parsed.data.repoRoot ?? "project path unavailable";
+    const location =
+      parsed.data.workspaceMode === "in_place"
+        ? `Write turns edit the project directory directly: ${project}.`
+        : `Write turns use this thread's isolated persistent worktree for project ${project}; it is created on the first write turn. Use thread Apply to merge changes into the project.`;
     return {
       ...parsed.data,
       threadId: parsed.data.id,
-      summary: `created thread ${parsed.data.id}`,
+      summary: `created thread ${parsed.data.id}\nworkspace: ${parsed.data.workspaceMode}\n${location}\nNo model was started.`,
     };
   }
   const parsed = ControlThreadTurnResponse.safeParse(result);

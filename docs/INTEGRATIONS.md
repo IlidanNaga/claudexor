@@ -505,6 +505,11 @@ Create a thread once, enqueue follow-ups with `claudexor_thread_turn`, then
 follow each returned `runId` with the ordinary status/result tools. If a turn
 returns only a queued `jobId`, use `claudexor_runs` to recover its `runId`
 after binding.
+Creation starts no model. The default `workspace: in_place` lets write turns edit
+the project directory directly. Choose `workspace: isolated` for a persistent
+thread worktree created on the first write turn, then use thread Apply to merge
+its changes into the project. The create result discloses the daemon's current
+`workspaceMode` and anchored `repoRoot`, including where write turns change files.
 Thread create/turn accept an optional caller-owned `idempotencyKey`. An omitted
 key is generated per invocation; retry an unknown outcome with the same key
 and body, and use a new key for a deliberately new turn. Changed content under

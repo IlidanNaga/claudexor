@@ -439,7 +439,13 @@ describe("Claudexor MCP server (SDK v2)", () => {
     const tools = defaultClaudexorTools(async (params) => {
       calls.push(params);
       return params.mode === "__thread_create"
-        ? { summary: "created", threadId: "th-1", title: "Audit" }
+        ? {
+            summary: "created thread th-1; in_place writes to /tmp/canonical-project",
+            threadId: "th-1",
+            title: "Audit",
+            workspaceMode: "in_place",
+            repoRoot: "/tmp/canonical-project",
+          }
         : {
             summary: "queued",
             jobId: "job-1",
@@ -451,6 +457,15 @@ describe("Claudexor MCP server (SDK v2)", () => {
     });
     const create = tools.find((tool) => tool.name === "claudexor_thread_create")!;
     const turn = tools.find((tool) => tool.name === "claudexor_thread_turn")!;
+    expect(create.description).toContain("Creation starts no model");
+    expect(create.description).toContain("project directory directly (in_place)");
+    expect(create.description).toContain("workspace=isolated");
+    expect(create.inputSchema.properties).toMatchObject({
+      workspace: {
+        enum: ["in_place", "isolated"],
+        description: expect.stringContaining("the default"),
+      },
+    });
 
     expect(create.inputSchema).toMatchObject({
       additionalProperties: false,
@@ -483,7 +498,12 @@ describe("Claudexor MCP server (SDK v2)", () => {
     });
     const refused = await wireToolCall(tools, create.name, { repoPath: "relative" });
 
-    expect(created?.structuredContent).toMatchObject({ threadId: "th-1" });
+    expect(created?.structuredContent).toMatchObject({
+      threadId: "th-1",
+      workspaceMode: "in_place",
+      repoRoot: "/tmp/canonical-project",
+    });
+    expect(created?.content?.[0]?.text).toBe(created?.structuredContent?.summary);
     expect(queued?.structuredContent).toMatchObject({
       threadId: "th-1",
       turnId: "turn-1",

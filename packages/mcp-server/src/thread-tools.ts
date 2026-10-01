@@ -1,5 +1,10 @@
 import mcpThreadTurnResultSchemaRaw from "@claudexor/schema/generated/McpThreadTurnResult.schema.json" with { type: "json" };
-import { AccessProfile, ExternalContextPolicy, effortJsonSchema } from "@claudexor/schema";
+import {
+  AccessProfile,
+  ExternalContextPolicy,
+  WorkspaceMode,
+  effortJsonSchema,
+} from "@claudexor/schema";
 import {
   safeProblemContext,
   safeProblemMessage,
@@ -29,7 +34,11 @@ export function threadTools(runner: RunnerFn): McpTool[] {
       },
       title: nonBlankString,
       defaultMode: { type: "string", enum: ["ask", "plan", "agent"] },
-      workspace: { type: "string", enum: ["in_place", "isolated"] },
+      workspace: {
+        type: "string",
+        enum: WorkspaceMode.options,
+        description: WorkspaceMode.description,
+      },
       credentialProfileId: nonBlankString,
       primaryHarness: nonBlankString,
       eligibleHarnesses: { type: "array", minItems: 1, items: nonBlankString },
@@ -107,7 +116,7 @@ export function threadTools(runner: RunnerFn): McpTool[] {
     {
       name: "claudexor_thread_create",
       description:
-        "Create a persistent Claudexor thread bound to a project and optional strict account profile. Use claudexor_thread_turn to start work in it.",
+        "Create a persistent Claudexor thread bound to a project and optional strict account profile. Creation starts no model. Write turns default to editing the project directory directly (in_place); choose workspace=isolated to use a persistent thread worktree created on the first write turn, then thread Apply to merge changes into the project. Use claudexor_thread_turn to start work in it.",
       inputSchema: threadCreateSchema,
       annotations: { readOnlyHint: false, destructiveHint: false },
       handler: async (args) => callThreadTool(args, "__thread_create"),
