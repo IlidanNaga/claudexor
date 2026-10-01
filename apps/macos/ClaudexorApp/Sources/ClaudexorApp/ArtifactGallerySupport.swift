@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import ClaudexorKit
+import SwiftUI
 
 // Support types for the artifacts gallery, split out of ArtifactGalleryView.swift
 // so the view file stays under the readability cap. These are pure/standalone
@@ -22,6 +23,12 @@ enum ArtifactCategory {
         let ext = (path as NSString).pathExtension.lowercased()
         if semanticTextExtensions.contains(ext) { return .text }
         return .other
+    }
+
+    static func previewKind(mime: String?, path: String) -> AgentFilePreviewKind {
+        let kind = ScopedInlineImage.previewKind(path: path)
+        if case .blocked = kind, of(mime: mime, path: path) == .text { return .source }
+        return kind
     }
 
     /// QA-067 (issue-067) PARITY: the App's text set MUST match the server's
@@ -63,28 +70,68 @@ enum GalleryLoadDecision: Equatable {
     case commit(failed: [String])
 }
 
-/// Write bytes to a fresh unpredictable 0700 dir and hand them to the system
-/// opener (pdf, binaries, oversize images). Shared by the image card and the
-/// document row. Release-wave sol #4: the artifact name is agent-controlled, so
+/// Stage bytes in a fresh unpredictable 0700 dir for the in-app preview sheet.
+/// Shared by the image card and document row. The artifact name is agent-controlled, so
 /// a basename-only name under a fresh private dir + `.atomic` write closes the
 /// symlink-overwrite primitive. QA-062: the copy now lives under the single
 /// TRACKED handoff root (`ExternalArtifactHandoff`) so a bounded-age startup
 /// sweep can reclaim it — the write-side hardening is unchanged.
 @MainActor
-func openArtifactExternally(
+func stagedArtifactPreview(
     model: AppModel,
     locationID: ExecutionLocationID,
     runId: String,
     path: String,
-    produced: Bool
-) async {
-    let data = produced
-        ? await model.producedBytes(runId: runId, path: path, locationID: locationID)
-        : await model.artifactBytes(runId: runId, path: path, locationID: locationID)
-    guard let data else { return }
-    do {
-        let url = try ExternalArtifactHandoff.standard()
-            .stage(data: data, suggestedName: (path as NSString).lastPathComponent)
-        NSWorkspace.shared.open(url)
-    } catch { /* opening a preview is best-effort */ }
+    produced: Bool,
+    mime: String? = nil
+) async throws -> SafeFilePreviewRequest {
+    let bytes = try await model.artifactDataOutcome(
+        runId: runId, path: path, produced: produced, locationID: locationID).get()
+    let kind = ArtifactCategory.previewKind(mime: mime, path: path)
+    if kind == .source || kind == .markdown,
+       String(data: bytes, encoding: .utf8) == nil {
+        throw ArtifactFetchError.payloadError(from: GatewayError.decoding("Invalid UTF-8"), path: path)
+    }
+    let url = try ExternalArtifactHandoff.standard()
+        .stage(data: bytes, suggestedName: (path as NSString).lastPathComponent)
+    let task = model.task(runId, at: locationID)
+    return .localFile(
+        url: url, kind: kind,
+        fileScopeRoots: [task?.repoRoot, task?.runDir].compactMap { $0 })
+}
+
+/// The gallery presents its existing payload state immediately, before a fetch
+/// completes. A successful load hands the same retained snapshot to the viewer.
+struct ArtifactPreviewSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let state: LoadState<SafeFilePreviewRequest>
+    let path: String
+    let retry: () -> Void
+
+    var body: some View {
+        if case .loaded(let request) = state {
+            SafeFilePreviewSheet(request: request)
+        } else {
+            VStack(spacing: Theme.Spacing.md) {
+                Text(path).font(.headline).textSelection(.enabled)
+                Spacer()
+                switch state {
+                case .failed(let error):
+                    Text(error.message).foregroundStyle(.secondary).textSelection(.enabled)
+                    Button("Retry", action: retry).buttonStyle(.bordered)
+                case .empty:
+                    ContentUnavailableView("Empty file", systemImage: "doc")
+                default:
+                    ProgressView("Loading \(path)…")
+                }
+                Spacer()
+                HStack {
+                    Spacer()
+                    Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+                }
+            }
+            .padding(Theme.Spacing.lg)
+            .frame(minWidth: 720, minHeight: 520)
+        }
+    }
 }
