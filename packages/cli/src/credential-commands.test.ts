@@ -351,6 +351,11 @@ describe("claudexor profiles login machine output", () => {
       expect(order).toEqual(["prepare", "spawn"]);
       expect(prepare).toHaveBeenCalledOnce();
       expect(spawnSync).toHaveBeenCalledOnce();
+      // Interactive sign-in stays visible in THIS terminal; only background
+      // helpers hide their Windows console.
+      const [, , loginOptions] = spawnSync.mock.calls[0] as unknown as [string, string[], object];
+      expect(loginOptions).toMatchObject({ stdio: "inherit" });
+      expect(loginOptions).not.toHaveProperty("windowsHide");
     } finally {
       if (previous === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
       else process.env.CLAUDEXOR_CONFIG_DIR = previous;
