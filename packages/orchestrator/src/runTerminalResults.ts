@@ -10,6 +10,7 @@ import {
   type ModeKind,
   type RunOutcomeFacts,
   type VendorFailureEvidence,
+  HarnessRequestRefusal,
 } from "@claudexor/schema";
 import { redactSecrets } from "@claudexor/util";
 import type { OrchestratorResult } from "./orchestrator.js";
@@ -38,6 +39,7 @@ export function writeFailure(
     /** The vendor's own typed failure for the attempt this record speaks for;
      * null/omitted when no vendor-typed evidence exists. Opaque evidence. */
     vendorFailure?: VendorFailureEvidence | null;
+    requestRefusal?: HarnessRequestRefusal;
     nextActions?: string[];
   },
 ): void {
@@ -54,21 +56,33 @@ export function writeFailure(
     eventRefs: failure.eventRefs ?? [],
     runDir: failure.runDir ?? paths.root,
     resetsAt: failure.resetsAt ?? null,
+    ...(failure.requestRefusal ? { requestRefusal: failure.requestRefusal } : {}),
     // Vendor text was redacted at event ingress; redact again like safeMessage (INV-062).
     vendorFailure: vendor && {
       code: vendor.code === null ? null : redactSecrets(vendor.code),
       message: vendor.message === null ? null : redactSecrets(vendor.message),
       source: vendor.source,
     },
-    nextActions: failure.nextActions ?? [],
+    nextActions:
+      failure.code === "input_too_large"
+        ? [
+            "Fit the input to the reported transport limit or supply source references",
+            "Choose another compatible harness if the complete input must remain inline",
+          ]
+        : (failure.nextActions ?? []),
   });
 }
 
 /** The typed provenance an error declared about its own terminal. */
 export interface DeclaredFailure {
+  requestRefusal?: HarnessRequestRefusal;
   category?: RunFailure["category"];
   code: RunFailureCode | null;
   resetsAt: string | null;
+}
+
+export function requestRefusalFailure(requestRefusal: HarnessRequestRefusal): DeclaredFailure {
+  return { category: "validation", code: requestRefusal.kind, resetsAt: null, requestRefusal };
 }
 
 /**
@@ -91,12 +105,14 @@ export function declaredFailure(err: unknown): DeclaredFailure {
   const code = RunFailureCode.safeParse(record["code"]);
   const category = RunFailure.shape.category.safeParse(record["category"]);
   const resetsAt = RunFailure.shape.resetsAt.safeParse(record["resetsAt"]);
+  const refusal = HarnessRequestRefusal.safeParse(record["requestRefusal"]);
   return {
     ...(typeof record["category"] === "string" && category.success
       ? { category: category.data }
       : {}),
     code: code.success ? code.data : null,
     resetsAt: resetsAt.success ? resetsAt.data : null,
+    ...(refusal.success ? { requestRefusal: refusal.data } : {}),
   };
 }
 
@@ -239,6 +255,7 @@ export function failTerminally(
     rawDetailRef: failureMeta.rawDetailRef,
     runDir: paths.root,
     resetsAt: declared.resetsAt,
+    requestRefusal: declared.requestRefusal,
     nextActions: budget?.nextActions ??
       failureMeta.nextActions ?? ["Open diagnostics", "Retry the run"],
   });

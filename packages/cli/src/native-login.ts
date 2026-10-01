@@ -14,11 +14,12 @@ import {
   CURSOR_MANAGED_LOGIN,
   canonicalCursorProfileHome,
   cursorProfilePathEnv,
+  resolveCursorBin,
 } from "@claudexor/harness-cursor";
 import { AGY_MANAGED_LOGIN, canonicalAgyProfileHome } from "@claudexor/harness-agy";
 import type { ManagedLogin } from "@claudexor/schema";
 import { ensureDir } from "@claudexor/util";
-import { isAbsolute } from "node:path";
+import { basename, isAbsolute } from "node:path";
 
 export interface NativeLoginSpec {
   binary: string;
@@ -41,7 +42,13 @@ export interface NativeLoginSpec {
   loginWindowMs?: number;
 }
 
-type LoginDefinition = Omit<NativeLoginSpec, "binary"> & { binaryName: () => string };
+type BinaryResolver = (binary: string) => string | null;
+
+type LoginDefinition = Omit<NativeLoginSpec, "binary"> & {
+  binaryName: (resolver: BinaryResolver) => string;
+  /** The command as it will actually run, when that depends on the binary. */
+  displayCommandFor?: (binary: string) => string;
+};
 
 /** device_auth = app-server device-code (primary, no Terminal); browser_callback
  * = app-server browser-callback (secondary); browser_redirect = legacy Terminal
@@ -76,9 +83,13 @@ const NATIVE_LOGIN_DEFINITIONS: Record<string, LoginDefinition> = {
     displayCommand: "claude auth login",
   },
   cursor: {
-    binaryName: () => process.env.CLAUDEXOR_CURSOR_BIN || "cursor-agent",
+    // The adapter's own lookup (`cursor-agent`, else an `agent` inside a
+    // Cursor install) over the same resolver that makes the spawn absolute.
+    binaryName: (resolver) => resolveCursorBin(process.env, resolver),
     args: ["login"],
     displayCommand: "cursor-agent login",
+    displayCommandFor: (binary) =>
+      basename(binary) === "agent" ? "agent login" : "cursor-agent login",
   },
   agy: {
     binaryName: () => process.env.CLAUDEXOR_AGY_BIN || "agy",
@@ -117,14 +128,14 @@ export const NATIVE_LOGIN_INPUTS: Record<string, ManagedLogin> = {
  */
 export function nativeLoginSpec(
   harness: string,
-  resolver: (binary: string) => string | null = resolveHarnessBinary,
+  resolver: BinaryResolver = resolveHarnessBinary,
   loginFlow?: CodexLoginFlow,
 ): NativeLoginSpec | null {
   const definition = NATIVE_LOGIN_DEFINITIONS[harness];
   if (!definition) return null;
   const managedLogin = NATIVE_LOGIN_INPUTS[harness];
   if (!managedLogin) return null;
-  const resolved = resolver(definition.binaryName());
+  const resolved = resolver(definition.binaryName(resolver));
   if (!resolved || !isAbsolute(resolved)) return null;
   if (harness === "codex") {
     // D-17: the legacy Terminal localhost-callback flow is the explicit opt-in
@@ -166,7 +177,7 @@ export function nativeLoginSpec(
   return {
     binary: resolved,
     args: [...definition.args],
-    displayCommand: definition.displayCommand,
+    displayCommand: definition.displayCommandFor?.(resolved) ?? definition.displayCommand,
     loginMode: withInput ? "url_disclosure_with_input" : "url_disclosure",
     // agy waits EXACTLY 60 seconds for the pasted code and offers no flag to
     // extend it (measured across four runs, PLAN §1.2 F6). Sealing the vendor's

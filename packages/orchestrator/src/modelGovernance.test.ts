@@ -323,7 +323,7 @@ describe("advisory live inventory (absence is not proof)", () => {
     const spec = astraSpec("ses-advisory-stale");
     const events = [];
     for await (const event of runModelGovernedRoute(routed, spec)) events.push(event);
-    const disclosures = events.filter((event) => event.type === "status");
+    const disclosures = events.filter((event) => event.type === "status" && event.text);
     expect(disclosures).toHaveLength(1);
     expect(disclosures[0]?.text).toBe(NOTE);
     expect(disclosures[0]?.session_id).toBe("ses-advisory-stale");
@@ -340,19 +340,22 @@ describe("advisory live inventory (absence is not proof)", () => {
     const events = [];
     for await (const event of runModelGovernedRoute(routed, astraSpec("ses-advisory-empty")))
       events.push(event);
-    expect(events.filter((event) => event.type === "status").map((event) => event.text)).toEqual([
+    expect(
+      events.filter((event) => event.type === "status" && event.text).map((event) => event.text),
+    ).toEqual([
       "the harness returned no model list; this harness's list cannot prove a model is " +
         "absent, so the request is forwarded to the vendor",
     ]);
     expect(runSpecs).toHaveLength(1);
   });
 
-  it("says nothing at all when the live list DOES carry the model", async () => {
+  it("emits no model warning when the live list DOES carry the model", async () => {
     const routed = codexish("advisory", [...STALE, "gpt-6-astra"]);
     const events = [];
     for await (const event of runModelGovernedRoute(routed, astraSpec("ses-advisory-listed")))
       events.push(event);
-    expect(events).toEqual([]);
+    expect(events.filter((event) => event.text)).toEqual([]);
+    expect(events[0]?.effort_resolution).toMatchObject({ requested: null, resolution: "omitted" });
   });
 
   it("an AUTHORITATIVE adapter still refuses the same list with today's exact text", async () => {

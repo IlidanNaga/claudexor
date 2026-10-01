@@ -1,3 +1,4 @@
+import { EffortResolution } from "./effort.js";
 import { z } from "zod/v3";
 import {
   RecordedAccessProfile,
@@ -19,7 +20,7 @@ import { WorkState } from "./work-report.js";
 import { ProcessingReceipt, ProcessingCostBasis } from "./processing.js";
 import { RunDelegationInfo } from "./delegation.js";
 import { RunFacts } from "./run-facts.js";
-import { InputTokenUsage } from "./harness.js";
+import { InputTokenUsage, HarnessRequestRefusal } from "./harness.js";
 
 /** Engine-owned final/telemetry.yaml: surfaces project, never re-derive evidence.
  * Legacy runs without this artifact disclose unavailable telemetry. */
@@ -379,6 +380,8 @@ export type BrowserEvidenceRecord = z.infer<typeof BrowserEvidenceRecord>;
 
 export const AttemptTelemetryRecord = z
   .object({
+    request_refusal: HarnessRequestRefusal.optional(),
+    effort_resolution: EffortResolution.optional(),
     processing: ProcessingReceipt.optional(),
     processing_cost_basis: ProcessingCostBasis.optional(),
     usage_cost: UsageCostSummary.optional(),

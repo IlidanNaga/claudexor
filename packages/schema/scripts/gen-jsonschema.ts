@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import {
+  EffortResolution,
   ProcessingPreference,
   ProcessingCapability,
   ProcessingReceipt,
@@ -185,6 +186,7 @@ for (const name of readdirSync(outDir)) {
 }
 
 const schemas = {
+  EffortResolution,
   ProcessingPreference,
   ProcessingCapability,
   ProcessingReceipt,

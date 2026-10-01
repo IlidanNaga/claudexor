@@ -1,5 +1,5 @@
 import { browserMcpCommand, type LiveMessageResult } from "@claudexor/core";
-import type { HarnessEvent, HarnessRunSpec } from "@claudexor/schema";
+import type { HarnessEvent, HarnessRunSpec, HarnessRequestRefusal } from "@claudexor/schema";
 import { nowIso } from "@claudexor/util";
 import { CODEX_EFFORT_SNAPSHOT, codexEffortFor, type CodexEffortCatalog } from "./effort-probe.js";
 import { parseCodexEvent, type CodexParseState } from "./parse.js";
@@ -21,10 +21,33 @@ export class CodexRpcError extends Error {
   constructor(
     readonly code: number | null,
     message: string,
+    readonly data: unknown = null,
   ) {
     super(message);
     this.name = "CodexRpcError";
   }
+}
+
+/** Native machine evidence, never a match against the vendor's error wording. */
+export function codexRequestRefusal(error: unknown): HarnessRequestRefusal | null {
+  if (!(error instanceof CodexRpcError)) return null;
+  const data = asObject(error.data);
+  if (data?.["input_error_code"] !== "input_too_large") return null;
+  const measure = (key: string, positive = false): number | null => {
+    const value = data[key];
+    return typeof value === "number" && Number.isSafeInteger(value) && value >= (positive ? 1 : 0)
+      ? value
+      : null;
+  };
+  return {
+    kind: "input_too_large",
+    scope: "turn_text",
+    unit: "unicode_scalars",
+    limit: measure("max_chars", true),
+    actual: measure("actual_chars"),
+    source: "codex.app-server.turn/start",
+    native_code: "input_too_large",
+  };
 }
 
 /** Where a request's answer came from: the vendor's result, its typed refusal, or the transport. */

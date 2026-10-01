@@ -9,8 +9,10 @@ import {
   CouncilProjection,
   HarnessManifest,
   RunFacts,
+  RunFailure,
   RunTelemetry,
   type HarnessRunSpec,
+  type HarnessRequestRefusal,
   type RunEvent,
   type WorkReport,
 } from "@claudexor/schema";
@@ -31,6 +33,7 @@ const draft =
 const merged = "# Unified plan\n\nUse the available evidence.\n\n## Open Questions\n- (none)";
 type Channel = "constrained_json" | "side_tool" | "instructed_fence";
 interface Reply {
+  requestRefusal?: HarnessRequestRefusal;
   output?: unknown;
   report?: unknown;
   error?: string;
@@ -104,7 +107,13 @@ function planner(id: string, member: Member, calls: HarnessRunSpec[]): HarnessAd
         text,
         ...(channel === "side_tool" ? { payload: { work_report_side_tool: report } } : {}),
       };
-      if (reply.error) yield { ...base, type: "error", error: reply.error };
+      if (reply.error)
+        yield {
+          ...base,
+          type: "error",
+          error: reply.error,
+          ...(reply.requestRefusal ? { request_refusal: reply.requestRefusal } : {}),
+        };
       if (reply.contextExhausted)
         yield {
           ...base,
@@ -167,6 +176,33 @@ async function runCouncil(members: Member[], extra: Partial<RunInput> = {}) {
 }
 
 describe("Council retains contradictory input through real planner attempts (#214)", () => {
+  it("keeps successful drafts while projecting the merge attempt's typed input refusal", async () => {
+    const refusal: HarnessRequestRefusal = {
+      kind: "input_too_large",
+      scope: "turn_text",
+      unit: "unicode_scalars",
+      limit: 10,
+      actual: 11,
+      source: "fixture.turn/start",
+      native_code: "input_too_large",
+    };
+    const run = await runCouncil([
+      { merge: { output: "", error: "input refused", requestRefusal: refusal } },
+      {},
+    ]);
+    expect(run.calls.map((call) => call.intent)).toEqual(["plan", "plan", "synthesize"]);
+    expect(run.result.lifecycle).toBe("failed");
+    expect(RunFailure.parse(run.read("final/failure.yaml"))).toMatchObject({
+      category: "validation",
+      code: "input_too_large",
+      requestRefusal: refusal,
+      resetsAt: null,
+    });
+    expect(run.text("council/draft-planner-1.md")).toBe(draft);
+    expect(run.text("council/draft-planner-2.md")).toBe(draft);
+    expect(run.text("final/failure.yaml")).not.toContain("Retry the run");
+  });
+
   it.each<Channel>(["constrained_json", "side_tool", "instructed_fence"])(
     "%s preserves the extracted draft and original claim without accepting the attempt",
     async (channel) => {

@@ -1,4 +1,5 @@
-import type { EffortHint } from "@claudexor/schema";
+import { EffortPreferenceRejectedError } from "./errors.js";
+import { mergeEffortLadders, type EffortHint, type EffortResolution } from "@claudexor/schema";
 
 /**
  * Effort resolution against VENDOR-ordered ladders. There is no static rank
@@ -18,6 +19,27 @@ import type { EffortHint } from "@claudexor/schema";
 export type EffortCheck =
   | { status: "ok"; effort: EffortHint | null; clamped: boolean }
   | { status: "rejected"; message: string };
+
+/** Only a vendor-proven total order may drive substitutions. The display merge
+ * breaks ties between disconnected/branching chains; those ties are not ranks.
+ * Exact membership remains usable even when ordering cannot be established. */
+export function effortRankLadder(
+  lists: ReadonlyArray<readonly EffortHint[]>,
+): readonly EffortHint[] {
+  const merged = mergeEffortLadders(lists);
+  if (!merged.consistent) return [];
+  const { order } = merged;
+  return order.every(
+    (level, index) =>
+      index === 0 ||
+      lists.some((list) => {
+        const before = list.indexOf(order[index - 1]!);
+        return before >= 0 && list[before + 1] === level;
+      }),
+  )
+    ? order
+    : [];
+}
 
 /**
  * Resolve a requested reasoning-effort level against the levels a specific
@@ -40,8 +62,9 @@ export type EffortCheck =
  *   the caller discloses it as ignored (INV-105) instead of clamping to a guess.
  * - requested IS advertised → PASS THROUGH VERBATIM. This is what makes a
  *   future vendor level work with no Claudexor change.
- * - requested is not advertised but the LADDER places it → CLAMP to the nearest
- *   advertised level by ladder position (ties resolve to the cheaper one).
+ * - requested is not advertised but the LADDER places it → choose the strongest
+ *   advertised level not above the request. If every supported level exceeds
+ *   the request, use the known minimum (reasoning cannot be disabled there).
  * - requested is unknown to the ladder too → REJECT, naming the advertised
  *   set. We cannot place it, so any "nearest" would be invented.
  */
@@ -69,19 +92,14 @@ export function resolveEffort(
     };
   }
 
-  let best: EffortHint = rankable[0] as EffortHint;
-  let bestDistance = Math.abs(ladder.indexOf(best) - want);
-  for (const level of rankable.slice(1)) {
-    const distance = Math.abs(ladder.indexOf(level) - want);
-    // Strictly-closer wins; on a tie keep the LOWER-positioned (cheaper) candidate.
-    if (
-      distance < bestDistance ||
-      (distance === bestDistance && ladder.indexOf(level) < ladder.indexOf(best))
-    ) {
-      best = level;
-      bestDistance = distance;
-    }
-  }
+  const ordered = [...rankable].sort((a, b) => ladder.indexOf(a) - ladder.indexOf(b));
+  const lower = ordered.filter((level) => ladder.indexOf(level) <= want).at(-1);
+  if (!lower && rankable.length !== advertised.length)
+    return {
+      status: "rejected",
+      message: "The advertised minimum effort cannot be established from the vendor order.",
+    };
+  const best = lower ?? ordered[0]!;
   return { status: "ok", effort: best, clamped: true };
 }
 
@@ -100,4 +118,64 @@ export function normalizeEffort(
 ): EffortHint | null {
   const check = resolveEffort(requested, advertised, ladder);
   return check.status === "ok" ? check.effort : null;
+}
+
+/** Shared typed receipt; native adapters supply the final route's capability
+ * facts. Empty supported and unavailable proof remain different outcomes. */
+export function resolveEffortEvidence(
+  requested: string | null | undefined,
+  advertised: readonly string[],
+  ladder: readonly string[],
+  source: EffortResolution["source"],
+  parameter: string | null,
+  unverifiable = false,
+): EffortResolution {
+  const check = resolveEffort(requested, unverifiable ? [] : advertised, ladder);
+  const base = {
+    requested: requested ?? null,
+    source,
+    parameter,
+    observed: null,
+    observedSource: null,
+  };
+  if (check.status === "rejected")
+    return { ...base, submitted: null, resolution: "rejected", reason: check.message };
+  const submitted = check.effort;
+  const resolution =
+    submitted === null
+      ? requested && unverifiable
+        ? "unverifiable"
+        : "omitted"
+      : !check.clamped
+        ? "exact"
+        : ladder.indexOf(submitted) < ladder.indexOf(requested!)
+          ? "downward"
+          : "floor";
+  return { ...base, submitted, resolution };
+}
+
+/** Diagnostic only: status events never inject assistant conversation text. */
+export function effortResolutionEvent(
+  sessionId: string,
+  receipt: EffortResolution,
+): import("@claudexor/schema").HarnessEvent {
+  const detail =
+    receipt.requested && receipt.resolution !== "exact"
+      ? `effort=${receipt.requested}: ${receipt.resolution}; submitted=${receipt.submitted ?? "omitted (native default)"}`
+      : null;
+  return {
+    type: "status",
+    session_id: sessionId,
+    ts: new Date().toISOString(),
+    effort_resolution: receipt,
+    ...(detail ? { text: `[effort] ${detail}`, payload: { ignored_settings: [detail] } } : {}),
+  };
+}
+
+/** Native adapters stop before transport when their final route cannot place a preference. */
+export function throwIfEffortRejected(receipt: import("@claudexor/schema").EffortResolution): void {
+  if (receipt.resolution === "rejected")
+    throw new EffortPreferenceRejectedError(
+      receipt.reason ?? "The final route cannot place the effort preference.",
+    );
 }

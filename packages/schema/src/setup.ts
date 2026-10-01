@@ -234,7 +234,7 @@ export const ControlSetupJobOutcome = z
       "timed_out",
       "cancelled_by_user",
       "cancelled_on_restart",
-      // Historical (pre-3.0.3 restart reconciliation); kept for journal replay.
+      // The live monitor proved the permitted process group empty without a result.
       "interrupted",
       "interrupted_unknown",
       "termination_unconfirmed",

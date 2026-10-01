@@ -203,25 +203,15 @@ describe("assertSettingsPatchValid", () => {
     }
   });
 
-  // INV-104 pairing: the effort ladder belongs to the MODEL, and a settings write
-  // may carry either half of the pair alone — so only the MERGED pair can be
-  // judged. The codex manifest (snapshot fallback under the stub) gives the
-  // asymmetry these need: gpt-5.5 stops at `xhigh` while the harness-wide union
-  // reaches `ultra` because gpt-5.6-sol advertises it.
-  // One `it` per patch shape, so a regression names the shape it broke instead of
-  // stopping at whichever assertion happened to come first.
-  // codex discover() spawns the (stubbed) vendor CLI, so each gets the same
-  // environmental-latency budget as the other manifest-backed cases.
-  it("shape 1: effort-only patch refused when the STORED model's ladder is narrower", async () => {
-    // `ultra` IS on the harness-wide union, so judging the patch against the union
-    // (or against a null model, which is what an absent patch.defaultModel means)
-    // accepted a value gpt-5.5 rejects.
+  // Every patch shape preserves the preference for the final account/model.
+  // Discovery may describe a different account; it cannot erase the request.
+  it("shape 1: effort-only patch preserves a preference above the stored model ladder", async () => {
     await expect(
       assertSettingsPatchValid(patchCodex({ effort: "ultra" }), {
         ...AUTO_NO_TIERS,
         harnesses: storedCodex({ defaultModel: "gpt-5.5" }),
       }),
-    ).rejects.toThrow(/harness 'codex' model 'gpt-5\.5' does not accept effort 'ultra'/);
+    ).resolves.toBeDefined();
   }, 30_000);
 
   it("shape 2: effort-only patch accepted when it is inside the STORED model's ladder", async () => {
@@ -233,15 +223,14 @@ describe("assertSettingsPatchValid", () => {
     ).resolves.toBeDefined();
   }, 30_000);
 
-  it("shape 3: defaultModel-only patch refused when the STORED effort is unsupported", async () => {
-    // The patch carries no effort at all, so effort validation used to be skipped
-    // entirely and the stored `ultra` silently became unsupported for the new model.
+  it("shape 3: defaultModel-only patch preserves the stored preference for dispatch", async () => {
+    // A model-only patch retains the stored preference for dispatch adaptation.
     await expect(
       assertSettingsPatchValid(patchCodex({ defaultModel: "gpt-5.5" }), {
         ...AUTO_NO_TIERS,
         harnesses: storedCodex({ defaultModel: "gpt-5.6-sol", effort: "ultra" }),
       }),
-    ).rejects.toThrow(/harness 'codex' model 'gpt-5\.5' does not accept effort 'ultra'/);
+    ).resolves.toBeDefined();
     // …and the same patch is fine once the stored effort fits the new model.
     await expect(
       assertSettingsPatchValid(patchCodex({ defaultModel: "gpt-5.5" }), {
@@ -263,7 +252,7 @@ describe("assertSettingsPatchValid", () => {
         ...AUTO_NO_TIERS,
         harnesses: storedCodex({ defaultModel: "gpt-5.6-sol", effort: "ultra" }),
       }),
-    ).rejects.toThrow(/harness 'codex' model 'gpt-5\.5' does not accept effort 'ultra'/);
+    ).resolves.toBeDefined();
   }, 30_000);
 
   it("an effective model the manifest records no ladder for keeps the harness-wide union", async () => {
@@ -601,7 +590,7 @@ describe("commitSettingsUpdate atomic validate+write (A-1 TOCTOU race)", () => {
     });
   }, 30_000);
 
-  it("an effort-only write is judged against the PERSISTED default model", async () => {
+  it("an effort-only write persists its original preference for final-route adaptation", async () => {
     // End-to-end proof that the stored per-harness settings actually reach the
     // validator: a unit test on `assertSettingsPatchValid` alone would still pass
     // if `commitSettingsUpdate` handed it an empty harnesses map.
@@ -619,8 +608,8 @@ describe("commitSettingsUpdate atomic validate+write (A-1 TOCTOU race)", () => {
             root,
             ControlSettingsUpdateRequest.parse({ harnesses: { codex: { effort: "ultra" } } }),
           ),
-        ).rejects.toThrow(/model 'gpt-5\.5' does not accept effort 'ultra'/);
-        expect(loadConfig(root).global.harnesses["codex"]?.effort).toBeNull();
+        ).resolves.toBeDefined();
+        expect(loadConfig(root).global.harnesses["codex"]?.effort).toBe("ultra");
         // The same write against a model that advertises `ultra` persists.
         await commitSettingsUpdate(
           root,
@@ -633,7 +622,7 @@ describe("commitSettingsUpdate atomic validate+write (A-1 TOCTOU race)", () => {
     );
   }, 30_000); // codex discover() spawns the vendor CLI; its startup latency is environmental
 
-  it("two concurrent writes can never persist a stranded model/effort pair", async () => {
+  it("two concurrent writes preserve model identity and effort preference independently", async () => {
     // The pair is merged-effective too, so it needs the SAME under-lock re-check the
     // goal/tiers invariant gets. A narrows the model (valid against the seed: the
     // stored `high` is fine for gpt-5.5); B raises the effort (valid against the
@@ -663,11 +652,11 @@ describe("commitSettingsUpdate atomic validate+write (A-1 TOCTOU race)", () => {
             ControlSettingsUpdateRequest.parse({ harnesses: { codex: { effort: "ultra" } } }),
           ),
         ]);
-        expect(results.filter((r) => r.status === "rejected")).toHaveLength(1);
-        // Whichever writer landed second is refused, so the persisted pair is
-        // always one the model actually accepts.
+        expect(results.filter((r) => r.status === "rejected")).toHaveLength(0);
+        // Adaptation occurs at dispatch, without rewriting either stored preference.
         const stored = loadConfig(root).global.harnesses["codex"];
-        expect(stored?.default_model === "gpt-5.5" && stored?.effort === "ultra").toBe(false);
+        expect(stored?.default_model).toBe("gpt-5.5");
+        expect(stored?.effort).toBe("ultra");
       },
     );
   }, 30_000);

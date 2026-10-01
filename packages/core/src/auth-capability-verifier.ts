@@ -153,6 +153,7 @@ export class AuthCapabilityVerifier {
     let interactionEvents = 0;
     let sessionMismatchEvents = 0;
     let eventsAfterCompleted = 0;
+    let effortPrepared = false;
     let protocolViolation = false;
     let adapterFailed = false;
     let adapterMissing = false;
@@ -221,6 +222,7 @@ export class AuthCapabilityVerifier {
               source: event.credential_source ?? null,
               aborted: event.aborted ?? false,
               textDigest: event.text === undefined ? null : sha256(event.text),
+              ...(event.effort_resolution ? { effortResolution: event.effort_resolution } : {}),
             }),
           );
           if (terminalSeen) eventsAfterCompleted += 1;
@@ -229,7 +231,12 @@ export class AuthCapabilityVerifier {
             evidence.add("event:session_mismatch");
             continue;
           }
-          if (startedEvents === 0 && event.type !== "started") protocolViolation = true;
+          if (startedEvents === 0 && event.type !== "started") {
+            if (!effortPrepared && !terminalSeen && isSmokeEffortPreparation(event)) {
+              effortPrepared = true;
+              evidence.add("event:effort_prepared");
+            } else protocolViolation = true;
+          }
           switch (event.type) {
             case "started":
               startedEvents += 1;
@@ -412,6 +419,26 @@ export class AuthCapabilityVerifier {
       throw new Error("unsafe auth capability scratch path");
     return path;
   }
+}
+
+/** The smoke requests no effort. One silent omission receipt is preparation,
+ * not a vendor start, credential proof, or provider observation. */
+function isSmokeEffortPreparation(event: HarnessEvent): boolean {
+  const effort = event.effort_resolution;
+  return (
+    event.type === "status" &&
+    effort !== undefined &&
+    effort.requested === null &&
+    effort.submitted === null &&
+    effort.resolution === "omitted" &&
+    effort.observed === null &&
+    effort.observedSource === null &&
+    // HarnessEvent allows independent optional fields; do not hide native
+    // activity/errors by accepting a mixed event carrying an effort receipt.
+    Object.keys(event).every((key) =>
+      ["type", "session_id", "ts", "effort_resolution"].includes(key),
+    )
+  );
 }
 
 function challengeFor(attemptId: string): string {

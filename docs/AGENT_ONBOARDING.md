@@ -46,7 +46,12 @@ It is strict: skipping a step is how the 2026-07-21 incident happened.
    `claudexor profiles login <harness> <profile-id>` when the harness requires
    a named binding (Antigravity does). Claudexor runs the vendor CLI's own
    login under the effective platform policy; a profile HOME is not a promise
-   of separate credential custody on every OS. For codex the default is
+   of separate credential custody on every OS. Cursor `profiles login` uses
+   a daemon setup job attached to the same terminal; `claudexor setup cancel`
+   and `claudexor setup reconcile` expose its existing recovery operations.
+   Claude/AGY profile login retains its direct vendor terminal path.
+   Non-Codex `profiles login --json` remains unsupported; it creates no job.
+   For codex the default is
    device-auth: the app/CLI shows a URL and one-time code without a Terminal.
    Complete the link in a
    **private browser window, or a browser profile signed into no other OpenAI
@@ -56,10 +61,10 @@ It is strict: skipping a step is how the 2026-07-21 incident happened.
    default + this isolation instruction) but cannot prevent it.
    `claudexor auth login codex --browser-redirect` is the explicit opt-in for
    the older localhost-callback flow. **NEVER run a bare `codex login`,
-   `claude auth login`, `cursor-agent login`, or interactive `agy`** — Claudexor
-   cannot bind or verify a requested profile around that process, and an
-   OS-user-scoped vendor transport may change the credential for the whole OS
-   user (Bible INV-067). To remove a row, use `claudexor profiles remove`;
+   `claude auth login`, `cursor-agent login`, `agent login`, or interactive
+   `agy`** — Claudexor cannot bind or verify a requested profile around that
+   process, and an OS-user-scoped vendor transport may change the credential
+   for the whole OS user (Bible INV-067). To remove a row, use `claudexor profiles remove`;
    that removes the binding and data Claudexor owns, while a typed receipt
    tells you when a vendor-owned OS-user credential was left unchanged.
 6. **Wait for verified readiness — process exit is not readiness.** A named

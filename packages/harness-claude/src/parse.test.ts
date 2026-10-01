@@ -605,7 +605,8 @@ describe("parseClaudeEvent", () => {
     });
     expect(claudeArgsForSpec(spec)).toEqual([
       "-p",
-      "review",
+      "--input-format",
+      "text",
       "--output-format",
       "stream-json",
       "--verbose",
@@ -671,7 +672,8 @@ describe("parseClaudeEvent", () => {
     // One-shot runs pipe no stdin frames, so there is nothing to echo.
     const oneShot = claudeArgsForSpec(spec, false);
     expect(oneShot).not.toContain("--replay-user-messages");
-    expect(oneShot).toContain("do it");
+    expect(oneShot).not.toContain("do it");
+    expect(oneShot[oneShot.indexOf("--input-format") + 1]).toBe("text");
   });
 
   it("keeps the readonly AskUserQuestion channel open without pre-approving it", () => {
@@ -896,10 +898,10 @@ describe("parseClaudeEvent", () => {
     expect(args[promptToolIdx + 1]).toBe("stdio");
     // The prompt must NOT travel as an argv prompt in interactive mode.
     expect(args).not.toContain("make a plan");
-    // One-shot mode keeps the prompt arg and no control-channel flags.
+    // One-shot mode owns text stdin without control-channel flags.
     const oneShot = claudeArgsForSpec(spec);
-    expect(oneShot).toContain("make a plan");
-    expect(oneShot).not.toContain("--input-format");
+    expect(oneShot).not.toContain("make a plan");
+    expect(oneShot[oneShot.indexOf("--input-format") + 1]).toBe("text");
     expect(oneShot).not.toContain("--permission-prompt-tool");
   });
 

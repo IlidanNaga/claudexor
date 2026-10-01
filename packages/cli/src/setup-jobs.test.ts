@@ -14,6 +14,8 @@ import { join } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import {
   AuthCapabilityVerifier,
+  bindCredentialMutationWindow,
+  credentialMutationWindowOpen,
   ProcessGroupService,
   type HarnessAdapter,
   type KnownProcessIdentity,
@@ -46,6 +48,8 @@ import {
   resolveSetupLoginRunnerPath,
 } from "./setup-job-support.js";
 import { createSetupJobManager } from "./setup-jobs.js";
+import { SetupJobStore } from "./setup-job-store.js";
+import * as CredentialWindow from "./setup-credential-window.js";
 import { SetupLifecycleBinding } from "./setup-lifecycle-binding.js";
 import { DaemonRuntimeShutdown } from "./daemon-runtime-shutdown.js";
 
@@ -817,7 +821,8 @@ describe("setup jobs", () => {
         input: { fresh: true, authPreference: "subscription", aborted: false },
       },
     ]);
-    expect(invalidatedHarnesses).toEqual(["codex"]);
+    // #363: the window opened at the execution permit and closed at the proven end.
+    expect(invalidatedHarnesses).toEqual(["codex", "codex"]);
     expect(capability.lookups).toEqual(["codex"]);
     expect(capability.runs).toHaveLength(1);
     expect(capability.runs[0]).toMatchObject({
@@ -949,7 +954,7 @@ describe("setup jobs", () => {
       });
       expect(capability.lookups).toEqual(["codex"]);
       expect(capability.runs).toHaveLength(1);
-      expect(invalidatedHarnesses).toEqual(["codex"]);
+      expect(invalidatedHarnesses).toEqual(["codex", "codex"]); // window entry + close
       expect(probedHarnesses).toEqual(["codex"]);
       expect(callbackSawDurableReceipt).toBe(true);
       await manager.shutdown();
@@ -963,7 +968,7 @@ describe("setup jobs", () => {
       exitCode: 17,
       errorCode: undefined,
       expectedReason: "command_failed",
-      expectedInvalidations: ["codex"],
+      expectedInvalidations: ["codex", "codex"], // window entry + close (#363)
     },
     {
       label: "command that never started",
@@ -1049,7 +1054,7 @@ describe("setup jobs", () => {
     writeRunnerStateV2(first, job.jobId, group.leader, "running", observedAt);
     writeRunnerResultV2(first, job.jobId, { exitCode: 9 });
     expect(await waitForTerminal(first, job.jobId)).toBe("failed");
-    expect(firstInvalidations).toEqual(["codex"]);
+    expect(firstInvalidations).toEqual(["codex", "codex"]); // window entry + close
     await first.shutdown();
     first._store.journal.close();
 
@@ -1531,6 +1536,8 @@ describe("setup jobs", () => {
       outcome: { reason: "cancelled_by_user", exitCode: 0, signal: null },
       nativeCommand: { commandStarted: true, exitCode: 0, signal: null },
     });
+    // The permit was written straight into the store (no manager transition),
+    // so only the receipt-proven close invalidates (#363).
     expect(invalidatedHarnesses).toEqual(["codex"]);
     expect(group.signals).toEqual([]);
     await manager.shutdown();
@@ -1635,6 +1642,89 @@ describe("setup jobs", () => {
       expect(group.signals).toEqual(["SIGTERM", "SIGKILL"]);
       expect(done.outcome?.reason).toBe(kind === "cancel" ? "cancelled_by_user" : "timed_out");
       await manager.shutdown();
+    },
+  );
+
+  it.each([
+    ["cancel", false],
+    ["timeout", false],
+    ["cancel", true],
+    ["timeout", true],
+  ] as const)(
+    "keeps the existing %s grace while group probes are unknown (persistent=%s)",
+    async (kind, persistent) => {
+      let ms = Date.now();
+      let killedAt: number | undefined;
+      let recover = false;
+      let probesAfterKill = 0;
+      const group = processGroupFixture({
+        leader: knownLeader(32),
+        onSignal: (signal) => {
+          if (signal === "SIGKILL") killedAt = ms;
+        },
+      });
+      const probe = group.service.probeEmpty.bind(group.service);
+      vi.spyOn(group.service, "probeEmpty").mockImplementation((handle) => {
+        if (killedAt !== undefined) {
+          probesAfterKill += 1;
+          if (!recover && (persistent || ms - killedAt < 100)) {
+            return { status: "unknown", pgid: handle.pgid, reason: "permission_denied" };
+          }
+        }
+        return probe(handle);
+      });
+      const bumps: string[] = [];
+      const manager = createSetupJobManager({
+        rootDir: join(root, `probe-grace-${kind}-${persistent}`),
+        platform: "darwin",
+        runnerPath: "/tmp/setup-login-runner.js",
+        openTerminal: fakeOpener,
+        now: () => new Date(ms),
+        monitorPollMs: 1,
+        terminationGraceMs: 200,
+        sleep: async (delay) => {
+          expect(manager.credentialMutationOpen("codex")).toBe(true);
+          ms += delay;
+        },
+        processGroups: group.service,
+        onCredentialStateMayHaveChanged: (harness) => bumps.push(harness),
+      });
+      await manager.start();
+      try {
+        const job = manager.create(LOGIN_REQUEST);
+        writeRunnerStateV2(
+          manager,
+          job.jobId,
+          group.leader,
+          "awaiting_permit",
+          new Date(ms).toISOString(),
+        );
+        await waitForPhase(manager, job.jobId, "awaiting_user");
+        expect(bumps).toEqual(["codex"]);
+        const done =
+          kind === "cancel"
+            ? await manager.cancel({ jobId: job.jobId })
+            : ((ms = Date.parse(job.deadlineAt!)),
+              await waitForTerminal(manager, job.jobId),
+              manager.status({ jobId: job.jobId }));
+        expect(group.signals).toEqual(["SIGTERM", "SIGKILL"]);
+        expect(probesAfterKill).toBeGreaterThanOrEqual(2);
+        if (persistent) {
+          expect(ms - killedAt!).toBe(200);
+          expect(done.outcome?.reason).toBe("termination_unconfirmed");
+          expect(manager.credentialMutationOpen("codex")).toBe(true);
+          expect(bumps).toEqual(["codex"]);
+          recover = true;
+          manager.reconcile({ jobId: job.jobId });
+        } else {
+          expect(ms - killedAt!).toBe(100);
+          expect(done.outcome?.reason).toBe(kind === "cancel" ? "cancelled_by_user" : "timed_out");
+        }
+        expect(manager.credentialMutationOpen("codex")).toBe(false);
+        expect(bumps).toEqual(["codex", "codex"]);
+      } finally {
+        await manager.shutdown();
+      }
     },
   );
 
@@ -2611,7 +2701,7 @@ describe("setup jobs for credential profiles (INV-135)", () => {
     );
     expect(await waitForTerminal(manager, job.jobId)).toBe("succeeded");
     expect(profileProbes).toEqual([["codex", "work"]]);
-    expect(invalidatedHarnesses).toEqual(["codex"]);
+    expect(invalidatedHarnesses).toEqual(["codex", "codex"]); // window entry + close
     // The smoke attests the DEFAULT route only — a scoped profile job must
     // not spend quota on it, and the lifecycle honestly stays disclosed.
     expect(capability.runs).toHaveLength(0);
@@ -2950,5 +3040,167 @@ describe("one-shot sign-in input (url_disclosure_with_input, owner directive 202
     expect(() => manager.input({ jobId: job.jobId, value: "y".repeat(2000) })).toThrow();
     expect(existsSync(manager._store.paths(job.jobId).runnerInput)).toBe(false);
     await manager.shutdown();
+  });
+});
+
+describe("setup credential-mutation window (#363)", () => {
+  const permitted = { permitIssuedAt: "2026-09-30T00:00:01.000Z" } as never;
+  it.each([
+    ["an active job before its permit", { state: "waiting_for_input" }, false],
+    ["an active job holding a permit", { state: "running", execution: permitted }, true],
+    ["a job that ended with proof", { state: "succeeded", execution: permitted }, false],
+    [
+      "an unconfirmed termination after a permit",
+      {
+        state: "failed",
+        execution: permitted,
+        outcome: { reason: "termination_unconfirmed" },
+      },
+      true,
+    ],
+    [
+      "an unconfirmed termination later proven empty",
+      {
+        state: "failed",
+        execution: permitted,
+        outcome: { reason: "termination_unconfirmed" },
+        terminationReconciliation: { status: "empty", observedAt: "2026-09-30T00:00:02.000Z" },
+      },
+      false,
+    ],
+    [
+      "an unconfirmed termination before any permit",
+      { state: "failed", outcome: { reason: "termination_unconfirmed" } },
+      false,
+    ],
+  ])("%s → open=%s", (_label, job, open) => {
+    expect(CredentialWindow.credentialMutationWindowOpenFor(job as never)).toBe(open);
+  });
+
+  function windowedManager(
+    rootDir: string,
+    group: ReturnType<typeof processGroupFixture>,
+    extra = {},
+  ) {
+    const bumps: string[] = [];
+    const manager = createSetupJobManager({
+      rootDir,
+      platform: "darwin",
+      runnerPath: "/tmp/setup-login-runner.js",
+      openTerminal: fakeOpener,
+      monitorPollMs: 1,
+      terminationGraceMs: 5,
+      processGroups: group.service,
+      onCredentialStateMayHaveChanged: (harness) => bumps.push(harness),
+      ...extra,
+    });
+    return { manager, bumps };
+  }
+
+  it("an unknown surviving vendor keeps the window open until a reconciliation proves it empty", async () => {
+    const leader = knownLeader(71);
+    const group = processGroupFixture({ leader });
+    const { manager, bumps } = windowedManager(join(root, "window-unconfirmed"), group);
+    await manager.start();
+    const job = manager.create(LOGIN_REQUEST);
+    expect(manager.credentialMutationOpen("codex")).toBe(false);
+    writeRunnerStateV2(manager, job.jobId, leader);
+    await waitForPhase(manager, job.jobId, "awaiting_user");
+    expect(manager.credentialMutationOpen("codex")).toBe(true);
+    expect(manager.credentialMutationOpen("cursor")).toBe(false);
+    expect(bumps).toEqual(["codex"]);
+    // The leader's identity can no longer be proven: nothing may be signalled
+    // and the group is not proven empty — the vendor may survive.
+    group.setObserved(knownLeader(71, "darwin:1710000009:000071"));
+    const stopped = await manager.cancel({ jobId: job.jobId });
+    expect(stopped.outcome?.reason).toBe("termination_unconfirmed");
+    expect(manager.credentialMutationOpen("codex")).toBe(true);
+    expect(bumps).toEqual(["codex"]);
+    expect(() => manager.reconcile({ jobId: job.jobId })).toThrow(/not proven empty/);
+    expect(manager.credentialMutationOpen("codex")).toBe(true);
+    group.setAlive(false);
+    manager.reconcile({ jobId: job.jobId });
+    expect(manager.credentialMutationOpen("codex")).toBe(false);
+    expect(bumps).toEqual(["codex", "codex"]);
+    await manager.shutdown();
+  });
+
+  it("a deadline never closes the window: an expired login whose termination is unproven stays open", async () => {
+    let nowMs = Date.parse("2026-09-30T00:00:00.000Z");
+    const leader = knownLeader(72);
+    const group = processGroupFixture({ leader });
+    const { manager, bumps } = windowedManager(join(root, "window-deadline"), group, {
+      now: () => new Date(nowMs),
+      loginTimeoutMs: 60_000,
+    });
+    await manager.start();
+    const job = manager.create(LOGIN_REQUEST);
+    writeRunnerStateV2(
+      manager,
+      job.jobId,
+      leader,
+      "awaiting_permit",
+      new Date(nowMs).toISOString(),
+    );
+    await waitForPhase(manager, job.jobId, "awaiting_user");
+    group.setObserved({
+      status: "unknown",
+      pid: 72,
+      platform: "darwin",
+      reason: "permission_denied",
+    });
+    nowMs = Date.parse(job.deadlineAt!) + 1;
+    expect(await waitForTerminal(manager, job.jobId)).toBe("failed");
+    expect(manager.status({ jobId: job.jobId }).outcome?.reason).toBe("termination_unconfirmed");
+    expect(manager.credentialMutationOpen("codex")).toBe(true);
+    expect(bumps).toEqual(["codex"]);
+    await manager.shutdown();
+  });
+
+  it("a restart that cannot re-prove the worker keeps the window open and invalidates nothing new", async () => {
+    const storeRoot = join(root, "window-restart");
+    const leader = knownLeader(73);
+    const group = processGroupFixture({ leader });
+    const first = windowedManager(storeRoot, group);
+    await first.manager.start();
+    const job = first.manager.create(LOGIN_REQUEST);
+    writeRunnerStateV2(first.manager, job.jobId, leader);
+    await waitForPhase(first.manager, job.jobId, "awaiting_user");
+    expect(first.bumps).toEqual(["codex"]);
+    group.setObserved({
+      status: "unknown",
+      pid: 73,
+      platform: "darwin",
+      reason: "permission_denied",
+    });
+    await first.manager.shutdown();
+    first.manager._store.journal.close();
+    const successor = windowedManager(storeRoot, group);
+    await successor.manager.start();
+    expect(successor.manager.status({ jobId: job.jobId }).outcome?.reason).toBe(
+      "termination_unconfirmed",
+    );
+    expect(successor.manager.credentialMutationOpen("codex")).toBe(true);
+    expect(successor.bumps).toEqual([]);
+    await successor.manager.shutdown();
+  });
+
+  it("an unreadable setup journal proves nothing closed: every harness reads open", () => {
+    const storeRoot = join(root, "window-corrupt");
+    const store = new SetupJobStore(storeRoot);
+    store.journal.append("setup.job.saved", { job: { jobId: "not-a-valid-setup-job" } });
+    store.journal.close();
+    const reopened = new SetupJobStore(storeRoot);
+    expect(reopened.recoveryState().status).toBe("recovery_required");
+    expect(() => CredentialWindow.open(reopened, "cursor")).toThrow(/requires recovery/);
+    bindCredentialMutationWindow((harness) => CredentialWindow.open(reopened, harness));
+    try {
+      expect(credentialMutationWindowOpen("cursor")).toBe(true);
+      expect(credentialMutationWindowOpen()).toBe(true);
+    } finally {
+      bindCredentialMutationWindow(null);
+    }
+    expect(credentialMutationWindowOpen("cursor")).toBe(false);
+    reopened.journal.close();
   });
 });

@@ -34,7 +34,13 @@ import {
   knownModelIdsForRoute,
 } from "@claudexor/schema";
 import type { HarnessAdapter } from "@claudexor/core";
-import { HarnessUnavailableError, hasModelInventoryForRoute, validateModel } from "@claudexor/core";
+import {
+  HarnessUnavailableError,
+  hasModelInventoryForRoute,
+  validateModel,
+  resolveEffort,
+  effortRankLadder,
+} from "@claudexor/core";
 import { WorkspaceManager } from "@claudexor/workspace";
 import type { ReviewerSpec } from "@claudexor/review";
 import { safeErrorMessage } from "./runSupport.js";
@@ -93,7 +99,18 @@ function reviewerEffortRefusal(
   // recorded it, else the harness-wide merged ladder — which is then the only
   // honest set, and the refusal says so.
   const advertised = effortLevelsForModel(capabilities, model);
-  if (advertised.includes(requestedEffort)) return null;
+  if (
+    advertised.length &&
+    resolveEffort(
+      requestedEffort,
+      advertised,
+      effortRankLadder([
+        capabilities.effort_levels,
+        ...Object.values(capabilities.model_effort_levels).map((entry) => entry.levels),
+      ]),
+    ).status === "ok"
+  )
+    return null;
   const perModel =
     model !== null && (capabilities.model_effort_levels[model]?.levels.length ?? 0) > 0;
   const supported = advertised.join(", ");
@@ -180,6 +197,7 @@ export async function resolveExplicitReviewerPanel(
           `reviewer credential profile "${entry.credentialProfileId}" cannot be resolved because the account-pool owner is unavailable`,
         );
       }
+      const profilePinned = Boolean(entry.credentialProfileId);
       const excludedProfileIds = new Set<string>();
       for (;;) {
         const credentialProfile = deps.resolveReviewerProfile
@@ -323,14 +341,15 @@ export async function resolveExplicitReviewerPanel(
           }
         }
         const requestedEffort = entry.effort ?? null;
-        // An EXPLICIT panel entry is a precise owner statement — an unadvertised
-        // level stays a hard, typed refusal (never forwarded to die natively).
-        const refusal = reviewerEffortRefusal(
-          entry.harness,
-          requestedEffort,
-          manifest.capabilities,
-          requestedModel,
-        );
+        // Native effort adapters resolve after the final account/model is bound.
+        const refusal = adapter.effortParameter
+          ? null
+          : reviewerEffortRefusal(
+              entry.harness,
+              requestedEffort,
+              manifest.capabilities,
+              requestedModel,
+            );
         if (refusal) throw new HarnessUnavailableError(refusal);
         specs.push({
           adapter,
@@ -339,7 +358,7 @@ export async function resolveExplicitReviewerPanel(
           requestedEffort,
           authPreference,
           processingPreference: entry.processingPreference,
-          ...(deps.resolveReviewerProfile ? { credentialProfile } : {}),
+          ...(deps.resolveReviewerProfile ? { credentialProfile, profilePinned } : {}),
         });
         break;
       }
@@ -503,22 +522,12 @@ export async function resolveAutoReviewerPanel(
             continue familyLoop;
           }
         }
-        // DISCLOSE-AND-DROP, deliberately weaker than the model gate above: the
-        // per-family `reviewerEfforts` map also rides stored replay surfaces
-        // (Exact Retry params, `ControlRunAgainDraft.request`), so a map recorded
-        // before a reviewer/catalog change must not hard-fail a replay that used
-        // to run. A fresh request and a replayed draft are indistinguishable at
-        // this layer, so the disclosed drop applies everywhere — the honest
-        // middle: the panel still reviews, at the reviewer's default effort, and
-        // the drop is disclosed instead of a typed refusal killing the run.
-        // (Explicit `reviewerPanel[].effort` entries above stay hard refusals.)
+        // Preserve native preferences through final-account resolution; adapters
+        // without a separate knob retain their existing conflict/drop behavior.
         let requestedEffort = overrides.reviewerEfforts?.[m.provider_family] ?? null;
-        const dropped = reviewerEffortRefusal(
-          adapter.id,
-          requestedEffort,
-          m.capabilities,
-          requestedModel,
-        );
+        const dropped = adapter.effortParameter
+          ? null
+          : reviewerEffortRefusal(adapter.id, requestedEffort, m.capabilities, requestedModel);
         if (dropped) {
           deps.onIgnoredSetting?.(`reviewer effort dropped: ${dropped}`);
           requestedEffort = null;
@@ -530,7 +539,7 @@ export async function resolveAutoReviewerPanel(
           requestedModel,
           requestedEffort,
           authPreference,
-          ...(deps.resolveReviewerProfile ? { credentialProfile } : {}),
+          ...(deps.resolveReviewerProfile ? { credentialProfile, profilePinned: false } : {}),
         });
         break;
       }

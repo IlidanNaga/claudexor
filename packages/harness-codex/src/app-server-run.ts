@@ -9,6 +9,7 @@ import {
   CodexRpcError,
   codexAppServerEvents,
   codexAppServerThreadParams,
+  codexRequestRefusal,
   createCodexSteer,
   errorText,
   readCodexLifecycle,
@@ -96,7 +97,11 @@ export async function* runCodexAppServer(
         if (request.taint) harnessReportedError = true;
         const code = typeof rpcError["code"] === "number" ? rpcError["code"] : null;
         request.reject(
-          new CodexRpcError(code, String(rpcError["message"] ?? "Codex app-server request failed")),
+          new CodexRpcError(
+            code,
+            String(rpcError["message"] ?? "Codex app-server request failed"),
+            rpcError["data"],
+          ),
         );
         return;
       }
@@ -543,12 +548,13 @@ export async function* runCodexAppServer(
     }
     const aborted = cancellationRequested;
     const failure = processFailure ?? cancellationFailure ?? error;
+    const requestRefusal = codexRequestRefusal(failure);
     const code =
       cancellationFailure || terminationUnconfirmed
         ? "codex_control_loss"
         : "codex_app_server_failure";
     const nativeError =
-      failure !== processFailure && !cancellationFailure
+      !requestRefusal && failure !== processFailure && !cancellationFailure
         ? parseCodexStderrFailure(errorText(failure), input.spec.session_id, parseState)
         : null;
     if (nativeError) harnessReportedError = true;
@@ -557,7 +563,8 @@ export async function* runCodexAppServer(
       session_id: input.spec.session_id,
       ts: nowIso(),
       error: redactSecrets(errorText(failure)),
-      payload: { code },
+      ...(requestRefusal ? { request_refusal: requestRefusal } : {}),
+      payload: { code: requestRefusal?.kind ?? code },
     };
     yield {
       type: "completed",
