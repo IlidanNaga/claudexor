@@ -56,6 +56,11 @@ export function validateSurfaceRunControls(obj: Record<string, unknown>): string
   }
   const modelError = validateOptionalNonEmptyString(obj.model, "model");
   if (modelError) return modelError;
+  const profileError = validateOptionalNonEmptyString(
+    obj.credentialProfileId,
+    "credentialProfileId",
+  );
+  if (profileError) return profileError;
   if (
     obj.effort !== undefined &&
     (typeof obj.effort !== "string" || !EffortHint.safeParse(obj.effort).success)
