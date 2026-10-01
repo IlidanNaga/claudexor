@@ -750,6 +750,12 @@ Codex's direct `model/list` and quota app-server probes use that same producer,
 so a GUI-launched daemon can discover models and quota from the CLI it found
 during login. Host toolchain PATH is composed before a scoped HOME patch;
 credential homes and provider-variable scrubbing remain specific to each probe.
+The shared `spawnProcess`/`runCaptureRaw` helpers also request `windowsHide`:
+every child they start is a fully piped background process. On Windows this
+requests a hidden console for the direct child at spawn; it does not control
+grandchildren or windows the child opens later. Interactive sign-in
+(`profiles login`, the Terminal/ConPTY setup runner) and `setup attach` do not
+use those helpers and keep their own visible-terminal policy.
 
 ### Credential profiles (INV-135, unified account model)
 
