@@ -194,20 +194,22 @@ export function reviewerProcessingAdmission(
     // A later included route must not erase the paid/unknown class already
     // admitted for this panel lease. The marker remains until settle/cancel.
     if (!currentPaid && paidOrUnknownSeen) return;
-    if (!costs.some(Boolean)) return;
-    const included = costs.every(
-      (cost) => cost?.billing === "subscription_entitlement" || cost?.billing === "proven_zero",
+    // No receipt on an unvisited ordinary row is not unknown-price evidence.
+    // Keep every declared Processing cost and every actual dispatch observation.
+    const knownCosts = costs.filter((cost): cost is CostEvidence => cost !== undefined);
+    const included = knownCosts.every(
+      (cost) => cost.billing === "subscription_entitlement" || cost.billing === "proven_zero",
     );
     const cost: CostEvidence = {
       billing: included
         ? "subscription_entitlement"
-        : costs.some((c) => c?.billing === "metered")
+        : knownCosts.some((c) => c.billing === "metered")
           ? "metered"
           : "unknown",
       knowledge: included ? "exact" : "unknown",
       estimatedUsd: null,
       source: "review-processing-dispatch",
-      provenance: costs.flatMap((c) => c?.provenance ?? ["processing:unknown"]),
+      provenance: knownCosts.flatMap((c) => c.provenance),
     };
     reprice(ledger, leaseId, cost, "review-panel", attemptId, onDenied);
   };

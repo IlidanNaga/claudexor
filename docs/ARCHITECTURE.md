@@ -3218,7 +3218,10 @@ sample counts and auth routing survive. A new explicitly unpriced attempt
 clears the cost average; auth-only updates preserve compatible observations.
 Mixed review panels classify
 each observed amount separately from its prospective billing basis;
-their aggregate is never blindly charged as cash. Candidate and reviewer
+their aggregate is never blindly charged as cash. Panel admission keeps
+declared Processing costs and already-observed slot costs;
+an unvisited ordinary slot without a receipt does not invent an unknown-cost
+hold. Later included slots cannot erase an observed paid or unknown hold. Candidate and reviewer
 retries classify EACH usage event by that event/current typed credential
 route and Processing evidence; a native→API-key retry cannot hide later metered spend under the first
 native route, and an undisclosed route remains cost-unverifiable. A typed auth

@@ -1,7 +1,7 @@
 import { newAttemptUsageCost, observeAttemptUsageEvent } from "./attemptUsageCost.js";
 import { describe, expect, it, vi } from "vitest";
 import { BudgetLedger } from "@claudexor/budget";
-import { HarnessRunSpec, type ProcessingCostBasis } from "@claudexor/schema";
+import { HarnessRunSpec, type BillingKnowledge, type ProcessingCostBasis } from "@claudexor/schema";
 import type { PreparedHarnessProcessing, HarnessAdapter } from "@claudexor/core";
 import {
   bindProcessingAdmission,
@@ -135,6 +135,54 @@ describe("exact prepared processing before physical dispatch", () => {
       "unknown_paid_in_flight",
     );
   });
+  it.each(["unknown", "metered"] as const)(
+    "keeps observed ordinary %s cost when an included slot follows",
+    (billing) => {
+      const ledger = new BudgetLedger({ kind: "finite", maxUsd: 2 });
+      const lease = reserve(ledger);
+      const reviewers = [0, 1].map(() => ({ adapter: { id: "fixture" } })) as ReviewerSpec[];
+      const admit = reviewerProcessingAdmission(ledger, lease.lease_id, reviewers, "a01");
+      admit(0, ordinary(billing));
+      admit(1, ordinary("subscription_entitlement"));
+      expect(lease.cost.billing).toBe(billing);
+      expect(ledger.reserve({ taskId: "t", intent: "audit", harnessId: "other" }).denied).toBe(
+        "unknown_paid_in_flight",
+      );
+    },
+  );
+  it.each(["unknown", "metered"] as const)(
+    "admits an included ordinary row but refuses a later %s row beside an unknown parent",
+    (billing) => {
+      const ledger = new BudgetLedger({ kind: "finite", maxUsd: 2 });
+      expect(
+        ledger.reserve({
+          taskId: "parent",
+          intent: "audit",
+          harnessId: "parent",
+        }).granted,
+      ).toBe(true);
+      const lease = reserve(ledger);
+      const reviewers = [0, 1].map(() => ({ adapter: { id: "fixture" } })) as ReviewerSpec[];
+      const admit = reviewerProcessingAdmission(ledger, lease.lease_id, reviewers, "a01");
+      expect(() => admit(0, ordinary("subscription_entitlement"))).not.toThrow();
+      expect(() => admit(1, ordinary(billing))).toThrow(ProcessingBudgetAdmissionError);
+    },
+  );
+  it("counts declared paid Processing before its slot is visited", () => {
+    const ledger = new BudgetLedger({ kind: "finite", maxUsd: 2 });
+    expect(ledger.reserve({ taskId: "parent", intent: "audit", harnessId: "parent" }).granted).toBe(
+      true,
+    );
+    const lease = reserve(ledger);
+    const reviewers = [
+      { adapter: { id: "fixture" } },
+      { adapter: { id: "fixture" }, processing: prepared("paid_credits") },
+    ] as ReviewerSpec[];
+    const admit = reviewerProcessingAdmission(ledger, lease.lease_id, reviewers, "a01");
+    expect(() => admit(0, ordinary("subscription_entitlement"))).toThrow(
+      ProcessingBudgetAdmissionError,
+    );
+  });
   it.each([
     { kind: "included", amountKind: "valuation", usd: 3, remaining: 1, denied: false },
     { kind: "paid_credits", amountKind: "unknown", usd: 2, remaining: 0, denied: true },
@@ -170,3 +218,23 @@ describe("exact prepared processing before physical dispatch", () => {
     },
   );
 });
+
+function ordinary(billing: BillingKnowledge): HarnessRunSpec {
+  return HarnessRunSpec.parse({
+    session_id: "ordinary-review",
+    intent: "review",
+    prompt: "test",
+    cwd: "/fixture",
+    credential_profile: {
+      profile_id: "review-account",
+      harness_id: "fixture",
+      display_name: "Review account",
+      credential_kind: billing === "metered" ? "api_key" : "config_dir_login",
+      isolation_locator: billing === "metered" ? null : "/fixture/profile",
+      secret_ref: billing === "metered" ? "openai:review-account" : null,
+      enabled: true,
+      created_at: null,
+    },
+    extra: { routeBillingKnowledge: billing },
+  });
+}
