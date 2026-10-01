@@ -1,10 +1,37 @@
-import type { BudgetLedger } from "@claudexor/budget";
-import type { ProcessingAdmission } from "@claudexor/core";
-import type { CostEvidence, HarnessRunSpec } from "@claudexor/schema";
+import {
+  attemptCostEvidence,
+  routeCostEvidence,
+  RoutingPreflightError,
+  type BudgetLedger,
+} from "@claudexor/budget";
+import type { PreparedHarnessProcessing, ProcessingAdmission } from "@claudexor/core";
+import type {
+  BillingKnowledge,
+  BudgetLease,
+  CostEvidence,
+  HarnessRunSpec,
+} from "@claudexor/schema";
 import type { ReviewerSpec } from "@claudexor/review";
 import type { AttemptUsageCost } from "./attemptUsageCost.js";
 import type { BudgetDenial } from "./budgetFailure.js";
 import { processingCostEvidence } from "./processing-routing.js";
+
+/** Compose initial lease evidence once from the admitted account and processing. */
+export function processingAttemptCostEvidence(
+  harnessId: string,
+  attemptId: string,
+  estimatedUsd: number | undefined,
+  billing: BillingKnowledge,
+  processing: PreparedHarnessProcessing | undefined,
+): CostEvidence {
+  return attemptCostEvidence(
+    harnessId,
+    attemptId,
+    estimatedUsd,
+    billing,
+    processingCostEvidence(processing, billing, [`harness:${harnessId}`]),
+  );
+}
 
 /** A budget refusal before native dispatch, never an adapter or auth failure. */
 export class ProcessingBudgetAdmissionError extends Error {
@@ -19,37 +46,51 @@ export class ProcessingBudgetAdmissionError extends Error {
 }
 
 function preparedCost(spec: HarnessRunSpec, harnessId: string): CostEvidence | undefined {
-  if (!spec.processing || !spec.processing_cost_basis) return undefined;
-  // A concrete profile on the prepared spec is authoritative. The extra is
-  // only a resolver/fallback for routes that have no profile identity yet.
-  const profileBilling =
-    spec.credential_profile?.credential_kind === "api_key"
-      ? "metered"
-      : spec.credential_profile
-        ? "subscription_entitlement"
-        : undefined;
   const resolver = spec.extra["routeBillingKnowledge"];
   const resolved =
-    profileBilling ??
-    (typeof resolver === "function"
+    typeof resolver === "function"
       ? (resolver as (actual: HarnessRunSpec) => unknown)(spec)
-      : resolver);
+      : resolver;
   const ordinary =
-    resolved === "metered" || resolved === "subscription_entitlement" || resolved === "unknown"
-      ? resolved
-      : spec.credential_profile?.credential_kind === "api_key"
-        ? "metered"
+    spec.credential_profile?.credential_kind === "api_key"
+      ? "metered"
+      : resolved === "metered" || resolved === "subscription_entitlement" || resolved === "unknown"
+        ? resolved
         : spec.credential_profile
-          ? "subscription_entitlement"
+          ? "unknown"
           : spec.auth_preference === "api_key"
             ? "metered"
             : spec.auth_preference === "subscription"
               ? "subscription_entitlement"
               : "unknown";
-  return processingCostEvidence(
-    { model: spec.model_hint, receipt: spec.processing, costBasis: spec.processing_cost_basis },
-    ordinary,
-    [`harness:${harnessId}`, `profile:${spec.credential_profile?.profile_id ?? "default"}`],
+  const provenance = [
+    `harness:${harnessId}`,
+    `profile:${spec.credential_profile?.profile_id ?? "default"}`,
+  ];
+  const processing =
+    spec.processing && spec.processing_cost_basis
+      ? processingCostEvidence(
+          {
+            model: spec.model_hint,
+            receipt: spec.processing,
+            costBasis: spec.processing_cost_basis,
+          },
+          ordinary,
+          provenance,
+        )
+      : undefined;
+  // Ordinary dispatches also re-admit the exact row after a rotation. No
+  // processing controls are required to consume account billing evidence.
+  return (
+    processing ??
+    (spec.credential_profile && resolver !== undefined
+      ? routeCostEvidence({
+          billing: ordinary,
+          knowledge: ordinary === "subscription_entitlement" ? "exact" : "unknown",
+          source: "credential-profile-verification",
+          provenance,
+        })
+      : undefined)
   );
 }
 
@@ -77,30 +118,56 @@ function reprice(
  * callback, which receives each actual prepared profile/model before spawn. */
 export function processingAdmissionForLease(
   ledger: BudgetLedger,
-  leaseId: string,
+  lease: BudgetLease,
   harnessId: string,
   attemptId: string | null,
   onDenied?: (denial: BudgetDenial) => void,
 ): ProcessingAdmission {
+  // A positive reservation floor is independent of account entitlement. Never
+  // carry an old included/zero verdict into a newly unknown or metered route.
+  const estimate = lease.cost.estimatedUsd;
   return (actual) => {
-    const cost = preparedCost(actual, harnessId);
-    if (cost) reprice(ledger, leaseId, cost, harnessId, attemptId, onDenied);
+    const prepared = preparedCost(actual, harnessId);
+    if (!prepared) return;
+    const cost: CostEvidence =
+      prepared.knowledge === "unknown" &&
+      prepared.estimatedUsd === null &&
+      estimate != null &&
+      estimate > 0
+        ? { ...prepared, estimatedUsd: estimate, knowledge: "estimated" }
+        : prepared;
+    if (
+      actual.extra["paidFallback"] === "never" &&
+      cost.billing !== "subscription_entitlement" &&
+      cost.billing !== "proven_zero"
+    ) {
+      // Rotation must preserve the original paid-fallback policy as well as
+      // the monetary cap. Reuse the routing refusal taxonomy, not auth failure.
+      throw Object.assign(
+        new RoutingPreflightError(
+          `paid_fallback: never refused ${harnessId} profile ${actual.credential_profile?.profile_id ?? "default"} with ${cost.billing} billing before dispatch`,
+        ),
+        { category: "config_error" },
+      );
+    }
+    reprice(ledger, lease.lease_id, cost, harnessId, attemptId, onDenied);
   };
 }
 
 export function bindProcessingAdmission(
   spec: HarnessRunSpec,
   ledger: BudgetLedger,
-  leaseId: string,
+  lease: BudgetLease,
   harnessId: string,
   attemptId: string | null,
   onDenied?: (denial: BudgetDenial) => void,
   admission?: ProcessingAdmission,
 ): ProcessingAdmission {
   const bound =
-    admission ?? processingAdmissionForLease(ledger, leaseId, harnessId, attemptId, onDenied);
+    admission ?? processingAdmissionForLease(ledger, lease, harnessId, attemptId, onDenied);
   spec.extra["processingAdmission"] = bound;
-  spec.extra["markPhysicalDispatchStarted"] = () => ledger.markPhysicalDispatchStarted(leaseId);
+  spec.extra["markPhysicalDispatchStarted"] = () =>
+    ledger.markPhysicalDispatchStarted(lease.lease_id);
   return bound;
 }
 
@@ -127,20 +194,22 @@ export function reviewerProcessingAdmission(
     // A later included route must not erase the paid/unknown class already
     // admitted for this panel lease. The marker remains until settle/cancel.
     if (!currentPaid && paidOrUnknownSeen) return;
-    if (!costs.some(Boolean)) return;
-    const included = costs.every(
-      (cost) => cost?.billing === "subscription_entitlement" || cost?.billing === "proven_zero",
+    // No receipt on an unvisited ordinary row is not unknown-price evidence.
+    // Keep every declared Processing cost and every actual dispatch observation.
+    const knownCosts = costs.filter((cost): cost is CostEvidence => cost !== undefined);
+    const included = knownCosts.every(
+      (cost) => cost.billing === "subscription_entitlement" || cost.billing === "proven_zero",
     );
     const cost: CostEvidence = {
       billing: included
         ? "subscription_entitlement"
-        : costs.some((c) => c?.billing === "metered")
+        : knownCosts.some((c) => c.billing === "metered")
           ? "metered"
           : "unknown",
       knowledge: included ? "exact" : "unknown",
       estimatedUsd: null,
       source: "review-processing-dispatch",
-      provenance: costs.flatMap((c) => c?.provenance ?? ["processing:unknown"]),
+      provenance: knownCosts.flatMap((c) => c.provenance),
     };
     reprice(ledger, leaseId, cost, "review-panel", attemptId, onDenied);
   };

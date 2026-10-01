@@ -13,7 +13,7 @@ import { ArtifactStore, type RunPaths } from "@claudexor/artifact-store";
 import { EventLog } from "@claudexor/event-log";
 import { BudgetLedger } from "@claudexor/budget";
 import type { AttemptTelemetry } from "./attemptTelemetry.js";
-import { readOnlyNoSuccessTerminal, type AttemptOutcomeClass } from "./attemptFinalize.js";
+import { readOnlyNoSuccessTerminal } from "./attemptFinalize.js";
 import { cancelledResult, writeFailure } from "./runTerminals.js";
 import { requestRefusalFailure } from "./runTerminalResults.js";
 import { unanimousDeclaredFailure } from "./candidateEvidence.js";
@@ -30,13 +30,12 @@ import {
 } from "./council.js";
 import { stageCouncilDraft, type CouncilMergeInput } from "./council-input.js";
 import type { OrchestratorResult, RoutedAdapter, RunInput } from "./orchestrator.js";
-import type { PlannerAttemptArgs, PlannerAttemptOutcome } from "./plannerAttempt.js";
-type PlanAttemptSummary = Pick<
-  PlannerAttemptOutcome,
-  "attemptId" | "harnessId" | "status" | "error"
-> & {
-  outcomeClass?: AttemptOutcomeClass;
-};
+import {
+  plannerAttemptSummary,
+  type PlannerAttemptArgs,
+  type PlannerAttemptOutcome,
+} from "./plannerAttempt.js";
+type PlanAttemptSummary = ReturnType<typeof plannerAttemptSummary>;
 /** Council orchestration and shared solo/Council finalize/failure tails. */
 export interface PlanRunDeps {
   /** One planner spawn (native plan mode, read-only) — the SAME machinery the
@@ -147,10 +146,8 @@ export async function runCouncilPlan(
           telemetry: outcome.telemetry,
         });
       planAttempts.push({
-        attemptId: outcome.attemptId,
-        harnessId: outcome.harnessId,
+        ...plannerAttemptSummary(outcome),
         status: outcome.status === "success" && !staged.input ? "failed" : outcome.status,
-        outcomeClass: outcome.outcomeClass,
         error: staged.error,
       });
       if (outcome.budgetDenied) councilBudgetDenial ??= outcome.budgetDenial ?? null;
@@ -272,13 +269,7 @@ export async function runCouncilPlan(
       harnessId: mergeOutcome.harnessId,
       telemetry: mergeOutcome.telemetry,
     });
-  planAttempts.push({
-    attemptId: mergeOutcome.attemptId,
-    harnessId: mergeOutcome.harnessId,
-    status: mergeOutcome.status,
-    outcomeClass: mergeOutcome.outcomeClass,
-    error: mergeOutcome.error,
-  });
+  planAttempts.push(plannerAttemptSummary(mergeOutcome));
 
   const mergedBy = mergeOutcome.status === "success" ? primary.adapter.id : null;
   // QA-047 root cause 4: a member card carries its DRAFT error only — the
@@ -538,13 +529,18 @@ export function writePlanHarnessFailure(
   } else {
     const refusals = (ctx.aggregateFailure ? planAttempts : planAttempts.slice(-1)).map(
       (p) =>
-        ctx.attemptTelemetries.find((a) => a.attemptId === p.attemptId)?.telemetry.requestRefusal,
+        p.declaredFailure ??
+        (() => {
+          const refusal = ctx.attemptTelemetries.find((a) => a.attemptId === p.attemptId)?.telemetry
+            .requestRefusal;
+          return refusal && requestRefusalFailure(refusal);
+        })(),
     );
     const declared = blocked
       ? null
       : unanimousDeclaredFailure(
           refusals.map((refusal) => ({
-            declaredFailure: refusal && requestRefusalFailure(refusal),
+            declaredFailure: refusal,
           })),
         );
     const harnessCategory = dominantHarnessFailureCategory(
@@ -558,7 +554,9 @@ export function writePlanHarnessFailure(
       safeMessage: message,
       eventRefs: planAttempts.map((p) => `attempts/${p.attemptId}/events.jsonl`),
       runDir: paths.root,
-      nextActions: harnessFailureNextActions(harnessCategory),
+      nextActions: harnessFailureNextActions(
+        declared?.category === "config_error" ? "config_error" : harnessCategory,
+      ),
     });
   }
   // D-16: context exhaustion stays interrupted after policy/budget precedence.

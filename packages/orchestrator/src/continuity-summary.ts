@@ -20,13 +20,9 @@ import {
   type CredentialProfile,
   type HarnessEvent as HarnessEventType,
 } from "@claudexor/schema";
-import {
-  AnswerAssembly,
-  admitPreparedProcessing,
-  type HarnessAdapter,
-  type ProcessingAdmission,
-} from "@claudexor/core";
+import { AnswerAssembly, type HarnessAdapter, type ProcessingAdmission } from "@claudexor/core";
 import type { ContinuityTurn } from "./continuity.js";
+import { admitCurrentProfileDispatch, type ModelGovernedRoute } from "./modelGovernance.js";
 
 /** Default wall-clock ceiling for one inline summary pass. */
 export const SUMMARY_TIMEOUT_MS = 60_000;
@@ -58,6 +54,8 @@ export interface SummaryRunParams {
   /** The same lease-bound admission callback as the enclosing candidate. */
   processingAdmission?: ProcessingAdmission;
   physicalDispatchStarted?: () => void;
+  billingVerificationForProfile?: ModelGovernedRoute["billingVerificationForProfile"];
+  paidFallback?: ModelGovernedRoute["paidFallback"];
 }
 
 function boundBytes(text: string, maxBytes: number): string {
@@ -139,10 +137,10 @@ export async function summarizeThreadPrefix(params: SummaryRunParams): Promise<s
       extra: {
         abortSignal: abort.signal,
         ...(params.processingAdmission ? { processingAdmission: params.processingAdmission } : {}),
+        markPhysicalDispatchStarted: params.physicalDispatchStarted,
       },
     });
-    await admitPreparedProcessing(spec);
-    params.physicalDispatchStarted?.();
+    await admitCurrentProfileDispatch(params, spec);
     for await (const raw of params.adapter.run(spec)) {
       if (abort.signal.aborted) return null;
       const event = raw as HarnessEventType;
