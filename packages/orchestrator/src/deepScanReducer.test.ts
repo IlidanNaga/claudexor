@@ -562,7 +562,22 @@ describe("runDeepScanReducer WorkReport contract parity (D-16)", () => {
       expect(result).toEqual({ status: "failed", error: "deep-scan reducer timed out after 20ms" });
       expect(Date.now() - startedAt).toBeGreaterThanOrEqual(90);
       expect(Date.now() - startedAt).toBeLessThan(400);
-      expect(observed).toEqual([]);
+      expect(observed).toEqual([
+        expect.objectContaining({
+          type: "status",
+          effort_resolution: {
+            requested: null,
+            submitted: null,
+            parameter: null,
+            resolution: "omitted",
+            source: "adapter",
+            observed: null,
+            observedSource: null,
+          },
+        }),
+      ]);
+      expect(observed[0]?.text).toBeUndefined();
+      expect(observed[0]?.payload).toBeUndefined();
       expect(dispose).toHaveBeenCalledOnce();
       expect(ledger.remainingUsd()).toBe(1);
       expect(streamObservedHomeAlive).toBe(true);
@@ -628,7 +643,19 @@ describe("runDeepScanReducer WorkReport contract parity (D-16)", () => {
         },
       });
       expect(result).toEqual({ status: "failed", error: "deep-scan reducer timed out after 20ms" });
+      expect(observed[0]?.effort_resolution).toEqual({
+        requested: null,
+        submitted: null,
+        parameter: null,
+        resolution: "omitted",
+        source: "adapter",
+        observed: null,
+        observedSource: null,
+      });
+      expect(observed[0]?.text).toBeUndefined();
+      expect(observed[0]?.payload).toBeUndefined();
       expect(observed.map((event) => event.type)).toEqual([
+        "status",
         "started",
         "usage",
         "error",

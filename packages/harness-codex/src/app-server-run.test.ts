@@ -1192,6 +1192,10 @@ describe("Codex app-server transport", () => {
       cwd: process.cwd(),
     });
     const iterator = adapter.run(spec)[Symbol.asyncIterator]();
+    expect((await iterator.next()).value).toMatchObject({
+      type: "status",
+      effort_resolution: { requested: null, submitted: null, resolution: "omitted" },
+    });
     expect((await iterator.next()).value).toMatchObject({ type: "started" });
     await adapter.cancel?.("session-adapter");
     expect((await iterator.next()).value).toMatchObject({ type: "completed", aborted: true });
@@ -1610,6 +1614,10 @@ describe("Codex live messages (turn/steer)", () => {
       cwd: process.cwd(),
     });
     const iterator = adapter.run(runSpec)[Symbol.asyncIterator]();
+    expect((await iterator.next()).value).toMatchObject({
+      type: "status",
+      effort_resolution: { requested: null, submitted: null, resolution: "omitted" },
+    });
     expect((await iterator.next()).value).toMatchObject({ type: "started" });
     await expect(
       adapter.message?.("session-message", { messageId: "msg-a", text: "steer" }),
@@ -1658,6 +1666,10 @@ describe("Codex live messages (turn/steer)", () => {
       cwd: process.cwd(),
     });
     const iterator = adapter.run(runSpec)[Symbol.asyncIterator]();
+    expect((await iterator.next()).value).toMatchObject({
+      type: "status",
+      effort_resolution: { requested: null, submitted: null, resolution: "omitted" },
+    });
     expect((await iterator.next()).value).toMatchObject({ type: "started" });
     await expect(
       adapter.message?.("session-exec", { messageId: "msg-exec", text: "steer" }),

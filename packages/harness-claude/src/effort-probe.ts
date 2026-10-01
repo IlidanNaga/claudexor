@@ -16,12 +16,15 @@
  * On a missing binary, an unparseable help text, or a `--help` that stops
  * documenting the values, the recorded snapshot fills in and the run proceeds.
  */
-import type { HarnessEvent, HarnessRunSpec } from "@claudexor/schema";
+import type { EffortResolution, HarnessEvent, HarnessRunSpec } from "@claudexor/schema";
 import { EffortHint } from "@claudexor/schema";
 import {
   harnessBinaryIdentity,
   harnessBinaryIdentityOnPath,
   normalizeEffort,
+  effortRankLadder,
+  resolveEffortEvidence,
+  effortResolutionEvent,
   resolveEffort,
   runCapture,
 } from "@claudexor/core";
@@ -42,6 +45,12 @@ export const CLAUDE_EFFORT_SNAPSHOT: readonly EffortHint[] = [
   "xhigh",
   "max",
 ];
+
+/** Historical vendor order may rank a preference; only the current verified
+ * advertised list authorizes submitting a value. Never combine providers. */
+export function claudeEffortLadder(advertised: readonly EffortHint[]): readonly EffortHint[] {
+  return effortRankLadder([CLAUDE_EFFORT_SNAPSHOT, advertised]);
+}
 
 /** Vendor CLI version `CLAUDE_EFFORT_SNAPSHOT` was captured from. Aliases the
  * per-package vendor-version SSOT (vendor-cli-version.ts), the same constant
@@ -105,7 +114,12 @@ export async function claudeRunEffortResolution(
     detectVersion: typeof detectClaudeVersion;
   },
   abortSignal?: AbortSignal,
-): Promise<{ advertised: readonly EffortHint[]; disclosure: HarnessEvent | null }> {
+): Promise<{
+  advertised: readonly EffortHint[];
+  disclosure: HarnessEvent | null;
+  resolution: EffortResolution;
+  event: HarnessEvent;
+}> {
   // Both answers must come from the binary THIS run will execute: a PATH in the
   // run's env patch replaces the normalized PATH at spawn (see helpProbeIdentity),
   // and a host binary's version must never vouch for the snapshot on the patch's.
@@ -115,7 +129,23 @@ export async function claudeRunEffortResolution(
     efforts.live || !spec.effort_hint
       ? efforts.levels
       : claudeAdvertisedEffortsForRun(efforts, await deps.detectVersion(abortSignal, patchPath));
-  return { advertised, disclosure: claudeEffortDisclosureEvent(spec, advertised) };
+  const unverifiable = !efforts.live && advertised !== efforts.levels;
+  const resolution = resolveEffortEvidence(
+    spec.effort_hint,
+    advertised,
+    claudeEffortLadder(advertised),
+    unverifiable ? "adapter" : efforts.live ? "live_probe" : "versioned_snapshot",
+    "--effort",
+    unverifiable,
+  );
+  const disclosure = claudeEffortDisclosureEvent(spec, advertised);
+  const event = {
+    ...(["downward", "floor", "unverifiable"].includes(resolution.resolution) && disclosure
+      ? disclosure
+      : effortResolutionEvent(spec.session_id, resolution)),
+    effort_resolution: resolution,
+  };
+  return { advertised, resolution, event, disclosure };
 }
 
 /** The PATH a run's env patch selects the binary on, when it carries one. */
@@ -396,7 +426,8 @@ export function claudeEffortIgnoredEvent(
   advertised: readonly EffortHint[],
 ): HarnessEvent | null {
   if (!spec.effort_hint) return null;
-  if (normalizeEffort(spec.effort_hint, advertised) !== null) return null;
+  if (normalizeEffort(spec.effort_hint, advertised, claudeEffortLadder(advertised)) !== null)
+    return null;
   // An EMPTY advertised list is the version-gated snapshot distrust case
   // (`claudeAdvertisedEffortsForRun`): the installed binary's ladder could not
   // be read and the recorded snapshot belongs to a different CLI version, so
@@ -404,13 +435,13 @@ export function claudeEffortIgnoredEvent(
   const detail =
     advertised.length > 0
       ? `effort=${spec.effort_hint} (not accepted by the installed claude CLI; ` +
-        `it advertises: ${advertised.join(", ")}; the run used the vendor default)`
+        `it advertises: ${advertised.join(", ")}; no effort flag is prepared; the vendor default is left unspecified)`
       : `effort=${spec.effort_hint} (could not be verified against the installed claude CLI: ` +
         "its effort ladder could not be read from --help, and the recorded snapshot was " +
         `captured from CLI ${CLAUDE_EFFORT_SNAPSHOT_VERIFIED_AGAINST}, a different version, ` +
-        "so no effort flag was sent; the run used the vendor default)";
+        "so no effort flag is prepared; the vendor default is left unspecified)";
   return {
-    type: "message",
+    type: "status",
     session_id: spec.session_id,
     ts: nowIso(),
     text: `[effort] ignored: ${detail}`,
@@ -427,13 +458,6 @@ export function claudeEffortIgnoredEvent(
  * inputs the arg builder's normalizer takes so the disclosure can never
  * disagree with the flag actually sent.
  *
- * Reachability today: the arg builder resolves with the installed binary's own
- * list as both advertised set and rank ladder (`normalizeEffort`'s two-arg
- * form), and against one's own ladder every miss is a DROP, never a clamp —
- * so with current call sites this event only fires if a rank ladder broader
- * than the binary's list is ever threaded through (the codex-shaped future,
- * e.g. `ultra` ranking above a max-capped binary and clamping onto `max`).
- * The seam exists precisely so that future cannot be silent.
  */
 /**
  * The one INV-105 seam the run yields: the DROP disclosure or the CLAMP
@@ -451,7 +475,7 @@ export function claudeEffortDisclosureEvent(
 export function claudeEffortClampedEvent(
   spec: Pick<HarnessRunSpec, "session_id" | "effort_hint">,
   advertised: readonly EffortHint[],
-  ladder: readonly EffortHint[] = advertised,
+  ladder: readonly EffortHint[] = claudeEffortLadder(advertised),
 ): HarnessEvent | null {
   if (!spec.effort_hint) return null;
   const check = resolveEffort(spec.effort_hint, advertised, ladder);
@@ -459,9 +483,9 @@ export function claudeEffortClampedEvent(
   const detail =
     `effort=${spec.effort_hint} (clamped to ${check.effort}: the requested level is not ` +
     `advertised by the installed claude CLI (it advertises: ${advertised.join(", ")}), ` +
-    `so the run sent ${check.effort}, the nearest level it advertises)`;
+    `so preparation selected ${check.effort}, the resolved supported level)`;
   return {
-    type: "message",
+    type: "status",
     session_id: spec.session_id,
     ts: nowIso(),
     text: `[effort] clamped: ${detail}`,

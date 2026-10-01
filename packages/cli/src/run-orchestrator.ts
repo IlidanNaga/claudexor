@@ -5,7 +5,11 @@
  * feeds the unusable-credential ledger's success-clearing, and the same deps
  * boundary that injects quota snapshots injects the ledger's observations.
  */
-import { CredentialUnusableLedger, type QuotaRegistry } from "@claudexor/daemon";
+import {
+  CredentialUnusableLedger,
+  PreProgressRefusalLedger,
+  type QuotaRegistry,
+} from "@claudexor/daemon";
 import { Orchestrator } from "@claudexor/orchestrator";
 import type { normalizeRunStartRequest } from "@claudexor/control-api";
 import { buildRegistry } from "./registry.js";
@@ -18,6 +22,14 @@ import type { RuntimeConcurrencyCaps } from "@claudexor/schema";
  * dead credential. `claudexord` clears it on credential-generation changes.
  */
 export const credentialUnusableLedger = new CredentialUnusableLedger();
+
+/**
+ * Daemon-lifetime pre-progress refusal observations (#363): in-memory and
+ * bounded like the unusable ledger, cleared at the same credential-generation
+ * call sites. Agent Runs produce them and every unpinned pool choice (runs,
+ * reviewers, the Accounts `next_up` projection) reads them.
+ */
+export const preProgressRefusalLedger = new PreProgressRefusalLedger();
 
 type OrchestratorDeps = ConstructorParameters<typeof Orchestrator>[0];
 
@@ -49,6 +61,7 @@ export function buildRunOrchestrator(args: {
     },
     credentialUnusable: () => credentialUnusableLedger.live(),
     recordCredentialUnusable: (obs) => credentialUnusableLedger.record(obs),
+    preProgressRefusals: preProgressRefusalLedger,
     reviewerPanel: p.reviewerPanel,
     reviewerModels:
       p.reviewerModels && typeof p.reviewerModels === "object" ? p.reviewerModels : undefined,

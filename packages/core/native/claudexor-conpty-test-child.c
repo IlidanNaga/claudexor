@@ -304,7 +304,75 @@ static int run_fake_agy(int argc, wchar_t **argv) {
   return 0;
 }
 
+/* Offline Cursor-shaped commands for the built CLI setup lifecycle test.
+ * The profile-local marker is mandatory, so no ordinary fixture invocation
+ * changes meaning. This executable never performs network or auth work. */
+static int run_fake_cursor(int argc, wchar_t **argv) {
+  int login = argc == 2 && wcscmp(argv[1], L"login") == 0;
+  int status = argc == 4 && wcscmp(argv[1], L"status") == 0 &&
+               wcscmp(argv[2], L"--format") == 0 &&
+               wcscmp(argv[3], L"json") == 0;
+  if (!login && !status) return -1;
+  wchar_t *home = environment_value(L"HOME");
+  if (home == NULL) return 84;
+  if (!marker_exists(home, L".claudexor-cursor-fake-enabled")) {
+    free(home);
+    return 85;
+  }
+  if (status) {
+    printf("{\"authenticated\":%s,\"email\":\"fixture@example.test\"}\n",
+           marker_exists(home, L".claudexor-cursor-fake-finished") ? "true" : "false");
+    free(home);
+    return 0;
+  }
+  DWORD mode = 0;
+  int input_tty = GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &mode) != 0;
+  int output_tty = GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &mode) != 0;
+  int error_tty = GetConsoleMode(GetStdHandle(STD_ERROR_HANDLE), &mode) != 0;
+  wchar_t *user_profile = environment_value(L"USERPROFILE");
+  wchar_t *store = environment_value(L"AGENT_CLI_CREDENTIAL_STORE");
+  int scoped = user_profile != NULL && wcscmp(home, user_profile) == 0;
+  int file_store = store != NULL && wcscmp(store, L"file") == 0;
+  int no_keys = provider_keys_absent() &&
+                GetEnvironmentVariableW(L"CURSOR_API_KEY", NULL, 0) == 0;
+  free(user_profile);
+  free(store);
+  wchar_t *path = home_path(home, L".claudexor-cursor-fake-starts");
+  if (path == NULL) {
+    free(home);
+    return 86;
+  }
+  HANDLE evidence = CreateFileW(path, FILE_APPEND_DATA,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                                OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  free(path);
+  if (evidence == INVALID_HANDLE_VALUE) {
+    free(home);
+    return 87;
+  }
+  char line[160];
+  int length = snprintf(line, sizeof(line), "LOGIN|%lu|%d|%d|%d|%d|%d|%d\n",
+                        (unsigned long)GetCurrentProcessId(), input_tty,
+                        output_tty, error_tty, scoped, file_store, no_keys);
+  int written = length > 0 && (size_t)length < sizeof(line) &&
+                write_all(evidence, line, (DWORD)length);
+  CloseHandle(evidence);
+  if (!written || !input_tty || !output_tty || !error_tty || !scoped ||
+      !file_store || !no_keys) {
+    free(home);
+    return 88;
+  }
+  fputs("FAKE_CURSOR_TTY_READY\n", stdout);
+  fflush(stdout);
+  while (!marker_exists(home, L".claudexor-cursor-fake-release")) Sleep(20);
+  int completed = touch_home_marker(home, L".claudexor-cursor-fake-finished");
+  free(home);
+  return completed ? 0 : 89;
+}
+
 int wmain(int argc, wchar_t **argv) {
+  int cursor = run_fake_cursor(argc, argv);
+  if (cursor >= 0) return cursor;
   int fake = run_fake_agy(argc, argv);
   if (fake >= 0) return fake;
   if (argc >= 2 && wcscmp(argv[1], L"--argv") == 0) {

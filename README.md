@@ -31,7 +31,7 @@ with a vendor usage source (Antigravity, Claude, and Codex); Cursor has none
 yet. Everything runs on your machine, files are the source of truth, and there
 is no telemetry.
 
-Current status: **v3.17.0**. See "Stability at 2.0" below for what is a stable
+Current status: **v3.17.2**. See "Stability at 2.0" below for what is a stable
 contract and what remains experimental; retired verbs and mode ids hard-error
 with the new spelling instead of silently aliasing.
 
@@ -93,7 +93,7 @@ composer](docs/assets/app-agent-run.jpg)
   Explicit directory execution supports direct work and selected-input copies
   without Git; Doctor reports Git availability, and
   the app's Workspace Git check explains whether a Git-backed shape is admitted.
-- At least one logged-in vendor CLI — `codex`, `claude`, `cursor-agent`,
+- At least one logged-in vendor CLI — `codex`, `claude`, `cursor-agent` (or Cursor’s `agent`),
   `opencode`, or `agy` (Antigravity, for a Gemini subscription) — OR a
   provider API key (adapters accept `OPENAI_API_KEY`,
   `ANTHROPIC_API_KEY`, ... as fallbacks; the raw-API route needs only a key).
@@ -502,7 +502,9 @@ claudexor profiles                         # every account per harness + the inf
 claudexor accounts --json                  # read-only snapshot doorway for agents, with freshness/quota state
 claudexor auth login claude                # bootstrap sugar: sign into the claude-default row
 claudexor profiles add claude work         # register another account
-claudexor profiles login claude work       # the vendor's own login, scoped to the row's dir
+claudexor profiles login claude work       # direct vendor login in this terminal, scoped to the row's dir
+claudexor profiles add cursor work        # a separate Cursor account row
+claudexor profiles login cursor work       # daemon-managed login in this terminal; setup cancel/reconcile can recover it
 claudexor profiles disable claude work     # Enabled toggle: a disabled account is never routable
 claudexor profiles enable claude work
 claudexor profiles remove claude work      # remove the binding + any Claudexor-owned state/managed secret
@@ -604,7 +606,7 @@ localhost-callback flow. See
 claudexor auth status
 claudexor auth login codex    # codex login (device-auth by default)
 claudexor auth login claude   # claude auth login (claude.ai subscription route)
-claudexor auth login cursor   # cursor-agent login 
+claudexor auth login cursor   # cursor-agent login (or Cursor's own `agent`)
 claudexor profiles add agy work    # register a named Antigravity binding
 claudexor profiles login agy work  # login with its scoped HOME and platform credential policy
 claudexor secrets set openai --from-env OPENAI_API_KEY

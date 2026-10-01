@@ -20,10 +20,10 @@ import {
 import type { DoctorSpec, HarnessAdapter } from "@claudexor/core";
 import {
   abortSignalFromSpec,
+  credentialProfileUnpinned,
   HarnessUnavailableError,
   promptWithInstructions,
   providerScrubEnv,
-  runCapture,
   runCliHarness as runCliHarnessDefault,
 } from "@claudexor/core";
 import { resolveSecret } from "@claudexor/secrets";
@@ -41,14 +41,19 @@ import {
   type CursorStatusObservation,
 } from "./auth.js";
 import { probeCursorDoctorForAccounts } from "./doctor.js";
+import { coordinatedCursorNativeAuth, cursorFileStoreEnv } from "./status-cache.js";
+export { clearCursorStatusCache } from "./status-cache.js";
 import {
   probeCursorCredentialAccount,
   probeCursorCredentialProfile,
   resolveCursorRunRoute,
   stampCursorProfileEvents,
+  staleCursorAuthEvent,
 } from "./profile.js";
 export { canonicalCursorProfileHome, cursorProfilePathEnv } from "./profile.js";
 import { prepareCursorMcpInjection } from "./mcp-config.js";
+import { detectCursorVersion, resolveCursorBin } from "./bin.js";
+export { resolveCursorBin } from "./bin.js";
 import { smokeIsolatedApiKey, unsmokedApiSmoke, type CursorApiSmokeResult } from "./smoke.js";
 import {
   listCursorModelsFromReadyRoute,
@@ -69,7 +74,6 @@ export {
   shouldDiscloseCursorAutoApiRoute,
 } from "./auth.js";
 
-export const BIN = process.env.CLAUDEXOR_CURSOR_BIN || "cursor-agent";
 // Long enough for one sequential reviewer panel pass; still bounded so revoked
 // keys do not remain smoke-proven for a whole daemon lifetime.
 const CURSOR_API_SMOKE_CACHE_TTL_MS = 60 * 60_000;
@@ -114,27 +118,6 @@ export const CURSOR_CAPABILITY_PROFILE: HarnessCapabilityProfile =
     attachment_inputs: [],
   });
 
-/** True only when the supplied env explicitly selects the vendor FILE store
- * (an account row's HOME, `AGENT_CLI_CREDENTIAL_STORE=file`). Any other env
- * would resolve the HOST Keychain login, which is never read (D-U3). */
-function cursorFileStoreEnv(env?: EnvMap): boolean {
-  return env?.["AGENT_CLI_CREDENTIAL_STORE"] === "file";
-}
-
-async function detectVersion(abortSignal?: AbortSignal): Promise<string | null> {
-  try {
-    const r = await runCapture(BIN, ["--version"], {
-      timeoutMs: 10_000,
-      abortSignal,
-      cancelSignal: "SIGTERM",
-      cancelKillDelayMs: 0,
-    });
-    return r.stdout.trim() || `${BIN} (version unknown)`;
-  } catch {
-    return null;
-  }
-}
-
 function cursorApiKey(env?: Record<string, string | null | undefined>): string | null {
   if (env && Object.prototype.hasOwnProperty.call(env, "CLAUDEXOR_CURSOR_API_KEY"))
     return env["CLAUDEXOR_CURSOR_API_KEY"] || null;
@@ -150,7 +133,7 @@ function cursorApiKey(env?: Record<string, string | null | undefined>): string |
 
 type CursorApiSmokeCacheEntry = { result: CursorApiSmokeResult; expiresAtMs: number };
 type CursorRuntimeDeps = {
-  detectVersion: typeof detectVersion;
+  detectVersion: typeof detectCursorVersion;
   nativeAuthOk: typeof probeCursorNativeAuth;
   cursorApiKey: typeof cursorApiKey;
   listCursorModels: CursorModelLister;
@@ -242,10 +225,11 @@ async function resolveCursorAuthRoute(
 
 export function createCursorAdapter(deps: Partial<CursorRuntimeDeps> = {}): HarnessAdapter {
   const runtime: CursorRuntimeDeps = {
-    detectVersion,
-    nativeAuthOk: probeCursorNativeAuth,
+    detectVersion: detectCursorVersion,
+    // Row-store probes are shared and briefly reused process-wide (#363).
+    nativeAuthOk: coordinatedCursorNativeAuth,
     cursorApiKey,
-    listCursorModels: (env, cwd) => queryCursorModels(BIN, env, cwd),
+    listCursorModels: (env, cwd) => queryCursorModels(resolveCursorBin(), env, cwd),
     smokeIsolatedApiKey,
     apiSmokeCache: new Map(),
     apiSmokeCacheTtlMs: CURSOR_API_SMOKE_CACHE_TTL_MS,
@@ -281,7 +265,7 @@ export function createCursorAdapter(deps: Partial<CursorRuntimeDeps> = {}): Harn
       const version = await runtime.detectVersion();
       if (version === null) {
         throw new HarnessUnavailableError(
-          "cursor-agent not found on PATH (set CLAUDEXOR_CURSOR_BIN)",
+          "Cursor CLI not found on PATH: no `cursor-agent`, and no `agent` inside a Cursor install (set CLAUDEXOR_CURSOR_BIN)",
         );
       }
       // D-U3: there is no default native session to detect (the host Keychain
@@ -398,6 +382,7 @@ async function* runCursor(
     ({ cursorApiKey, ...input }) =>
       resolveCursorAuthRoute(cursorApiKey ? { ...deps, cursorApiKey } : deps, input),
     abortSignalFromSpec(spec),
+    { admitLastPositive: credentialProfileUnpinned(spec) }, // #363: the engine's pin fact
   );
   if ("refusal" in resolved) {
     yield { type: "error", session_id: spec.session_id, ts: nowIso(), error: resolved.refusal };
@@ -405,6 +390,7 @@ async function* runCursor(
     return;
   }
   const { route, env, key, nativeAuthed, scopedHome } = resolved;
+  if (resolved.staleAuth) yield staleCursorAuthEvent(spec.session_id, resolved.staleAuth);
   if (route === "api_key" && key) {
     env.CURSOR_API_KEY = key;
     if (
@@ -478,7 +464,7 @@ async function* runCursor(
     spec.model_hint,
   );
   yield* deps.runCliHarness({
-    bin: BIN,
+    bin: resolveCursorBin(),
     args,
     spec,
     input,

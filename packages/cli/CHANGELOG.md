@@ -1,5 +1,68 @@
 # @claudexor/cli
 
+## 3.17.2
+
+### Patch Changes
+
+- Preserve native input-size refusals without account retries or unrelated quota resets, publish measured ASK input budgets, distinguish proven undelivered Codex model requests, and move large Claude and AGY inputs off process arguments.
+- Updated dependencies
+  - @claudexor/harness-codex@3.17.2
+  - @claudexor/harness-claude@3.17.2
+  - @claudexor/harness-agy@3.17.2
+  - @claudexor/orchestrator@3.17.2
+  - @claudexor/daemon@3.17.2
+  - @claudexor/schema@3.17.2
+  - @claudexor/acp-server@3.17.2
+  - @claudexor/config@3.17.2
+  - @claudexor/control-api@3.17.2
+  - @claudexor/core@3.17.2
+  - @claudexor/delivery@3.17.2
+  - @claudexor/gateway@3.17.2
+  - @claudexor/harness-cursor@3.17.2
+  - @claudexor/harness-fake@3.17.2
+  - @claudexor/harness-opencode@3.17.2
+  - @claudexor/harness-raw-api@3.17.2
+  - @claudexor/mcp-server@3.17.2
+  - @claudexor/review@3.17.2
+  - @claudexor/workspace@3.17.2
+  - @claudexor/artifact-store@3.17.2
+  - @claudexor/journal@3.17.2
+  - @claudexor/secrets@3.17.2
+  - @claudexor/util@3.17.2
+
+## 3.17.1
+
+### Patch Changes
+
+- 72825b9: Resolve effort preferences at the final native route using the strongest supported level at or below a known request, with an explicitly recorded minimum or vendor-default omission when applicable. Preserve advertised future values, original preferences and model identities. Add shared typed effort evidence to model results and final attempt telemetry; keep adaptation disclosures in logs.
+
+  Preserve strict legacy model results unless creation opts into `captureEffortEvidence=true`, binding that choice to idempotency while keeping exact stored bytes and digest acknowledgement. Keep effort verification metadata in negotiated account catalogs only. Refuse unplaceable effort without retrying another route, clean temporary Codex authorization on preparation exit, and describe prepared controls without claiming dispatch.
+
+- Updated dependencies [72825b9]
+  - @claudexor/schema@3.17.1
+  - @claudexor/core@3.17.1
+  - @claudexor/harness-codex@3.17.1
+  - @claudexor/harness-claude@3.17.1
+  - @claudexor/orchestrator@3.17.1
+  - @claudexor/control-api@3.17.1
+  - @claudexor/daemon@3.17.1
+  - @claudexor/acp-server@3.17.1
+  - @claudexor/config@3.17.1
+  - @claudexor/delivery@3.17.1
+  - @claudexor/gateway@3.17.1
+  - @claudexor/harness-agy@3.17.1
+  - @claudexor/harness-cursor@3.17.1
+  - @claudexor/harness-fake@3.17.1
+  - @claudexor/harness-opencode@3.17.1
+  - @claudexor/harness-raw-api@3.17.1
+  - @claudexor/mcp-server@3.17.1
+  - @claudexor/review@3.17.1
+  - @claudexor/workspace@3.17.1
+  - @claudexor/artifact-store@3.17.1
+  - @claudexor/journal@3.17.1
+  - @claudexor/secrets@3.17.1
+  - @claudexor/util@3.17.1
+
 ## 3.17.0
 
 ### Patch Changes

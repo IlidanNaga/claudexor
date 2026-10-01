@@ -933,9 +933,30 @@ invariant or operator decision before proceeding.
   vendor-limit cooldown or spent window, stale-but-live included — ranks a
   row exhausted with its release instant), a row that recently answered this
   model's request with a different model (a live, self-expiring
-  model-substitution observation) ranks after every other selectable row,
-  oldest observation first, and is never excluded by it; deterministic profile-id
-  tie-break. The per-harness `limit_action` stored default is the kind-aware
+  model-substitution observation), or whose session an unpinned run started
+  on it recently ended before any progress for this same requested model (a
+  live, self-expiring pre-progress refusal observation, scoped to that exact
+  account and requested model and never recorded by a pin), ranks after
+  every other selectable row, oldest observation first, and is never
+  excluded by it; deterministic profile-id tie-break.
+  **CONCEPT-CHANGE(INV-135), #363:** an unpinned choice is admitted on FRESH
+  readiness, with one bounded exception for Cursor rows: when a row's
+  `cursor-agent status` probe did not answer within its own budget, that row
+  store's last POSITIVE status answer, if younger than five minutes, may admit
+  the row to an UNPINNED choice (bound row, pool, rotation, `next_up`). The
+  row stays disclosed as stale unknown — never a fresh pass, never an
+  identity — and a spawn on it says so. A logged-out answer from that store
+  or any Claudexor-handled credential mutation revokes it. No positive answer,
+  an expired one, any other probe failure, and an explicit pin keep the
+  strict behavior: a pin is never admitted on it, and every other stale
+  observation still serves only an already selected route. Rationale: an
+  unanswered probe is not vendor evidence of either state, whatever delayed
+  it; the row's own recent positive answer with no observed logout since is
+  the best evidence at hand, and refusing it let unanswered probes alone
+  report "no ready account". The exception widens only unpinned
+  availability, where a wrong guess meets the pool's ordinary failover,
+  and leaves the pin contract
+  unchanged. The per-harness `limit_action` stored default is the kind-aware
   `auto` — it RESOLVES at decision time to `rotate` for subscription
   (`local_session`) subjects and `fail` for metered API-key or unknown
   routes, while explicitly persisted `fail`/`ask`/`rotate` keep their exact
@@ -969,7 +990,9 @@ invariant or operator decision before proceeding.
   rollback command, run BEFORE installing an older engine. verify: schema
   credential-profile.ts + accounts-migration.ts; orchestrator
   preflightProfile/account-pool tests; the accounts-unified-migration
-  battery; threads binding/resume-isolation tests; profile-delete tests.
+  battery; threads binding/resume-isolation tests; profile-delete tests;
+  `packages/harness-cursor/src/status-cache.test.ts` +
+  `packages/orchestrator/src/rowAdmission.test.ts` (#363 stale admission).
 - **INV-136** High-volume UI evidence is PROGRESSIVE, BOUNDED, and honest:
   per-run milestone bursts are exactly one in-flight request plus at most one
   trailing refresh (events during the trailing load cannot chain more GETs);

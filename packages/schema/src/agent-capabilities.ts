@@ -15,6 +15,7 @@ import { GitCapability } from "./git-capability.js";
 import { SetupLoginCapability } from "./readiness.js";
 import { WorkspaceKind } from "./files-manifest.js";
 import { ProcessingPreference } from "./processing.js";
+import { CatalogInputLimit } from "./harness-input.js";
 
 /**
  * AgentCapabilityCatalog — the machine-readable answer to "what can this
@@ -88,6 +89,7 @@ export type CatalogModelSummary = z.infer<typeof CatalogModelSummary>;
 
 export const CatalogHarness = z
   .object({
+    inputLimits: z.array(CatalogInputLimit).optional(),
     processingPreferences: z.array(ProcessingPreference).optional(),
     accountCatalog: z.boolean().optional(),
     id: z
