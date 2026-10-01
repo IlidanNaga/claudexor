@@ -476,17 +476,26 @@ describe("a malformed model/list is a FAILED probe, not a narrowed ladder", () =
     expect(readModelListEfforts(payload)).toBeNull();
   });
 
-  it("still SKIPS mere absence: a model advertising no effort surface is normal", () => {
+  it("keeps explicit empty effort arrays distinct from absent metadata", () => {
     const payload = [
       { id: "gpt-8" },
       { id: "", supportedReasoningEfforts: [{ reasoningEffort: "low" }] },
       { id: "gpt-9", supportedReasoningEfforts: [] },
-      { id: "gpt-7", supportedReasoningEfforts: [{}, { reasoningEffort: "high" }] },
+      { id: "gpt-7", supportedReasoningEfforts: [{ reasoningEffort: "high" }] },
     ];
     expect(readModelListEfforts(payload)).toEqual({
-      models: { "gpt-7": { levels: ["high"], default: null } },
+      models: {
+        "gpt-7": { levels: ["high"], default: null },
+        "gpt-9": { levels: [], default: null },
+      },
       defaultModel: null,
+      unverifiedModels: ["gpt-8"],
     });
+    expect(
+      readModelListEfforts([
+        { id: "partial", supportedReasoningEfforts: [{}, { reasoningEffort: "high" }] },
+      ]),
+    ).toBeNull();
   });
 
   it("records the vendor's default model from `isDefault: true`, and only from a literal true", () => {
@@ -514,6 +523,7 @@ describe("a malformed model/list is a FAILED probe, not a narrowed ladder", () =
     expect(flaggedNoSurface).toEqual({
       models: { "gpt-9": { levels: ["high"], default: null } },
       defaultModel: "gpt-plain",
+      unverifiedModels: ["gpt-plain"],
     });
     // Same with an explicitly EMPTY advertised list.
     expect(
@@ -700,7 +710,7 @@ describe("an effort dropped AFTER preflight is disclosed on the run (INV-105)", 
       model_hint: "gpt-9",
       effort_hint: "hyperdrive",
     });
-    expect(dropped?.type).toBe("message");
+    expect(dropped?.type).toBe("status");
     expect(dropped?.payload?.["ignored_settings"]).toEqual([
       expect.stringContaining("effort=hyperdrive"),
     ]);
@@ -722,7 +732,7 @@ describe("an effort dropped AFTER preflight is disclosed on the run (INV-105)", 
     ).toBeNull();
   });
 
-  it("the RUN discloses the drop and sends no flag when the profile-resolved catalog rejects the level", async () => {
+  it("the RUN records a rejection and does not spawn when the final catalog cannot place the level", async () => {
     clearCodexEffortCache();
     let cliArgs: string[] | undefined;
     const adapter = createCodexAdapter({
@@ -751,13 +761,18 @@ describe("an effort dropped AFTER preflight is disclosed on the run (INV-105)", 
       auth_preference: "auto",
     });
     const events: HarnessEvent[] = [];
-    for await (const ev of adapter.run(spec)) events.push(ev);
+    await expect(
+      (async () => {
+        for await (const ev of adapter.run(spec)) events.push(ev);
+      })(),
+    ).rejects.toThrow(/cannot place/);
     const disclosure = events.find((ev) => Array.isArray(ev.payload?.["ignored_settings"]));
     expect(disclosure?.payload?.["ignored_settings"]).toEqual([
       expect.stringContaining("effort=hyperdrive"),
     ]);
     // ...and the child was really spawned WITHOUT any effort flag.
-    expect(cliArgs?.some((a) => a.startsWith("model_reasoning_effort="))).toBe(false);
+    expect(cliArgs).toBeUndefined();
+    expect(events[0]?.effort_resolution?.resolution).toBe("rejected");
     clearCodexEffortCache();
   });
 });
@@ -971,7 +986,7 @@ describe("an effort the run CLAMPED is disclosed too (INV-105) — a moved level
       model_hint: "gpt-cap",
       effort_hint: "ultra",
     });
-    expect(clamped?.type).toBe("message");
+    expect(clamped?.type).toBe("status");
     expect(clamped?.text).toContain("clamped");
     expect(clamped?.payload?.["ignored_settings"]).toEqual([
       expect.stringContaining("effort=ultra"),
@@ -1071,4 +1086,21 @@ describe("an effort the run CLAMPED is disclosed too (INV-105) — a moved level
     expect(cliArgs?.some((a) => a === 'model_reasoning_effort="xhigh"')).toBe(true);
     clearCodexEffortCache();
   });
+});
+
+it("describes effort preparation without claiming a dispatch or observed vendor use", () => {
+  const catalog = {
+    models: {
+      fixture: { levels: ["low", "high"], default: "low" },
+      sibling: { levels: ["low", "medium", "high"], default: "low" },
+    },
+    defaultModel: "fixture",
+  };
+  const spec = { session_id: "prepared", model_hint: "fixture", effort_hint: "medium" };
+  expect(codexEffortClampedEvent(catalog, spec)?.text).toBe(
+    "[effort] clamped: effort=medium (clamped to low: the requested level is not advertised by model fixture, so preparation selected low, the resolved supported level)",
+  );
+  expect(codexEffortIgnoredEvent({ models: {}, defaultModel: null }, spec)?.text).toContain(
+    "no effort flag is prepared; the vendor default is left unspecified",
+  );
 });

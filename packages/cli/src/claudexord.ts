@@ -50,9 +50,10 @@ import { runtimeConcurrencyCaps } from "@claudexor/schema";
 import { scheduleStartupRetention } from "./retention-service.js";
 import { controlServices } from "./control-services.js";
 import { AuthReadinessService } from "@claudexor/gateway";
+import { bindCredentialMutationWindow } from "@claudexor/core";
 import { buildGateway } from "./registry.js";
 import { createSetupJobManager } from "./setup-jobs.js";
-import { bustGlobalCredentialStatusCaches } from "./credential-status-invalidation.js";
+import { bustLoginCredentialState } from "./credential-status-invalidation.js";
 import { SetupJobStore } from "./setup-job-store.js";
 import { SetupLifecycleBinding } from "./setup-lifecycle-binding.js";
 import { DaemonRuntimeShutdown } from "./daemon-runtime-shutdown.js";
@@ -247,11 +248,14 @@ export async function main(): Promise<void> {
       createSetupJobManager({
         rootDir: daemonDir(),
         store,
-        onCredentialStateMayHaveChanged: (harness) => {
-          bustGlobalCredentialStatusCaches(() => quotaStoreSlot.current());
-          authReadiness.invalidate(harness);
-        },
+        onCredentialStateMayHaveChanged: (harness) =>
+          bustLoginCredentialState(() => quotaStoreSlot.current(), authReadiness, harness),
       }),
+    );
+    // #363: every process-local credential observer reads the login window from
+    // the durable setup lifecycle; an unbound or recovering generation reads open.
+    bindCredentialMutationWindow((harness) =>
+      setupBinding.current().credentialMutationOpen(harness),
     );
     let control: DaemonControlApiServer | null = null;
     shutdownRuntime = new DaemonRuntimeShutdown({

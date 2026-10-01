@@ -1,8 +1,8 @@
 /**
  * Credential surfaces: the managed secret store and INV-135 credential
  * profiles. Thin clients — the daemon owns storage and doctor probes; the
- * profile login spawns the SAME vendor command the setup jobs run, in this
- * interactive terminal, scoped to the profile's config dir.
+ * Cursor profile login uses the daemon setup lifecycle in this terminal;
+ * Claude/AGY retain their direct scoped vendor login. Codex uses device code.
  */
 import { spawnSync } from "node:child_process";
 import { registerConfigDirProfile } from "./profile-registration.js";
@@ -30,6 +30,7 @@ import { print, printJson, printUsageError } from "./cli-io.js";
 import { ensureDaemon } from "./daemon-run.js";
 import { controlApiFetch } from "./live.js";
 import { daemonGet } from "./ops-commands.js";
+import { type ProfileLoginAttachDeps, profileLoginViaSetupJob } from "./profile-login-attach.js";
 import { nativeLoginEnv, nativeLoginSpec } from "./native-login.js";
 import { isAgyProfileKeychainUnsafe, prepareAgyProfileKeychain } from "@claudexor/harness-agy";
 import { credentialProfilePolicyProblem, credentialProfilePolicyState } from "@claudexor/core";
@@ -113,7 +114,7 @@ export async function accountsCommandWithDeps(
   return 0;
 }
 
-export interface ProfilesCommandDeps {
+export interface ProfilesCommandDeps extends Partial<ProfileLoginAttachDeps> {
   daemonGet?: typeof daemonGet;
   spawnSync?: typeof spawnSync;
   platform?: NodeJS.Platform;
@@ -242,6 +243,27 @@ export async function profilesCommandWithDeps(
       }
       print(`codex/${profileId} login was not started: ${job.message}`);
       return 1;
+    }
+    // Cursor shares the existing setup owner with its app login. The other
+    // interactive profile-login paths retain their existing vendor terminal.
+    if (harness === "cursor") {
+      return profileLoginViaSetupJob(
+        {
+          harness,
+          profileId,
+          json,
+          statusLine: async () => {
+            const after = ControlCredentialProfilesResponse.parse(
+              await get("/credential-profiles"),
+            ).profiles.find(
+              (p) => p.profile.harness_id === harness && p.profile.profile_id === profileId,
+            );
+            const status = after?.status;
+            return `${harness}/${profileId}: ${status?.availability ?? "unknown"}${status?.detail ? ` — ${status.detail}` : ""}`;
+          },
+        },
+        { ...deps, ensureDaemon: deps.ensureDaemon ?? ensureDaemon },
+      );
     }
     const spec = nativeLoginSpec(harness);
     if (!spec) {

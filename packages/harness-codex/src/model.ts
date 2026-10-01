@@ -4,7 +4,7 @@ import {
   observeCodexProcessing,
   codexProcessingCost,
 } from "./processing.js";
-import type { ProcessingReceipt } from "@claudexor/schema";
+import type { ProcessingReceipt, EffortResolution } from "@claudexor/schema";
 import { validateModel, type ModelAdapter, type ModelAdapterContext } from "@claudexor/core";
 import type {
   ControlModelCatalogResponse,
@@ -36,6 +36,8 @@ import {
 } from "./http-client-version.js";
 import { processingAdmissionProblem } from "./processing-refusal.js";
 import { ResponseFailureCapture } from "./failure-evidence.js";
+import { RequestDelivery } from "./request-delivery.js";
+import { codexModelEfforts, codexModelEffortResolution } from "./model-effort.js";
 
 const ENDPOINT = "https://chatgpt.com/backend-api/codex";
 const CLIENT = "claudexor";
@@ -137,11 +139,14 @@ export function parseCodexModelCatalog(value: unknown): ModelCatalogEntry[] {
         "catalog_unavailable",
         "Codex returned an invalid model catalog entry.",
       );
-    const efforts = Array.isArray(entry.supported_reasoning_levels)
-      ? entry.supported_reasoning_levels
-          .map((item) => text(record(item)?.effort))
-          .filter((item): item is string => item !== null)
+    const reportedEfforts = entry.supported_reasoning_levels;
+    const reasoningEffortsVerified =
+      Array.isArray(reportedEfforts) &&
+      reportedEfforts.every((item) => text(record(item)?.effort)?.trim());
+    const efforts = reasoningEffortsVerified
+      ? reportedEfforts.map((item) => text(record(item)?.effort)!)
       : [];
+    const projectedEfforts = codexModelEfforts(efforts);
     const modalities = Array.isArray(entry.input_modalities)
       ? entry.input_modalities.filter((item): item is string => typeof item === "string")
       : [];
@@ -155,14 +160,16 @@ export function parseCodexModelCatalog(value: unknown): ModelCatalogEntry[] {
       // Backend output-cap parameters are unsupported even when a model has a published output capacity.
       maxOutputTokens: capacity(entry.max_output_tokens),
       inputModalities: modalities,
-      reasoningEfforts: efforts,
-      defaultReasoningEffort: text(entry.default_reasoning_level),
+      ...projectedEfforts,
+      reasoningEffortsVerified,
+      defaultReasoningEffort:
+        entry.default_reasoning_level === "ultra" ? null : text(entry.default_reasoning_level),
       supportedOptions: [
         "toolChoice",
         "cacheKey",
         "serviceTier",
         "processingPreference",
-        ...(efforts.length ? ["reasoningEffort"] : []),
+        ...(projectedEfforts.reasoningEfforts.length ? ["reasoningEffort"] : []),
         ...(entry.supports_parallel_tool_calls === true ? ["parallelToolCalls"] : []),
       ],
     };
@@ -245,8 +252,10 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
         model: request.model,
       };
       let dispatched = false;
+      let delivery: RequestDelivery | undefined;
       const capture = new ResponseFailureCapture(context.captureFailureEvidence);
       let processing: ProcessingReceipt | undefined;
+      let effortResolution: EffortResolution | undefined;
       let nativeContinuation: ModelNativeContinuation | null | undefined =
         request.nativeContinuation === undefined ? undefined : null;
       const withTurnState = (result: ModelCallResult): ModelCallResult => {
@@ -270,6 +279,17 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
             : nativeContinuation;
         return {
           ...result,
+          ...(effortResolution
+            ? {
+                effortResolution: {
+                  ...effortResolution,
+                  observed: result.appliedOptions.reasoningEffort ?? null,
+                  observedSource: result.appliedOptions.reasoningEffort
+                    ? "codex.responses.reasoning.effort"
+                    : null,
+                },
+              }
+            : {}),
           ...(nativeContinuation === undefined ? {} : { nativeContinuation: turn }),
           ...(observed
             ? {
@@ -333,26 +353,36 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
               clientVersionSource: catalog.clientVersionSource,
             },
           );
-        if (
-          request.options.reasoningEffort &&
-          !model.reasoningEfforts.includes(request.options.reasoningEffort)
-        ) {
-          throw new CodexModelError(
-            "unsupported_parameter",
-            "The requested reasoning effort is not advertised for this model.",
-            { parameter: "reasoningEffort" },
-          );
+        effortResolution = codexModelEffortResolution(
+          request.options.reasoningEffort,
+          model,
+          catalog.models,
+        );
+        if (effortResolution.resolution === "rejected") {
+          throw new CodexModelError("unsupported_parameter", effortResolution.reason!, {
+            parameter: "reasoningEffort",
+          });
         }
         processing = prepareCodexProcessing(
           request.options.processingPreference,
           model.processing,
           request.options.serviceTier,
         );
-        const physicalRequest = processing?.submittedNative
-          ? { ...request, options: { ...request.options, serviceTier: processing.submittedNative } }
-          : request;
+        const { reasoningEffort: _requestedEffort, ...otherOptions } = request.options;
+        const physicalRequest = {
+          ...request,
+          options: {
+            ...otherOptions,
+            ...(effortResolution.submitted === null
+              ? {}
+              : { reasoningEffort: effortResolution.submitted }),
+            ...(processing?.submittedNative ? { serviceTier: processing.submittedNative } : {}),
+          },
+        };
         const body = JSON.stringify(buildResponsesRequest(physicalRequest, route));
+        delivery = new RequestDelivery(body);
         const requestHeaders = new Headers(headers(auth));
+        requestHeaders.set("Content-Length", String(delivery.bytes.length));
         if (nativeContinuation) {
           requestHeaders.set(
             "x-codex-turn-state",
@@ -377,7 +407,7 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
         const response = await fetcher(`${ENDPOINT}/responses`, {
           method: "POST",
           headers: requestHeaders,
-          body,
+          ...delivery.request(),
           signal: context.signal,
           redirect: "error",
         });
@@ -402,9 +432,16 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
         );
       } catch (error) {
         const result = emptyModelResult({ ...route, model: null });
-        result.outcome = dispatched ? "unknown" : "failed";
-        result.problem =
-          error instanceof CodexModelError
+        const proof = dispatched ? delivery?.notDelivered() : null;
+        result.outcome = dispatched && !proof ? "unknown" : "failed";
+        result.problem = proof
+          ? new CodexModelError(
+              "transport_not_delivered",
+              "The complete Codex request was not delivered; generation did not start.",
+              { generationStarted: false, requestDelivery: proof },
+              true,
+            ).problem
+          : error instanceof CodexModelError
             ? error.problem
             : new CodexModelError(
                 dispatched
@@ -418,7 +455,11 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
                     ? "The model operation was cancelled before dispatch."
                     : "The Codex model request could not be prepared.",
               ).problem;
-        if (dispatched) capture.caught(error);
+        if (dispatched) {
+          capture.caught(error);
+          if (delivery && !proof && result.problem)
+            result.problem.context.requestDelivery = delivery.facts();
+        }
         return withTurnState(dispatched ? capture.finish(result) : result);
       }
     },

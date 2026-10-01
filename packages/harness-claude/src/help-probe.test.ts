@@ -195,7 +195,7 @@ describe("the --help memo and its consumers follow a run's PATH patch", () => {
       { probeEffortLevels: probeClaudeEffortLevels, detectVersion: async () => null },
     );
     expect(resolution.advertised).toEqual(LADDER_2_1_89);
-    expect(resolution.disclosure?.text).toContain("effort=xhigh (not accepted");
+    expect(resolution.disclosure?.text).toContain("effort=xhigh (clamped to high");
     // Same patch PATH again: the memo answers, no second spawn.
     await probeClaudeEffortLevels(undefined, older);
     expect(spawns(older)).toBe(1);

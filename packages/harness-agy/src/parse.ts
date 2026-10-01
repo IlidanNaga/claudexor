@@ -4,7 +4,7 @@ import { nowIso, redactSecrets } from "@claudexor/util";
 type Json = any;
 
 /**
- * Map an Antigravity CLI (`agy -p --output-format stream-json`) ND-JSON event
+ * Map an Antigravity CLI (`agy --output-format stream-json`, piped stdin) ND-JSON event
  * to normalized events. Field shapes are pinned by RECORDED fixtures captured
  * on agy 1.1.13 (fixtures/manifest.yaml): `init` / `step_update` / `result`,
  * with `step_update.step_type` an OPEN vocabulary

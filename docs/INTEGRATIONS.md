@@ -43,6 +43,24 @@ A confirmed processing refusal may authorize a separate caller-owned Standard
 request/reservation; it does not erase the first operation's physical dispatch
 or permit retrying an unknown outcome.
 
+Effort preferences resolve in the engine at the final model/account/harness.
+Embedding callers preserve the original request and consume the typed
+receipt; they do not duplicate adaptation or parse disclosure text. The
+[effort contract](ARCHITECTURE.md#4-routing) specifies existing result/artifact
+locations, omission versus explicit `none`, and independent provider observation.
+Raw model clients discover `captureEffortEvidence` on the model-operation POST
+descriptor and freeze that query choice for each operation; omission retains the
+legacy strict result shape. GET and ACK always use the exact stored bytes.
+The shared fixture is `packages/schema/fixtures/effort-resolution.json`.
+
+Codex raw-model catalogs list inference efforts rather than native agent modes.
+An existing `ultra` preference resolves within the vendor's ordered choices to
+the strongest supported ordinary generation effort (currently Astra `max`).
+The effort receipt preserves `requested: ultra`, the prepared value and independent
+provider observation; it discloses that raw calls do not execute native automatic
+delegation. Native Codex sessions retain their full Ultra mode. Catalog object
+shapes and the opt-in result contract are unchanged.
+
 ## Embedded Engine Runtime
 
 An embedding host reuses `claudexor-runtime-<version>.tar.gz`, the same closure
@@ -332,7 +350,10 @@ typed 409. Cancel is asynchronous and
 resolves only after termination is proved; duplicate create returns the same
 active login instead of launching a second runner.
 `POST /v2/setup/jobs/:id/reconcile` is the sole replacement-fence recovery
-path. The execution mechanics behind these jobs — the bundled runner, the
+path. Full CLI `claudexor setup cancel <jobId>` and `claudexor setup reconcile
+<jobId>` are thin clients over the corresponding routes, with optional `--json`.
+Their success reports the operation's job state, not a completed authentication.
+`setup attach` remains interactive. The execution mechanics behind these jobs — the bundled runner, the
 journal authority, process-identity fences, and the same-harness capability
 smoke — are engine internals owned by `docs/ARCHITECTURE.md` (native login
 and setup jobs); API-key fallback goes through `/secrets` as a separate
@@ -464,6 +485,7 @@ completion; follow the handle with the status/result tools before claiming an
 answer, finished work, or applyability.
 The implemented tools include `claudexor_ask` (with `deepScan`), `claudexor_run`,
 `claudexor_best_of`, `claudexor_plan`, `claudexor_create`,
+`claudexor_thread_create`, `claudexor_thread_turn`, `claudexor_thread_read`,
 `claudexor_status`, `claudexor_capabilities`
 (the derived AgentCapabilityCatalog: per-harness live capabilities, modes,
 the mutability matrix, run-control keys), and the read-only recovery tools
@@ -477,8 +499,26 @@ honors per-vendor rate-limit cooldowns),
 `claudexor_apply_check`, and
 `claudexor_journal_recovery`. The destructive
 `claudexor_quarantine_journal` requires an exact partition fingerprint and
-explicit `quarantine_and_start_fresh` confirmation. MCP does not claim live
-thread parity.
+explicit `quarantine_and_start_fresh` confirmation. One-shot runs and thread
+turns accept `credentialProfileId` (CLI `--profile`) as a strict account pin.
+Create a thread once, enqueue follow-ups with `claudexor_thread_turn`, then
+follow each returned `runId` with the ordinary status/result tools. If a turn
+returns only a queued `jobId`, use `claudexor_runs` to recover its `runId`
+after binding.
+Creation starts no model. The default `workspace: in_place` lets write turns edit
+the project directory directly. Choose `workspace: isolated` for a persistent
+thread worktree created on the first write turn, then use thread Apply to merge
+its changes into the project. The create result discloses the daemon's current
+`workspaceMode` and anchored `repoRoot`, including where write turns change files.
+Thread create/turn accept an optional caller-owned `idempotencyKey`. An omitted
+key is generated per invocation; retry an unknown outcome with the same key
+and body, and use a new key for a deliberately new turn. Changed content under
+the same key conflicts. `claudexor_thread_turn` declares the durable
+`McpThreadTurnResult` handle as its outputSchema. `claudexor_thread_read`
+returns daemon-owned thread, turn and session records without starting work or
+a daemon; with no daemon running it fails with retryable `daemon_unavailable`.
+Final output remains on the run result surface. Thread tools do not add a
+separate budget or lifecycle.
 
 Tools declare MCP behavior annotations (readOnlyHint for every non-agent
 route — ask/plan are read-only) and, for run tools and
@@ -675,10 +715,12 @@ Terminal window.
 `session/new` creates a daemon thread (default `in_place`) and returns that
 thread id. `session/list`, `session/load`, `session/resume`, `session/close`,
 `session/prompt`, and `session/cancel` all resolve through the same `/v2`
-authority; no second in-memory session catalog exists. Images and embedded
-resources are uploaded/finalized into immutable daemon resource IDs before the
-turn enqueues. Blocked/failed daemon outcomes return ACP `refusal` plus typed
-`_meta.claudexor` run/status/apply evidence rather than a false `end_turn`.
+authority; no second in-memory session catalog exists. A prompt may pin its
+turn to one account with `_meta.claudexor.credentialProfileId`, the same strict
+pin MCP run tools accept. Images and embedded resources are uploaded/finalized
+into immutable daemon resource IDs before the turn enqueues. Blocked/failed
+daemon outcomes return ACP `refusal` plus typed `_meta.claudexor`
+run/status/apply evidence rather than a false `end_turn`.
 Terminal turns also carry the exact validated RunFacts receipt at
 `_meta.claudexor.runFacts` (`null` for active runs and legacy runs without a
 receipt). A missing/404 or transport-unavailable detail keeps the receipt
@@ -818,8 +860,9 @@ re-record the `recorded-*` fixture and re-verify the expectations; the
 fixture-freshness gate discloses drift.
 
 **Claude Code** — wire: `claude -p … --output-format stream-json --verbose`
-(one-shot prompt as argv; interactive runs add `--input-format stream-json`
-and deliver the prompt plus an `initialize` control handshake on stdin).
+(one-shot prompt uses `--input-format text` and stdin; interactive runs keep
+`stream-json` stdin with their `initialize` handshake). System additions use
+`--append-system-prompt-file`, preserving their role without argv payloads.
 Events: `system/init` → `started` (carries `native_session_id` for
 `--resume`); `system/api_retry` → typed `status` (kind `api_retry`, typed
 `rate_limit`/`transient` enrichment); `assistant` content blocks → `message` /
@@ -866,10 +909,19 @@ tagged-object variant yields its variant name. Skipped for an aborted run and
 under `evidence_policy: stream_only`. Pin: `fixtures/rollout/recorded-*.jsonl`
 (session-rollout records, not stream captures).
 
-**Cursor** — wire: `cursor-agent -p --output-format stream-json <sandbox
+**Cursor** — binary: `CLAUDEXOR_CURSOR_BIN`, else `cursor-agent` on the harness
+PATH, else Cursor's primary `agent` only when its realpath is the installer's
+`…/cursor-agent/versions/<v>/cursor-agent`; that `agent` is spawned by absolute
+path, resolved per call by discovery, doctor, status, models, the API-key
+smoke, runs and login, and never executed to identify it. This fallback covers
+Cursor's POSIX installer layout. On native Windows the shared resolver accepts
+executable images (`.exe`/`.com`) only; `.cmd`/`.ps1` launcher installations
+remain unavailable. This alias fallback does not add Windows `agent.exe`
+discovery or change explicit overrides and the existing `cursor-agent` route.
+Wire: `cursor-agent -p --output-format stream-json <sandbox
 args> [--stream-partial-output]` with the composed prompt on piped stdin (no
 positional prompt or native system-prompt flag — instructions ride a delimited
-prompt prefix; full access is refused pre-spawn). Events: `system/init` →
+prompt prefix; Full uses the native disabled-sandbox arguments). Events: `system/init` →
 `started` (session id under
 `chatId`/`chat_id`/`session_id`, version-tolerant); `assistant` →
 `message` — with `--stream-partial-output`, a frame with `timestamp_ms` and
@@ -894,8 +946,10 @@ fabricated ISO instant (the daemon's quota registry bounds the resulting
 cooldown at end-of-that-day UTC). Other transient conditions still surface as
 generic `error` events — honest degradation, never invented status.
 
-**Antigravity CLI (`agy`)** — wire: `agy -p "<prompt>" --output-format
-stream-json --model <slug> --mode <plan|accept-edits> --add-dir <cwd>`
+**Antigravity CLI (`agy`)** — wire: `agy --output-format stream-json
+--model <slug> --mode <plan|accept-edits> --add-dir <cwd>` with the composed
+prompt on piped stdin, without a print flag (agy 1.1.13 selects print mode
+from non-empty non-TTY stdin)
 (`--dangerously-skip-permissions` for full access; `--conversation <id>`
 resumes). Events: `init` → `started` (the vendor `conversation_id` is the
 resumable native session id); `step_update` with `step_type: "tool"` → a

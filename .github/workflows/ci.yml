@@ -296,6 +296,15 @@ jobs:
           packages/cli/src/setup-login-capability.test.ts
           packages/cli/src/setup-login-pty.test.ts
           packages/cli/src/setup-login-runner-transport.test.ts
+          packages/cli/src/profile-login-win32.integration.test.ts
+          packages/cli/src/setup-login-recovery.test.ts
+          packages/cli/src/setup-recovery-command.test.ts
+          packages/cli/src/live-auth-status.test.ts
+          packages/core/src/credential-mutation-window.test.ts
+          packages/core/src/proc-exit.test.ts
+          packages/harness-cursor/src/auth-timeout.test.ts
+          packages/harness-cursor/src/status-cache.test.ts
+          packages/harness-cursor/src/status-cache-clock.test.ts
           packages/cli/src/cli-io.test.ts
           packages/journal/src/index.test.ts
           packages/journal/src/background-compaction.test.ts

@@ -283,7 +283,9 @@ at every wire boundary.
   all three run modes enqueue through the daemon `/v2` control API. Until MCP
   Tasks stabilize, MCP returns a durable run handle and exposes explicit
   status/result/cancel/interaction tools; it does not hold a tool call open or
-  advertise Tasks. ACP uses the official TypeScript SDK at stable protocol v1;
+  advertise Tasks. MCP persistent-thread create/turn pass an optional caller key
+  to the daemon's existing idempotent journal; read projects its thread detail
+  without starting a run or a daemon. ACP uses the official TypeScript SDK at stable protocol v1;
   its session IDs are daemon thread IDs and list/load/resume/close/prompt/cancel
   all project the same `/v2` thread authority. ACP images and embedded resources
   are finalized through the daemon attachment pipeline before a turn enqueues.
@@ -458,8 +460,8 @@ positional merge of its models' lists (`mergeEffortLadders`; the Swift
 `EffortLadder` merges the manifest's already-ordered arrays the same way), and
 a level's rank is its position in that merged order — which is what lets a
 brand-new vendor level sort correctly with no code change. Should two models
-ever advertise genuinely contradictory orders, the merge flags it and
-cross-model clamping is refused rather than an order invented. Adapters
+advertise contradictory or incomparable orders, the resolver refuses
+cross-model substitutions rather than treating display order as rank. Adapters
 discover what is really advertised at discovery time and fall back to a
 recorded snapshot (stamped vendor data, kept in its captured order) when a
 probe cannot answer, so a probe failure costs freshness, never the run; both
@@ -470,26 +472,73 @@ live model must match its recorded ladder/default, while a recorded-only model
 does not make another account stale. Effort ceilings are per MODEL, not per
 harness (gpt-6-astra and gpt-5.6-sol take `ultra`, gpt-5.4 stops at `xhigh`), so
 `effortLevelsForModel` narrows the harness-wide merged ladder for the routed
-model. The shared normalizer then passes an ADVERTISED level through verbatim,
-clamps an unadvertised one onto the nearest advertised level INSIDE the merged
-vendor order, and refuses a level that order has never seen, disclosed via
-`ignored_settings` rather than silently downgraded. WHICH LAYER clamps is part
+model on the native session surface. The shared normalizer passes an accepted level through verbatim,
+resolves a known unadvertised preference to the strongest supported level not
+above the request. Only when every supported level exceeds the request may the
+known minimum be used. Display tie-breaking between incomparable vendor chains
+is not rank evidence; unknown order never authorizes a guessed substitution. WHICH LAYER clamps is part
 of the contract: `discover()` probes the DEFAULT native harness home, so the
 manifest carries the default account's ladders, while codex advertises per
 ACCOUNT and every credential profile and API-key route runs under its own
-`CODEX_HOME`. Run preflight (`governRouteEffort`) therefore only DISCLOSES a
-level the harness's merged ladder does not know and forwards everything else
-verbatim; the adapter, which has resolved the profile env the child will
-actually run in, is the single layer that clamps. Reviewer efforts have no
-adapter-side disclosure channel, so the panel resolvers refuse a level the
-SELECTED reviewer does not advertise — against the named model's own ladder
-when the entry resolves one, else the harness-wide merged ladder — instead of
-forwarding it to be dropped. The CLI help, the MCP tool
+`CODEX_HOME`. Run preflight (`governRouteEffort`) therefore forwards the original
+preference even when default-account discovery lacks it. Native effort adapters
+resolve only after the account, model and harness are bound. Settings writes and
+reviewer admission preserve these preferences too; a separate effort on an
+adapter without that carrier retains its typed validation rule. Compound
+Cursor/Antigravity model ids are route identities and are never rewritten by
+effort resolution. Claude uses the installed binary's accepted list and its
+recorded same-provider vendor order for known gaps; historical ordering cannot
+authorize submitting a value absent from the current accepted list. Snapshot
+fallback authorizes values only on its recorded CLI version. An unverifiable
+knob uses the current vendor default with an explicit omission receipt; known
+absence and unknown capability remain distinct. An unrankable request against
+an available nonempty ladder refuses before generation. The CLI help, the MCP tool
 schema and the macOS picker's ordering all derive from that single source. `doctor` validates each
 harness's CONFIGURED default model against the truth source, so a broken
 default (e.g. a model the CLI cannot run) is reported honestly instead of
 masked by a smoke that used a different model, and the same verdict rides
 the harness status DTO (`configuredModelCheck`) into the Settings UI.
+The reusable `EffortResolution` schema records `requested` (the original
+preference), `submitted` (native option or explicit null omission), `resolution`
+(`exact`, `downward`, `floor`, `omitted`, `unverifiable`, `rejected`), `source`
+(the resolution authority), and `parameter` (the native carrier, null if absent).
+`observed` and `observedSource` stay null unless a provider field reports effort;
+submission never becomes observation. Existing dispatch/lifecycle evidence still
+determines whether the prepared option was physically sent. The receipt is
+optional on historical records. Model operations retain `effortResolution` in the
+existing `ModelCallResult` resource only when creation opted into
+`captureEffortEvidence=true` (see [model operations](#caller-owned-model-operations)).
+
+Runs record it as `attempts[].effort_resolution` in
+`final/telemetry.yaml`, carried through `HarnessEvent.effort_resolution`. The
+attempt retains the final native execution's receipt after account rotation.
+Codex model results obtain observation only from Responses' `reasoning.effort`;
+`appliedOptions` keeps its existing provider-echo meaning. Session adapters do
+not claim an observed value. Adaptation disclosures are status/log events and
+never injected assistant messages. These fields add no operation, generation,
+retry, account-selection or budget authority. A rejected final-route preference
+ends that attempt without account rotation, model/harness fallback or repair retry;
+ordinary availability failover retains its existing policy.
+
+Codex raw model calls expose ordinary inference efforts, while the native CLI's
+`ultra` selector also owns automatic task delegation. The raw adapter excludes
+that agent-mode selector from `reasoningEfforts` and retains the vendor's original
+`reasoningEffortPreferenceOrder` internally through operation-local catalog parsing.
+The existing preference resolver chooses the strongest accepted generation effort
+not above the original request in that vendor order (currently `ultra` → `max`
+for Astra), with a downward receipt and no claim of native delegation. It does
+not copy the CLI's underlying per-agent effort or invent a replacement ladder.
+Both public catalog views project the internal order out, preserving their object
+shapes. Native session Ultra remains unchanged and is implemented by the CLI.
+
+Managed catalogs also carry optional `reasoningEffortsVerified` on `ModelCatalogEntry`:
+true records a fully parsed vendor array (including known empty), while false or
+historical absence prevents an incomplete catalog from claiming known absence or
+authorizing a substitution. Native Codex likewise retains explicit empty arrays
+separately from missing metadata on a listed model. The unnegotiated model-catalog
+HTTP view omits this new field; the account view retains it. An unlisted advisory model
+still follows its existing sibling-ladder fallback.
+
 Manifest `auth_modes` and `capability_profile.auth.preferred_source` describe
 possible source availability only. They are not readiness. UI, routing, and
 reviewer selection use doctor status, enabled intents, and smoke/conformance
@@ -609,8 +658,12 @@ the argv prompt only instructs the harness to read it, and the file is removed
 before every diff/gate/review (including native retries). This prevents
 `spawn E2BIG` without truncating evidence or polluting the candidate patch.
 
-Cursor prompts use the vendor's one-shot stdin contract through the shared CLI
-run loop; prompt bytes never ride process argv. Codex instead owns one native
+Cursor and AGY prompts use the shared CLI loop's one-shot stdin. AGY omits
+print flags so its native stdin reader selects print mode. Claude one-shot uses
+text stdin; interactive/image runs retain their sole stream-json stdin owner.
+Claude instructions append through an adapter-owned UTF-8 file, removed when
+the child ends, never through argv or user-role text (`instructions-file.ts`).
+Codex owns one native
 `app-server --stdio` JSON-RPC child per Claudexor run. The adapter keeps the run
 active while a native turn, active goal continuation, or run-owned background
 terminal exists. Native thread/turn ids are control handles, not durable engine
@@ -684,9 +737,50 @@ an in-flight probe); an external vendor login/logout may remain visible for the
 bounded grace window. Stale evidence is never reported as a fresh passed login
 and does not alter profile selection or paid-route policy: an already explicit
 pin or durable thread binding may keep its exact config-dir route alive for
-this bounded grace, while unpinned pool/rotation selection remains fresh-only.
+this bounded grace, while unpinned pool/rotation selection never consumes it.
 This absorbs a probe failure only; it does not claim to serialize the vendor's
 OAuth refresh or to repair a revoked credential.
+Cursor's row status probe (`cursor-agent status` in a row's file-store HOME)
+is coordinated the same way: concurrent reads of one row store — keyed by the
+auth-selecting `HOME`/`USERPROFILE`/`XDG_CONFIG_HOME`/`APPDATA`, so admission
+and a spawn with a lane state HOME share it — share one child, and a POSITIVE
+answer is reused as fresh for at most one minute, keeping the instant the
+vendor gave it as `last_verified_at`. Age uses a suspend-inclusive monotonic
+clock; Linux uptime's possible one-second quantization is conservatively
+bounded, so an observation can expire less than two seconds early. Wall time
+only stamps the observation; clock steps neither extend nor expire it.
+A probe with no recognized answer whose ten-second budget expires before
+observed native exit or caller cancellation reports
+`did not answer within 10s (…); login state unknown`, which is
+`unknown + not_run`, never a logout and never a pass — a caller's
+cancellation or a kill from outside is a plain unknown, not a timeout. Its stale path serves the other side of routing (the INV-135
+#363 amendment): only such a timeout, while the store's last positive answer is
+under five minutes old, projects that answer as `stale: true` with
+`stale_basis: last_positive_after_timeout`, its `stale_age_ms`, a detail naming
+the answer's instant, and no `last_verified_at` or identity. That basis admits
+UNPINNED choices only — a bound row, the pool, rotation and `next_up` — never
+an explicit pin (a pin whose probe timed out is still refused), while the
+generic grace above still serves only a selected route. A logged-out answer
+from the store drops its positive, as do Claudexor-handled credential
+mutations (including an in-flight probe), and while a Claudexor-managed
+Cursor login's credential-mutation window is open (see the profile-login
+note under [Design constraints](#design-constraints)) the coordinator
+answers live and neither reuses, retains nor leans on any positive; any
+other unknown answer never consults it, and no file in the row HOME is read
+as a substitute. The
+adapter's spawn-time route check applies the same split. The engine stamps
+each spec whose row was an unpinned choice (a bound row, the pool, rotation, an
+unpinned or automatic reviewer seat) with that row's id in `spec.extra`; the
+adapter never infers it from profile fields. Only a stamped row starts on a
+stale positive, after yielding an `[auth] … using the last positive status
+answer …` status event (`auth_status_stale`; never answer text). An explicit
+pin, or any unstamped spec, whose spawn-time probe times out refuses as
+`login state is unknown`, naming the last positive as unpinned-only, and every
+other unconfirmed row refuses the same way rather than with login advice. A
+model-inventory read, which launches nothing, may still read on it. The
+Accounts catalog projection remains stricter for a named account: it reports
+unknown status and does not offer catalog reading on stale evidence. This
+conservative projection does not change standalone inventory or run admission.
 Adapters declare the physical credential transport they support (`config_file`,
 `env_var`, `oauth_token_env`, `os_keychain`, `http_header`, or `none`) plus the
 containment strategy that keeps it honest. A transport may be platform-scoped;
@@ -850,14 +944,39 @@ checkpoint, per harness) and hands it to the run as `threadAccountBindings`;
 a binding whose row became disabled/deleted/revoked/exhausted moves to a pool
 sibling with a typed `route.account.lane_switch` disclosure, never silently.
 (3) Otherwise the quota-aware POOL of enabled+ready subscription rows selects
-the account (`route.account.pool_selected`): fresh model-applicable headroom
+the account (`route.account.pool_selected`); "ready" is fresh readiness except
+a Cursor row's bounded last positive status answer after a timed-out probe
+(see [Auth And Secrets](#5-auth-and-secrets)): fresh model-applicable headroom
 descending, unknown/stale quota after known-positive headroom but before
 exhausted (stale quota never authorizes routing), deterministic profile-id
 tie-break; a row under an observed live block (a reactive vendor-limit
 cooldown or spent window — the A4 reader) ranks exhausted with its release
-instant. Model operations pass one more ordering key, a live model-substitution
+instant. Two live observations add one ordering key among the selectable rows:
+a marked row ranks after every other selectable row for that requested model,
+a row's newest mark counts, oldest mark first, and a mark never excludes a row
+or makes the pool exhausted. Model operations pass a model-substitution
 observation (see [Caller-owned model operations](#caller-owned-model-operations));
-Agent Runs pass none. An empty or exhausted pool is a TYPED TERMINAL
+Agent Runs, reviewer seats and the `next_up` projection pass a pre-progress
+refusal observation. That observation is recorded when an unpinned try on a
+subscription row reported a typed `started` session and then ended in the
+structural rotation branch's own evidence (a terminal non-transient death with
+no agent progress, no deliverable and no mutation) without a typed vendor limit,
+which is already a cooldown; an adapter's own pre-spawn refusal and an explicit
+pin never record one, and the vendor's wording is never read. It is keyed by
+harness, row and requested model (the harness default model is its own key),
+lives in daemon memory for one hour, and clears when a later try on that row and
+model makes agent progress or ends cleanly, or on a credential-generation
+change. A try binds its row's credential generation before it spawns, so an
+outcome arriving after such a change neither records nor clears a mark; while
+a login of that harness holds its credential-mutation window the generation is
+no number at all, so a try bound before or inside the window never records or
+clears one (#363). When
+the default route is not ready and no registered row admits a
+lane, the lane refusal names every row with its own observed readiness
+(`<harness> has no ready account (<row>: <detail>; …)`) instead of the default
+route's doctor advice, so login advice appears only where a row's probe
+positively reported logged-out; `next_up` names unready rows the same way. An
+empty or exhausted pool is a TYPED TERMINAL
 (`route.account.pool_exhausted`, then `credential_pool_exhausted` with the
 pool's earliest known reset — owner Q3=A): an unpinned run under `auto` or
 explicit `subscription` waits for a window instead of silently taking the
@@ -889,8 +1008,11 @@ fresh vendor session with the thread's continuation packet instead of
 resuming a sibling's. `claudexor profiles login
 <harness> <id>` runs the vendor login with the named binding's exact scoped
 environment: codex rides the SAME durable device-code setup job as the default
-login (D-17); the other harnesses run the vendor command interactively in this
-terminal. Credential custody remains an effective platform fact, so a scoped
+login (D-17); Cursor runs the vendor command in this terminal through a
+`client_pty` setup job and the existing `setup attach` owner. Claude/AGY keep
+their direct scoped terminal flow (see the profile-login note under
+[Design constraints](#design-constraints)).
+Credential custody remains an effective platform fact, so a scoped
 HOME may select Claudexor-owned vendor state without representing a separate
 OS-user credential.
 
@@ -1023,14 +1145,10 @@ UI surfaces the exhaustion instead of implying a switch. Exhaustion is also a
 TYPED terminal: a reactive rotation-eligible failure with nowhere to go
 terminalizes the attempt on `credential_pool_exhausted` (category
 `harness_unavailable` — nothing malfunctioned) only when the triggering
-subject or a POOL-MEMBER row carries limit/unusable evidence — rows for
-identities rotation could never select (wrong kind, outside policy, not
-ready) never count, and an evidence-free structural death keeps its TRUE
-failure — through NORMAL attempt
-finalization, BEFORE the transient gate could burn same-profile retries on the
-already-refused subject, and the run terminal lifts `code` + `resetsAt` onto
-`final/failure.yaml` in every lane (race unanimity, convergence last-result,
-read-only chain). `resetsAt` folds the EARLIEST known reset WITHIN the pool —
+subject carries limit/unusable evidence. Earlier or untried accounts cannot
+replace its structural failure with a quota claim. Normal finalization lifts
+`code` and `resetsAt` onto `final/failure.yaml` in every lane before transient
+retry (race unanimity, convergence last-result, read-only chain). `resetsAt` folds the EARLIEST known reset WITHIN the pool —
 the triggering subject's own observed limit included; a limit-evidenced member
 with an unknown reset makes it null — deliberately the within-pool opposite of
 the across-candidates LATEST rule. At preflight under `rotate`, the selected
@@ -1056,7 +1174,10 @@ clearing contract is threefold: bounded self-expiry (24h hard cap;
 entitlement/probe verdicts expire within the hour), a served model response
 for the same subject (wired where usage events already feed the quota
 registry), and any credential-generation change (login/logout/profile
-mutation). Consumption is one composition point: `readyProfilesForRotation`
+mutation). Nothing is recorded while a login of that harness holds its
+credential-mutation window, and a subscription row's verdict is recorded only
+while the credential its try bound is still current (#363). Consumption is one
+composition point: `readyProfilesForRotation`
 refuses a candidate a live observation condemns (model-scoped observations
 refuse only their own model), exhaustion rows name it typed
 (`rejected: credential_unusable`, never hidden behind `not_ready`), and the
@@ -1472,7 +1593,14 @@ caller rereads current authorization. Selection hands its exact-profile catalog
 to this operation's invocation, which rechecks the current account fingerprint;
 no catalog or credentials are cached across operations. Unknown fingerprints
 retain fresh discovery and cannot authorize native continuation reuse.
-Its single inference POST follows a durable dispatch receipt.
+Its single inference POST follows a durable dispatch receipt. Exact JSON bytes
+stream with Content-Length. `request-delivery.ts` observes public callbacks on
+the existing dispatcher; its lazy `dispatcher-accessor.cts` preserves native
+cold initialization, proxy, TLS and pool ownership. Positive connector or
+incomplete-upload proof yields `transport_not_delivered`; full handoff or
+unobserved transport stays unknown. `ModelOperations` refines the terminal to
+`not_started` only after publishing proof, retaining the attempted-send timestamp
+and route. Crash/publication failure stays unknown. No adapter retry is added.
 The caller's canonical instruction messages retain their roles and ordered text
 parts in Ouroboros history. Codex's provider-specific wire projection maps each
 canonical `system` message to the high-priority `developer` role because this
@@ -1537,8 +1665,18 @@ death are separate facts. A crash after response bytes are published but before
 the command's terminal journal commit retains an unknown outcome; uncommitted
 bytes cannot certify a completed response and are reclaimed as crash residue.
 
-Callers may request `captureFailureEvidence=true` on the existing model-operation
-POST, discovered through that operation's query descriptor. Omission and false
+Callers may request `captureEffortEvidence=true` on the existing model-operation
+POST, discovered through its query descriptor, to retain the adapter's typed
+`effortResolution` receipt. Omission and false strip only that field before
+immutable result publication, preserving strict legacy result bytes. The literal
+true choice is captured in command parameters and idempotency identity: rejoining
+the same operation retains it, and changing it under the same key conflicts.
+GET still returns the stored bytes and their original digest for ACK; it performs
+no projection. This choice never changes the inference request, real provider
+`appliedOptions`, dispatch or generation count. Historical results remain unchanged.
+
+Callers may independently request `captureFailureEvidence=true` on the same POST,
+discovered through that operation's query descriptor. Omission and false
 retain the legacy command identity and strict result shape; true is bound to the
 same idempotency key and cannot change during a create rejoin. This is transport
 evidence intent, not a provider generation option.
@@ -1606,8 +1744,9 @@ is the caller's decision. The same composition point records a
 `ModelSubstitutionObservation` in the daemon's in-memory
 `ModelSubstitutionLedger`: bounded, newest-wins per account and requested model,
 kept for 30 minutes (observation retention, not a vendor reset time), never
-cleared by a later success, and voided with the credential generation at the
-unusable ledger's call sites. While one is live, Auto selection for that
+cleared by a later success, voided with the credential generation at the
+unusable ledger's call sites, and never recorded while a login of that harness
+holds its credential-mutation window (#363). While one is live, Auto selection for that
 requested model ranks the account after every other selectable account, oldest
 observation first, so a fully marked pool takes turns. The observation never
 excludes an account or exhausts a pool, and a pin or a usable preferred account
@@ -2488,7 +2627,8 @@ runs. The request `loginFlow` selects the secondary app-server
 `browser_callback` (`account/login/start {chatgptDeviceCode}` → `chatgpt`
 authUrl) or the legacy Terminal `browser_redirect` (localhost callback). Claude
 (`claude auth login`, the claude.ai subscription route with no version-varying
-flag) and Cursor (`cursor-agent login`) use daemon-hosted URL disclosure; Claude
+flag) and Cursor (`cursor-agent login`, or `agent login` through a verified
+Cursor `agent`) use daemon-hosted URL disclosure; Claude
 accepts its one-shot completion input over the transient sidecar, while Cursor
 self-completes by vendor polling. Antigravity uses the same disclosure/input
 shape but declares terminal stdin because the vendor rejects a plain pipe.
@@ -2551,6 +2691,10 @@ runner's hash-bound result is journaled before verification. For a
 DEFAULT-store login, exit zero enters a fresh, source-targeted native probe
 followed by an isolated same-harness capability smoke over the normal adapter
 stream; only the exact `vendor_native` / `native_session` route may pass.
+One silent effort-omission status may precede `started` for the smoke's explicit
+null effort preference. It remains preparation evidence in the stream digest;
+the native `started` event alone supplies credential route/source proof. Repeated
+pre-start preparation, other pre-start activity, and events after completion still fail.
 Another provider, an API key, tool use, external context, or workspace mutation
 invalidates the receipt. No plan-tier, entitlement, quota, or zero-cost
 inference is part of this proof. A PROFILE-targeted login (INV-135:
@@ -2600,8 +2744,11 @@ and passive registry retain normal cancellation and unconfirmed-child custody.
 An ordinary daemon
 stop/restart no longer terminates an awaiting-user login runner (that regression
 killed the operator's own pending login in the 2026-07-21 incident); explicit
-`setup jobs cancel` and the login deadline's timeout escalation are the only
-signalling paths. Restart consumes an existing
+`setup cancel` and the login deadline's timeout escalation are the only signalling
+paths. Group probes keep polling within the existing grace through transient
+uncertainty (including macOS exit-time permission errors); only proven emptiness
+closes the credential-mutation window. Persistent uncertainty stays unconfirmed.
+Restart consumes an existing
 terminal result first, then adopts a live runner only on positive evidence — a
 matching durable handle, the same leader identity, and a nonempty process
 group; a proven-dead group with no receipt is the unrecoverable
@@ -2611,8 +2758,10 @@ becomes `interrupted_unknown` and is never auto-replayed. Terminal outcomes dist
 `completed`, `not_supported`, `launch_failed`, `command_failed`,
 `auth_not_ready`, `capability_verification_failed`,
 `credential_route_mismatch`, `timed_out`, `cancelled_by_user`,
-`cancelled_on_restart`, `interrupted_unknown`, and
-`termination_unconfirmed`.
+`cancelled_on_restart`, `interrupted`, `interrupted_unknown`, and
+`termination_unconfirmed`. `interrupted` records a live monitor proving the
+recorded group empty without a result; `cancelled_on_restart` describes that
+evidence during restart reconciliation.
 
 The checksummed, fsync-before-ACK global journal is the only setup lifecycle and
 event authority. Per-job `0700` directories under the daemon data root contain
@@ -3361,11 +3510,16 @@ the rapid-refill breaker `rapid_refill_breaker` → `capacity_exhausted` with a
 typed cause), the `compact_boundary` system frame → a compaction event, and the
 top-level typed `rate_limit_event` → the existing `rate_limit` signal (a routine
 `allowed` heartbeat surfaces nothing and never arms rotation). Codex exec's
-recorded oversized-input case (0.153.3 and 0.156.1, byte-identical) surfaces
-a stderr JSON-RPC error (`input_error_code: input_too_large`) before model
-execution, without a typed context stream frame. The Codex adapter has no
-token-window context mapping; this character-limit capture does not establish
-a token-window limit. A terminal `capacity_exhausted` with no completed
+recorded oversized-input refusal remains separate: the app-server preserves
+RPC data and emits `request_refusal`, which reaches final failure as
+`input_too_large` with Unicode-scalar measurements and no quota reset. It stops
+account rotation, same-harness fallback-model and convergence retries; ordinary
+failover remains unchanged. `capability_profile.input_limits` declares the
+verified native turn-text bound only on the observed CLI version. The catalog's
+`inputLimits` entry's `askPromptBudget` subtracts shared thread-pointer framing for ordinary
+ASK initial attempts (`prompt-framing.ts`), including thread turns. Other shapes
+remain unbudgeted; no predictive native refusal or guessed model window is added.
+The native input cap excludes separate instructions and is not token capacity. A terminal `capacity_exhausted` with no completed
 WorkReport maps to `interrupted / context_capacity_exhausted`.
 
 One-shot continuation (D-16d): when an eligible terminal `capacity_exhausted`
@@ -4245,16 +4399,51 @@ code touching one of these areas must honor it or change it explicitly here.
   first-wins auth-route receipt would misvalue metered usage as subscription
   entitlement against a finite cash cap. `nextEligibleProfile` skips
   cross-kind candidates; rotate between accounts of the SAME transport only.
-- `claudexor profiles login` for non-codex harnesses deliberately spawns the
-  vendor's own login command IN the operator's terminal (no daemon setup
-  job): vendor OAuth needs the user's TTY/browser interactively, and the
-  binding's Claudexor-owned HOME/config root scopes vendor state. Credential
-  custody remains platform-defined and may be OS-user-owned; Claudexor neither
-  reads nor copies it. There is no daemon setup receipt to journal, and the
-  post-exit vendor doctor probe under the exact binding environment is the
-  verification truth (exit code non-zero unless the probe passes). Codex
-  profile login is the D-17
-  exception: it rides the SAME durable app-server device-code setup job as
-  the default codex login (restart-surviving runner, transient sidecar,
-  in-app/inline code disclosure), because the app-server flow needs no TTY. The daemon-owned setup jobs remain the path for
-  non-interactive/GUI-driven logins.
+- `claudexor profiles login cursor <id>` runs the vendor's own login in the
+  operator's terminal through the daemon's existing `client_pty` setup job.
+  The CLI reads the registered binding, creates its job and uses the sealed
+  manifest, one-use attachment and built runner. Vendor state remains in the
+  binding's scoped store; Claudexor neither reads nor copies credentials.
+  Claude/AGY profile login keeps its direct vendor terminal path, including
+  its known delayed-observation limitation (BACKLOG W-f). Non-Codex
+  `profiles login --json` refuses before preparing or starting a login.
+  Codex retains its durable device-code flow; GUI/non-interactive login uses
+  the existing setup API.
+- The setup journal owns the credential-mutation window from durable permit
+  through terminal verification. A hash-bound runner result or a positively
+  empty recorded process group establishes the command's end. Fresh profile
+  verification runs while the window remains open; terminalization closes it.
+  The existing monitor also settles a proven-empty group with no receipt as
+  interrupted, after checking once more for a result published during that
+  proof. A missing sidecar never releases a permitted job. An unattached
+  reservation without permission remains replaceable. A bound pre-command
+  failure is a launch failure; actual unknown termination retains custody.
+  Physical executable bytes are checked before permission; an already
+  permitted vendor's self-update does not invalidate its original sealed
+  command and recorded process identity.
+- Opening and closing each invalidate the process-wide caches, ledger marks
+  and credential generations plus that harness's auth readiness. While its
+  window is open, the Cursor status coordinator and Claude LKG neither reuse
+  nor retain observations; fresh probes still answer and may admit work.
+  Refusal marks and subscription-row unusable callbacks are generation-bound.
+  The aggregate doctor/status projections are invalidated at the transitions;
+  they can show an intermediate observation until close. Pre-existing late
+  model-substitution callbacks and default/API-key unusable callbacks do not
+  gain a new cross-generation guarantee. Descendants outliving a valid runner
+  receipt remain outside the command-completion proof. An unreadable bound
+  journal reads open; restart alone proves no closure. The hold is per harness,
+  not a blanket admission ban. A genuinely unconfirmed group still needs the
+  existing proof-based reconciliation.
+- The Cursor CLI requests cancellation on Ctrl-C, SIGHUP and SIGTERM. A lost
+  attachment without a runner receipt also requests cancellation; failed
+  delivery is visible and custody stays with the daemon. An already-attached
+  or fenced job names its id and the full CLI's `setup cancel <jobId>` and
+  `setup reconcile <jobId>` commands, which call the existing API. Cancellation
+  is asynchronous and reconcile requires positive termination evidence; these
+  commands do not claim that request acceptance means a finished login.
+  The packaged daemon's alternate `setup attach` role stays attach-only.
+  A hard-killed client cannot cancel; a live vendor retains its job until its
+  own result, explicit cancellation or the existing deadline. A permitted
+  historical unconfirmed row without provable group evidence remains a
+  disclosed recovery limitation. The interactive CLI exits zero only for a
+  succeeded verified job, or 130 after its handled interruption.

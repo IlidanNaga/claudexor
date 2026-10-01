@@ -52,6 +52,13 @@ describe("ACP run-control applicability", () => {
     ).toBeNull();
   });
 
+  it("accepts a strict per-turn credentialProfileId and rejects a blank one", () => {
+    expect(validateRunControls({ mode: "ask", credentialProfileId: "work-secondary" })).toBeNull();
+    expect(validateRunControls({ credentialProfileId: "   " })?.message).toMatch(
+      /credentialProfileId.*non-empty/,
+    );
+  });
+
   it("rejects inline secret fixtures with the typed ACP error code", () => {
     const rejected = validateRunControls({
       mode: "agent",

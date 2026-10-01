@@ -39,6 +39,16 @@ describe("ACP run-control projection", () => {
     ).toEqual({ mode: "agent", review });
   });
 
+  it("forwards a strict credentialProfileId to the thread turn", () => {
+    expect(
+      projectAcpRunControls({
+        mode: "__acp_session_prompt",
+        runMode: "ask",
+        credentialProfileId: "work-secondary",
+      }),
+    ).toEqual({ mode: "ask", credentialProfileId: "work-secondary" });
+  });
+
   it("maps the Agent race alias to the strict n vocabulary", () => {
     expect(
       projectAcpRunControls({

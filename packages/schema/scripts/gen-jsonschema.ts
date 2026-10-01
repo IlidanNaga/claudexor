@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import {
+  EffortResolution,
   ProcessingPreference,
   ProcessingCapability,
   ProcessingReceipt,
@@ -144,6 +145,7 @@ import {
   ApplyEligibility,
   McpRunToolResult,
   McpRunHandleResult,
+  McpThreadTurnResult,
   ControlTrustState,
   ControlTrustUpdateRequest,
   ControlProblem,
@@ -184,6 +186,7 @@ for (const name of readdirSync(outDir)) {
 }
 
 const schemas = {
+  EffortResolution,
   ProcessingPreference,
   ProcessingCapability,
   ProcessingReceipt,
@@ -323,6 +326,7 @@ const schemas = {
   ApplyEligibility,
   McpRunToolResult,
   McpRunHandleResult,
+  McpThreadTurnResult,
   ControlTrustState,
   ControlTrustUpdateRequest,
   ControlProblem,

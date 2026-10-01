@@ -494,6 +494,17 @@ describe("Control API schemas", () => {
     ).toBe(false);
   });
 
+  it("inherits thread-turn mode without changing the standalone Agent default", () => {
+    expect(ControlThreadTurnRequest.parse({ prompt: "continue" })).not.toHaveProperty("mode");
+    expect(ControlRunStartRequest.parse({ prompt: "start" }).mode).toBe("agent");
+    for (const mode of ["ask", "plan", "agent"] as const) {
+      expect(ControlThreadTurnRequest.parse({ prompt: "continue", mode }).mode).toBe(mode);
+    }
+    expect(
+      ControlThreadTurnRequest.safeParse({ prompt: "continue", mode: "unknown" }).success,
+    ).toBe(false);
+  });
+
   it("preserves the deciding credential profile on a run auth-route receipt", () => {
     const summary = ControlRunSummary.parse({
       jobId: "job-1",

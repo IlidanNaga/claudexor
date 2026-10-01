@@ -1,9 +1,11 @@
 /** The single owner of typed attempt evidence and outcome truth, never prose inference. */
 import type {
   AttemptTelemetryRecord,
+  EffortResolution,
   AuthSourceKind,
   ExternalContextPolicy,
   HarnessEvent,
+  HarnessRequestRefusal,
   InputTokenUsage,
   RequestRequirementResolution,
   TaskContract,
@@ -60,9 +62,7 @@ export interface WebEvidenceState {
   attempted: boolean;
   satisfied: boolean;
   failed: boolean;
-  /** QA-042: retrieval strength — "verified" once any web result carried a
-   * typed successful retrieval, else "dispatched" once web activity completed
-   * with no typed outcome (codex), else "none". Never downgrades verified. */
+  /** Typed retrieval strength; never downgrades verified. */
   verification: "verified" | "dispatched" | "none";
   tool: string | null;
   target: string | null;
@@ -89,6 +89,8 @@ export interface DelegationBeltState {
 }
 
 export interface AttemptTelemetry extends ProcessingTelemetry {
+  requestRefusal?: HarnessRequestRefusal;
+  effortResolution?: EffortResolution;
   requestRequirements: RequestRequirementResolution[];
   toolErrors: ToolErrorRecord[];
   /** tool_result events without a status field: never silently treated as ok. */
@@ -104,9 +106,7 @@ export interface AttemptTelemetry extends ProcessingTelemetry {
   currentAuthMode: "local_session" | "api_key" | null;
   /** Concrete credential source disclosed alongside the route (never guessed). */
   authSource: AuthSourceKind | null;
-  /** Credential profile the attempt ACTUALLY ran under (INV-135), first-wins
-   * from the adapter's per-event stamp — rotation makes this differ from the
-   * contract's requested id, and the receipt must carry the effective truth. */
+  /** Effective profile, last-wins across credential rotation (INV-135). */
   profileId: string | null;
   /** Model hint the engine SENT this attempt (requested side; observedModel is
    * the disclosed side of the model x route truth). */
@@ -120,8 +120,7 @@ export interface AttemptTelemetry extends ProcessingTelemetry {
   outputMarkers: marks.AttemptOutputMarkers;
   /** Delegation-belt runtime readiness (QA-024); requested=false on non-delegate attempts. */
   delegationBelt: DelegationBeltState;
-  /** Browser-MCP runtime evidence (QA-040); requested=false unless the browser
-   * injection was armed for this attempt. */
+  /** Browser-MCP runtime evidence; requested=false unless armed. */
   browser: BrowserEvidenceState;
   /** D-16: a terminal `capacity_exhausted` context signal was observed this
    * attempt (never a transient; consumed by the finalizer, not the retry loop). */
@@ -135,7 +134,6 @@ export interface AttemptTelemetry extends ProcessingTelemetry {
    * final message (claude StructuredOutput tool), or null. The unwrap validates
    * it while the markdown answer stays the deliverable. */
   sideToolWorkReport: unknown;
-  /** Contract/outcome truth for this attempt, produced by the orchestrator. */
   outcome: AttemptOutcomeState | null;
   /** Legacy fields sum known reports with harness-specific input/cache semantics.
    * Normalized input fields require complete coverage. Money stays in the ledger. */
@@ -281,7 +279,9 @@ function bumpWebVerification(t: AttemptTelemetry, retrieval: string | undefined)
 
 /** Observe typed adapter evidence, never payload strings or tool-name heuristics. */
 export function observeAttemptTelemetry(t: AttemptTelemetry, ev: HarnessEvent): void {
+  if (ev.type === "error" && ev.request_refusal) t.requestRefusal = ev.request_refusal;
   observeProcessing(t, ev);
+  if (ev.effort_resolution) t.effortResolution = ev.effort_resolution;
   marks.observeAttemptOutputMarkers(t.outputMarkers, ev);
   // Delegation belt readiness (QA-024): normalized startup/error events carry
   // typed MCP server statuses. Read THAT server's status as first-class truth;
@@ -313,11 +313,8 @@ export function observeAttemptTelemetry(t: AttemptTelemetry, ev: HarnessEvent): 
   // native tries of ONE attempt, and the receipt must name the try that
   // produced the deliverable.
   if (ev.credential_profile_id) t.profileId = ev.credential_profile_id;
-  // #31: classify every disclosed transient into the typed taxonomy
-  // (transientClassify.ts). An adapter `transient` and a `rate_limit` are retryable
-  // failures; the vendor's typed `status.error_category` surfaces only the
-  // deterministic FAILURE classes (auth/capability/config) so required-actions attach
-  // the right remediation. Rate limits ALSO stay in rateLimits for W5.4 rotation.
+  // Typed transient/auth/capability evidence owns retry and remediation;
+  // rate limits also stay available to credential rotation.
   if (ev.transient) t.transientFailures.push(classifyTransientSignal(ev.transient));
   if (ev.rate_limit) {
     t.rateLimits.push({
@@ -598,6 +595,7 @@ export function telemetrySummary(t: AttemptTelemetry): Record<string, unknown> {
   const unrecovered = unrecoveredToolErrors(t);
   const warnings = toolWarnings(t);
   return {
+    ...(t.requestRefusal ? { request_refusal: t.requestRefusal } : {}),
     web_evidence: {
       required: t.web.required,
       mode: t.web.mode,
@@ -676,6 +674,8 @@ export function attemptTelemetryRecord(
       cashKnowledge: t.usageCost.cashKnowledge ?? "unknown",
       valuationKnowledge: t.usageCost.valuationKnowledge ?? "unknown",
     },
+    effort_resolution: t.effortResolution,
+    request_refusal: t.requestRefusal,
     processing: t.processing,
     processing_cost_basis: t.processingCostBasis,
     attempt_id: attemptId,

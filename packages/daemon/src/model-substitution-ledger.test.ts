@@ -96,4 +96,17 @@ describe("ModelSubstitutionLedger (bounded self-expiring ordering evidence)", ()
     expect(ids).toContain("p0");
     expect(ids).not.toContain("p1");
   });
+
+  it("records no mark while a login window of that harness is open (#363)", () => {
+    let open = true;
+    const ledger = new ModelSubstitutionLedger(
+      () => new Date(T0),
+      (harness) => open && harness === "codex",
+    );
+    ledger.record(seen());
+    expect(ledger.live()).toEqual([]);
+    open = false;
+    ledger.record(seen());
+    expect(ledger.live()).toHaveLength(1);
+  });
 });

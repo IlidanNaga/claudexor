@@ -28,44 +28,9 @@ import { journalRecoveryTools } from "./recovery-tools.js";
 import { formatRunResult, structuredRunResult } from "./run-result-format.js";
 import { assertNoPluginArtifactSkew } from "./plugin-skew.js";
 import { accountsTool } from "./accounts-tool.js";
+import { threadTools } from "./thread-tools.js";
+import { inlineJsonSchemaRefs } from "./inline-json-schema-refs.js";
 import { reviewerPanelEntrySchema, processingPreferenceSchema } from "./reviewer-panel-schema.js";
-// Inline generated refs once at load; the SDK requires self-contained schemas.
-function inlineJsonSchemaRefs(schema: Record<string, unknown>): Record<string, unknown> {
-  const resolvePointer = (pointer: string): unknown => {
-    let node: unknown = schema;
-    for (const rawSegment of pointer.split("/").slice(1)) {
-      const segment = rawSegment.replaceAll("~1", "/").replaceAll("~0", "~");
-      if (Array.isArray(node)) node = node[Number(segment)];
-      else if (node && typeof node === "object") node = (node as Record<string, unknown>)[segment];
-      else return undefined;
-    }
-    return node;
-  };
-  const resolve = (node: unknown, stack: readonly string[]): unknown => {
-    if (Array.isArray(node)) return node.map((child) => resolve(child, stack));
-    if (!node || typeof node !== "object") return node;
-    const obj = node as Record<string, unknown>;
-    const ref = obj["$ref"];
-    if (typeof ref === "string" && ref.startsWith("#/")) {
-      // Generated schemas are trees; fail loudly if a refactor introduces recursion.
-      if (stack.includes(ref))
-        throw new Error(
-          `cyclic $ref '${ref}' in a generated tool schema — flatten the schema or drop its outputSchema`,
-        );
-      const target = resolvePointer(ref);
-      if (target === undefined)
-        throw new Error(`unresolved $ref '${ref}' in a generated tool schema`);
-      return resolve(target, [...stack, ref]);
-    }
-    const out: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(obj)) {
-      if (key === "definitions") continue;
-      out[key] = resolve(value, stack);
-    }
-    return out;
-  };
-  return resolve(schema, []) as Record<string, unknown>;
-}
 const mcpRunToolResultSchema = inlineJsonSchemaRefs(
   mcpRunToolResultSchemaRaw as Record<string, unknown>,
 );
@@ -118,7 +83,13 @@ export interface McpToolAnnotations {
 }
 
 /** Tool output: plain text, or text plus a structured mirror (structuredContent). */
-export type McpToolOutput = string | { text: string; structured?: Record<string, unknown> };
+export type McpToolOutput =
+  | string
+  | {
+      text: string;
+      structured?: Record<string, unknown>;
+      isError?: boolean;
+    };
 
 export interface McpTool {
   name: string;
@@ -178,6 +149,7 @@ export function buildMcpServer(opts: {
         return {
           content: [{ type: "text" as const, text }],
           ...(structured !== undefined ? { structuredContent: structured } : {}),
+          ...(typeof out !== "string" && out.isError ? { isError: true } : {}),
         };
       }) as any,
     );
@@ -318,6 +290,12 @@ export function defaultClaudexorTools(runner: RunnerFn): McpTool[] {
       },
       execution: runExecutionSchema,
       paidBudget: paidBudgetSchema,
+      credentialProfileId: {
+        type: "string",
+        minLength: 1,
+        pattern: "\\S",
+        description: "Strict credential profile for this run; never falls back to another account.",
+      },
       access: {
         type: "string",
         enum: AccessProfile.options,
@@ -471,6 +449,7 @@ export function defaultClaudexorTools(runner: RunnerFn): McpTool[] {
         create: true,
       },
     ),
+    ...threadTools(runner),
     {
       name: "claudexor_status",
       description:

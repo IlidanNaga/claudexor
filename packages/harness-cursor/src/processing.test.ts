@@ -35,6 +35,7 @@ describe("Cursor processing uses listed same-effort variants", () => {
       access: "workspace_write",
       auth_preference: "api_key",
       model_hint: "cursor-grok-4.6-xhigh",
+      effort_hint: "low", // Separate preference never rewrites the compound model id.
       processing: prepared.receipt,
       processing_cost_basis: prepared.costBasis,
     });

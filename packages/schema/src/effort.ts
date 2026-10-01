@@ -1,4 +1,5 @@
 import { z } from "zod/v3";
+import { NonBlankString } from "./primitives.js";
 
 /**
  * Reasoning-effort vocabulary: the open wire type and the ONE owner of every
@@ -29,7 +30,7 @@ export const EFFORT_HINT_PATTERN = /^[a-z0-9]+(?:[_-][a-z0-9]+)*$/;
  * `ReasoningEffort` as "a non-empty reasoning effort value advertised by the
  * model"). Adapters advertise the subset they actually accept per (harness,
  * model); the shared normalizer passes an advertised level through verbatim,
- * clamps an unadvertised-but-mergeable one onto the nearest advertised level
+ * resolves a known preference downward (or to the known minimum)
  * inside the vendor's own order, and REFUSES a level the merged ladder has
  * never seen — so a vendor level newer than this repo works with no code
  * change, and a typo is never silently downgraded.
@@ -46,6 +47,34 @@ export const EffortHint = z
     "Cross-harness reasoning-effort level as a lowercase slug (open vocabulary, mirroring the vendor contract); adapters advertise the levels they accept per model, ordered weakest to strongest by the vendor itself, and a shared normalizer passes advertised levels through, clamps inside the vendor order, and refuses levels the advertised ladder has never seen.",
   );
 export type EffortHint = z.infer<typeof EffortHint>;
+
+/** One receipt for preparation and independent provider observation. Dispatch
+ * remains the operation/session lifecycle's fact, never inferred from this. */
+export const EffortResolution = z
+  .object({
+    requested: NonBlankString.nullable().describe(
+      "Original effort preference before adaptation; null when none was requested.",
+    ),
+    submitted: NonBlankString.nullable().describe(
+      "Native option prepared for transport; null means omitted, never the explicit token none. Not proof of dispatch.",
+    ),
+    resolution: z.enum(["exact", "downward", "floor", "omitted", "unverifiable", "rejected"]),
+    source: z.enum(["account_catalog", "live_probe", "versioned_snapshot", "adapter"]),
+    parameter: NonBlankString.nullable().describe(
+      "Native carrier, such as reasoning.effort, model_reasoning_effort or --effort; null when no separate knob is carried.",
+    ),
+    observed: NonBlankString.nullable().describe(
+      "Provider-reported effort only; null when unobserved, never copied from submission.",
+    ),
+    observedSource: NonBlankString.nullable().describe(
+      "Provider event/field that reported observed effort; null when unobserved.",
+    ),
+    reason: NonBlankString.optional().describe(
+      "Diagnostic explanation; consumers branch on resolution, never prose.",
+    ),
+  })
+  .strict();
+export type EffortResolution = z.infer<typeof EffortResolution>;
 
 /** What one model advertises: its ordered effort vocabulary and vendor default. */
 export const ModelEffortCapability = z

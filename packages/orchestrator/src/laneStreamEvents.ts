@@ -6,7 +6,7 @@
  */
 import type { RunEventType } from "@claudexor/schema";
 import { transientRetryDelayMs, type TransientRetryPolicy } from "./runSupport.js";
-import type { AttemptTelemetry } from "./attemptTelemetry.js";
+import { classifyAdapterThrow, type AttemptTelemetry } from "./attemptTelemetry.js";
 
 type Emit = (type: RunEventType, payload: Record<string, unknown>) => void;
 
@@ -126,4 +126,14 @@ export function emitTransientExhausted(
     retries: telemetry.transientRetries,
     max_retries: maxRetries,
   });
+}
+
+/** Effort refusal is a terminal preparation fact, not an availability failure.
+ * Return whether ordinary retry/rotation handling applies to this thrown error. */
+export function recordAdapterThrow(telemetry: AttemptTelemetry, error: unknown): boolean {
+  if (telemetry.effortResolution?.resolution === "rejected") return false;
+  telemetry.transientFailures.push(
+    classifyAdapterThrow({ errorName: error instanceof Error ? error.name : null }),
+  );
+  return true;
 }

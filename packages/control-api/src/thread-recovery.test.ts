@@ -1,6 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
+import type { ServerResponse } from "node:http";
+import {
+  ControlRunStartRequest,
+  ControlThreadTurnRequest,
+  SCHEMA_VERSION,
+  Thread,
+} from "@claudexor/schema";
 import type { DaemonRunRecord } from "./daemon-server.js";
 import { inspectThreadTurnCreateReplay, resolveThreadRecoveryTurn } from "./thread-recovery.js";
+import { handleThreadTurnCreate, type ThreadTurnRouteCtx } from "./thread-turn-routes.js";
 
 const source: DaemonRunRecord = {
   id: "job-source",
@@ -16,6 +24,61 @@ const idempotency = {
 };
 
 describe("thread recovery admission", () => {
+  it.each([
+    ["ask", undefined, "ask"],
+    ["plan", undefined, "plan"],
+    ["agent", undefined, "agent"],
+    ["agent", "ask", "ask"],
+    ["ask", "plan", "plan"],
+    ["plan", "agent", "agent"],
+  ] as const)(
+    "resolves persisted %s with turn override %s as %s",
+    async (stored, override, expected) => {
+      const thread = Thread.parse({
+        schema_version: SCHEMA_VERSION,
+        id: "thread-mode",
+        mode: stored,
+        created_at: "2026-10-01T00:00:00Z",
+        updated_at: "2026-10-01T00:00:00Z",
+        repo: { root: "/tmp/thread-mode-project", base_ref: "HEAD" },
+      });
+      const enqueue = vi.fn(async () => ({ id: "job-mode" }));
+      const json = vi.fn();
+      const ctx = {
+        threadTurnChains: new Map(),
+        threadDetail: async () => ({ thread, turns: [], sessions: [] }),
+        createThreadTurn: async () => ({ id: "turn-mode" }),
+        normalizeStart: (request: ControlRunStartRequest) => request,
+        daemon: { enqueue, findAccepted: async () => null },
+        waitForRunStart: async () => ({ id: "job-mode", state: "queued" }),
+        isTerminalState: () => false,
+        json,
+      } as unknown as ThreadTurnRouteCtx;
+      const request = ControlThreadTurnRequest.parse({
+        prompt: "Continue",
+        ...(override ? { mode: override } : {}),
+      });
+      await handleThreadTurnCreate(ctx, {} as ServerResponse, thread.id, request, "mode-key");
+      expect(enqueue).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          mode: expected,
+          threadId: thread.id,
+          turnId: "turn-mode",
+          execution: expect.objectContaining({
+            isolation: expected === "agent" ? "live" : "envelope",
+          }),
+        }),
+        expect.objectContaining({ idempotencyKey: "mode-key" }),
+      );
+      expect(json).toHaveBeenCalledWith(
+        expect.anything(),
+        202,
+        expect.objectContaining({ turnId: "turn-mode" }),
+      );
+      expect(thread.mode).toBe(stored);
+    },
+  );
+
   it("refuses a runless idempotent turn after the conversation moved on", async () => {
     const list = vi.fn(async () => []);
     const createThreadTurn = vi.fn();
