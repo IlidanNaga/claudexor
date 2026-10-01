@@ -163,7 +163,7 @@ const BOOLEAN_FLAG_MAP = {
   },
   resume: {
     mcp: null,
-    reason: "CLI shorthand over --thread; thread continuation via MCP is deferred with it",
+    reason: "CLI shorthand over --thread; MCP continues threads through claudexor_thread_turn",
   },
   all: { mcp: null, reason: "subcommand scope flag, not a run control" },
   refresh: { mcp: null, reason: "quota subcommand operation, not a run control" },
@@ -195,7 +195,7 @@ const CLI_ONLY_EXEMPT = {
     "embedder contract is CLI/HTTP-first (v2.1 W5, DECIDED_TRADEOFFS DT2.1-1); MCP exposure of per-run system instructions is deferred",
   "instructions-file": "file form of --instructions; MCP exposure deferred with it (DT2.1-1)",
   "max-seconds":
-    "wall-clock run deadline; embedder contract is CLI/HTTP-first, MCP exposure deferred (DT2.1-1)",
+    "wall-clock run deadline; exposed as maxSeconds on claudexor_thread_turn, not the one-shot run tools checked here",
   "deny-path":
     "per-run deny globs; embedder contract is CLI/HTTP-first, MCP exposure deferred (DT2.1-1)",
   "output-schema":

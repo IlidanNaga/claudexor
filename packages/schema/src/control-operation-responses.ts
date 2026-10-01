@@ -6,7 +6,7 @@ import {
   ControlRunStartRequest,
   ControlRunSummary,
 } from "./control.js";
-import { Id } from "./primitives.js";
+import { Id, ModeKind } from "./primitives.js";
 import { DeliveryReceipt } from "./delivery.js";
 import { RunExecution } from "./control-run-execution.js";
 
@@ -121,6 +121,9 @@ export const ControlThreadTurnRequest = ControlRunStartRequest.omit({
   planRef: true,
 })
   .extend({
+    mode: ModeKind.optional().describe(
+      "Turn mode override; omission inherits the thread's default mode.",
+    ),
     execution: RunExecution.pick({ workspaceKind: true, scopePaths: true, isolation: true })
       .partial()
       .strict()

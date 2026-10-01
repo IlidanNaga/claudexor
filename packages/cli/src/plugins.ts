@@ -303,7 +303,7 @@ function commandText(host: PluginHost, runtime: RuntimePaths): string {
     MCP_RUN_HANDLE_GUIDANCE,
     READINESS_GUIDANCE,
     "",
-    "Do not claim live thread parity through MCP. Ask for an explicit repo path if the target project is ambiguous.",
+    "For durable MCP conversations, create once with `claudexor_thread_create`, continue with `claudexor_thread_turn`, and inspect with `claudexor_thread_read`. These tools do not expose portable native vendor sessions or a live vendor conversation. Ask for an explicit repo path if the target project is ambiguous.",
     "",
     // QA-029A: retain the exact invocation grammar in the generated command.
     ...(host === "claude"

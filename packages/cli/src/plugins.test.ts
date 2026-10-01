@@ -319,7 +319,7 @@ describe("plugin lifecycle", () => {
                   line.includes('"longDescription"') ||
                   line.includes("MCP run tools enqueue work") ||
                   line.includes("Readiness has separate owners") ||
-                  line.includes("Do not claim live thread parity"),
+                  line.includes("For durable MCP conversations"),
               ),
           ];
         }),
@@ -339,7 +339,7 @@ describe("plugin lifecycle", () => {
           `<!-- ${MANAGED_VERSION_MARKER} -->`,
           "MCP run tools enqueue work and return a durable run handle, not terminal output or a live thread. Follow the handle with `claudexor_run_status`/`claudexor_run_result` (or the CLI) before claiming the answer, completion, or applyability.",
           "Readiness has separate owners: `claudexor_status`/doctor is the aggregate/default-store projection, `claudexor_accounts` is the server-authored exact-profile readiness/quota snapshot, `claudexor_capabilities` declares setup transport, and `claudexor models --harness <id>` is default-route discovery rather than a named profile entitlement. An unpinned request may still be admitted through the canonical account pool when it selects a ready exact profile; only a genuinely profile-less/default fallback depends on doctor status. For a selected profile, strict run/reviewer preflight owns model admission and result telemetry owns the observed profile/model route. `unknown/not_run`, stale quota, or unavailable inventory is uncertainty/refusal; `external_terminal` means the supported client terminal attach path and is not itself unreadiness.",
-          "Do not claim live thread parity through MCP. Ask for an explicit repo path if the target project is ambiguous.",
+          "For durable MCP conversations, create once with `claudexor_thread_create`, continue with `claudexor_thread_turn`, and inspect with `claudexor_thread_read`. These tools do not expose portable native vendor sessions or a live vendor conversation. Ask for an explicit repo path if the target project is ambiguous.",
         ],
         ".claude/skills/claudexor/skills/claudexor/SKILL.md": [
           `<!-- ${MANAGED_VERSION_MARKER} -->`,
@@ -372,7 +372,7 @@ describe("plugin lifecycle", () => {
           `<!-- ${MANAGED_VERSION_MARKER} -->`,
           "MCP run tools enqueue work and return a durable run handle, not terminal output or a live thread. Follow the handle with `claudexor_run_status`/`claudexor_run_result` (or the CLI) before claiming the answer, completion, or applyability.",
           "Readiness has separate owners: `claudexor_status`/doctor is the aggregate/default-store projection, `claudexor_accounts` is the server-authored exact-profile readiness/quota snapshot, `claudexor_capabilities` declares setup transport, and `claudexor models --harness <id>` is default-route discovery rather than a named profile entitlement. An unpinned request may still be admitted through the canonical account pool when it selects a ready exact profile; only a genuinely profile-less/default fallback depends on doctor status. For a selected profile, strict run/reviewer preflight owns model admission and result telemetry owns the observed profile/model route. `unknown/not_run`, stale quota, or unavailable inventory is uncertainty/refusal; `external_terminal` means the supported client terminal attach path and is not itself unreadiness.",
-          "Do not claim live thread parity through MCP. Ask for an explicit repo path if the target project is ambiguous.",
+          "For durable MCP conversations, create once with `claudexor_thread_create`, continue with `claudexor_thread_turn`, and inspect with `claudexor_thread_read`. These tools do not expose portable native vendor sessions or a live vendor conversation. Ask for an explicit repo path if the target project is ambiguous.",
         ],
         ".cursor/plugins/local/claudexor/mcp.json": [
           '  "mcpServers": {',
@@ -384,7 +384,7 @@ describe("plugin lifecycle", () => {
           `<!-- ${MANAGED_VERSION_MARKER} -->`,
           "MCP run tools enqueue work and return a durable run handle, not terminal output or a live thread. Follow the handle with `claudexor_run_status`/`claudexor_run_result` (or the CLI) before claiming the answer, completion, or applyability.",
           "Readiness has separate owners: `claudexor_status`/doctor is the aggregate/default-store projection, `claudexor_accounts` is the server-authored exact-profile readiness/quota snapshot, `claudexor_capabilities` declares setup transport, and `claudexor models --harness <id>` is default-route discovery rather than a named profile entitlement. An unpinned request may still be admitted through the canonical account pool when it selects a ready exact profile; only a genuinely profile-less/default fallback depends on doctor status. For a selected profile, strict run/reviewer preflight owns model admission and result telemetry owns the observed profile/model route. `unknown/not_run`, stale quota, or unavailable inventory is uncertainty/refusal; `external_terminal` means the supported client terminal attach path and is not itself unreadiness.",
-          "Do not claim live thread parity through MCP. Ask for an explicit repo path if the target project is ambiguous.",
+          "For durable MCP conversations, create once with `claudexor_thread_create`, continue with `claudexor_thread_turn`, and inspect with `claudexor_thread_read`. These tools do not expose portable native vendor sessions or a live vendor conversation. Ask for an explicit repo path if the target project is ambiguous.",
         ],
         ".config/opencode/plugins/claudexor.js": [
           `// ${MANAGED_VERSION_MARKER}`,
