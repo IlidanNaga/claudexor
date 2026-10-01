@@ -909,6 +909,10 @@ views in the shared design-system files; screens compose them.
   absolute local-file links use the originating run's project/run scope and the existing
   document preview or Finder action. Staged snapshots retain that scope;
   their temporary storage directory does not grant additional file access.
+  Gallery text previews retain the server's MIME/category decision and open
+  immediately into their loading, content, or typed error state with the file
+  path and Retry. Malformed UTF-8 is disclosed; a valid character crossing the
+  read cap stays a readable truncated preview, with the raw loaded bytes retained.
   HTML/SVG previews stay literal source; the separately
   launched interactive web preview is unchanged. Literal source starts at the
   top-left corner in a plain, read-only text view that draws the visible part

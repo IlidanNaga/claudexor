@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import ClaudexorKit
+import SwiftUI
 
 // Support types for the artifacts gallery, split out of ArtifactGalleryView.swift
 // so the view file stays under the readability cap. These are pure/standalone
@@ -22,6 +23,12 @@ enum ArtifactCategory {
         let ext = (path as NSString).pathExtension.lowercased()
         if semanticTextExtensions.contains(ext) { return .text }
         return .other
+    }
+
+    static func previewKind(mime: String?, path: String) -> AgentFilePreviewKind {
+        let kind = ScopedInlineImage.previewKind(path: path)
+        if case .blocked = kind, of(mime: mime, path: path) == .text { return .source }
+        return kind
     }
 
     /// QA-067 (issue-067) PARITY: the App's text set MUST match the server's
@@ -75,16 +82,56 @@ func stagedArtifactPreview(
     locationID: ExecutionLocationID,
     runId: String,
     path: String,
-    produced: Bool
+    produced: Bool,
+    mime: String? = nil
 ) async throws -> SafeFilePreviewRequest {
-    let data = produced
-        ? await model.producedBytes(runId: runId, path: path, locationID: locationID)
-        : await model.artifactBytes(runId: runId, path: path, locationID: locationID)
-    guard let data else { throw CocoaError(.fileReadUnknown) }
+    let bytes = try await model.artifactDataOutcome(
+        runId: runId, path: path, produced: produced, locationID: locationID).get()
+    let kind = ArtifactCategory.previewKind(mime: mime, path: path)
+    if kind == .source || kind == .markdown,
+       String(data: bytes, encoding: .utf8) == nil {
+        throw ArtifactFetchError.payloadError(from: GatewayError.decoding("Invalid UTF-8"), path: path)
+    }
     let url = try ExternalArtifactHandoff.standard()
-        .stage(data: data, suggestedName: (path as NSString).lastPathComponent)
+        .stage(data: bytes, suggestedName: (path as NSString).lastPathComponent)
     let task = model.task(runId, at: locationID)
     return .localFile(
-        url: url, kind: ScopedInlineImage.previewKind(path: path),
+        url: url, kind: kind,
         fileScopeRoots: [task?.repoRoot, task?.runDir].compactMap { $0 })
+}
+
+/// The gallery presents its existing payload state immediately, before a fetch
+/// completes. A successful load hands the same retained snapshot to the viewer.
+struct ArtifactPreviewSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let state: LoadState<SafeFilePreviewRequest>
+    let path: String
+    let retry: () -> Void
+
+    var body: some View {
+        if case .loaded(let request) = state {
+            SafeFilePreviewSheet(request: request)
+        } else {
+            VStack(spacing: Theme.Spacing.md) {
+                Text(path).font(.headline).textSelection(.enabled)
+                Spacer()
+                switch state {
+                case .failed(let error):
+                    Text(error.message).foregroundStyle(.secondary).textSelection(.enabled)
+                    Button("Retry", action: retry).buttonStyle(.bordered)
+                case .empty:
+                    ContentUnavailableView("Empty file", systemImage: "doc")
+                default:
+                    ProgressView("Loading \(path)…")
+                }
+                Spacer()
+                HStack {
+                    Spacer()
+                    Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+                }
+            }
+            .padding(Theme.Spacing.lg)
+            .frame(minWidth: 720, minHeight: 520)
+        }
+    }
 }

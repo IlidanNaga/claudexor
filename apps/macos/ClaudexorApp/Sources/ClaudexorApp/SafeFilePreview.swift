@@ -10,7 +10,7 @@ enum AgentFilePreviewKind: Equatable, Sendable {
     case blocked(reason: String)
 }
 
-struct SafeFilePreviewRequest: Identifiable {
+struct SafeFilePreviewRequest: Identifiable, Equatable, Sendable {
     enum SourceReadError: Error, Equatable {
         case couldNotRead
         case notRegularFile
@@ -21,7 +21,36 @@ struct SafeFilePreviewRequest: Identifiable {
         let bytes: Data
         let wasTruncated: Bool
 
-        var text: String { String(decoding: bytes, as: UTF8.self) }
+        let text: String?
+
+        init(bytes: Data, wasTruncated: Bool) {
+            self.bytes = bytes
+            self.wasTruncated = wasTruncated
+            self.text = String(data: bytes, encoding: .utf8)
+        }
+
+        init(readBuffer: Data, maxBytes: Int) {
+            bytes = Data(readBuffer.prefix(maxBytes))
+            wasTruncated = readBuffer.count > maxBytes
+            if let decoded = String(data: bytes, encoding: .utf8) {
+                text = decoded
+                return
+            }
+            // The read includes one full scalar of lookahead. Validate the
+            // retained prefix before using the existing character-safe bound;
+            // an interior encoding error cannot be repaired by trimming it.
+            if wasTruncated {
+                var probe = readBuffer
+                for _ in 0..<4 where probe.count >= maxBytes {
+                    if let decoded = String(data: probe, encoding: .utf8) {
+                        text = AppModel.boundedUTF8Prefix(decoded, maxBytes: maxBytes)
+                        return
+                    }
+                    probe.removeLast()
+                }
+            }
+            text = nil
+        }
     }
 
     static let sourceByteLimit = 4 * 1024 * 1024
@@ -95,13 +124,11 @@ struct SafeFilePreviewRequest: Identifiable {
         at url: URL,
         maxBytes: Int = sourceByteLimit
     ) throws -> BoundedSource {
-        precondition(maxBytes >= 0 && maxBytes < Int.max)
+        precondition(maxBytes >= 0 && maxBytes <= Int.max - 4)
         let handle = try regularFileHandle(at: url)
         defer { try? handle.close() }
-        let bytes = try handle.read(upToCount: maxBytes + 1) ?? Data()
-        return BoundedSource(
-            bytes: Data(bytes.prefix(maxBytes)),
-            wasTruncated: bytes.count > maxBytes)
+        let bytes = try handle.read(upToCount: maxBytes + 4) ?? Data()
+        return BoundedSource(readBuffer: bytes, maxBytes: maxBytes)
     }
 
     private static func boundedSource(
@@ -111,10 +138,8 @@ struct SafeFilePreviewRequest: Identifiable {
         let copy = Darwin.dup(descriptor)
         guard copy >= 0 else { throw SourceReadError.couldNotRead }
         let handle = FileHandle(fileDescriptor: copy, closeOnDealloc: true)
-        let bytes = try handle.read(upToCount: maxBytes + 1) ?? Data()
-        return BoundedSource(
-            bytes: Data(bytes.prefix(maxBytes)),
-            wasTruncated: bytes.count > maxBytes)
+        let bytes = try handle.read(upToCount: maxBytes + 4) ?? Data()
+        return BoundedSource(readBuffer: bytes, maxBytes: maxBytes)
     }
 
     private static func regularFileHandle(at url: URL) throws -> FileHandle {
@@ -218,7 +243,7 @@ struct SafeFilePreviewSheet: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                if request.kind == .markdown, request.source != nil {
+                if request.kind == .markdown, request.source?.text != nil {
                     Toggle("Show source", isOn: $showSource)
                         .toggleStyle(.checkbox)
                         .help("Switch between formatted Markdown and its source text.")
@@ -256,22 +281,24 @@ struct SafeFilePreviewSheet: View {
     @ViewBuilder private var preview: some View {
         switch request.kind {
         case .source, .markdown:
-            if let source = request.source {
+            if let source = request.source, let text = source.text {
                 if request.kind == .markdown && !showSource {
                     ScrollView {
                         MarkdownOutputView(
-                            markdown: source.text, fileScopeRoots: request.fileScopeRoots,
+                            markdown: text, fileScopeRoots: request.fileScopeRoots,
                             bodyFont: .body, isFilePreview: true)
                             .padding(Theme.Spacing.lg)
                     }
                 } else {
-                    LiteralSourceView(text: source.text)
+                    LiteralSourceView(text: text)
                 }
             } else {
                 ContentUnavailableView(
                     "Preview unavailable",
                     systemImage: "doc.badge.ellipsis",
-                    description: Text("The file could not be read within the preview limit."))
+                    description: Text(request.source == nil
+                        ? "The file could not be read within the preview limit."
+                        : "\(request.displayName) is not valid UTF-8 text. Use Reveal in Finder to inspect the retained file."))
             }
         case .quickLook:
             QuickLookPreview(url: request.url)
