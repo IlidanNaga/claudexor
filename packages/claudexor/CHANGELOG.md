@@ -1,5 +1,13 @@
 # claudexor
 
+## 3.18.0
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies [fb1fdb4]
+  - @claudexor/cli@3.18.0
+
 ## 3.17.2
 
 ### Patch Changes

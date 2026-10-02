@@ -1,5 +1,5 @@
 import type { SpawnOptions, spawnProcess } from "@claudexor/core";
-import { HarnessRunSpec, type HarnessEvent } from "@claudexor/schema";
+import { HarnessRunSpec, HarnessEvent } from "@claudexor/schema";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -15,7 +15,46 @@ import {
 import type { CodexParseState } from "./parse.js";
 import { createCodexAdapter } from "./index.js";
 
+const retryNotifications = readFileSync(
+  new URL("../fixtures/app-server/retry-status-0.156.1.jsonl", import.meta.url),
+  "utf8",
+)
+  .trim()
+  .split("\n")
+  .map((line) => JSON.parse(line) as Record<string, unknown>);
+
 describe("Codex app-server transport", () => {
+  it("preserves recorded native retries without inventing policy signals or counters", () => {
+    for (const notification of retryNotifications) {
+      const params = notification["params"] as Record<string, unknown>;
+      const events = codexAppServerEvents(notification, "session-retry", {});
+      expect(events).toHaveLength(1);
+      expect(events![0]).toEqual({
+        type: "status",
+        session_id: "session-retry",
+        ts: expect.any(String),
+        text: (params["error"] as Record<string, unknown>)["message"],
+        status: { kind: "api_retry" },
+        payload: params,
+      });
+      expect(HarnessEvent.safeParse(events![0]).success).toBe(true);
+    }
+  });
+
+  it.each([false, undefined, "true", 1, null])(
+    "keeps non-retry notification accounting for willRetry=%s",
+    (willRetry) => {
+      const notification = retryNotifications[0]!;
+      expect(
+        codexAppServerEvents(
+          { ...notification, params: { ...(notification["params"] as object), willRetry } },
+          "session-retry",
+          {},
+        ),
+      ).toBeNull();
+    },
+  );
+
   it("initializes, starts a thread and turn, and exposes the native thread id", async () => {
     const writes: Array<Record<string, unknown>> = [];
     const replies: string[] = [];
@@ -1207,7 +1246,7 @@ describe("Codex app-server transport", () => {
   });
 });
 
-describe("Codex live messages (turn/steer)", () => {
+describe("Codex live app-server events and messages", () => {
   type Request = { id?: number; method: string; params?: Record<string, unknown> };
   type Push = (message: unknown) => void;
   const STEER_TEXT = "Change of plan: stop and answer MANGO.";
@@ -1219,7 +1258,7 @@ describe("Codex live messages (turn/steer)", () => {
     const replies: string[] = [];
     let wake: (() => void) | undefined;
     let stop = false;
-    let crashed = false;
+    let exitCode: number | null = null;
     let turnOpen = true;
     const waiters: Array<{ method: string; resolve: () => void }> = [];
     const state = { goalActive: false };
@@ -1306,7 +1345,7 @@ describe("Codex live messages (turn/steer)", () => {
             wake = resolve;
           });
       }
-      if (crashed) yield { type: "exit", code: 1, signal: null };
+      if (exitCode !== null) yield { type: "exit", code: exitCode, signal: null };
     };
     return {
       spawn,
@@ -1319,8 +1358,8 @@ describe("Codex live messages (turn/steer)", () => {
         push({ method: "turn/started", params: { threadId: "thread-live", turn: { id: turnId } } });
       },
       completeTurn,
-      crash: (): void => {
-        crashed = true;
+      crash: (code = 1): void => {
+        exitCode = code;
         stop = true;
         wake?.();
       },
@@ -1397,6 +1436,71 @@ describe("Codex live messages (turn/steer)", () => {
     server.writes.filter((request) => request.method === "turn/steer");
   const statusEvents = (events: HarnessEvent[]): HarnessEvent[] =>
     events.filter((event) => event.type === "status");
+
+  it.each(["completed", "failed", "systemError", 0, 7] as const)(
+    "keeps native retry activity separate from terminal outcome %s",
+    async (outcome) => {
+      const server = liveAppServer();
+      const run = start(server);
+      await run.seen(started);
+      for (const notification of retryNotifications) {
+        server.push({
+          ...notification,
+          params: {
+            ...(notification["params"] as object),
+            threadId: "thread-live",
+            turnId: "turn-live",
+          },
+        });
+      }
+      server.push({ method: "unmapped/fixture", params: {} });
+      server.push({
+        method: "item/completed",
+        params: {
+          threadId: "thread-live",
+          turnId: "turn-live",
+          item: { type: "agentMessage", id: "answer", text: "OK" },
+        },
+      });
+      if (typeof outcome === "number") server.crash(outcome);
+      else {
+        if (outcome === "systemError") {
+          // Recorded exhaustion order: systemError, non-retrying error, failed turn.
+          server.push({
+            method: "thread/status/changed",
+            params: { threadId: "thread-live", status: { type: "systemError" } },
+          });
+          server.push({
+            method: "error",
+            params: { willRetry: false, error: { message: "retry exhausted" } },
+          });
+        }
+        server.completeTurn("turn-live", outcome === "systemError" ? "failed" : outcome);
+      }
+      await run.done;
+      expect(statusEvents(run.events).map((event) => event.status)).toEqual([
+        { kind: "api_retry" },
+        { kind: "api_retry" },
+      ]);
+      expect(run.events.filter((event) => event.type === "completed")).toHaveLength(1);
+      expect(server.writes.filter((request) => request.method === "turn/start")).toHaveLength(1);
+      expect(server.writes.filter((request) => request.method === "thread/start")).toHaveLength(1);
+      if (outcome === "completed") {
+        expect(run.events.filter((event) => event.type === "error")).toEqual([]);
+        expect(run.events.filter((event) => event.final)).toEqual([
+          expect.objectContaining({ text: "OK", final: true }),
+        ]);
+        expect(run.events.at(-1)?.payload?.["dropped_unrecognized_events"]).toBe(1);
+        expect(run.events.at(-1)?.payload?.["harness_reported_error"]).toBeUndefined();
+      } else {
+        expect(run.events.filter((event) => event.type === "error")).toHaveLength(1);
+        expect(run.events.filter((event) => event.final)).toEqual([]);
+        if (typeof outcome === "number")
+          expect(run.events.at(-1)?.payload?.["code"]).toBe("codex_app_server_failure");
+        else expect(run.events.at(-1)?.payload?.["harness_reported_error"]).toBe(true);
+      }
+    },
+  );
 
   it("answers accepted on {turnId}; the later userMessage echo yields one delivered receipt", async () => {
     const server = liveAppServer((request, push) =>

@@ -60,6 +60,20 @@ function parseLines(raw: string): {
 }
 
 describe("codex adapter conformance fixtures", () => {
+  it("maps recorded app-server retry notices to schema-valid nonterminal activity", () => {
+    const events = readFileSync(join(FIXTURES, "app-server/retry-status-0.156.1.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .flatMap((line) => codexAppServerEvents(JSON.parse(line), "ses-fixture", {}) ?? []);
+    expect(events).toHaveLength(2);
+    expect(
+      events.every((event) => event.type === "status" && event.status?.kind === "api_retry"),
+    ).toBe(true);
+    const stats = validateTypedStream(events);
+    expect(stats.errors).toBe(0);
+    expect(stats.completed).toBe(0);
+  });
+
   it("maps the recorded 0.156.1 app-server stream with lifecycle parity", () => {
     const name = "app-server/recorded-run-0.156.1.jsonl";
     const state: CodexParseState = { startedEmitted: true };
