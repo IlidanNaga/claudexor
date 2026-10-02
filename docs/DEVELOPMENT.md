@@ -76,6 +76,7 @@ pnpm typecheck
 pnpm typecheck:tests   # type-checks *.test.ts, schema scripts, and canary sources
 pnpm test
 pnpm schema:gen
+pnpm gen:version  # root-version projections and canonical portable plugin asset copies
 git diff --exit-code packages/schema/generated
 node scripts/validate-generated-schemas.mjs   # ajv-compiles every generated schema (draft-07)
 pnpm docs:check    # docs-truth gate (endpoints / mode ids / CLI flags vs source)
