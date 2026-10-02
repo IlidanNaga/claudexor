@@ -913,6 +913,11 @@ provides the exact active turn id. `item/*` maps `reasoning` → `thinking`,
 `commandExecution`/`mcpToolCall`/`webSearch` → `tool_call`+`tool_result`,
 `fileChange` → `file_change`, `agentMessage` → `message`; `turn/plan/updated`
 maps plan progress and `thread/tokenUsage/updated` maps usage.
+An `error` notification with `willRetry: true` maps to nonterminal `status`
+(`api_retry`), preserving the native message as text and native fields in the
+payload. The vendor owns that in-turn retry: no retry count, delay, category,
+`transient` or `rate_limit` signal is inferred. Other `error` notifications keep
+the existing terminal and dropped-event handling.
 
 Finality is quiescence-based: an individual `turn/completed` is intermediate
 while the native thread is active, its goal is active, or a background terminal
@@ -1034,7 +1039,7 @@ Known traps (class → CURRENT rule → pin):
   Pins: `stream-deltas.jsonl` + `delta_messages` expectations.
 - Rate limit read from prose: retry/limit conditions scraped from message
   text. Rule: adapters attach the typed `rate_limit`/`transient` fields (or a
-  typed `status` event for claude's `api_retry`); consumers never regex
+  typed `status` event for a harness-owned `api_retry`); consumers never regex
   prose. Pin: `session-resume-rate-limit.jsonl` + `typed_rate_limit`
   expectations.
 - Retry CLASS silently degrading to `unknown`: the signal survives but its

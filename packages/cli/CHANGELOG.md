@@ -1,5 +1,43 @@
 # @claudexor/cli
 
+## 3.18.0
+
+### Minor Changes
+
+- Release the integrated persistent MCP conversation tools and macOS agent-file previews. Thanks to @IlidanNaga for these contributions, including selected-profile billing repairs, to @Petyok for Cursor launcher discovery, and to @kzmx23 for Windows background-process and reconnect investigations.
+
+### Patch Changes
+
+- fb1fdb4: Discover Cursor installations that expose only the `agent` command, while preserving explicit binary overrides and the existing `cursor-agent` route across runs, probes, and managed login.
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies [fb1fdb4]
+- Updated dependencies [09d08fb]
+- Updated dependencies [b00408e]
+  - @claudexor/harness-codex@3.18.0
+  - @claudexor/mcp-server@3.18.0
+  - @claudexor/harness-cursor@3.18.0
+  - @claudexor/orchestrator@3.18.0
+  - @claudexor/core@3.18.0
+  - @claudexor/daemon@3.18.0
+  - @claudexor/delivery@3.18.0
+  - @claudexor/gateway@3.18.0
+  - @claudexor/harness-agy@3.18.0
+  - @claudexor/harness-claude@3.18.0
+  - @claudexor/harness-fake@3.18.0
+  - @claudexor/harness-opencode@3.18.0
+  - @claudexor/harness-raw-api@3.18.0
+  - @claudexor/review@3.18.0
+  - @claudexor/workspace@3.18.0
+  - @claudexor/control-api@3.18.0
+  - @claudexor/acp-server@3.18.0
+  - @claudexor/artifact-store@3.18.0
+  - @claudexor/config@3.18.0
+  - @claudexor/journal@3.18.0
+  - @claudexor/schema@3.18.0
+  - @claudexor/secrets@3.18.0
+  - @claudexor/util@3.18.0
+
 ## 3.17.2
 
 ### Patch Changes

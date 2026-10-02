@@ -24,6 +24,13 @@
 # so they were NOT re-recorded and keep the version they were captured from.
 cli: codex
 fixtures:
+  # Actual native notifications from auth-free loopback Responses endpoints:
+  # an idle SSE stream and HTTP 403, captured on macOS (not the original Windows incident).
+  app-server/retry-status-0.156.1.jsonl:
+    source: recorded
+    cli_version: "0.156.1"
+    recorded_at: "2026-10-02"
+    sanitized: "thread/turn ids and loopback port; emittedAtMs omitted; native error fields unchanged"
   # Native turn/start RPC refusal from an auth-free loopback probe; zero provider calls.
   app-server/input-too-large-error.jsonl:
     source: recorded
