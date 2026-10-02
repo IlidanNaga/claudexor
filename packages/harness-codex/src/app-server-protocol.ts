@@ -403,6 +403,19 @@ export function codexAppServerEvents(
   const method = notification["method"];
   const params = asObject(notification["params"]);
   if (!params) return null;
+  if (method === "error" && params["willRetry"] === true) {
+    const message = asObject(params["error"])?.["message"];
+    return [
+      {
+        type: "status",
+        session_id: sessionId,
+        ts: nowIso(),
+        ...(typeof message === "string" ? { text: message } : {}),
+        status: { kind: "api_retry" },
+        payload: params,
+      },
+    ];
+  }
   if (method === "item/started" || method === "item/completed") {
     const item = asObject(params["item"]);
     if (!item) return null;

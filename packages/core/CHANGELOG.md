@@ -1,5 +1,13 @@
 # @claudexor/core
 
+## 3.18.0
+
+### Patch Changes
+
+- b00408e: Request a hidden Windows console when the shared spawn helpers start background child processes (harness runs, capability and version probes, git capture). Interactive sign-in and `setup attach` keep their visible terminal.
+  - @claudexor/schema@3.18.0
+  - @claudexor/util@3.18.0
+
 ## 3.17.2
 
 ### Patch Changes

@@ -670,6 +670,8 @@ terminal exists. Native thread/turn ids are control handles, not durable engine
 truth; the daemon journal remains authoritative. Stop pauses an active goal,
 interrupts the exact stored turn id, terminates only background terminals whose
 item ids were observed in that run, verifies quiescence, then reaps app-server.
+Native in-turn retry notices use the existing nonterminal `api_retry` status;
+their wire mapping is documented in INTEGRATIONS' Harness Stream Reference.
 Adapters without a verified prompt transport retain their vendor-specific path.
 
 Git-backed candidate envelopes also preserve bounded raster previews before

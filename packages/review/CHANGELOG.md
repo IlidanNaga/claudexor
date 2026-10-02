@@ -1,5 +1,18 @@
 # @claudexor/review
 
+## 3.18.0
+
+### Patch Changes
+
+- Updated dependencies [b00408e]
+  - @claudexor/core@3.18.0
+  - @claudexor/context@3.18.0
+  - @claudexor/workspace@3.18.0
+  - @claudexor/budget@3.18.0
+  - @claudexor/config@3.18.0
+  - @claudexor/schema@3.18.0
+  - @claudexor/util@3.18.0
+
 ## 3.17.2
 
 ### Patch Changes

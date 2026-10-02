@@ -46,6 +46,19 @@ vi.mock("./registry.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("./registry.js")>();
   return {
     ...original,
+    // Catalog projection does not test native model discovery. PATH alone is
+    // insufficient: the harness resolver also checks managed install roots.
+    harnessModelTruth: async (
+      harnessId: string,
+    ): ReturnType<typeof original.harnessModelTruth> => ({
+      response: {
+        harnessId,
+        models: [],
+        source: "none",
+        verifiedAgainst: null,
+      },
+      absence: "authoritative",
+    }),
     buildRegistry: (options?: Parameters<typeof original.buildRegistry>[0]) => {
       const registry = original.buildRegistry(options);
       for (const [id, adapter] of registry) {

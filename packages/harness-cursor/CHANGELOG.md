@@ -1,5 +1,20 @@
 # @claudexor/harness-cursor
 
+## 3.18.0
+
+### Patch Changes
+
+- fb1fdb4: Discover Cursor installations that expose only the `agent` command, while preserving explicit binary overrides and the existing `cursor-agent` route across runs, probes, and managed login.
+- 09d08fb: Attribute named-account billing to the selected account's own verification during routing, reservation, inline continuity summaries, and credential rotation. Preserve the original ranking evidence while checking the account that actually dispatches, so a default login or a previous account cannot lend its subscription entitlement.
+
+  Preserve valid reservation estimates and typed pre-send policy refusals. Keep included reviewer panels eligible beside an existing unknown family-budget hold, while retaining declared or observed paid reviewer costs. Cursor status now keeps successful server evidence distinct from its local-token fallback, without changing login readiness or paid-fallback policy.
+
+- Updated dependencies [b00408e]
+  - @claudexor/core@3.18.0
+  - @claudexor/schema@3.18.0
+  - @claudexor/secrets@3.18.0
+  - @claudexor/util@3.18.0
+
 ## 3.17.2
 
 ### Patch Changes

@@ -1,5 +1,16 @@
 # @claudexor/mcp-server
 
+## 3.18.0
+
+### Minor Changes
+
+- Release the integrated persistent MCP conversation tools and macOS agent-file previews. Thanks to @IlidanNaga for these contributions, including selected-profile billing repairs, to @Petyok for Cursor launcher discovery, and to @kzmx23 for Windows background-process and reconnect investigations.
+
+### Patch Changes
+
+- @claudexor/schema@3.18.0
+- @claudexor/util@3.18.0
+
 ## 3.17.2
 
 ### Patch Changes
