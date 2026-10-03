@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import type { CredentialProfile, QuotaSnapshot } from "@claudexor/schema";
+import type {
+  CredentialProfile,
+  ModelSubstitutionObservation,
+  PreProgressRefusalObservation,
+  QuotaSnapshot,
+} from "@claudexor/schema";
+import { GlobalConfig } from "@claudexor/schema";
 import { rankAccountPool, selectFromAccountPool } from "./account-pool.js";
 
 function row(id: string, overrides: Partial<CredentialProfile> = {}): CredentialProfile {
@@ -186,7 +192,237 @@ describe("account pool ranking (unified model, D-U1 + K.5)", () => {
   });
 });
 
+describe("model-substitution ordering (INV-135: ordered last, never excluded)", () => {
+  const MODEL = "model-a";
+  const substituted = (
+    profileId: string,
+    observedAt: string,
+    over: Partial<ModelSubstitutionObservation> = {},
+  ): ModelSubstitutionObservation => ({
+    harness_id: "claude",
+    profile_id: profileId,
+    requested_model: MODEL,
+    observed_at: observedAt,
+    expires_at: "2099-01-01T00:00:00.000Z",
+    ...over,
+  });
+  const pool = (ids: string[], usedRatios: Record<string, number> = {}) => ({
+    ...baseArgs,
+    model: MODEL,
+    registry: ids.map((id) => row(id)),
+    snapshots: Object.entries(usedRatios).map(([id, used]) => snapshot(id, used)),
+    readyProfileIds: new Set(ids),
+  });
+  const order = (args: Parameters<typeof rankAccountPool>[0]) =>
+    rankAccountPool(args).map((c) => c.profile.profile_id);
+
+  it("ranks a marked row after every other selectable row, whatever its headroom", () => {
+    const args = pool(["best", "low", "unknown"], { best: 0.1, low: 0.8 });
+    expect(order(args)).toEqual(["best", "low", "unknown"]);
+    expect(
+      order({ ...args, substitutions: [substituted("best", "2026-09-20T10:00:00.000Z")] }),
+    ).toEqual(["low", "unknown", "best"]);
+  });
+
+  it("orders a fully marked pool oldest observation first and still selects from it", () => {
+    const args = {
+      ...pool(["a", "b", "c"], { a: 0.1, b: 0.5 }),
+      substitutions: [
+        substituted("a", "2026-09-20T10:20:00.000Z"),
+        substituted("b", "2026-09-20T10:00:00.000Z"),
+        substituted("c", "2026-09-20T10:10:00.000Z"),
+      ],
+    };
+    expect(order(args)).toEqual(["b", "c", "a"]);
+    expect(selectFromAccountPool(args)).toMatchObject({
+      outcome: "selected",
+      candidate: { profile: { profile_id: "b" }, verdict: { kind: "fresh_headroom" } },
+    });
+  });
+
+  it("a refreshed observation re-orders: the account marked longest ago goes first", () => {
+    const args = pool(["a", "b"], { a: 0.1, b: 0.5 });
+    const old = substituted("b", "2026-09-20T10:00:00.000Z");
+    expect(
+      order({ ...args, substitutions: [substituted("a", "2026-09-20T10:05:00.000Z"), old] }),
+    ).toEqual(["b", "a"]);
+    // b substituted again: its refreshed observation is now the newest.
+    expect(
+      order({
+        ...args,
+        substitutions: [
+          substituted("a", "2026-09-20T10:05:00.000Z"),
+          substituted("b", "2026-09-20T10:06:00.000Z"),
+        ],
+      }),
+    ).toEqual(["a", "b"]);
+    // Equal instants fall back to today's order.
+    expect(order({ ...args, substitutions: [substituted("a", old.observed_at), old] })).toEqual([
+      "a",
+      "b",
+    ]);
+  });
+
+  it("keeps a marked singleton selectable and never makes a pool exhausted", () => {
+    const only = {
+      ...pool(["only"]),
+      substitutions: [substituted("only", "2026-09-20T10:00:00.000Z")],
+    };
+    expect(selectFromAccountPool(only)).toMatchObject({
+      outcome: "selected",
+      candidate: { profile: { profile_id: "only" } },
+    });
+    const spent = {
+      ...pool(["marked", "spent"], { spent: 0.99 }),
+      substitutions: [
+        substituted("marked", "2026-09-20T10:00:00.000Z"),
+        substituted("spent", "2026-09-20T09:00:00.000Z"),
+      ],
+    };
+    // An exhausted row keeps its place at the end whatever its mark says.
+    expect(order(spent)).toEqual(["marked", "spent"]);
+    expect(selectFromAccountPool(spent)).toMatchObject({
+      outcome: "selected",
+      candidate: { profile: { profile_id: "marked" } },
+    });
+  });
+
+  it("ignores expired, foreign-harness and other-model observations", () => {
+    const args = pool(["a", "b"], { a: 0.1, b: 0.5 });
+    const at = "2026-09-20T10:00:00.000Z";
+    for (const substitutions of [
+      [substituted("a", "2020-01-01T00:00:00.000Z", { expires_at: "2020-01-01T00:30:00.000Z" })],
+      [substituted("a", at, { harness_id: "codex" })],
+      [substituted("a", at, { requested_model: "model-z" })],
+      [],
+    ])
+      expect(order({ ...args, substitutions })).toEqual(["a", "b"]);
+    // No requested model (a catalog read) matches no observation.
+    expect(order({ ...args, model: null, substitutions: [substituted("a", at)] })).toEqual([
+      "a",
+      "b",
+    ]);
+  });
+});
+
+describe("pre-progress refusal ordering (#363: demoted for that model, never excluded)", () => {
+  const MODEL = "grok-4.7";
+  const refused = (
+    profileId: string,
+    observedAt: string,
+    over: Partial<PreProgressRefusalObservation> = {},
+  ): PreProgressRefusalObservation => ({
+    harness_id: "claude",
+    profile_id: profileId,
+    requested_model: MODEL,
+    observed_at: observedAt,
+    expires_at: "2099-01-01T00:00:00.000Z",
+    ...over,
+  });
+  const pool = (ids: string[], usedRatios: Record<string, number> = {}) => ({
+    ...baseArgs,
+    model: MODEL as string | null,
+    registry: ids.map((id) => row(id)),
+    snapshots: Object.entries(usedRatios).map(([id, used]) => snapshot(id, used)),
+    readyProfileIds: new Set(ids),
+  });
+  const order = (args: Parameters<typeof rankAccountPool>[0]) =>
+    rankAccountPool(args).map((c) => c.profile.profile_id);
+  const at = "2026-09-28T19:52:00.000Z";
+
+  it("the no-evidence tie no longer re-picks the refusing row: it ranks after its sibling", () => {
+    // Cursor exposes no quota: both rows are `unknown` and the id tie-break
+    // alone put `a` first on every unpinned run.
+    const args = pool(["a", "b"]);
+    expect(order(args)).toEqual(["a", "b"]);
+    expect(order({ ...args, refusals: [refused("a", at)] })).toEqual(["b", "a"]);
+    expect(selectFromAccountPool({ ...args, refusals: [refused("a", at)] })).toMatchObject({
+      outcome: "selected",
+      candidate: { profile: { profile_id: "b" }, verdict: { kind: "unknown" } },
+    });
+  });
+
+  it("outranks known headroom, but a marked singleton or fully marked pool still selects", () => {
+    const args = pool(["best", "unknown"], { best: 0.1 });
+    expect(order({ ...args, refusals: [refused("best", at)] })).toEqual(["unknown", "best"]);
+    expect(selectFromAccountPool({ ...pool(["only"]), refusals: [refused("only", at)] })).toEqual(
+      expect.objectContaining({ outcome: "selected" }),
+    );
+    // Oldest mark first, so a fully marked pool takes turns.
+    expect(
+      order({
+        ...pool(["a", "b"]),
+        refusals: [refused("a", "2026-09-28T19:55:00.000Z"), refused("b", at)],
+      }),
+    ).toEqual(["b", "a"]);
+  });
+
+  it("shares the substitution tier: a row's newest mark of either kind orders it", () => {
+    const substituted: ModelSubstitutionObservation = {
+      harness_id: "claude",
+      profile_id: "a",
+      requested_model: MODEL,
+      observed_at: "2026-09-28T19:40:00.000Z",
+      expires_at: "2099-01-01T00:00:00.000Z",
+    };
+    expect(
+      order({
+        ...pool(["a", "b", "c"]),
+        substitutions: [substituted],
+        refusals: [refused("a", "2026-09-28T19:58:00.000Z"), refused("b", at)],
+      }),
+    ).toEqual(["c", "b", "a"]);
+  });
+
+  it("ignores expired, foreign-harness and other-model marks; null is its own model", () => {
+    const args = pool(["a", "b"]);
+    for (const refusals of [
+      [refused("a", "2020-01-01T00:00:00.000Z", { expires_at: "2020-01-01T01:00:00.000Z" })],
+      [refused("a", at, { harness_id: "cursor" })],
+      [refused("a", at, { requested_model: "auto" })],
+      [refused("a", at, { requested_model: null })],
+      [],
+    ])
+      expect(order({ ...args, refusals })).toEqual(["a", "b"]);
+    // The harness default model (null) matches only a null-model mark.
+    expect(
+      order({ ...args, model: null, refusals: [refused("a", at, { requested_model: null })] }),
+    ).toEqual(["b", "a"]);
+    expect(order({ ...args, model: null, refusals: [refused("a", at)] })).toEqual(["a", "b"]);
+  });
+
+  it("never rescues an exhausted row or makes the pool exhausted", () => {
+    const args = {
+      ...pool(["marked", "spent"], { spent: 0.99 }),
+      refusals: [refused("marked", at)],
+    };
+    expect(order(args)).toEqual(["marked", "spent"]);
+    expect(selectFromAccountPool(args)).toMatchObject({
+      outcome: "selected",
+      candidate: { profile: { profile_id: "marked" } },
+    });
+  });
+});
+
 describe("account pool selection", () => {
+  it.each([
+    [0.9, "selected"],
+    [0.95, "selected"],
+    [0.99, "selected"],
+    [1, "exhausted"],
+  ] as const)("default policy at %s usage leaves the pool %s", (usedRatio, outcome) => {
+    const policy = GlobalConfig.parse({ harnesses: { claude: {} } }).harnesses["claude"]!
+      .profile_policy;
+    const selection = selectFromAccountPool({
+      ...baseArgs,
+      registry: [row("last-account")],
+      snapshots: [snapshot("last-account", usedRatio)],
+      readyProfileIds: new Set(["last-account"]),
+      headroomThreshold: policy.headroom_threshold,
+    });
+    expect(selection.outcome).toBe(outcome);
+  });
+
   it("selects the best candidate and never an exhausted row", () => {
     const registry = [row("spent"), row("open")];
     const selection = selectFromAccountPool({

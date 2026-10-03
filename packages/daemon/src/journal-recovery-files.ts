@@ -274,10 +274,8 @@ export function exportPartitionEntries(source: string, destination: string) {
       let digest: string | null = null;
       let copiedAs: string | null = null;
       if (stat.isFile() && stat.nlink === 1n) {
-        const bytes = readOwnedFile(path);
-        digest = sha256(bytes);
+        digest = copyOwnedFile(path, join(destination, name), 0o400);
         copiedAs = name;
-        writeExclusiveFile(join(destination, name), bytes, 0o400);
       }
       return {
         name,
@@ -353,6 +351,48 @@ export function exportJournalRecovery(input: {
     rmSync(bundlePath, { recursive: true, force: true });
     fsyncDirectory(exportsRoot);
     throw error;
+  }
+}
+
+/** Stream one owned regular file into an exclusive private copy and return its
+ * sha256 hex — bounded buffers, never the whole file in memory (a journal
+ * partition can exceed the 2 GiB `readFileSync` wall). The source must stay
+ * byte-identical across the copy or the export fails. */
+export function copyOwnedFile(source: string, target: string, mode: number): string {
+  const fd = openSync(source, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const before = fstatSync(fd, { bigint: true });
+    assertOwnedRegular(source, before);
+    const out = openSync(
+      target,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    );
+    try {
+      const hash = createHash("sha256");
+      const buffer = Buffer.allocUnsafe(1024 * 1024);
+      let offset = 0;
+      for (;;) {
+        const count = readSync(fd, buffer, 0, buffer.length, offset);
+        if (count === 0) break;
+        hash.update(buffer.subarray(0, count));
+        let written = 0;
+        while (written < count) written += writeSync(out, buffer, written, count - written);
+        offset += count;
+      }
+      fsyncSync(out);
+      fchmodSync(out, mode);
+      fsyncSync(out);
+      const after = fstatSync(fd, { bigint: true });
+      if (metadata(before) !== metadata(after))
+        throw new Error(`journal file changed while exporting: ${source}`);
+      assertOwnedRegular(source, after);
+      return hash.digest("hex");
+    } finally {
+      closeSync(out);
+    }
+  } finally {
+    closeSync(fd);
   }
 }
 

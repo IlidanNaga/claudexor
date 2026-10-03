@@ -23,17 +23,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WorkspaceManager, git, processStartTime } from "@claudexor/workspace";
 import { projectRuntimeDir } from "@claudexor/util";
-import { DurableJournal, journalPartitionDirectory } from "@claudexor/journal";
 
 const RO_HOME_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 interface SweepInput {
-  journalRoot: string;
+  /** Project roots this daemon has run against, read from the ALREADY
+   * PREPARED global command projection (the stage-2 replay) — never a second
+   * `DurableJournal.prepare()` over the same file. */
+  knownProjectRoots: () => readonly string[];
 }
 
 export async function sweepOrphanWorkspaces(input: SweepInput): Promise<string[]> {
   const actions: string[] = [];
-  const roots = knownProjectRoots(input.journalRoot);
+  const roots = knownProjectRoots(input.knownProjectRoots);
 
   for (const root of roots) {
     const trees = [root, ...threadTreesUnder(root)];
@@ -52,37 +54,15 @@ export async function sweepOrphanWorkspaces(input: SweepInput): Promise<string[]
  * read-only preparation and the prepared activation, so this scan must never
  * create or open-for-write anything under the journal tree. (Opening a writer
  * here used to create journal.bin on a clean root, which failed activation's
- * revalidation and trapped every FRESH root on the recovery plane.) An absent
- * global journal means no known roots; an unreadable one means no sweep. */
-function knownProjectRoots(journalRoot: string): string[] {
-  const roots = new Set<string>();
-  if (!existsSync(join(journalPartitionDirectory(journalRoot, "global"), "journal.bin"))) {
-    return [];
-  }
-  let journal: DurableJournal | null = null;
+ * revalidation and trapped every FRESH root on the recovery plane.) The roots
+ * come from the prepared in-memory command projection, so the journal file is
+ * not read a second time; an unreadable projection means no sweep. */
+function knownProjectRoots(read: () => readonly string[]): string[] {
   try {
-    journal = DurableJournal.prepare({ rootDir: journalRoot, partition: "global" });
-    for (const entry of journal.records()) {
-      if (entry.type !== "command.accepted") continue;
-      const payload = entry.payload as { record?: { params?: unknown } };
-      const scope = (
-        payload.record?.params as { scope?: { kind?: unknown; root?: unknown } } | undefined
-      )?.scope;
-      if (
-        scope &&
-        scope.kind === "project" &&
-        typeof scope.root === "string" &&
-        existsSync(scope.root)
-      ) {
-        roots.add(scope.root);
-      }
-    }
+    return [...new Set(read().filter((root) => existsSync(root)))];
   } catch {
     return [];
-  } finally {
-    journal?.close();
   }
-  return [...roots];
 }
 
 /** Isolated-thread worktrees live in the external per-project runtime namespace. */

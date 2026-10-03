@@ -1,5 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { budgetValuationFromEvents } from "./budget-valuation.js";
+import { budgetValuationFromEvents, cashKnowledgeFromEvents } from "./budget-valuation.js";
+
+describe("cash certainty projection", () => {
+  it("distinguishes an unknown zero from an estimated zero without consulting valuation", () => {
+    const event = (cash_knowledge: string) => ({
+      type: "budget.cash",
+      payload: { cash_spend_usd: 0, estimated: true, valuation_usd: 4, cash_knowledge },
+    });
+    expect(cashKnowledgeFromEvents([event("estimated")])).toBe("estimated");
+    expect(cashKnowledgeFromEvents([event("estimated"), event("unknown")])).toBe("unknown");
+    expect(
+      cashKnowledgeFromEvents([
+        { type: "budget.cash", payload: { cash_spend_usd: 0, estimated: true } },
+      ]),
+    ).toBeUndefined();
+  });
+});
 
 // QA-023c / QA-017b: the budget snapshot projected only CASH. A native-
 // subscription run settles cash to exactly $0 while its token VALUATION lives on

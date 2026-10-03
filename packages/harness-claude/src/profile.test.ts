@@ -178,7 +178,7 @@ describe("Claude strict profile routing (INV-135)", () => {
     }
     expect(events).toContainEqual(
       expect.objectContaining({
-        type: "message",
+        type: "status",
         payload: { auth_status_stale: true, auth_status_stale_age_ms: 42 },
       }),
     );

@@ -20,10 +20,33 @@ import {
 } from "./acp-surface-runner.js";
 
 describe("ACP run-control projection", () => {
+  it("keeps explicit Standard and directory footprint on the thread request", () => {
+    const execution = { workspaceKind: "directory", scopePaths: ["input", "image.bin"] };
+    const reviewerPanel = [{ harness: "claude", processingPreference: "economy" }];
+    expect(
+      projectAcpRunControls({
+        mode: "__acp_session_prompt",
+        runMode: "agent",
+        processingPreference: "standard",
+        execution,
+        reviewerPanel,
+      }),
+    ).toEqual({ mode: "agent", processingPreference: "standard", execution, reviewerPanel });
+  });
   it.each([true, false])("preserves review=%s through the thread projection", (review) => {
     expect(
       projectAcpRunControls({ mode: "__acp_session_prompt", runMode: "agent", review }),
     ).toEqual({ mode: "agent", review });
+  });
+
+  it("forwards a strict credentialProfileId to the thread turn", () => {
+    expect(
+      projectAcpRunControls({
+        mode: "__acp_session_prompt",
+        runMode: "ask",
+        credentialProfileId: "work-secondary",
+      }),
+    ).toEqual({ mode: "ask", credentialProfileId: "work-secondary" });
   });
 
   it("maps the Agent race alias to the strict n vocabulary", () => {
@@ -59,6 +82,7 @@ const typedFailure = {
   safeMessage: "Authentication expired",
   rawDetailRef: "attempts/a01/failure.json",
   resetsAt: null,
+  vendorFailure: null,
   logRefs: ["attempts/a01/stderr.log"],
   eventRefs: ["events.jsonl#42"],
   runDir: "/tmp/run-1",

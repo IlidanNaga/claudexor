@@ -9,10 +9,11 @@ import {
   CredentialUnusableLedger,
   DaemonClient,
   DaemonServer,
+  ModelSubstitutionLedger,
   QuotaRegistry,
   ResourceStore,
 } from "@claudexor/daemon";
-import { createCodexAdapter } from "@claudexor/harness-codex";
+import { createCodexAdapter, createCodexModelAdapter } from "@claudexor/harness-codex";
 import {
   ControlGcReceipt,
   ControlProblem,
@@ -48,13 +49,19 @@ function model(id = "test-model"): ModelCatalogEntry {
   };
 }
 
-async function fixture(options: { lazy?: boolean } = {}) {
+async function fixture(options: { lazy?: boolean; adapter?: ModelAdapter } = {}) {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "cx-ms-")));
   const journal = new DurableJournal({ rootDir: join(root, "journal"), partition: "global" });
   const store = new CommandStore(journal);
   const commands = { current: () => store };
   const quota = new QuotaRegistry(journal);
   const unusable = new CredentialUnusableLedger();
+  const clock = { now: Date.now() };
+  const substitutions = new ModelSubstitutionLedger(() => new Date(clock.now));
+  // The model each account's terminal response discloses; absent = the requested one.
+  const served: Record<string, string | null> = {};
+  // Accounts whose terminal response ran out of room rather than completing.
+  const incomplete = new Set<string>();
   let resourceStore: ResourceStore | undefined;
   const resources = vi.fn(() => (resourceStore ??= new ResourceStore(join(root, "resources"))));
   const profiles = ["a", "b"].map((id) =>
@@ -69,6 +76,11 @@ async function fixture(options: { lazy?: boolean } = {}) {
   const cfg = GlobalConfig.parse({ credential_profiles: profiles });
   const catalogModels: Record<string, ModelCatalogEntry[]> = { a: [model()], b: [model()] };
   const failures: Record<string, string> = {};
+  // The vendor-shaped `context` each account's typed refusal carries. A
+  // vendor-named reset by default; a test that means a different vendor fact
+  // (an HTTP status, say) declares it per account, as the live producer does.
+  const vendorReset = { resetsAt: new Date(Date.now() + 60000).toISOString() };
+  const failureContext: Record<string, Record<string, unknown>> = {};
   const probe = vi.fn<(profile: CredentialProfile) => Promise<CredentialProfileStatus>>(
     async (profile) => ({
       profile_id: profile.profile_id,
@@ -86,6 +98,8 @@ async function fixture(options: { lazy?: boolean } = {}) {
     accountFingerprint: profile.profile_id,
     observedAt: new Date().toISOString(),
     provenance: "fixture exact catalog",
+    clientVersion: "0.156.1",
+    clientVersionSource: "verified_transport",
     models: catalogModels[profile.profile_id]!,
   }));
   const invoke = vi.fn<ModelAdapter["invoke"]>(async (request, context) => {
@@ -103,9 +117,16 @@ async function fixture(options: { lazy?: boolean } = {}) {
     await context.onDispatch(route);
     const code = failures[context.profile.profile_id];
     return ModelCallResult.parse({
-      outcome: code ? "failed" : "completed",
+      outcome: code
+        ? "failed"
+        : incomplete.has(context.profile.profile_id)
+          ? "incomplete"
+          : "completed",
       message: code ? null : { role: "assistant", content: "own model reply" },
-      route,
+      route:
+        context.profile.profile_id in served
+          ? { ...route, model: served[context.profile.profile_id] }
+          : route,
       usage: code ? {} : { input_tokens: 5, output_tokens: 3 },
       cost: {
         knowledge: "unknown",
@@ -119,7 +140,7 @@ async function fixture(options: { lazy?: boolean } = {}) {
             code,
             message: "fixture refusal",
             retryable: false,
-            context: { resetsAt: new Date(Date.now() + 60000).toISOString() },
+            context: failureContext[context.profile.profile_id] ?? vendorReset,
           }
         : null,
     });
@@ -134,10 +155,15 @@ async function fixture(options: { lazy?: boolean } = {}) {
     quota: () => quota,
     config: () => cfg,
     unusable,
+    substitutions,
     migrationGate: () => null,
     registry: new Map([["codex", { ...createCodexAdapter(), probeCredentialProfile: probe }]]),
     sources: [
-      { adapter: { id: "codex", catalog, invoke }, label: "Codex", credentialHarness: "codex" },
+      {
+        adapter: options.adapter ?? { id: "codex", catalog, invoke },
+        label: "Codex",
+        credentialHarness: "codex",
+      },
     ],
   });
   const agentRunner = vi.fn(async () => ({ lifecycle: "succeeded" }));
@@ -185,11 +211,16 @@ async function fixture(options: { lazy?: boolean } = {}) {
     cfg,
     catalogModels,
     failures,
+    failureContext,
     catalog,
     invoke,
     probe,
     quota,
     unusable,
+    substitutions,
+    served,
+    incomplete,
+    clock,
     client,
     agentRunner,
     run,
@@ -197,6 +228,201 @@ async function fixture(options: { lazy?: boolean } = {}) {
 }
 
 describe("production model service composition", () => {
+  it("preserves raw Ultra preference order through catalog parsing into the only generation", async () => {
+    const provider = vi.fn<typeof fetch>(async (_url, init) => {
+      if (init?.method !== "POST")
+        return Response.json({
+          models: [
+            {
+              slug: "test-model",
+              supported_reasoning_levels: ["low", "max", "ultra"].map((effort) => ({ effort })),
+              multi_agent_version: "v2",
+              multi_agent_reasoning_effort: "low",
+            },
+          ],
+        });
+      const body = JSON.parse(await new Response(init.body).text());
+      expect(body.reasoning.effort).toBe("max");
+      return new Response(
+        `data: ${JSON.stringify({
+          type: "response.completed",
+          response: {
+            model: "test-model",
+            output: [],
+            reasoning: { effort: "max" },
+          },
+        })}\n\n`,
+      );
+    });
+    const adapter = createCodexModelAdapter({
+      fetch: provider,
+      now: () => 1900000000000,
+      clientVersion: async () => ({ version: "0.156.1", source: "verified_transport" }),
+      readAuthFile: async () =>
+        JSON.stringify({
+          auth_mode: "chatgpt",
+          tokens: {
+            account_id: "fixture",
+            id_token: `fixture.${Buffer.from('{"sub":"fixture"}').toString("base64url")}.signature`,
+            access_token: `fixture.${Buffer.from('{"exp":2100000000}').toString("base64url")}.signature`,
+          },
+        }),
+    });
+    const f = await fixture({ adapter });
+    // The real adapter validates its managed home, unlike the fixture's fake
+    // adapter. Keep both profile and auth resolution under this test's root.
+    process.env.CLAUDEXOR_CONFIG_DIR = f.root;
+    const request = ModelCallRequest.parse({
+      source: "codex",
+      model: "test-model",
+      account: { mode: "pin", profileId: "a" },
+      messages: [{ role: "user", content: "test" }],
+      options: { reasoningEffort: "ultra" },
+    });
+    const ref = f.resources().publishModel(Buffer.from(JSON.stringify(request)));
+    const started = await f.services.routes.createModelOperation(
+      ref,
+      randomUUID(),
+      undefined,
+      true,
+    );
+    await vi.waitFor(async () =>
+      expect((await f.services.routes.getModelOperation(started.id)).state).toBe("succeeded"),
+    );
+    const result = ModelCallResult.parse(
+      JSON.parse((await f.services.routes.readModelResult(started.id)).bytes.toString()),
+    );
+    expect(result).toMatchObject({
+      outcome: "completed",
+      effortResolution: {
+        requested: "ultra",
+        submitted: "max",
+        observed: "max",
+        resolution: "downward",
+      },
+    });
+    expect(provider.mock.calls.map(([, init]) => init?.method ?? "GET")).toEqual(["GET", "POST"]);
+    expect(f.agentRunner).not.toHaveBeenCalled();
+  });
+
+  it("enumerates distinct enabled account inventories without selecting the inference account", async () => {
+    const f = await fixture({ lazy: true });
+    f.catalogModels.a = [model("only-a")];
+    f.catalogModels.b = [
+      {
+        ...model("only-b"),
+        contextWindow: 1000000,
+        processing: {
+          modes: ["standard", "fast"],
+          nativeModes: [{ mode: "fast", id: "priority" }],
+          defaultNativeMode: "auto",
+          eligible: true,
+          source: "fixture",
+          observedAt: "2026-09-12T00:00:00.000Z",
+        },
+      },
+    ];
+    const view = await f.services.routes.modelAccountCatalog("codex");
+    expect(view.partial).toBe(false);
+    expect(
+      view.accounts.map((row) => [
+        row.credentialProfileId,
+        row.catalog?.models[0]?.id,
+        row.catalog?.models[0]?.contextWindow,
+      ]),
+    ).toEqual([
+      ["a", "only-a", 272000],
+      ["b", "only-b", 1000000],
+    ]);
+    expect(view.accounts[1]?.catalog?.models[0]?.processing?.nativeModes).toEqual([
+      { mode: "fast", id: "priority" },
+    ]);
+    expect(
+      view.accounts.every((row) => row.availability === "available" && row.problem === null),
+    ).toBe(true);
+    expect(f.invoke).not.toHaveBeenCalled();
+    f.catalog.mockClear();
+    const pinned = await f.services.routes.modelAccountCatalog("codex", "b");
+    expect(pinned.accounts.map((row) => row.credentialProfileId)).toEqual(["b"]);
+    expect(f.catalog).toHaveBeenCalledTimes(1);
+    f.cfg.credential_profiles[1]!.enabled = false;
+    await expect(f.services.routes.modelAccountCatalog("codex", "b")).rejects.toMatchObject({
+      code: "model_account_unavailable",
+    });
+    expect(
+      (await f.services.routes.modelAccountCatalog("codex")).accounts.map(
+        (row) => row.credentialProfileId,
+      ),
+    ).toEqual(["a"]);
+  });
+
+  it("keeps partial inventory failures separate from missing authentication and preserves observation time", async () => {
+    const f = await fixture({ lazy: true });
+    const observedAt = "2026-09-10T00:00:00.000Z";
+    f.catalog.mockImplementation(async ({ profile }) => {
+      if (profile.profile_id === "b") throw new Error("network failed");
+      return {
+        source: "codex",
+        credentialProfileId: "a",
+        accountFingerprint: "a",
+        observedAt,
+        provenance: "existing_cache",
+        clientVersion: null,
+        clientVersionSource: null,
+        models: [model()],
+      };
+    });
+    const partial = await f.services.routes.modelAccountCatalog("codex");
+    expect(partial.partial).toBe(true);
+    expect(partial.accounts[0]?.catalog).toMatchObject({
+      observedAt,
+      provenance: "existing_cache",
+    });
+    expect(partial.accounts[1]).toMatchObject({
+      credentialProfileId: "b",
+      availability: "unknown",
+      catalog: null,
+      problem: { code: "model_catalog_unavailable" },
+    });
+    expect(f.unusable.live()).toEqual([]);
+    const original = f.probe.getMockImplementation()!;
+    f.probe.mockImplementation(async (profile) =>
+      profile.profile_id === "b"
+        ? { ...(await original(profile)), availability: "unavailable", verification: "failed" }
+        : original(profile),
+    );
+    f.catalog.mockClear();
+    const missing = await f.services.routes.modelAccountCatalog("codex");
+    expect(missing.accounts[1]).toMatchObject({
+      credentialProfileId: "b",
+      availability: "unavailable",
+      catalog: null,
+      problem: { code: "auth_unavailable" },
+    });
+    expect(f.catalog).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains quota-exhausted account catalogs without admitting an inference", async () => {
+    const f = await fixture({ lazy: true });
+    const resetsAt = new Date(Date.now() + 60000).toISOString();
+    f.quota.ingest("codex", {
+      type: "error",
+      ts: new Date().toISOString(),
+      session_id: "quota",
+      credential_profile_id: "b",
+      credential_route: "vendor_native",
+      rate_limit: { resets_at: resetsAt, retry_delay_ms: null },
+    });
+    const view = await f.services.routes.modelAccountCatalog("codex");
+    expect(view.accounts[1]).toMatchObject({
+      availability: "unavailable",
+      problem: { code: "subscription_window_exhausted" },
+      catalog: { credentialProfileId: "b" },
+    });
+    expect(f.catalog).toHaveBeenCalledTimes(2);
+    expect(f.invoke).not.toHaveBeenCalled();
+  });
+
   it("constructs without creating the ResourceStore or probing accounts in recovery", async () => {
     const f = await fixture({ lazy: true });
     expect(f.resources).not.toHaveBeenCalled();
@@ -271,6 +497,9 @@ describe("production model service composition", () => {
     expect(f.invoke).toHaveBeenCalledTimes(1);
     const pinned = await f.run({ mode: "pin", profileId: "b" });
     expect(pinned.problem?.code).toBe("model_unavailable");
+    // The first gate a pinned caller hits names the declared client version
+    // too (issue #339): the version filter, not the account, decided the list.
+    expect(pinned.problem?.message).toContain("client_version 0.156.1");
     expect(pinned.dispatch.state).toBe("not_started");
     f.catalogModels.a = [];
     const unsupported = await f.run();
@@ -290,6 +519,91 @@ describe("production model service composition", () => {
     expect(pinned.problem?.code).toBe("subscription_window_exhausted");
     expect(pinned.dispatch.state).toBe("not_started");
     expect(f.invoke).toHaveBeenCalledTimes(2);
+  });
+
+  it("states a served-model mismatch as a typed fact; the next Auto operation prefers other accounts", async () => {
+    const f = await fixture();
+    const result = async (id: string) =>
+      JSON.parse((await f.services.routes.readModelResult(id)).bytes.toString());
+    f.served.a = "other-model";
+    const first = await f.run();
+    // One generation, an unchanged outcome and a fact the caller can act on.
+    expect(first.state).toBe("succeeded");
+    expect(first.dispatch.route).toMatchObject({ credentialProfileId: "a", model: "other-model" });
+    expect(await result(first.id)).toMatchObject({
+      outcome: "completed",
+      message: { content: "own model reply" },
+      modelMismatch: { requested: "test-model", observed: "other-model" },
+    });
+    expect(f.substitutions.live()).toMatchObject([
+      {
+        harness_id: "codex",
+        profile_id: "a",
+        requested_model: "test-model",
+      },
+    ]);
+    const next = await f.run();
+    expect(next.dispatch.route?.credentialProfileId).toBe("b");
+    expect(await result(next.id)).not.toHaveProperty("modelMismatch");
+    // A preferred account and a pin are resolved before the ordering.
+    f.clock.now += 60_000;
+    const preferred = await f.run({ mode: "auto", preferredProfileId: "a" });
+    expect(preferred.dispatch.route?.credentialProfileId).toBe("a");
+    const pinned = await f.run({ mode: "pin", profileId: "a" });
+    expect(pinned.dispatch.route?.credentialProfileId).toBe("a");
+    expect(f.invoke).toHaveBeenCalledTimes(4);
+  });
+
+  it("takes turns through a fully substituting pool and restores the order when observations expire", async () => {
+    const f = await fixture();
+    f.served.a = f.served.b = "other-model";
+    const chosen: Array<string | undefined> = [];
+    for (let i = 0; i < 4; i += 1) {
+      f.clock.now += 60_000;
+      const done = await f.run();
+      expect(done.state).toBe("succeeded");
+      chosen.push(done.dispatch.route?.credentialProfileId);
+    }
+    // Never refused: a marked account is still selected, oldest observation first.
+    expect(chosen).toEqual(["a", "b", "a", "b"]);
+    f.clock.now += 31 * 60_000;
+    expect(f.substitutions.live()).toEqual([]);
+    expect((await f.run()).dispatch.route?.credentialProfileId).toBe("a");
+  });
+
+  it("states the mismatch on an incomplete terminal response too", async () => {
+    // An answer that ran out of room was still produced by the other model.
+    const f = await fixture();
+    f.served.a = "other-model";
+    f.incomplete.add("a");
+    const run = await f.run({ mode: "pin", profileId: "a" });
+    expect(
+      JSON.parse((await f.services.routes.readModelResult(run.id)).bytes.toString()),
+    ).toMatchObject({
+      outcome: "incomplete",
+      modelMismatch: { requested: "test-model", observed: "other-model" },
+    });
+    expect(f.substitutions.live()).toMatchObject([
+      { profile_id: "a", requested_model: "test-model" },
+    ]);
+  });
+
+  it("records no mismatch without a known, different model on a terminal response", async () => {
+    const f = await fixture();
+    f.served.a = null;
+    const unknown = await f.run({ mode: "pin", profileId: "a" });
+    expect(
+      JSON.parse((await f.services.routes.readModelResult(unknown.id)).bytes.toString()),
+    ).not.toHaveProperty("modelMismatch");
+    f.served.a = "other-model";
+    f.failures.a = "provider_failed";
+    f.failureContext.a = {};
+    const failed = await f.run({ mode: "pin", profileId: "a" });
+    expect(failed.state).toBe("failed");
+    expect(
+      JSON.parse((await f.services.routes.readModelResult(failed.id)).bytes.toString()),
+    ).not.toHaveProperty("modelMismatch");
+    expect(f.substitutions.live()).toEqual([]);
   });
 
   it("types an all-quota pool before catalog polling or another generation", async () => {
@@ -336,6 +650,16 @@ describe("production model service composition", () => {
     const f = await fixture();
     f.failures.a = a;
     f.failures.b = b;
+    // Declare the vendor fact that accompanies each code on the live route: a
+    // rejected credential arrives as HTTP 401, a spent window as a reset time.
+    for (const [id, code] of [
+      ["a", a],
+      ["b", b],
+    ] as const)
+      f.failureContext[id] =
+        code === "auth_required"
+          ? { httpStatus: 401 }
+          : { resetsAt: new Date(Date.now() + 60000).toISOString() };
     await f.run({ mode: "pin", profileId: "a" });
     await f.run({ mode: "pin", profileId: "b" });
     const done = await f.run();
@@ -360,6 +684,49 @@ describe("production model service composition", () => {
     expect(done.problem).toMatchObject({
       code: "credential_pool_exhausted",
       context: { poolCause: "mixed" },
+    });
+    expect(f.catalog).toHaveBeenCalledTimes(2);
+    expect(f.invoke).not.toHaveBeenCalled();
+  });
+
+  it.each(["catalog_unavailable"])(
+    "types a pool that lost every catalog to %s as unavailable, not as spent quota",
+    async (code) => {
+      const f = await fixture();
+      f.catalog.mockRejectedValue(
+        Object.assign(new Error("catalog refusal"), {
+          problem: ControlProblem.parse({ code, message: "catalog refusal", retryable: false }),
+        }),
+      );
+      const done = await f.run();
+      expect(done.problem).toMatchObject({
+        code: "credential_pool_exhausted",
+        context: { poolCause: "unavailable" },
+      });
+      expect(f.catalog).toHaveBeenCalledTimes(2);
+      expect(f.invoke).not.toHaveBeenCalled();
+    },
+  );
+
+  it("tells the owner the pool is unavailable, without a reset, when the network dies", async () => {
+    const f = await fixture();
+    f.catalog.mockRejectedValue(
+      // The shape the live adapter throws when the catalog fetch itself fails:
+      // a retryable catalog_unavailable carrying no vendor context at all.
+      Object.assign(new Error("network is unreachable"), {
+        problem: ControlProblem.parse({
+          code: "catalog_unavailable",
+          message: "The selected Codex account's catalog could not be reached.",
+          retryable: true,
+          context: {},
+        }),
+      }),
+    );
+    const done = await f.run();
+    expect(done.problem).toMatchObject({
+      code: "credential_pool_exhausted",
+      message: "No managed account can currently serve this model request",
+      context: { poolCause: "unavailable", resetsAt: null },
     });
     expect(f.catalog).toHaveBeenCalledTimes(2);
     expect(f.invoke).not.toHaveBeenCalled();
@@ -394,6 +761,7 @@ describe("production model service composition", () => {
 
   it("keeps unproven profile failure distinct from a sibling's confirmed auth failure", async () => {
     const f = await fixture();
+    f.failureContext.a = { httpStatus: 401 };
     f.failures.a = "auth_required";
     await f.run({ mode: "pin", profileId: "a" });
     const original = f.probe.getMockImplementation()!;
@@ -411,19 +779,67 @@ describe("production model service composition", () => {
   });
 
   it.each(["rate_limited", "auth_refresh_failed"])(
-    "does not reinterpret %s as quota exhaustion or logout",
+    "records the vendor-named reset for a typed %s without reinterpreting it as logout",
     async (code) => {
       const f = await fixture();
       f.failures.a = code;
       const done = await f.run({ mode: "pin", profileId: "a" });
       expect(done.problem?.code).toBe(code);
-      expect(f.quota.read().snapshots).toEqual([]);
+      expect(f.quota.read().snapshots[0]?.subject.subject_id).toBe("a");
       expect(f.unusable.live()).toEqual([]);
     },
   );
 
+  it("writes no cooldown when a rate limit arrives without a vendor reset or delay", async () => {
+    const f = await fixture();
+    f.catalog.mockRejectedValueOnce(
+      Object.assign(new Error("rate limited"), {
+        problem: ControlProblem.parse({
+          code: "rate_limited",
+          message: "rate limited",
+          retryable: true,
+        }),
+      }),
+    );
+    const done = await f.run({ mode: "auto", preferredProfileId: "a" });
+    expect(done.state).toBe("succeeded");
+    expect(done.dispatch.route?.credentialProfileId).toBe("b");
+    expect(f.quota.read().snapshots).toEqual([]);
+    expect(f.unusable.live()).toEqual([]);
+  });
+
+  it("leaves a status-less provider failure without a cooldown or a verdict", async () => {
+    const f = await fixture();
+    f.failureContext.a = {};
+    f.failures.a = "provider_failed";
+    const done = await f.run({ mode: "pin", profileId: "a" });
+    expect(done.problem?.code).toBe("provider_failed");
+    expect(f.quota.read().snapshots).toEqual([]);
+    expect(f.unusable.live()).toEqual([]);
+  });
+
+  it("condemns a credential only on the adapter's confirmed auth loss, not on a bare 401", async () => {
+    const f = await fixture();
+    // The adapter emits this code precisely because a 401 on a token whose
+    // freshness it could not confirm is no proof that a new login is needed.
+    f.failureContext.a = { httpStatus: 401 };
+    f.failures.a = "auth_refresh_failed";
+    await f.run({ mode: "pin", profileId: "a" });
+    expect(f.unusable.live()).toEqual([]);
+    expect(f.quota.read().snapshots).toEqual([]);
+    const g = await fixture();
+    g.failureContext.a = { httpStatus: 401 };
+    g.failures.a = "auth_required";
+    await g.run({ mode: "pin", profileId: "a" });
+    expect(g.unusable.live()).toMatchObject([
+      { profile_id: "a", code: "auth_revoked", model: null, detail: "auth_required" },
+    ]);
+    expect(g.quota.read().snapshots).toEqual([]);
+  });
+
   it("shares confirmed auth loss with existing Agent account readiness", async () => {
     const f = await fixture();
+    f.failureContext.a = { httpStatus: 401 };
     f.failures.a = "auth_required";
     await f.run({ mode: "auto", preferredProfileId: "a" });
     expect(f.unusable.live()[0]).toMatchObject({
@@ -448,6 +864,12 @@ describe("production model service composition", () => {
     async (code) => {
       const f = await fixture();
       const original = f.catalog.getMockImplementation()!;
+      // The vendor fact each refusal carries on the live route: a rejected
+      // sign-in arrives as HTTP 401 with no reset time, a spent window names one.
+      const vendorFact =
+        code === "auth_required"
+          ? { httpStatus: 401 }
+          : { resetsAt: new Date(Date.now() + 60000).toISOString() };
       f.catalog.mockImplementation(async (context) => {
         if (context.profile.profile_id === "a")
           throw Object.assign(new Error("catalog refused"), {
@@ -455,7 +877,7 @@ describe("production model service composition", () => {
               code,
               message: "catalog refused",
               retryable: false,
-              context: { resetsAt: new Date(Date.now() + 60000).toISOString() },
+              context: vendorFact,
             }),
           });
         return original(context);
@@ -480,6 +902,48 @@ describe("production model service composition", () => {
       expect(g.invoke).not.toHaveBeenCalled();
     },
   );
+
+  it("advances to a healthy sibling on a catalog refusal outside the rotation codes", async () => {
+    const f = await fixture();
+    const original = f.catalog.getMockImplementation()!;
+    f.catalog.mockImplementation(async (context) => {
+      if (context.profile.profile_id === "a")
+        throw Object.assign(new Error("catalog unavailable"), {
+          problem: ControlProblem.parse({
+            code: "catalog_unavailable",
+            message: "catalog unavailable",
+            retryable: false,
+          }),
+        });
+      return original(context);
+    });
+    const done = await f.run({ mode: "auto", preferredProfileId: "a" });
+    expect(done.state).toBe("succeeded");
+    expect(done.dispatch.route?.credentialProfileId).toBe("b");
+    expect(f.catalog).toHaveBeenCalledTimes(2);
+    expect(f.invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps an explicit pin strict on a catalog refusal outside the rotation codes", async () => {
+    const f = await fixture();
+    f.catalog.mockRejectedValueOnce(
+      Object.assign(new Error("catalog unavailable"), {
+        problem: ControlProblem.parse({
+          code: "catalog_unavailable",
+          message: "catalog unavailable",
+          retryable: false,
+        }),
+      }),
+    );
+    const pinned = await f.run({ mode: "pin", profileId: "a" });
+    expect(pinned.problem).toMatchObject({
+      code: "catalog_unavailable",
+      context: { source: "codex", credentialProfileId: "a" },
+    });
+    expect(pinned.dispatch.state).toBe("not_started");
+    expect(f.catalog).toHaveBeenCalledTimes(1);
+    expect(f.invoke).not.toHaveBeenCalled();
+  });
 
   it("does not turn local verification failure into a confirmed sign-in requirement", async () => {
     const f = await fixture();

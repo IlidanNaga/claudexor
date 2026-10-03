@@ -6,7 +6,7 @@ import { HarnessEvent } from "@claudexor/schema";
 import { createClaudeParser } from "./parse.js";
 
 /**
- * D-16c fixture-parity: the SIGNAL-bearing claude 2.1.261 frames (context
+ * D-16c fixture-parity: the SIGNAL-bearing claude frames (context
  * exhaustion, compaction boundary, the typed rate-limit heartbeat) map onto
  * typed HarnessEvents — never dropped, never prose-matched. These fixtures
  * live in fixtures/signals/ (out of the top-level conformance loop, which
@@ -44,16 +44,17 @@ describe("claude D-16 signal fixtures", () => {
     const events = parser(raw, "sig") ?? [];
     expect(events).toHaveLength(1);
     expect(events[0]?.type).toBe("started");
+    // The native receipt passes through verbatim, including 2.1.281's `source`.
     expect(events[0]?.payload?.["mcp_servers"]).toEqual([
-      { name: "claudexor", status: "connected" },
+      { name: "claudexor", status: "connected", source: "dynamic" },
     ]);
     expect(events.some((event) => event.type === "error")).toBe(false);
     expect(() => HarnessEvent.parse(events[0])).not.toThrow();
   });
 
   it("preserves the historical 2.1.165 async pending startup without a fatal", () => {
-    // Exact sanitized native frame from the 2026-07-26 recording. Current
-    // 2.1.261 probes waited for handshake and emitted connected; this keeps
+    // Exact sanitized native frame from the 2026-07-26 recording. The 2.1.261
+    // and 2.1.281 probes waited for handshake and emitted connected; this keeps
     // the older provisional-status regression without calling it fresh proof.
     const raw = {
       type: "system",

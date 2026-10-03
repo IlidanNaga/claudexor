@@ -4,6 +4,7 @@ import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { ArtifactStore } from "@claudexor/artifact-store";
 import { CLAUDEXOR_VERSION, noProjectRepoRoot, readTextSafe, userConfigDir } from "@claudexor/util";
+import { resolveInstructions } from "./run-options.js";
 import { releaseCommand } from "./release-command.js";
 import { serveBeltBridge, serveMcpBridge } from "./bridge-serve.js";
 import { dispatchAcpCommand } from "./acp-auth-command.js";
@@ -13,6 +14,8 @@ import {
   AccessProfile,
   EFFORT_HINT_HELP,
   EffortHint,
+  ProcessingPreference,
+  RunExecution,
   ExternalContextPolicy,
   type ProtectedPathApproval,
   type ControlReviewerPanelEntry,
@@ -109,6 +112,7 @@ import { setupCommand } from "./setup-attach-command.js";
 import { harnessCommand } from "./harness-command.js";
 import { runRepl } from "./repl.js";
 import {
+  stringFlagValues,
   parseProtectedPathApprovalFlags,
   parseTestCommandFlags,
   parseReviewerEffortFlags,
@@ -163,29 +167,6 @@ function testCommands(args: ParsedArgs): TestCommandInvocation[] | undefined {
 /** Typed approval for protected gate/test path changes; never inferred from prompt text. */
 function protectedPathApprovals(args: ParsedArgs): ProtectedPathApproval[] | undefined {
   return parseProtectedPathApprovalFlags(flagValues(args, "allow-protected-path"));
-}
-
-/**
- * Per-run system instructions from `--instructions "<text>"` or
- * `--instructions-file <path>` (mutually exclusive; the file form avoids
- * ARG_MAX and keeps long instructions out of the process argv / `ps`).
- */
-function resolveInstructions(args: ParsedArgs): string | undefined {
-  const inline = flagStr(args, "instructions");
-  const file = flagStr(args, "instructions-file");
-  if (inline !== undefined && file !== undefined) {
-    throw new Error("pass either --instructions or --instructions-file, not both");
-  }
-  if (file !== undefined) {
-    try {
-      return readFileSync(file, "utf8");
-    } catch (err) {
-      throw new Error(
-        `could not read --instructions-file ${file}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-  }
-  return inline;
 }
 
 /** Access profile from `--access`. Invalid profiles FAIL LOUDLY (a typo must never silently run with the default write profile). */
@@ -318,6 +299,8 @@ async function orchestrate(
   let resolvedWebPolicy: ReturnType<typeof webPolicy> = undefined;
   let resolvedAccess: ReturnType<typeof accessProfile> = undefined;
   let resolvedEffort: EffortHint | undefined;
+  let processingPreference: ProcessingPreference | undefined;
+  let execution: RunExecution;
   let paidBudget: PaidBudget | undefined;
   let nFlag: number | undefined;
   let attemptsFlag: number | undefined;
@@ -346,6 +329,15 @@ async function orchestrate(
     resolvedWebPolicy = webPolicy(args);
     resolvedAccess = accessProfile(args);
     resolvedEffort = effortHint(args);
+    const processing = flagStr(args, "processing");
+    processingPreference =
+      processing === undefined ? undefined : ProcessingPreference.parse(processing);
+    const scopePaths = stringFlagValues(flagValues(args, "scope-path"), "scope-path");
+    execution = RunExecution.parse({
+      isolation: flagBool(args, "in-place") ? "live" : "envelope",
+      workspaceKind: flagStr(args, "workspace-kind"),
+      ...(scopePaths.length ? { scopePaths } : {}),
+    });
     resolvedHarnesses = harnessList(args);
     resolvedPrimaryHarness = flagStr(args, "primary-harness");
     resolvedModel = flagStr(args, "model");
@@ -407,6 +399,7 @@ async function orchestrate(
       primaryHarness: resolvedPrimaryHarness,
       model: resolvedModel,
       effort: resolvedEffort,
+      processingPreference,
       review,
       reviewerPanel: resolvedReviewerPanel,
       reviewerModels: resolvedReviewerModels,
@@ -461,6 +454,8 @@ async function orchestrate(
     resolvedWebPolicy,
     resolvedAccess,
     resolvedEffort,
+    processingPreference,
+    execution,
     resolvedSynthesis,
     resolvedHarnesses,
     resolvedPrimaryHarness,
@@ -494,6 +489,8 @@ interface DaemonRunParams {
   resolvedWebPolicy: ReturnType<typeof webPolicy>;
   resolvedAccess: ReturnType<typeof accessProfile>;
   resolvedEffort: EffortHint | undefined;
+  processingPreference: ProcessingPreference | undefined;
+  execution: RunExecution;
   resolvedSynthesis: ReturnType<typeof synthesisMode>;
   resolvedHarnesses: string[] | undefined;
   resolvedPrimaryHarness: string | undefined;
@@ -513,7 +510,6 @@ async function daemonRun(
   outputMode: CliOutputMode,
   p: DaemonRunParams,
 ): Promise<number> {
-  const inPlace = flagBool(args, "in-place");
   const json = outputModeIsMachine(outputMode);
   const jsonStream = outputModeIsStream(outputMode);
   let client: Awaited<ReturnType<typeof ensureDaemon>>["client"];
@@ -599,7 +595,7 @@ async function daemonRun(
     ...(p.delegate ? { delegate: true } : {}),
     ...(p.council ? { council: true } : {}),
     scope: { kind: "project", root: process.cwd() },
-    execution: { isolation: inPlace ? "live" : "envelope" },
+    execution: p.execution,
     ...(p.resolvedHarnesses ? { harnesses: p.resolvedHarnesses } : {}),
     ...(p.resolvedPrimaryHarness ? { primaryHarness: p.resolvedPrimaryHarness } : {}),
     ...(p.routingGoal ? { routingGoal: p.routingGoal } : {}),
@@ -617,6 +613,7 @@ async function daemonRun(
     ...(p.resolvedWebPolicy ? { web: p.resolvedWebPolicy } : {}),
     ...(p.resolvedModel ? { model: p.resolvedModel } : {}),
     ...(p.resolvedEffort ? { effort: p.resolvedEffort } : {}),
+    ...(p.processingPreference ? { processingPreference: p.processingPreference } : {}),
     ...(p.review !== undefined ? { review: p.review } : {}),
     ...(p.reviewerPanel ? { reviewerPanel: p.reviewerPanel } : {}),
     ...(p.reviewerModels ? { reviewerModels: p.reviewerModels } : {}),
@@ -1175,7 +1172,7 @@ async function dispatch(args: ParsedArgs, outputMode: CliOutputMode): Promise<nu
       print(`output: ${outputReadyState}${primary ? ` ${primary.path}` : ""}`);
       if (failure) {
         print(
-          `failure: ${failure.category}${failure.code ? `/${failure.code}` : ""} phase=${failure.phase}${failure.harnessId ? ` harness=${failure.harnessId}` : ""}`,
+          `failure: ${failure.category}${failure.code ? `/${failure.code}` : ""} phase=${failure.phase}${failure.harnessId ? ` harness=${failure.harnessId}` : ""}${failure.vendorFailure?.code ? ` vendor_code=${failure.vendorFailure.code} (${failure.vendorFailure.source})` : ""}`,
         );
         print(`failure message: ${failure.safeMessage}`);
         for (const action of failure.nextActions) print(`next action: ${action}`);

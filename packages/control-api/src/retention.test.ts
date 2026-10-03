@@ -92,6 +92,33 @@ function seedDataRootEntry(dataRoot: string, name: string, kind: "directory" | "
 }
 
 describe("runRetentionPass", () => {
+  it("retains the remainder of partial files delivery and releases explicit discard to normal retention", async () => {
+    const { project } = sandbox();
+    const records = ["pending", "discarded", "direct"].map((id) => {
+      const runId = `run-files-${id}`;
+      const root = seedRun(project.runsDir, runId, {
+        workProduct: `kind: files\nmeta:\n  apply_state: ${id === "direct" ? "applied" : "not_applied"}\n`,
+      });
+      if (id !== "direct")
+        writeFileSync(
+          join(root, "final/delivery_state.yaml"),
+          `applyState: ${id === "discarded" ? "discarded" : "not_applied"}\nappliedPaths: [already-delivered.bin]\n`,
+        );
+      return { runId, state: "succeeded", finishedAt: daysAgo(90) };
+    });
+    const receipt = await runRetentionPass(
+      { ...POLICY, keepLastRunsPerProject: 0 },
+      { dry_run: false },
+      deps(project, { records: () => records }),
+    );
+    expect(receipt.deleted_runs.map((r) => r.run_id).sort()).toEqual([
+      "run-files-direct",
+      "run-files-discarded",
+    ]);
+    expect(existsSync(join(project.runsDir, "run-files-pending", "final/work_product.yaml"))).toBe(
+      true,
+    );
+  });
   it("deletes only old terminal unreferenced trees, keeps newest-N, leaves a tombstone", async () => {
     const { project } = sandbox();
     seedRun(project.runsDir, "run-old-a");

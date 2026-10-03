@@ -33,8 +33,8 @@ Read these together before changing shared behavior:
 - `packages/harness-*` translate native CLI/API streams into typed events. They
   do not select winners, manage budgets, or decide review policy. Each has a
   `fixtures/` dir backing its conformance parity test.
-- `packages/workspace` owns worktree envelopes, scoped harness homes, diff
-  capture, and cleanup.
+- `packages/workspace` owns Git and directory envelopes, scoped harness homes,
+  byte-faithful diff/file capture, and cleanup.
 - `packages/policy` owns typed risk classification, protected-path rules, and
   the workspace path guard.
 - `packages/context` owns the scope atlas and lazy ContextPack.
@@ -54,6 +54,16 @@ Read these together before changing shared behavior:
   tags (`pnpm canary`).
 - `benchmarks/runner` holds the SWE-bench benchmark runner and is part of the
   pnpm workspace.
+
+## Native input transport changes
+
+Keep native text limits separate from model windows and process argument limits.
+Preserve exact payload bytes and instruction roles. Verify both oversized and
+ordinary inputs, final typed failures, account failover, resume and cleanup.
+HTTP delivery proof must distinguish local handoff from provider acceptance:
+exercise partial/full uploads, unchanged proxy ownership, unsupported observation,
+replay and crash custody on the supported Node floor and bundled runtime. Test
+lazy dispatcher initialization from the built artifact as well as source modules.
 
 ## Development Commands
 
@@ -168,9 +178,11 @@ symlink semantics. It rejects escaping links, special files, and `.node`
 addons. The closure includes both top-level `claudexord.bundle.cjs` and
 `claudexor.bundle.cjs`, while Node remains host-owned. Embedders keep one exact
 tested full Node toolchain plus protocol/separate daemon-and-CLI
-entrypoints/size in their reviewed pin; POSIX local harness installation
-requires the adjacent `lib/node_modules/npm/bin/npm-cli.js` from that same
-toolchain and must never fall back to ambient PATH npm. The npm `engines` range
+entrypoints/size in their reviewed pin; local harness installation
+requires the toolchain's own adjacent npm entrypoint
+(`lib/node_modules/npm/bin/npm-cli.js` beside `bin/node`, or
+`node_modules\npm\bin\npm-cli.js` beside `node.exe`) and must never fall back
+to ambient PATH npm. The npm `engines` range
 is not closure-smoke evidence. The existing signed manifest is the publication
 authority used to form that pin; runtime consumers may verify it directly or
 rely on a review-bound exact URL/`buildSha`/SHA-256/size pin, without a second
@@ -178,8 +190,10 @@ manifest or verifier. The focused builder test must cover an internal link's
 expected materialized bytes and an escaping-link refusal. A Windows claim also
 requires a native extract/exact-Node probe/isolated handshake/graceful-stop
 smoke; feature support must not be inferred from portable extraction alone,
-and local Windows harness installation remains typed-unsupported until its own
-bounded support contract exists.
+and local Windows harness installation is bounded to vendors with a
+verified package-native image (Codex). The Windows CI lane must PROVE the real
+pinned install before this candidate can be released; until then it is not a
+Windows success claim. Other vendors stay typed-unsupported there.
 
 The `publish` mode also carries `remote_runtime_manifest_b64`:
 the OWNER-SIGNED four-target SSH runtime manifest, transported the same way.
@@ -266,6 +280,13 @@ Tests and local smokes must never touch real user state:
 - Managed secrets always use the daemon-owned v2 0600 file store, so a
   disposable `CLAUDEXOR_CONFIG_DIR` fully contains test secret I/O. The public
   CLI cannot select a storage backend.
+- Model-response changes exercise the actual adapter through the model-operation
+  and resource/HTTP owners with injected provider I/O. Pin byte-faithful failed
+  SSE and HTTP-body evidence, original exception causes, legacy query/result
+  compatibility and same-key replay, plus terminal usage when message conversion
+  fails. Test public receipts separately from private result bytes, including a
+  large failed result through restart, GET and ACK/expiry. The contract lives in
+  [Caller-owned model operations](ARCHITECTURE.md#caller-owned-model-operations).
 - Setup-job/runner tests inject filesystem, clock, launcher, process identity,
   signal, and timer dependencies and use temp roots only. They checksum the
   legacy registry before/after, exercise PID reuse and symlink/path fences, and
@@ -281,7 +302,12 @@ Tests and local smokes must never touch real user state:
   the real prompt consumers, and inspect the affected Council receipt visually.
 - Journal maintenance tests preserve synchronous `compact()` consumer coverage
   and separately exercise streamed compaction with concurrent acknowledged
-  batches, cursor continuity, cancellation and installation faults. Run daemon
+  batches, cursor continuity, cancellation and installation faults, plus the
+  fold contract: positional-reader equivalence with whole-buffer replay,
+  receipt byte-identity, disk chain state when a fold drops the last frame,
+  fold boundary arithmetic under streaming appends, and multi-frame
+  seq-preserving snapshot roundtrips. `scripts/journal-bench.mjs` is the opt-in
+  preparation benchmark against a copied journal root. Run daemon
   responsiveness/SSE acceptance in an empty fixture config without provider
   profiles; rebuilding candidate source never requires restarting a live daemon
   used by other work.
@@ -348,12 +374,17 @@ Tests and local smokes must never touch real user state:
   The build proof has no caller-supplied sentinel: every invocation owns and awaits
   the forced build before battery code can load. Never use the lane on the
   credential-free pristine VM or on a config root with live work.
-- Runtime retry/review knobs are user-global config (`runtime.transient_retry`
-  and `runtime.reviewer_timeout_ms`) with env overrides
+- Runtime retry/review/concurrency knobs are user-global config
+  (`runtime.transient_retry`, `runtime.reviewer_timeout_ms`, and the four
+  `runtime.max_*` concurrency fields) with env overrides
   `CLAUDEXOR_TRANSIENT_RETRY_MAX`,
   `CLAUDEXOR_TRANSIENT_RETRY_INITIAL_DELAY_MS`,
   `CLAUDEXOR_TRANSIENT_RETRY_MAX_DELAY_MS`, and
-  `CLAUDEXOR_REVIEWER_TIMEOUT_MS`.
+  `CLAUDEXOR_REVIEWER_TIMEOUT_MS`, `CLAUDEXOR_MAX_CONCURRENT`,
+  `CLAUDEXOR_MAX_PARALLEL_CANDIDATES`, `CLAUDEXOR_MAX_DEEP_SCAN_WIDTH`, and
+  `CLAUDEXOR_MAX_COUNCIL_MEMBERS`. Concurrency values are read at daemon
+  startup; settings surfaces distinguish configured, effective, and pending
+  replacement state.
 
 ## Schema-First Workflow
 
@@ -396,6 +427,32 @@ Do not fork contracts in UI code, CLI parsing, adapter output, or docs. Run
 `pnpm docs:check` in the same change: its small retired-contract inventory is a
 ratchet, so removing or replacing a product surface also removes every stale
 positive promise instead of relying on a one-time documentation cleanup.
+
+## Processing preference
+
+`processingPreference` is an advisory transport option for the selected model,
+independent of routing goal, reasoning effort, context and output policy.
+Standard requests ordinary service. Fast and Economy may fall back to Standard;
+fallback, account rotation and retry must never introduce Fast. Omission keeps
+legacy behavior, while explicit native `serviceTier` on `ModelCallOptions` takes
+precedence and is disclosed. Keep the captured preference and canonical request
+unchanged on exact replay. A confirmed no-generation processing refusal may
+produce a new Standard request and reservation; an unknown outcome may not.
+
+Choosing Fast permits its premium service within existing monetary limits. It
+does not enable paid account settings, change credentials, buy credits, or raise
+limits. An explicit no-paid policy selects ordinary fallback before dispatch.
+Resolve native controls and mode-qualified billing before ranking and reservation;
+carry observed usage through the existing ledger. Authentication proves the
+credential route, not inclusion of premium service. A native list-price amount is
+valuation; unobserved cash or credit consumption stays unknown. Never use a fixed
+price multiplier or infer actual execution from the submitted flag. Preserve
+requested, submitted and observed service separately, including mixed sessions.
+
+Capabilities, exact-account inventories and their observation provenance belong
+to existing adapter/discovery owners. Clients negotiate new account views through
+the operation catalog and preserve strict legacy requests when unsupported.
+Do not add a parallel catalog cache, pricing ledger or preference resolver.
 
 ## Boundaries
 
@@ -445,7 +502,8 @@ positive promise instead of relying on a one-time documentation cleanup.
   places that pinned runtime beside the daemon and runs its help entrypoint under
   the app's bundled Node with an empty environment. Do not restore runtime `npx`, `@latest`, or a
   package-manager override.
-- Diffs come from git in the target workspace or envelope.
+- Git diffs come from the target workspace or envelope; directory results use
+  complete manifest-bound files through the same workspace owner.
 - Files and typed artifacts are the source of truth; terminal text and UI rows
   are projections.
 - Unknown modes, invalid config, unavailable harnesses, stale reviews, malformed

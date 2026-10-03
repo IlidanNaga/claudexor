@@ -96,7 +96,7 @@ export function buildReviewPrompt(
     | boolean
     | {
         sealed?: boolean;
-        candidateInventoryMode?: "git_visible" | "diff_only";
+        candidateInventoryMode?: "git_visible" | "diff_only" | "explicit_manifest";
         /** Owner-amended delta scope (INV-125 second amendment, 2026-08-04):
          * this lane's review subject is the sealed DELTA.patch since the
          * recorded base SHA; the full packet stays its context. */
@@ -122,6 +122,11 @@ export function buildReviewPrompt(
     : `Each finding: {"severity":"BLOCK|FIX_FIRST|WARN|NIT|OUT_OF_SCOPE|INSUFFICIENT_EVIDENCE|NEEDS_HUMAN","category":"correctness|regression|security|performance|maintainability|test_gap|spec_gap|deploy|architecture|ux","claim":"...","evidence":{"files":[{"path":"...","lines":"..."}]},"proposed_fix":"..."}.`;
   return [
     "You are an adversarial code reviewer.",
+    ...(options.candidateInventoryMode === "explicit_manifest"
+      ? [
+          `Read FILES.json in ${evidenceDir} completely. It records the full selected input footprint, before/after states and hashes. Inspect the candidate files listed there, including binary outputs through appropriate tools. DIFF.patch is only a diagnostic preview and may be empty for this file work product. Do not infer no changes from an empty patch.`,
+        ]
+      : []),
     `Candidate root: ${candidateRoot}.`,
     sealed
       ? `First read MANIFEST.sha256 and every file it seals in ${evidenceDir}, including FREEZE.json and DECIDED_TRADEOFFS.md, and confirm every sealed file is present. The packet's manifest digest was already cryptographically verified by the review runtime before this session launched (verifySealedEvidencePacket, digest-bound to the frozen identity below); re-hashing the entries yourself is OPTIONAL — do it when your environment permits, but the inability to run a checksum tool is NOT grounds for INSUFFICIENT_EVIDENCE. If the manifest or a sealed file is missing or unreadable, return INSUFFICIENT_EVIDENCE.`

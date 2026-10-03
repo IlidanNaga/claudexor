@@ -1,4 +1,10 @@
-import type { HarnessAdapter } from "@claudexor/core";
+import {
+  prepareHarnessProcessing,
+  admitPreparedProcessing,
+  stampCredentialProfileSelection,
+  type HarnessAdapter,
+  type PreparedHarnessProcessing,
+} from "@claudexor/core";
 import { preflightEvidence, type DiffEvidence, writeDiffEvidence } from "@claudexor/context";
 import type {
   AuthPreference,
@@ -8,6 +14,7 @@ import type {
   ProviderFamily,
   ReviewFinding,
   RouteProof,
+  ProcessingPreference,
 } from "@claudexor/schema";
 import { HarnessRunSpec, ReviewFinding as ReviewFindingSchema } from "@claudexor/schema";
 import { execFileSync } from "node:child_process";
@@ -78,14 +85,20 @@ export interface ReviewerSpec {
   providerFamily: ProviderFamily;
   requestedModel?: string | null;
   requestedEffort?: EffortHint | null;
+  processingPreference?: ProcessingPreference;
+  processing?: PreparedHarnessProcessing;
+  processingAllowPaid?: boolean;
   authPreference?: AuthPreference | null;
-  /** Exact resolved profile used by this reviewer; null means pool/default. */
+  /** Exact resolved profile (null = pool/default); `profilePinned: false` = the pool chose it. */
   credentialProfile?: CredentialProfile | null;
+  profilePinned?: boolean;
 }
 
 export interface ReviewCandidateInput {
   candidateLabel: string;
   diff: string;
+  /** Explicit selected postimage manifest for ordinary-folder review. */
+  candidatePaths?: string[];
   evidenceDir: string;
   artifactsDir?: string;
   evidenceReadOnly?: boolean;
@@ -94,13 +107,9 @@ export interface ReviewCandidateInput {
     candidateTree: string;
     packetManifestSha256: string;
   };
-  /** Owner-amended delta scope (INV-125 second amendment, 2026-08-04).
-   * SUBTRACTIVE by design (wave-6 integrity finding): there is NO harness
-   * parameter — the delta applies ONLY to the contract's sol slot (the
-   * cursor lane), the base SHA must match the sealed packet's FINGERPRINTS
-   * delta entries, and DELTA.patch must verify as the exact
-   * deltaBaseSha..candidateSha diff. Sealed-packet mode only; every other
-   * lane always reviews the full context. */
+  /** Subtractive delta for the fixed Cursor/Sol slot in sealed-packet mode
+   * (INV-125). Other lanes retain full context; the base SHA and diff must
+   * match the sealed packet, as checked by assertSealedDeltaScope. */
   deltaScope?: { baseSha: string };
   cwd: string;
   reviewers: ReviewerSpec[];
@@ -110,6 +119,10 @@ export interface ReviewCandidateInput {
   env?: Record<string, string>;
   signal?: AbortSignal;
   onReviewerEvent?: (event: ReviewerProgressEvent) => void;
+  /** Cumulative panel cash plus amounts of unknown meaning on potentially paid routes. */
+  onUsageCost?: (panelPaidOrUnknownUsd: number) => boolean;
+  /** Exact prepared slot, before each physical send; caller owns the panel lease. */
+  onBeforeDispatch?: (reviewerIndex: number, spec: HarnessRunSpec) => void | Promise<void>;
 }
 
 const DEFAULT_REVIEWER_TIMEOUT_MS = 10 * 60_000;
@@ -156,11 +169,8 @@ function readSealedDeltaEvidence(dir: string): DiffEvidence {
  * delta subject, so a mislabeled attestation cannot be produced upstream. */
 const SOL_DELTA_HARNESS_ID = "cursor";
 
-/** Fail-closed launch-time verification of an owner-amended delta scope
- * (wave-6 integrity finding f-…: the flag's former free parameters could
- * mislabel a signed attestation). The base SHA and delta digest must match
- * the sealed FINGERPRINTS entries, and DELTA.patch must be the exact
- * deltaBaseSha..candidateSha diff of the candidate repository. */
+/** Verify the optional delta against the packet and exact frozen candidate;
+ * the fixed reviewer slot remains outside caller control. */
 function assertSealedDeltaScope(
   input: ReviewCandidateInput,
   baseSha: string,
@@ -316,6 +326,11 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
   );
   const healthyReviewerIndexes = new Set<number>();
   const reviewerSpend = new ReviewerSpendAccumulator(input.reviewers.length);
+  const streamedPaid = Array<number>(input.reviewers.length).fill(0);
+  const budgetAbort = new AbortController();
+  const reviewerSignal = input.signal
+    ? AbortSignal.any([input.signal, budgetAbort.signal])
+    : budgetAbort.signal;
   const reviewerTimeoutMs = input.reviewerTimeoutMs ?? DEFAULT_REVIEWER_TIMEOUT_MS;
   const reviewWaveId =
     input.env?.["CLAUDEXOR_REVIEW_WAVE_ID"] ?? process.env["CLAUDEXOR_REVIEW_WAVE_ID"] ?? null;
@@ -369,11 +384,14 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
     ].filter(Boolean);
     throw new Error(`mandatory evidence preflight failed (${parts.join("; ")})`);
   }
-  const postimagePaths = extractDiffPostimagePaths(input.diff);
+  const postimagePaths = input.candidatePaths
+    ? new Set(input.candidatePaths)
+    : extractDiffPostimagePaths(input.diff);
   const candidateInventory = await buildReviewerCandidateInventory(
     input.cwd,
     postimagePaths,
     input.evidenceReadOnly === true,
+    input.candidatePaths,
   );
   const artifactsBaseDir = input.artifactsDir ?? join(input.evidenceDir, "reviewer-artifacts");
   if (
@@ -465,10 +483,7 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
         candidate_inventory_reason: candidateInventory.reason,
         review_scope: deltaBase ? "delta" : "full",
         ...(deltaBase
-          ? {
-              delta_base_sha: deltaBase,
-              delta_sha256: verifiedDeltaScope!.deltaSha256,
-            }
+          ? { delta_base_sha: deltaBase, delta_sha256: verifiedDeltaScope!.deltaSha256 }
           : {}),
         ...frozenMetadata,
       });
@@ -497,6 +512,10 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
           : {}),
         model_hint: reviewer.requestedModel ?? null,
         effort_hint: reviewer.requestedEffort ?? null,
+        processing_preference: reviewer.processingPreference,
+        processing: reviewer.processing?.receipt,
+        processing_cost_basis: reviewer.processing?.costBasis,
+        processing_allow_paid: reviewer.processingAllowPaid,
         auth_preference: reviewer.authPreference ?? "auto",
         credential_profile: reviewer.credentialProfile ?? null,
         env_inheritance: input.envInheritance ?? "mirror_native",
@@ -505,6 +524,26 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
           : {}),
         env: reviewerEnv,
       });
+      stampCredentialProfileSelection(spec, { pinned: reviewer.profilePinned !== false });
+      if (input.onBeforeDispatch)
+        spec.extra["processingAdmission"] = async (actual: HarnessRunSpec) => {
+          // The adapter resolves the concrete profile/route while preparing
+          // this attempt. Keep billing tied to that current SSOT rather than
+          // the reviewer-level preflight (which may be stale after rotation).
+          actual.extra["routeBillingKnowledge"] = (resolved: HarnessRunSpec) => {
+            const profileKind = resolved.credential_profile?.credential_kind;
+            return profileKind === "api_key"
+              ? "metered"
+              : profileKind
+                ? "subscription_entitlement"
+                : resolved.auth_preference === "api_key"
+                  ? "metered"
+                  : resolved.auth_preference === "subscription"
+                    ? "subscription_entitlement"
+                    : "unknown";
+          };
+          await input.onBeforeDispatch!(index, actual);
+        };
       writeText(artifact.promptPath, spec.prompt);
       updateReviewerMetadata(artifact, {
         session_id: spec.session_id,
@@ -558,8 +597,21 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
           : (input.transientRetryPolicy ?? DEFAULT_REVIEWER_TRANSIENT_RETRY_POLICY),
         artifact,
         input.onReviewerEvent,
-        input.signal,
+        reviewerSignal,
         input.evidenceReadOnly === true,
+        (amount) => {
+          streamedPaid[index] = amount;
+          try {
+            if (input.onUsageCost?.(streamedPaid.reduce((sum, value) => sum + value, 0))) {
+              budgetAbort.abort("review_budget_cap");
+              return true;
+            }
+            return false;
+          } catch (error) {
+            budgetAbort.abort("review_budget_observer_failed");
+            throw error;
+          }
+        },
       );
       text = out.text;
       sealedProjectionError = out.sealedProjectionError ?? null;
@@ -764,6 +816,7 @@ async function collectReviewerOutput(
   onReviewerEvent: ReviewCandidateInput["onReviewerEvent"],
   signal?: AbortSignal,
   sealed = false,
+  onUsageCost?: (paidOrUnknownUsd: number) => boolean,
 ): Promise<ReviewerOutput> {
   const controller = new AbortController();
   spec.extra["abortSignal"] = controller.signal;
@@ -807,8 +860,32 @@ async function collectReviewerOutput(
     cancelledBySignal || signal?.aborted === true || controller.signal.aborted;
 
   const consumeOnce = async (nativeTry: number): Promise<ReviewerOutput> => {
+    if (isCancelled()) throw new Error("Reviewer cancelled before dispatch");
+    if (runSpec.processing_preference || reviewer.adapter.prepareProcessing) {
+      const prepared = await prepareHarnessProcessing(reviewer.adapter, {
+        preference: runSpec.processing_preference,
+        model: runSpec.model_hint,
+        effort: runSpec.effort_hint,
+        cwd: runSpec.cwd,
+        env: runSpec.env,
+        credentialProfile: runSpec.credential_profile,
+        authPreference: runSpec.auth_preference,
+        allowPaid: runSpec.processing_allow_paid,
+      });
+      runSpec = {
+        ...runSpec,
+        processing: prepared.receipt,
+        processing_cost_basis: prepared.costBasis,
+      };
+    }
+    if (isCancelled()) throw new Error("Reviewer cancelled before dispatch");
+    await admitPreparedProcessing(runSpec);
+    const markPhysicalDispatchStarted = runSpec.extra["markPhysicalDispatchStarted"];
+    if (typeof markPhysicalDispatchStarted === "function")
+      (markPhysicalDispatchStarted as () => void)();
+    if (isCancelled()) throw new Error("Reviewer cancelled before dispatch");
     currentAuthMode = null;
-    costKnowledge.startAttempt();
+    costKnowledge.startAttempt(runSpec);
     const iter = (reviewer.adapter.review ?? reviewer.adapter.run).call(reviewer.adapter, runSpec);
     currentIter = iter;
     let text = "";
@@ -852,7 +929,7 @@ async function collectReviewerOutput(
         observedAuthModes.add(disclosedAuthMode);
         updateReviewerMetadata(artifact, { auth_modes: [...observedAuthModes] });
       }
-      costKnowledge.observeEvent(currentAuthMode);
+      costKnowledge.observeEvent(currentAuthMode, ev);
       if (!observedAuthMode) {
         observedAuthMode = disclosedAuthMode;
         if (observedAuthMode) updateReviewerMetadata(artifact, { auth_mode: observedAuthMode });
@@ -873,14 +950,15 @@ async function collectReviewerOutput(
       ) {
         costUsd += ev.usage.cost_usd;
         if (ev.usage.estimated) costEstimated = true;
-        costKnowledge.observeUsage(currentAuthMode, ev.usage.estimated === true);
-        if (currentAuthMode === "local_session") {
-          valuationUsd += ev.usage.cost_usd;
-        } else if (currentAuthMode === "api_key") {
-          cashUsd += ev.usage.cost_usd;
-        } else {
-          unknownUsd += ev.usage.cost_usd;
-        }
+        costKnowledge.observeUsage(
+          currentAuthMode,
+          ev.usage.cost_usd,
+          ev.usage.estimated === true,
+          ev,
+        );
+        cashUsd = costKnowledge.totals.cashUsd;
+        valuationUsd = costKnowledge.totals.valuationUsd;
+        unknownUsd = costKnowledge.totals.unknownUsd;
         updateReviewerMetadata(artifact, {
           cost_usd: costUsd,
           cost_estimated: costEstimated,
@@ -888,6 +966,10 @@ async function collectReviewerOutput(
           valuation_usd: valuationUsd,
           unknown_usd: unknownUsd,
         });
+        const paidOrUnknown = cashUsd + costKnowledge.unknownPaidUsd;
+        if (paidOrUnknown > 0 && onUsageCost?.(paidOrUnknown)) {
+          throw new Error("Reviewer stopped at the existing paid budget cap");
+        }
       }
       if (sealed && ev.type === "message" && ev.final === true) {
         sealedMessageEvents.push(persistedEvent);

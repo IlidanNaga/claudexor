@@ -37,6 +37,8 @@ export interface StartupDiagnosticsHandle {
   diagnostics: DaemonStartupDiagnostics | null;
   recordStage(stage: string, message: string): void;
   recordFailure(message: string, error: unknown): void;
+  /** Daemon log line plus a diagnostics record under `stage` (redacted). */
+  log(stage: string, message: string): void;
   close(): void;
 }
 
@@ -81,6 +83,11 @@ export function openStartupDiagnostics(identity: {
     diagnostics,
     recordStage: (stage, message) => record({ stage, message }),
     recordFailure: (message, error) => record({ stage: "startup_failure", message, error }),
+    log: (stage, message) => {
+      const redacted = redactSecrets(message);
+      logLine(logPath(), redacted);
+      record({ stage, message: redacted });
+    },
     close: () => diagnostics?.close(),
   };
 }
@@ -118,6 +125,10 @@ export interface NormalPlaneDuties {
    * write — and is crash-recoverable via its own phase file (an incomplete
    * harness refuses runs typed until the next start finishes it). */
   migrateAccounts(): void;
+  /** Command history retention (age/cap and the retained-params byte budget)
+   * over the just-activated registry; a heavy install must not carry its
+   * oldest prompts until the next terminal happens to prune them. */
+  pruneCommandHistory(): void;
   startSetup(): Promise<void>;
   quarantineGhosts(): void;
   scheduleRetention(): void;
@@ -133,6 +144,10 @@ export function createStartupAdmissionRuntime(input: {
   global: JournalManager;
   partitions: ProjectPartitions;
   diagnostics: StartupDiagnosticsHandle;
+  /** Project roots crash-GC may sweep, from the stage-2 prepared global
+   * command projection (accepted commands plus prune tombstones) instead of a
+   * second journal replay. */
+  knownProjectRoots: () => readonly string[];
   normalPlane: NormalPlaneDuties;
 }): {
   runAdmissionCompletion(blockedPartitions: () => string[]): Promise<DaemonServingMode>;
@@ -161,6 +176,7 @@ export function createStartupAdmissionRuntime(input: {
       );
     }
     input.normalPlane.migrateAccounts();
+    input.normalPlane.pruneCommandHistory();
     await input.normalPlane.startSetup();
     input.normalPlane.quarantineGhosts();
     input.normalPlane.scheduleRetention();
@@ -214,6 +230,7 @@ export function createStartupAdmissionRuntime(input: {
             runStartupCrashGc({
               daemonDir: daemonDir(),
               logPath: logPath(),
+              knownProjectRoots: input.knownProjectRoots,
               ...(input.diagnostics.diagnostics
                 ? { diagnostics: input.diagnostics.diagnostics }
                 : {}),

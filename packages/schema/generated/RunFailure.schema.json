@@ -4,6 +4,68 @@
     "RunFailure": {
       "type": "object",
       "properties": {
+        "requestRefusal": {
+          "type": "object",
+          "properties": {
+            "scope": {
+              "type": "string",
+              "const": "turn_text",
+              "description": "All text input items in one native turn; separate instructions are excluded."
+            },
+            "unit": {
+              "type": "string",
+              "const": "unicode_scalars"
+            },
+            "limit": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source": {
+              "type": "string",
+              "minLength": 1
+            },
+            "kind": {
+              "type": "string",
+              "const": "input_too_large"
+            },
+            "actual": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "native_code": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "scope",
+            "unit",
+            "limit",
+            "source",
+            "kind",
+            "actual",
+            "native_code"
+          ],
+          "additionalProperties": false,
+          "description": "Vendor-typed physical input refusal; the same input cannot be repaired by changing this harness's account or model."
+        },
         "phase": {
           "type": "string",
           "default": "unknown",
@@ -41,6 +103,7 @@
                 "delegation_child_drain_timeout",
                 "subscription_window_exhausted",
                 "credential_pool_exhausted",
+                "input_too_large",
                 "delegated_home_unavailable",
                 "delegated_confinement_unavailable",
                 "delegated_evidence_incomplete",
@@ -120,6 +183,58 @@
           ],
           "default": null,
           "description": "When the refused window reopens (a spent subscription quota window), or null when the failure has no such time. Callers schedule a retry off this field, never off safeMessage."
+        },
+        "vendorFailure": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "The vendor's own machine-readable failure code, verbatim; null when the vendor recorded an error without one."
+                },
+                "message": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 4000
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "The vendor's own words from the same record, verbatim (redacted); null when absent."
+                },
+                "source": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64,
+                  "description": "Evidence channel the code was read from (codex: `codex_rollout`). An open vocabulary: consumers display it, never branch on it."
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "source"
+              ],
+              "additionalProperties": false,
+              "description": "Vendor-typed failure evidence read from a vendor-owned machine-readable record, never parsed from prose."
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The vendor's own typed failure for the attempt this record speaks for, or null when no vendor-typed evidence exists (every harness without such a channel, and any unreadable record). Facts only: carries no remedy.",
+          "default": null
         },
         "nextActions": {
           "type": "array",

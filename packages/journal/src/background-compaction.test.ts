@@ -248,7 +248,11 @@ describe("streamed compaction", () => {
     journal.appendBatch(
       Array.from({ length: 8 }, () => ({ type: "new", payload: "tail".repeat(2048) })),
     );
-    expect(await journal.compactInBackground({ stagingDir })).not.toBeNull();
+    expect(await journal.compactInBackground({ stagingDir })).toMatchObject({
+      records: 72,
+      retainedCount: 72,
+      retiredCount: 0,
+    });
     expect(() => journal.sequenceAfter(stale)).toThrow(/stale/);
     expect(journal.records(journal.sequenceAfter(cursor))).toHaveLength(8);
     const foreign = fixture(0, { partition: "project:foreign" }).currentCursor();
@@ -284,7 +288,12 @@ describe("streamed compaction", () => {
     ]);
     const expected = logical(journal.records());
     close.release();
-    expect(await flight).toMatchObject({ records: 70 });
+    expect(await flight).toMatchObject({
+      records: 70,
+      retainedCount: 64,
+      retiredCount: 0,
+      retiredBytes: 0,
+    });
     expect(logical(journal.records())).toEqual(expected);
     for (const [index, cursor] of cursors.entries())
       expect(logical(journal.records(journal.sequenceAfter(cursor)))).toEqual(
@@ -331,7 +340,7 @@ describe("streamed compaction", () => {
       await gate.entered;
       if (action === "close") journal.close();
       else controller.abort();
-      expect(await flight).toBeNull();
+      expect(await flight).toEqual({ declined: true, reason: "aborted" });
       gate.release();
       expect(digest(journal)).toBe(before);
       expect(readdirSync(stagingDir)).toEqual([]);
@@ -363,7 +372,7 @@ describe("streamed compaction", () => {
         }
       }
       const installed = digest(journal);
-      expect(await flight).toBeNull();
+      expect(await flight).toEqual({ declined: true, reason: "aborted" });
       gate.release();
       expect(digest(journal)).toBe(installed);
       if (outcome === "success") expect(() => journal.sequenceAfter(oldCursor)).toThrow(/stale/);
@@ -457,7 +466,7 @@ describe("streamed compaction", () => {
       ]),
     ).toThrow(JournalAppendUncertainError);
     gate.release();
-    expect(await flight).toBeNull();
+    expect(await flight).toEqual({ declined: true, reason: "aborted" });
     journal.close();
     const replay = fixture(0);
     expect(logical(replay.records()).slice(0, 64)).toEqual(expected);
@@ -465,8 +474,126 @@ describe("streamed compaction", () => {
     expect(replay.records().at(-1)?.type).toBe("journal.recovery_tail_discarded");
   });
 
+  it("folds the captured prefix, keeps disk boundary arithmetic under streaming appends, and re-folds on reopen", async () => {
+    const fold = {
+      verdict: (record: { type: string; payload: unknown }) => ({
+        drop: record.type === "history" && (record.payload as { n: number }).n % 2 === 0,
+        slot: record.type === "during.stream" ? "stream" : undefined,
+      }),
+    };
+    const journal = fixture(64, { fold });
+    // The fold judges records at replay and at compaction, never a live append.
+    expect(journal.records()).toHaveLength(64);
+    expect(journal.currentSequence()).toBe(64);
+    const cursor = journal.cursorAt(30);
+    const stream = barrier("stream");
+    const flush = barrier("sync");
+    const flight = journal.compactInBackground({ stagingDir });
+    await stream.entered;
+    journal.appendBatch([
+      { type: "during.stream", payload: { value: 1 } },
+      { type: "during.stream", payload: { value: 2 } },
+    ]);
+    stream.release();
+    await flush.entered;
+    journal.appendBatch([{ type: "during.flush", payload: "a" }]);
+    flush.release();
+    expect(await flight).toMatchObject({
+      records: 35,
+      retainedCount: 32,
+      retiredCount: 32,
+    });
+    // The in-flight tail is appended verbatim; the fold judges it on the next pass.
+    expect(journal.records().map((record) => record.seq)).toEqual([
+      ...Array.from({ length: 32 }, (_, n) => 2 * n + 2),
+      65,
+      66,
+      67,
+    ]);
+    expect(journal.records(journal.sequenceAfter(cursor)).map((record) => record.seq)).toEqual([
+      32, 34, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62, 64, 65, 66, 67,
+    ]);
+    expect(journal.append("after.fold", true).seq).toBe(68);
+    journal.close();
+    const verbatim = fixture(0);
+    expect(verbatim.records().map((record) => record.seq)).toEqual([
+      ...Array.from({ length: 32 }, (_, n) => 2 * n + 2),
+      65,
+      66,
+      67,
+      68,
+    ]);
+    expect(verbatim.currentSequence()).toBe(68);
+    verbatim.close();
+    const refolded = fixture(0, { fold });
+    expect(refolded.records().map((record) => record.seq)).toEqual([
+      ...Array.from({ length: 32 }, (_, n) => 2 * n + 2),
+      66,
+      67,
+      68,
+    ]);
+    expect(refolded.sequenceAfter(cursor)).toBe(30);
+    expect(readdirSync(stagingDir)).toEqual([]);
+  });
+
+  it("compacts a journal whose retained set is empty into an empty covering chunk", async () => {
+    const journal = fixture(16, { fold: { verdict: () => ({ drop: true }) } });
+    expect(journal.currentSequence()).toBe(16);
+    expect(await journal.compactInBackground({ stagingDir })).toMatchObject({
+      records: 0,
+      retainedCount: 0,
+      retiredCount: 16,
+    });
+    expect(journal.records()).toEqual([]);
+    expect(journal.currentSequence()).toBe(16);
+    expect(journal.append("after.empty", true).seq).toBe(17);
+    journal.close();
+    const replay = fixture(0);
+    expect(replay.records().map((record) => [record.seq, record.type])).toEqual([
+      [17, "after.empty"],
+    ]);
+  });
+
+  it("compacts a 12 MiB compressible record as its own chunk beyond the logical cut point", async () => {
+    const journal = fixture(0);
+    journal.append("wide", { text: "compressible ".repeat((12 * 1024 * 1024) / 13) });
+    journal.append("after", { n: 1 });
+    const expected = logical(journal.records());
+    expect(await journal.compactInBackground({ stagingDir })).toMatchObject({
+      records: 2,
+      retainedCount: 2,
+    });
+    expect(logical(journal.records())).toEqual(expected);
+    journal.close();
+    expect(logical(fixture(0).records())).toEqual(expected);
+  });
+
+  it("declines typed with the frame payload cap when one record cannot be enveloped", async () => {
+    const journal = fixture(0);
+    // Dense JSON-safe noise: the base64 gzip envelope of one such record exceeds the frame cap.
+    const alphabet = Buffer.from(
+      Array.from({ length: 95 }, (_, n) => 0x20 + n).filter(
+        (code) => code !== 0x22 && code !== 0x5c,
+      ),
+    );
+    const noise = Buffer.allocUnsafe(16_700_000);
+    const random = randomBytes(noise.length);
+    for (let index = 0; index < noise.length; index += 1)
+      noise[index] = alphabet[random[index]! % alphabet.length]!;
+    journal.append("noise", noise.toString("latin1"));
+    const before = digest(journal);
+    expect(await journal.compactInBackground({ stagingDir })).toEqual({
+      declined: true,
+      reason: "capacity",
+      cap: 16 * 1024 * 1024,
+    });
+    expect(digest(journal)).toBe(before);
+    expect(journal.append("after.cap", true).seq).toBe(2);
+    expect(readdirSync(stagingDir)).toEqual([]);
+  });
+
   it.each([18, 24])(
-    "preserves incompressible %s-record history at the envelope/output caps",
+    "leaves incompressible %s-record history in place with a typed no-reclaim decline",
     async (count) => {
       const journal = fixture(0);
       journal.appendBatch(
@@ -477,7 +604,11 @@ describe("streamed compaction", () => {
       );
       const before = digest(journal);
       const cursor = journal.currentCursor();
-      expect(await journal.compactInBackground({ stagingDir })).toBeNull();
+      expect(await journal.compactInBackground({ stagingDir })).toMatchObject({
+        declined: true,
+        reason: "no_reclaim",
+        cap: journal.physicalBytes(),
+      });
       expect(digest(journal)).toBe(before);
       expect(journal.sequenceAfter(cursor)).toBe(count);
       expect(journal.append("after.cap", true).seq).toBe(count + 1);

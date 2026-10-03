@@ -503,7 +503,7 @@ public struct ThreadTurnRequest: Codable, Sendable {
     public var create: Bool?
     /// Plan strategy (D31/INV-031): N harnesses draft plans in parallel, the
     /// primary merges into one plan + one question set. Plan mode only; `n`
-    /// (2..4) sets the member count.
+    /// sets the member count (at least two, up to the daemon's effective cap).
     public var council: Bool?
     /// Agent delegation belt toggle (D32). Agent-only: injects the scoped
     /// Claudexor MCP belt so the harness can spawn bounded isolated sub-runs.

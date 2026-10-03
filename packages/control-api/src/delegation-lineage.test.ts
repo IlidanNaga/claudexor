@@ -1,9 +1,6 @@
 import { describe, expect, it } from "vitest";
-import {
-  directDelegatedChildrenFromRecords,
-  delegatedDescendantsFromRecords,
-  type DaemonRunRecord,
-} from "./run-record.js";
+import { directDelegatedChildrenFromRecords } from "@claudexor/schema";
+import { delegatedDescendantsFromRecords, type DaemonRunRecord } from "./run-record.js";
 
 function run(id: string, params: Record<string, unknown>, state = "running"): DaemonRunRecord {
   return { id: `job-${id}`, runId: id, state, params };

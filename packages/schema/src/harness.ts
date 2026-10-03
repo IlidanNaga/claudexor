@@ -1,3 +1,4 @@
+import { EffortResolution } from "./effort.js";
 import { z } from "zod/v3";
 import { AuthSourceKind, AuthSourceReadiness, CredentialRoute } from "./auth.js";
 import { CredentialProfile } from "./credential-profile.js";
@@ -21,7 +22,16 @@ import {
 import { QuotaConstraint, QuotaSource } from "./quota.js";
 import { RateLimitSignal } from "./rate-limit.js";
 import { EffortHint, ModelEffortCapability } from "./effort.js";
+import {
+  ProcessingCostBasis,
+  ProcessingPreference,
+  ProcessingReceipt,
+  UsageCostBasis,
+} from "./processing.js";
 import { AuthCapabilities } from "./platform-auth.js";
+import { InteractionRequest, LiveInputCapability } from "./harness-interaction.js";
+import { HarnessInputLimit, HarnessRequestRefusal } from "./harness-input.js";
+export * from "./harness-input.js";
 export * from "./platform-auth.js";
 // Re-exported so sibling contract modules keep one import path for the type.
 export { EffortHint } from "./effort.js";
@@ -70,6 +80,12 @@ export type WebPolicySupport = z.infer<typeof WebPolicySupport>;
  */
 export const HarnessCapabilities = z
   .object({
+    processing_preferences: z
+      .array(ProcessingPreference)
+      .optional()
+      .describe(
+        "Service preferences translated by this adapter; model/account support is separate.",
+      ),
     plan: z.boolean().default(false).describe("The harness can produce plans (plan intent)."),
     implement: z
       .boolean()
@@ -215,14 +231,35 @@ export const HarnessCapabilities = z
       .describe(
         "Vendor CLI version the effort ladders were last verified against; null = never verified / not applicable.",
       ),
+    model_inventory_routes: z
+      .array(z.enum(["local_session", "api_key"]))
+      .min(1)
+      .optional()
+      .describe(
+        "Credential routes supported by the adapter's live models() producer; omitted preserves all-route support. Other routes use manifest known_models, never another account's live inventory.",
+      ),
+    /**
+     * What this harness's model lists prove (INV-104) — the live `models()`
+     * answer and the manifest `known_models` hints alike. A list always proves
+     * PRESENCE; this says whether an absence from it is proof too. `authoritative`
+     * (the default when omitted) keeps the strict gate: a model the list lacks is
+     * refused. `advisory` means the harness cannot enumerate what its runtime
+     * accepts, so the gate forwards the explicit model byte-identical and discloses it.
+     */
+    model_inventory_absence: z
+      .enum(["authoritative", "advisory"])
+      .optional()
+      .describe(
+        "Whether an absence from this harness's model lists (the live models() answer and the manifest known_models alike) proves a model is ABSENT; omitted = authoritative (an unlisted model is refused). advisory = absence is not proof, so an explicit model is forwarded to the vendor and disclosed instead of refused.",
+      ),
     /**
      * Known model ids/aliases this harness accepts — the manifest-declared model
-     * truth source used when the adapter has no live `models()` inventory.
-     * STRICT: an explicit model outside the active truth source is refused
-     * at settings-write, run preflight, and reviewer resolution; a harness with
-     * NO truth source (no `models()` and an empty list) refuses every explicit
-     * model. Data-driven like `effort_levels` — no model id is hardcoded in
-     * routing logic.
+     * truth source when no live `models()` producer applies to the credential route.
+     * Judged under `model_inventory_absence`: an authoritative harness refuses an
+     * explicit model outside the active list at settings-write, run preflight and
+     * reviewer resolution (an empty list refuses every explicit model); an
+     * advisory harness forwards it with a note. Data-driven like `effort_levels`
+     * — no model id is hardcoded in routing logic.
      */
     known_models: z
       .array(
@@ -243,7 +280,7 @@ export const HarnessCapabilities = z
       )
       .default([])
       .describe(
-        "Manifest-declared model ids/aliases this harness accepts (bare string = every credential route; object form scopes a model to specific routes), used as the model truth source when the adapter has no live inventory; explicit models outside the truth source are refused.",
+        "Manifest-declared model ids/aliases this harness accepts (bare string = every credential route; object form scopes a model to specific routes), used as the model truth source when the adapter has no live inventory and judged under model_inventory_absence: an authoritative harness refuses an explicit model outside it, an advisory harness forwards it with a note.",
       ),
     /**
      * Vendor CLI version this `known_models` hint set was last verified against
@@ -264,6 +301,10 @@ export const HarnessCapabilities = z
 export type HarnessCapabilities = z.infer<typeof HarnessCapabilities>;
 
 export type KnownModelEntry = HarnessCapabilities["known_models"][number];
+
+/** What a harness's model lists prove about a model they do NOT list (INV-104).
+ * ONE owner for the vocabulary; absent on a manifest means `authoritative`. */
+export type ModelInventoryAbsence = NonNullable<HarnessCapabilities["model_inventory_absence"]>;
 
 /** Model ids from a known_models list that are valid on `route`. ONE owner for
  * the route filter (INV-122): a bare string entry is valid on every route;
@@ -321,6 +362,7 @@ export const HarnessCapabilityProfile = z
     isolation: IsolationCapabilities,
     /** Every accepted media class has a finite MIME/size/count/transport declaration. */
     attachment_inputs: z.array(AttachmentInputClass).default([]),
+    input_limits: z.array(HarnessInputLimit).optional(),
     /**
      * The adapter can inject engine-owned MCP servers into the harness sandbox
      * (the generalized browser-MCP seam): claude via `--mcp-config` inline JSON,
@@ -353,46 +395,25 @@ export const HarnessCapabilityProfile = z
       .describe(
         "An injected MCP server can only reach the daemon (belt) at full access; below it the harness sandbox cancels the call. true => Delegate below full access degrades to ordinary Agent with a durable typed receipt.",
       ),
+    /**
+     * Live input into a RUNNING session (`POST /v2/runs/:id/messages`). Truthful
+     * per adapter: codex declares mid_turn (turn/steer, recorded on 0.153.3 and
+     * 0.156.1); claude declares next_tool_boundary (a uuid-bearing user frame on
+     * the live stdin is folded into the running turn after the current tool
+     * batch, recorded on 2.1.283); cursor, agy, opencode and raw-api have no
+     * channel. Consumers: the agent-capability
+     * catalog row (`liveInput`) and the daemon's live-input registry, which
+     * answers `unsupported` without a native write when this is none.
+     */
+    live_input: LiveInputCapability.default("none"),
   })
   .default({})
   .describe(
-    "Structured per-harness facts the engine consumes: auth routing, isolation containment, readonly mechanism, finite attachment inputs, and MCP injection.",
+    "Structured per-harness facts the engine consumes: auth routing, isolation containment, readonly mechanism, finite attachment inputs, MCP injection, and live input into a running session.",
   );
 export type HarnessCapabilityProfile = z.infer<typeof HarnessCapabilityProfile>;
 
-/**
- * One enumerable model offered by a harness. Deliberately small: only the
- * fields a real enumeration source (an OpenAI-compatible `GET /v1/models`)
- * can honestly populate. `label`/`context_window` are nullable because the
- * raw `{data:[{id}]}` list rarely carries them.
- */
-export const HarnessModel = z
-  .object({
-    id: z.string().describe("Model id as the vendor enumerates it."),
-    label: z
-      .string()
-      .nullable()
-      .default(null)
-      .describe("Human-readable model label; null when the enumeration source has none."),
-    context_window: z
-      .number()
-      .int()
-      .positive()
-      .nullable()
-      .default(null)
-      .describe("Context window in tokens; null when the enumeration source does not report it."),
-    /** Credential routes the model is scoped to per the manifest annotation;
-     * null = unannotated (available on every route). */
-    routes: z
-      .array(z.enum(["local_session", "api_key"]))
-      .nullable()
-      .default(null)
-      .describe("Credential routes the model is scoped to; null = every route."),
-  })
-  .describe(
-    "One enumerable model offered by a harness, limited to fields a real enumeration source can honestly populate.",
-  );
-export type HarnessModel = z.infer<typeof HarnessModel>;
+export { HarnessModel } from "./harness-model.js";
 
 export const HarnessManifest = z
   .object({
@@ -521,6 +542,12 @@ export type ExtraMcpServer = z.infer<typeof ExtraMcpServer>;
 /** Spec passed to a harness adapter's run(). */
 export const HarnessRunSpec = z
   .object({
+    processing_preference: ProcessingPreference.optional(),
+    processing: ProcessingReceipt.optional().describe(
+      "Prepared native service choice for this exact attempt.",
+    ),
+    processing_cost_basis: ProcessingCostBasis.optional(),
+    processing_allow_paid: z.boolean().optional(),
     session_id: Id.describe("Session id this run belongs to."),
     intent: Intent,
     prompt: z.string().describe("Prompt text delivered to the harness."),
@@ -528,14 +555,14 @@ export const HarnessRunSpec = z
      * Optional caller-supplied system-level instructions layered on top of the
      * prompt for TASK-PRODUCING lanes (primary, candidate, planner, explorer)
      * — never reviewers, synthesis, or the auth smoke.
-     * Adapters deliver it natively (claude `--append-system-prompt`, codex
+     * Adapters deliver it natively (claude `--append-system-prompt-file`, codex
      * `developer_instructions`) or as a delimited prompt prefix.
      */
     instructions: z
       .string()
       .optional()
       .describe(
-        "Caller-supplied system-level instructions for task-producing lanes; delivered natively (append-system-prompt / developer_instructions) or as a delimited prompt prefix.",
+        "Caller-supplied system-level instructions for task-producing lanes; delivered natively (append-system-prompt-file / developer_instructions) or as a delimited prompt prefix.",
       ),
     cwd: z.string().describe("Working directory the harness process runs in."),
     access: AccessProfile.default("workspace_write"),
@@ -678,86 +705,29 @@ export const HarnessRunSpec = z
   );
 export type HarnessRunSpec = z.infer<typeof HarnessRunSpec>;
 
-/**
- * One multiple-choice option of an interactive question (AskUserQuestion-style).
- */
-export const InteractionOption = z
-  .object({
-    label: z.string().describe("Option label shown to the user."),
-    description: z
-      .string()
-      .nullable()
-      .default(null)
-      .describe("Optional longer explanation of the option."),
-  })
-  .describe("One multiple-choice option of an interactive question.");
-export type InteractionOption = z.infer<typeof InteractionOption>;
+// Interactive-session contracts (questions, answers, live input) live in
+// harness-interaction.ts; re-exported here so every importer keeps ONE path.
+export * from "./harness-interaction.js";
 
-export const InteractionQuestion = z
+export const InputTokenUsage = z
   .object({
-    id: Id.describe("Question id."),
-    question: z.string().describe("The question text."),
-    /** Short chip/header text some harnesses attach to a question. */
-    header: z
-      .string()
-      .nullable()
-      .default(null)
-      .describe("Short chip/header text some harnesses attach to a question."),
-    options: z
-      .array(InteractionOption)
-      .default([])
-      .describe("Selectable options; empty for free-text-only questions."),
-    multi_select: z.boolean().default(false).describe("Whether multiple options may be selected."),
+    total_tokens: z.number().int().nonnegative().nullable(),
+    cache_read_tokens: z.number().int().nonnegative().nullable(),
+    cache_write_tokens: z.number().int().nonnegative().nullable(),
   })
-  .describe("One question of an interactive user-input request.");
-export type InteractionQuestion = z.infer<typeof InteractionQuestion>;
-
-/**
- * A live request for user input raised by an interactive harness session.
- * Carried on `interaction_requested` HarnessEvents and projected into
- * `interaction.requested` RunEvents.
- */
-export const InteractionRequest = z
-  .object({
-    interaction_id: Id.describe("Interaction id used to correlate the answer set."),
-    questions: z
-      .array(InteractionQuestion)
-      .default([])
-      .describe("Questions the harness wants answered."),
-    /** Native tool that raised the request (e.g. "AskUserQuestion"). */
-    source_tool: z
-      .string()
-      .nullable()
-      .default(null)
-      .describe('Native tool that raised the request (e.g. "AskUserQuestion").'),
-  })
-  .describe("A live request for user input raised by an interactive harness session.");
-export type InteractionRequest = z.infer<typeof InteractionRequest>;
-
-export const InteractionAnswer = z
-  .object({
-    question_id: Id.describe("Id of the question being answered."),
-    selected_labels: z.array(z.string()).default([]).describe("Labels of the selected options."),
-    free_text: z
-      .string()
-      .nullable()
-      .default(null)
-      .describe("Free-text answer; null when only options were selected."),
-  })
-  .describe("The user's answer to one interactive question.");
-export type InteractionAnswer = z.infer<typeof InteractionAnswer>;
-
-export const InteractionAnswerSet = z
-  .object({
-    interaction_id: Id.describe("Interaction this answer set responds to."),
-    answers: z.array(InteractionAnswer).default([]).describe("Answers, one per question."),
-  })
-  .describe("Typed answers delivered back into a live interactive harness session.");
-export type InteractionAnswerSet = z.infer<typeof InteractionAnswerSet>;
+  .strict()
+  .describe(
+    "Complete reported input total, including cache reads/writes, and its separately measured cache subsets. Null means unknown, never zero or a partial sum.",
+  );
+export type InputTokenUsage = z.infer<typeof InputTokenUsage>;
 
 /** Normalized event emitted by every adapter (the SSOT of adapter output). */
 export const HarnessEvent = z
   .object({
+    request_refusal: HarnessRequestRefusal.optional(),
+    effort_resolution: EffortResolution.optional(),
+    processing: ProcessingReceipt.optional(),
+    processing_cost_basis: ProcessingCostBasis.optional(),
     type: z
       .enum([
         "started",
@@ -817,7 +787,9 @@ export const HarnessEvent = z
           .nonnegative()
           .optional()
           .describe("Reported cache token count; relation to input_tokens is harness-specific."),
+        input_token_usage: InputTokenUsage.optional(),
         cost_usd: z.number().nonnegative().optional().describe("Cost in USD."),
+        cost_basis: UsageCostBasis.optional(),
         /** True when cost_usd is derived from token pricing (not natively reported). */
         estimated: z
           .boolean()

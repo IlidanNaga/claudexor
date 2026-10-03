@@ -1,5 +1,153 @@
 # @claudexor/journal
 
+## 3.18.0
+
+### Patch Changes
+
+- @claudexor/util@3.18.0
+
+## 3.17.2
+
+### Patch Changes
+
+- @claudexor/util@3.17.2
+
+## 3.17.1
+
+### Patch Changes
+
+- @claudexor/util@3.17.1
+
+## 3.17.0
+
+### Patch Changes
+
+- @claudexor/util@3.17.0
+
+## 3.16.0
+
+### Patch Changes
+
+- @claudexor/util@3.16.0
+
+## 3.15.1
+
+### Patch Changes
+
+- @claudexor/util@3.15.1
+
+## 3.15.0
+
+### Patch Changes
+
+- @claudexor/util@3.15.0
+
+## 3.14.0
+
+### Patch Changes
+
+- @claudexor/util@3.14.0
+
+## 3.13.0
+
+### Patch Changes
+
+- @claudexor/util@3.13.0
+
+## 3.12.10
+
+### Patch Changes
+
+- @claudexor/util@3.12.10
+
+## 3.12.9
+
+### Patch Changes
+
+- @claudexor/util@3.12.9
+
+## 3.12.8
+
+### Patch Changes
+
+- @claudexor/util@3.12.8
+
+## 3.12.7
+
+### Patch Changes
+
+- @claudexor/util@3.12.7
+
+## 3.12.6
+
+### Patch Changes
+
+- @claudexor/util@3.12.6
+
+## 3.12.5
+
+### Patch Changes
+
+- @claudexor/util@3.12.5
+
+## 3.12.4
+
+### Patch Changes
+
+- @claudexor/util@3.12.4
+
+## 3.12.3
+
+### Patch Changes
+
+- @claudexor/util@3.12.3
+
+## 3.12.2
+
+### Patch Changes
+
+- @claudexor/util@3.12.2
+
+## 3.12.1
+
+### Patch Changes
+
+- @claudexor/util@3.12.1
+
+## 3.12.0
+
+### Minor Changes
+
+- 1b1476c: The durable journal now replays its file frame by frame instead of loading it whole, so daemon startup memory follows the retained record set rather than the journal size. Callers may supply a fold policy that is applied at replay and at background compaction; sequence numbers, the epoch and live cursors are preserved across compaction, dead records are dropped from the file per that policy, snapshots may span several frames, background maintenance re-requests itself when the file crosses the threshold again, and a declined maintenance pass is reported with a typed reason instead of `null`. An engine from before this change refuses a folded journal loudly rather than reading a partial history. `compactionThresholdBytes` now measures growth since the last background pass that reached the data — an install, a real decline or a failed pass — and a folded replay at open counts as that first pass, so a restart on an already-compacted partition above the threshold no longer rewrites it to reclaim nothing.
+
+### Patch Changes
+
+- @claudexor/util@3.12.0
+
+## 3.11.0
+
+### Patch Changes
+
+- @claudexor/util@3.11.0
+
+## 3.10.5
+
+### Patch Changes
+
+- @claudexor/util@3.10.5
+
+## 3.10.4
+
+### Patch Changes
+
+- @claudexor/util@3.10.4
+
+## 3.10.3
+
+### Patch Changes
+
+- @claudexor/util@3.10.3
+
 ## 3.10.2
 
 ### Patch Changes

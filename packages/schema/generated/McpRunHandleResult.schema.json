@@ -4,6 +4,190 @@
     "McpRunHandleResult": {
       "type": "object",
       "properties": {
+        "attemptExecution": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "attemptId": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Non-empty identifier string."
+              },
+              "harnessId": {
+                "$ref": "#/definitions/McpRunHandleResult/properties/attemptExecution/items/properties/attemptId"
+              },
+              "processing": {
+                "type": "object",
+                "properties": {
+                  "requested": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "standard",
+                          "fast",
+                          "economy"
+                        ],
+                        "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
+                  },
+                  "submitted": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/McpRunHandleResult/properties/attemptExecution/items/properties/processing/properties/requested/anyOf/0"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
+                  },
+                  "submittedNative": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "\\S",
+                        "description": "User-supplied string that must contain visible content, not just whitespace."
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "User-supplied string that must contain visible content, not just whitespace."
+                  },
+                  "observed": {
+                    "type": "string",
+                    "enum": [
+                      "standard",
+                      "fast",
+                      "economy",
+                      "mixed",
+                      "unknown"
+                    ]
+                  },
+                  "observedNative": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/definitions/McpRunHandleResult/properties/attemptExecution/items/properties/processing/properties/submittedNative/anyOf/0"
+                    }
+                  },
+                  "reason": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/McpRunHandleResult/properties/attemptExecution/items/properties/processing/properties/submittedNative/anyOf/0"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "User-supplied string that must contain visible content, not just whitespace."
+                  },
+                  "source": {
+                    "$ref": "#/definitions/McpRunHandleResult/properties/attemptExecution/items/properties/processing/properties/submittedNative/anyOf/0"
+                  }
+                },
+                "required": [
+                  "requested",
+                  "submitted",
+                  "submittedNative",
+                  "observed",
+                  "observedNative",
+                  "reason",
+                  "source"
+                ],
+                "additionalProperties": false,
+                "description": "Requested intent, submitted native control, and observed execution are independent facts. A submitted flag never proves observed service; mixed or missing session observations remain explicit."
+              },
+              "processingCostBasis": {
+                "type": "object",
+                "properties": {
+                  "nativeMode": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/McpRunHandleResult/properties/attemptExecution/items/properties/processing/properties/submittedNative/anyOf/0"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "User-supplied string that must contain visible content, not just whitespace."
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "included",
+                      "paid_credits",
+                      "cash",
+                      "valuation",
+                      "unknown"
+                    ]
+                  },
+                  "source": {
+                    "$ref": "#/definitions/McpRunHandleResult/properties/attemptExecution/items/properties/processing/properties/submittedNative/anyOf/0"
+                  }
+                },
+                "required": [
+                  "nativeMode",
+                  "kind",
+                  "source"
+                ],
+                "additionalProperties": false,
+                "description": "Mode-qualified billing evidence for an existing cost record. Authentication alone does not establish included premium service; credits, cash, and token valuation stay distinct."
+              },
+              "usageCost": {
+                "type": "object",
+                "properties": {
+                  "cashUsd": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "valuationUsd": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "unknownUsd": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "cashKnowledge": {
+                    "type": "string",
+                    "enum": [
+                      "exact",
+                      "estimated",
+                      "unknown"
+                    ],
+                    "description": "Quality of incremental-cash cost evidence for an operation."
+                  },
+                  "valuationKnowledge": {
+                    "$ref": "#/definitions/McpRunHandleResult/properties/attemptExecution/items/properties/usageCost/properties/cashKnowledge"
+                  }
+                },
+                "required": [
+                  "cashUsd",
+                  "valuationUsd",
+                  "unknownUsd",
+                  "cashKnowledge",
+                  "valuationKnowledge"
+                ],
+                "additionalProperties": false,
+                "description": "Observed usage components. An amount of unknown meaning is not charged cash; separately proven included service can still establish exact zero incremental cash."
+              }
+            },
+            "required": [
+              "attemptId",
+              "harnessId"
+            ],
+            "additionalProperties": false,
+            "description": "Compact projection of existing attempt execution and amount evidence."
+          }
+        },
         "summary": {
           "type": "string",
           "description": "Human-readable outcome/status text (same as the tool's text content)."
@@ -43,12 +227,10 @@
                   "description": "Schema version of the artifact; bumped on breaking ABI changes."
                 },
                 "run_id": {
-                  "type": "string",
-                  "minLength": 1,
-                  "description": "Non-empty identifier string."
+                  "$ref": "#/definitions/McpRunHandleResult/properties/attemptExecution/items/properties/attemptId"
                 },
                 "task_id": {
-                  "$ref": "#/definitions/McpRunHandleResult/properties/runFacts/anyOf/0/properties/run_id"
+                  "$ref": "#/definitions/McpRunHandleResult/properties/attemptExecution/items/properties/attemptId"
                 },
                 "mode": {
                   "type": "string",
@@ -73,7 +255,10 @@
                       "description": "Terminal lifecycle of the run."
                     },
                     "noChanges": {
-                      "type": "boolean",
+                      "type": [
+                        "boolean",
+                        "null"
+                      ],
                       "default": false,
                       "description": "True when the run finished without changing any files (the ex no_op fact)."
                     },
@@ -234,6 +419,7 @@
                             "report",
                             "plan",
                             "patch",
+                            "files",
                             "structured_output"
                           ]
                         },
@@ -253,7 +439,7 @@
                     "producer_attempt_id": {
                       "anyOf": [
                         {
-                          "$ref": "#/definitions/McpRunHandleResult/properties/runFacts/anyOf/0/properties/run_id"
+                          "$ref": "#/definitions/McpRunHandleResult/properties/attemptExecution/items/properties/attemptId"
                         },
                         {
                           "type": "null"
@@ -294,6 +480,7 @@
                                 "report",
                                 "plan",
                                 "patch",
+                                "files",
                                 "structured_output",
                                 "diagnostic"
                               ],
@@ -342,7 +529,7 @@
                           "attempt_id": {
                             "anyOf": [
                               {
-                                "$ref": "#/definitions/McpRunHandleResult/properties/runFacts/anyOf/0/properties/run_id"
+                                "$ref": "#/definitions/McpRunHandleResult/properties/attemptExecution/items/properties/attemptId"
                               },
                               {
                                 "type": "null"
@@ -444,7 +631,7 @@
                     "receipt_attempt_id": {
                       "anyOf": [
                         {
-                          "$ref": "#/definitions/McpRunHandleResult/properties/runFacts/anyOf/0/properties/run_id"
+                          "$ref": "#/definitions/McpRunHandleResult/properties/attemptExecution/items/properties/attemptId"
                         },
                         {
                           "type": "null"
@@ -473,7 +660,7 @@
                     "blocker_ids": {
                       "type": "array",
                       "items": {
-                        "$ref": "#/definitions/McpRunHandleResult/properties/runFacts/anyOf/0/properties/run_id"
+                        "$ref": "#/definitions/McpRunHandleResult/properties/attemptExecution/items/properties/attemptId"
                       },
                       "default": [],
                       "description": "Stable ids of accepted evidence-backed blocking findings."
@@ -648,6 +835,68 @@
             {
               "type": "object",
               "properties": {
+                "requestRefusal": {
+                  "type": "object",
+                  "properties": {
+                    "scope": {
+                      "type": "string",
+                      "const": "turn_text",
+                      "description": "All text input items in one native turn; separate instructions are excluded."
+                    },
+                    "unit": {
+                      "type": "string",
+                      "const": "unicode_scalars"
+                    },
+                    "limit": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "exclusiveMinimum": 0,
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "source": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "kind": {
+                      "type": "string",
+                      "const": "input_too_large"
+                    },
+                    "actual": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "native_code": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "scope",
+                    "unit",
+                    "limit",
+                    "source",
+                    "kind",
+                    "actual",
+                    "native_code"
+                  ],
+                  "additionalProperties": false,
+                  "description": "Vendor-typed physical input refusal; the same input cannot be repaired by changing this harness's account or model."
+                },
                 "phase": {
                   "type": "string",
                   "default": "unknown",
@@ -685,6 +934,7 @@
                         "delegation_child_drain_timeout",
                         "subscription_window_exhausted",
                         "credential_pool_exhausted",
+                        "input_too_large",
                         "delegated_home_unavailable",
                         "delegated_confinement_unavailable",
                         "delegated_evidence_incomplete",
@@ -764,6 +1014,58 @@
                   ],
                   "default": null,
                   "description": "When the refused window reopens (a spent subscription quota window), or null when the failure has no such time. Callers schedule a retry off this field, never off safeMessage."
+                },
+                "vendorFailure": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 128
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "description": "The vendor's own machine-readable failure code, verbatim; null when the vendor recorded an error without one."
+                        },
+                        "message": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 4000
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "description": "The vendor's own words from the same record, verbatim (redacted); null when absent."
+                        },
+                        "source": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 64,
+                          "description": "Evidence channel the code was read from (codex: `codex_rollout`). An open vocabulary: consumers display it, never branch on it."
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "source"
+                      ],
+                      "additionalProperties": false,
+                      "description": "Vendor-typed failure evidence read from a vendor-owned machine-readable record, never parsed from prose."
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "The vendor's own typed failure for the attempt this record speaks for, or null when no vendor-typed evidence exists (every harness without such a channel, and any unreadable record). Facts only: carries no remedy.",
+                  "default": null
                 },
                 "nextActions": {
                   "type": "array",
@@ -848,7 +1150,7 @@
                 "requested": {
                   "type": "integer",
                   "exclusiveMinimum": 0,
-                  "description": "Requested member count (n; 2..4)."
+                  "description": "Requested member count (n; at least 2, up to the configured Council cap)."
                 },
                 "drafted": {
                   "type": "integer",
@@ -935,6 +1237,15 @@
             {
               "type": "object",
               "properties": {
+                "cashKnowledge": {
+                  "type": "string",
+                  "enum": [
+                    "exact",
+                    "estimated",
+                    "unknown"
+                  ],
+                  "description": "Cash certainty from the ledger; explicit unknown keeps spendUsd null independently of valuation."
+                },
                 "paidBudget": {
                   "anyOf": [
                     {

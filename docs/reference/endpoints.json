@@ -234,6 +234,26 @@
       "request_schema": null,
       "parameters": [
         {
+          "name": "view",
+          "in": "query",
+          "required": false,
+          "repeatable": false,
+          "enum": [
+            "accounts"
+          ],
+          "schema_ref": null,
+          "description": "Opt in to all enabled account catalogs with separate availability and provenance; omission preserves the legacy response."
+        },
+        {
+          "name": "credentialProfileId",
+          "in": "query",
+          "required": false,
+          "repeatable": false,
+          "enum": null,
+          "schema_ref": "Id",
+          "description": "Restrict the accounts view to this exact enabled credential profile."
+        },
+        {
           "name": "route",
           "in": "query",
           "required": false,
@@ -246,7 +266,7 @@
           "description": "Filter enumerated models to the given credential route (models foreign to the route are hidden)."
         }
       ],
-      "response_schema": "ControlHarnessModelsResponse",
+      "response_schema": "ControlHarnessModelsQueryResponse",
       "error_schema": "ControlProblem"
     },
     {
@@ -269,7 +289,32 @@
       "summary": "Accept one idempotent model generation without an agent run.",
       "auth": "loopback_bearer",
       "request_schema": "ControlModelOperationCreateRequest",
-      "parameters": [],
+      "parameters": [
+        {
+          "name": "captureEffortEvidence",
+          "in": "query",
+          "required": false,
+          "repeatable": false,
+          "enum": [
+            "true",
+            "false"
+          ],
+          "schema_ref": null,
+          "description": "Retain typed effort preparation and observation evidence in the private result. Omitted or false preserves the legacy result shape; the choice is bound to idempotency."
+        },
+        {
+          "name": "captureFailureEvidence",
+          "in": "query",
+          "required": false,
+          "repeatable": false,
+          "enum": [
+            "true",
+            "false"
+          ],
+          "schema_ref": null,
+          "description": "Retain exact failed-response bytes and exception details in the private result. Omitted or false preserves the legacy result shape."
+        }
+      ],
       "response_schema": "ControlModelOperationDetail",
       "error_schema": "ControlProblem"
     },
@@ -329,8 +374,20 @@
       "summary": "List raw model transports, independent of agent harnesses.",
       "auth": "loopback_bearer",
       "request_schema": null,
-      "parameters": [],
-      "response_schema": "ControlModelSourcesResponse",
+      "parameters": [
+        {
+          "name": "view",
+          "in": "query",
+          "required": false,
+          "repeatable": false,
+          "enum": [
+            "accounts"
+          ],
+          "schema_ref": null,
+          "description": "Opt in to account catalog and processing transport capabilities; omitted preserves the legacy source shape."
+        }
+      ],
+      "response_schema": "ControlModelSourcesQueryResponse",
       "error_schema": "ControlProblem"
     },
     {
@@ -342,6 +399,17 @@
       "auth": "loopback_bearer",
       "request_schema": null,
       "parameters": [
+        {
+          "name": "view",
+          "in": "query",
+          "required": false,
+          "repeatable": false,
+          "enum": [
+            "accounts"
+          ],
+          "schema_ref": null,
+          "description": "Enumerate every enabled account's separate inventory and availability; omitted selects one account using the inference pool criteria. Account view cannot be combined with requestedModel."
+        },
         {
           "name": "credentialProfileId",
           "in": "query",
@@ -361,7 +429,7 @@
           "description": "Select one account able to serve this model using the inference pool criteria; omitted discovers one account without a model constraint."
         }
       ],
-      "response_schema": "ControlModelCatalogResponse",
+      "response_schema": "ControlModelCatalogQueryResponse",
       "error_schema": "ControlProblem"
     },
     {
@@ -770,6 +838,18 @@
       "request_schema": "ControlInteractionAnswerRequest",
       "parameters": [],
       "response_schema": "ControlInteractionAnswerResponse",
+      "error_schema": "ControlProblem"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/runs/:id/messages",
+      "mutating": true,
+      "applicability": "run",
+      "summary": "Place a live message into a run's active attempt and return a typed receipt: delivered (native consumption observed), accepted (native acceptance observed, consumption unproved), rejected, not_active, unsupported, or delivery_unknown. Every typed outcome answers HTTP 200 (unlike the answer and control routes); the Idempotency-Key is the message id and a replay returns the stored receipt.",
+      "auth": "loopback_bearer",
+      "request_schema": "ControlRunMessageRequest",
+      "parameters": [],
+      "response_schema": "ControlRunMessageResponse",
       "error_schema": "ControlProblem"
     },
     {

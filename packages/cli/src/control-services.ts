@@ -4,6 +4,7 @@ import {
   type OperatorDecisionRecord,
   JournalManager,
   InteractionRegistry,
+  LiveInputRegistry,
   ProjectPartitions,
   ProjectStore,
   ResourceStore,
@@ -18,8 +19,9 @@ import {
   type ResourceAttachmentRef,
   ControlAccountsMigrationRollbackRequest,
   ControlCredentialProfileCreateRequest,
-  ControlSettingsUpdateRequest,
   type ControlRunStartRequest,
+  type LiveMessageInput,
+  type RuntimeConcurrencyCaps,
   RunScope,
   TERMINAL_LIFECYCLES,
 } from "@claudexor/schema";
@@ -32,14 +34,15 @@ import { vendorVerifiedProfileStatus } from "@claudexor/orchestrator";
 import { profileDoctorStatus } from "./accounts-projection.js";
 import { createRetentionRunner } from "./retention-service.js";
 import { AuthReadinessService } from "@claudexor/gateway";
-import { buildGateway, harnessModels } from "./registry.js";
+import { buildGateway, harnessModels, harnessAccountModels } from "./registry.js";
+import { credentialUnusableLedger } from "./run-orchestrator.js";
 import {
   createCredentialProfilesService,
   projectHarnessStatuses,
   type HarnessListInput,
 } from "./accounts-services.js";
 import { buildAgentCapabilityCatalog } from "./capabilities.js";
-import { commitSettingsUpdate, settingsSnapshot } from "./settings-service.js";
+import { settingsControlServices } from "./settings-service.js";
 import {
   bustCredentialStatusCaches,
   type CredentialMutationSubject,
@@ -82,6 +85,7 @@ function activeRunProjectRoot(job: { runId?: string; params?: unknown }): string
 
 export function controlServices(
   interactions: InteractionRegistry,
+  liveInputs: LiveInputRegistry,
   projects: () => ProjectStore,
   threads: ProjectPartitions,
   setupBinding: SetupBinding,
@@ -94,6 +98,7 @@ export function controlServices(
   daemonJobs: () => Promise<
     Array<{ runId?: string; state: string; finishedAt?: string; params?: unknown }>
   >,
+  effectiveConcurrencyCaps?: RuntimeConcurrencyCaps,
 ) {
   const secretStore = new SecretStore();
   const listHarnesses = async (input?: HarnessListInput) => {
@@ -296,6 +301,7 @@ export function controlServices(
     pendingInteractions: (runId: string) => interactions.pendingForRun(runId),
     answerInteraction: (runId: string, interactionId: string, answers: unknown) =>
       interactions.answer(runId, interactionId, answers),
+    sendRunMessage: (input: LiveMessageInput) => liveInputs.send(input),
     operatorDecision: (runId: string, params: unknown) => threads.operatorDecision(params, runId),
     findOperatorDecisionByIdempotency: (
       runId: string,
@@ -318,8 +324,21 @@ export function controlServices(
       !input?.includeFakes && !input?.fresh && !input?.harnessIds?.length
         ? harnessesPollCache.read(() => listHarnesses())
         : listHarnesses(input),
-    harnessModels: async (input: { harnessId: string; route?: "local_session" | "api_key" }) =>
-      harnessModels(input.harnessId, NO_PROJECT_ROOT, true, input.route),
+    harnessModels: async (input: {
+      harnessId: string;
+      route?: "local_session" | "api_key";
+      view?: "accounts";
+      credentialProfileId?: string;
+    }) =>
+      input.view === "accounts"
+        ? harnessAccountModels({
+            ...input,
+            cwd: NO_PROJECT_ROOT,
+            config: loadConfig(NO_PROJECT_ROOT).global,
+            quota: quotaRegistry().read(),
+            unusable: credentialUnusableLedger.live(),
+          })
+        : harnessModels(input.harnessId, NO_PROJECT_ROOT, true, input.route),
     authReadiness: async (input: { harnessId: string; request: unknown }) =>
       authReadiness.refresh(input.harnessId, input.request),
     agentCapabilities: async () => buildAgentCapabilityCatalog(),
@@ -343,7 +362,7 @@ export function controlServices(
       }
       return setupBinding.replaceAfter(() => journalManager.quarantineAndStartFresh(request));
     },
-    settings: async () => settingsSnapshot(NO_PROJECT_ROOT),
+    ...settingsControlServices(NO_PROJECT_ROOT, effectiveConcurrencyCaps, bustStatusCaches),
     ...quotaControlServices(quotaRegistry),
     // INV-135: durable registry + live doctor projection, one probe per
     // profile; adapters without profile support report honest unknown.
@@ -395,18 +414,6 @@ export function controlServices(
           quotaRegistry().read(),
         ),
       };
-    },
-    updateSettings: async (patch: unknown) => {
-      const p = ControlSettingsUpdateRequest.parse(patch ?? {});
-      // A-1 race fix: the COMPLETE read → validate → write is one atomic
-      // transaction under the config lock (see commitSettingsUpdate). The
-      // merged-effective goal/tiers invariant (D-9/#22 server half) is
-      // re-validated against the exact state being persisted, so two concurrent
-      // settings requests can never each pass on a stale snapshot and commit an
-      // invalid final combination (quality goal with zero tiers).
-      await commitSettingsUpdate(NO_PROJECT_ROOT, p);
-      bustStatusCaches();
-      return settingsSnapshot(NO_PROJECT_ROOT);
     },
     listSecrets: async () => ({
       backend: secretStore.resolvedBackend(),

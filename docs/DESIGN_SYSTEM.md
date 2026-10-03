@@ -633,8 +633,9 @@ frequency and volume are. The contracts:
     Outcome facts at the top; run detail is DEMOTED, not deleted — it is the
     run-filtered state of this panel. Changes = the thread-cumulative diff
     (isolated-thread apply-thread action + per-run diffs beneath); Artifacts = a
-    gallery across the thread's runs (images grid + compact file rows) with an
-    "Open preview" affordance for the project's `index.html`; Evidence = per-run
+    gallery across the thread's runs (images grid + compact file rows) with
+    bounded in-app previews; HTML/SVG render as literal source and every preview
+    offers Reveal in Finder. Evidence = per-run
     diagnostics/receipts. Empty thread / no output → an honest "No project output
     in this thread." The Canvas mode is retired (artifacts fold into this panel).
     The workspace is the sanctioned extension of the one-screen doctrine — never
@@ -715,7 +716,9 @@ views in the shared design-system files; screens compose them.
     `stream_deltas` the current message grows live and the complete text
     replaces it. Agent images render inline ONLY inside the thread's
     repoRoot / run dir (canonical-path scope, bounded decode, disclosed
-    refusal outside the scope); file links open through the same gate.
+    refusal outside the scope). Local file links use the same gate: safe formats
+    open from a staged snapshot in Markdown/source/Quick Look, unsupported in-scope files
+    reveal in Finder, and executable or out-of-scope targets never launch.
   - **"What changed since this turn"** marker + an **attention state** (working /
     blocked / needs-permission / done) on the turn card and its thread row.
 - **Chat composer.** ONE floating Liquid-Glass panel
@@ -831,9 +834,12 @@ views in the shared design-system files; screens compose them.
   thread. The composer's intent menu surfaces the THREE canonical modes —
   `ask` / `plan` / `agent` (the v3.0.0 collapse) — and nothing else. **Best-of**
   is `agent` + the best-of-N strategy flag, not a mode; **Council** is a Plan
-  knob; `ask --deep-scan`, `agent --delegate`, `--create`, race width,
-  until-clean and attempts are engine strategy flags (in the "⋯" popover or
-  CLI-only power-user flows), not modes. The retired `orchestrate` / `spec` /
+  knob. Its existing member picker ranges from two to the selected execution
+  location's effective `maxCouncilMembers` setting, using four only when an
+  older engine omits the projection. Pending configured values do not expand
+  that range until daemon replacement. `ask --deep-scan`, `agent --delegate`,
+  `--create`, race width, until-clean and attempts are engine strategy flags
+  (in the "⋯" popover or CLI-only power-user flows), not modes. The retired `orchestrate` / `spec` /
   `explore` / `audit` modes are gone — delegation is `agent --delegate` and Plan
   absorbed Spec.
 - **Composer attachments + Capture.** The paperclip picker attaches files to a
@@ -892,6 +898,27 @@ views in the shared design-system files; screens compose them.
   are never markdown-rendered as Outcome; they belong to the workspace Changes
   tab, parsed from `final/patch.diff`. Dense output uses solid `surface/raised`;
   never put Liquid Glass behind dense output.
+  File previews for `.md`/`.markdown` use this native renderer by default and
+  expose **Show source** to inspect the same loaded snapshot as literal text.
+  Their formatted view retains the 200,000-character and table bounds; omitted
+  content is disclosed and points at **Show source**. File reads remain capped
+  at 4 MiB with a visible notice when truncated. Images are never loaded, so a
+  preview fetches nothing on its own: a whole-line image reference stays literal
+  text and an inline one shows only its alt text. Manual links use the same
+  policy as answers: web/system links open through their normal handler, while
+  absolute local-file links use the originating run's project/run scope and the existing
+  document preview or Finder action. Staged snapshots retain that scope;
+  their temporary storage directory does not grant additional file access.
+  Gallery text previews retain the server's MIME/category decision and open
+  immediately into their loading, content, or typed error state with the file
+  path and Retry. Malformed UTF-8 is disclosed; a valid character crossing the
+  read cap stays a readable truncated preview, with the raw loaded bytes retained.
+  HTML/SVG previews stay literal source; the separately
+  launched interactive web preview is unchanged. Literal source starts at the
+  top-left corner in a plain, read-only text view that draws the visible part
+  first and lays out the rest while idle, so opening a snapshot at the read cap
+  does not wait on the whole file. The formatted view keeps the shared
+  renderer's per-block cost.
 - **Evidence badges.** Header/timeline badges show output readiness
   (`pending/finalizing/ready/diagnostic`), requested/effective access, web policy,
   web evidence (`none/attempted/satisfied/failed/unverified`), tool errors,

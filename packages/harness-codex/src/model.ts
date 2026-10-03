@@ -1,5 +1,18 @@
+import {
+  codexProcessingCapability,
+  prepareCodexProcessing,
+  observeCodexProcessing,
+  codexProcessingCost,
+} from "./processing.js";
+import type { ProcessingReceipt, EffortResolution } from "@claudexor/schema";
 import { validateModel, type ModelAdapter, type ModelAdapterContext } from "@claudexor/core";
-import type { ControlModelCatalogResponse, ModelCatalogEntry, ModelRoute } from "@claudexor/schema";
+import type {
+  ControlModelCatalogResponse,
+  ModelCallResult,
+  ModelCatalogEntry,
+  ModelNativeContinuation,
+  ModelRoute,
+} from "@claudexor/schema";
 import { CLAUDEXOR_VERSION } from "@claudexor/util";
 import {
   prepareCodexModelAuth,
@@ -16,13 +29,55 @@ import {
   text,
   validateCodexModelOptions,
 } from "./responses.js";
-import { CODEX_VENDOR_CLI_VERSION } from "./vendor-cli-version.js";
+import {
+  codexCatalogClientVersion,
+  describeCodexClientVersion,
+  type CodexCatalogClientVersion,
+} from "./http-client-version.js";
+import { processingAdmissionProblem } from "./processing-refusal.js";
+import { ResponseFailureCapture } from "./failure-evidence.js";
+import { RequestDelivery } from "./request-delivery.js";
+import { codexModelEfforts, codexModelEffortResolution } from "./model-effort.js";
 
 const ENDPOINT = "https://chatgpt.com/backend-api/codex";
 const CLIENT = "claudexor";
+const TURN_FORMAT = "codex.turn.v1";
+
+/** Transport state belongs to a caller's live turn, never to assistant history. */
+function prepareTurnContinuation(
+  native: ModelNativeContinuation | null | undefined,
+  route: ModelRoute,
+): ModelNativeContinuation | null | undefined {
+  if (native == null) return native;
+  const turnState = text(record(native.payload)?.turnState);
+  try {
+    if (
+      native.format !== TURN_FORMAT ||
+      turnState === null ||
+      new Headers({ "x-codex-turn-state": turnState }).get("x-codex-turn-state") !== turnState
+    )
+      throw new Error("invalid turn state");
+  } catch {
+    throw new CodexModelError(
+      "invalid_continuation",
+      "Codex transport continuation requires a valid, unchanged HTTP header value.",
+    );
+  }
+  // Unknown or changed identity starts empty. A transport hint must never pin
+  // an account or refuse otherwise valid generation on a newly selected route.
+  return route.accountFingerprint &&
+    native.route.accountFingerprint === route.accountFingerprint &&
+    native.route.source === route.source &&
+    native.route.credentialProfileId === route.credentialProfileId &&
+    native.route.model === route.model
+    ? native
+    : null;
+}
 
 export interface CodexModelAdapterDeps extends CodexModelAuthDeps {
   fetch?: typeof fetch;
+  /** The client version the catalog read declares (see http-client-version.ts). */
+  clientVersion?: () => Promise<CodexCatalogClientVersion>;
 }
 
 function headers(auth: CodexModelAuth): Record<string, string> {
@@ -84,16 +139,20 @@ export function parseCodexModelCatalog(value: unknown): ModelCatalogEntry[] {
         "catalog_unavailable",
         "Codex returned an invalid model catalog entry.",
       );
-    const efforts = Array.isArray(entry.supported_reasoning_levels)
-      ? entry.supported_reasoning_levels
-          .map((item) => text(record(item)?.effort))
-          .filter((item): item is string => item !== null)
+    const reportedEfforts = entry.supported_reasoning_levels;
+    const reasoningEffortsVerified =
+      Array.isArray(reportedEfforts) &&
+      reportedEfforts.every((item) => text(record(item)?.effort)?.trim());
+    const efforts = reasoningEffortsVerified
+      ? reportedEfforts.map((item) => text(record(item)?.effort)!)
       : [];
+    const projectedEfforts = codexModelEfforts(efforts);
     const modalities = Array.isArray(entry.input_modalities)
       ? entry.input_modalities.filter((item): item is string => typeof item === "string")
       : [];
     return {
       id,
+      processing: codexProcessingCapability(entry, "codex.models"),
       label: text(entry.display_name),
       isDefault: value === defaultEntry,
       contextWindow: capacity(entry.context_window),
@@ -101,13 +160,16 @@ export function parseCodexModelCatalog(value: unknown): ModelCatalogEntry[] {
       // Backend output-cap parameters are unsupported even when a model has a published output capacity.
       maxOutputTokens: capacity(entry.max_output_tokens),
       inputModalities: modalities,
-      reasoningEfforts: efforts,
-      defaultReasoningEffort: text(entry.default_reasoning_level),
+      ...projectedEfforts,
+      reasoningEffortsVerified,
+      defaultReasoningEffort:
+        entry.default_reasoning_level === "ultra" ? null : text(entry.default_reasoning_level),
       supportedOptions: [
         "toolChoice",
         "cacheKey",
         "serviceTier",
-        ...(efforts.length ? ["reasoningEffort"] : []),
+        "processingPreference",
+        ...(projectedEfforts.reasoningEfforts.length ? ["reasoningEffort"] : []),
         ...(entry.supports_parallel_tool_calls === true ? ["parallelToolCalls"] : []),
       ],
     };
@@ -119,11 +181,17 @@ async function catalogFor(
   context: Omit<ModelAdapterContext, "onDispatch">,
   fetcher: typeof fetch,
   now: () => number,
+  clientVersion: () => Promise<CodexCatalogClientVersion>,
 ): Promise<ControlModelCatalogResponse> {
   context.signal.throwIfAborted();
+  // The backend lists only models whose minimum client version is at or below
+  // the declared one; the declaration is this transport's own level, raised to
+  // a newer installed CLI, never the installer pin (issue #339).
+  const declared = await clientVersion();
   let response: Response;
   try {
-    response = await fetcher(`${ENDPOINT}/models?client_version=${CODEX_VENDOR_CLI_VERSION}`, {
+    const query = `client_version=${encodeURIComponent(declared.version)}`;
+    response = await fetcher(`${ENDPOINT}/models?${query}`, {
       headers: headers(auth),
       signal: context.signal,
       redirect: "error",
@@ -152,13 +220,16 @@ async function catalogFor(
     const code = problem.code === "provider_failed" ? "catalog_unavailable" : problem.code;
     throw new CodexModelError(code, problem.message, problem.context, problem.retryable);
   }
+  const models = parseCodexModelCatalog(body);
   return {
     source: "codex",
     credentialProfileId: context.profile.profile_id,
     accountFingerprint: auth.accountFingerprint,
     observedAt: new Date(now()).toISOString(),
-    provenance: `codex.backend.models; client_version=${CODEX_VENDOR_CLI_VERSION}; default=vendor-priority-and-visibility`,
-    models: parseCodexModelCatalog(body),
+    provenance: "provider_http",
+    clientVersion: declared.version,
+    clientVersionSource: declared.source,
+    models,
   };
 }
 
@@ -166,11 +237,12 @@ async function catalogFor(
 export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): ModelAdapter {
   const fetcher = deps.fetch ?? globalThis.fetch;
   const now = deps.now ?? Date.now;
+  const clientVersion = deps.clientVersion ?? (() => codexCatalogClientVersion());
   return {
     id: "codex",
     async catalog(context) {
       const auth = await prepareCodexModelAuth(context.profile, context.signal, deps);
-      return catalogFor(auth, context, fetcher, now);
+      return catalogFor(auth, context, fetcher, now, clientVersion);
     },
     async invoke(request, context) {
       let route: ModelRoute = {
@@ -180,6 +252,53 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
         model: request.model,
       };
       let dispatched = false;
+      let delivery: RequestDelivery | undefined;
+      const capture = new ResponseFailureCapture(context.captureFailureEvidence);
+      let processing: ProcessingReceipt | undefined;
+      let effortResolution: EffortResolution | undefined;
+      let nativeContinuation: ModelNativeContinuation | null | undefined =
+        request.nativeContinuation === undefined ? undefined : null;
+      const withTurnState = (result: ModelCallResult): ModelCallResult => {
+        const optIn = request.options.processingPreference !== undefined;
+        const observed =
+          optIn && processing
+            ? observeCodexProcessing(processing, result.appliedOptions.serviceTier)
+            : undefined;
+        // The turn belongs to the model that ANSWERED, which is known only once
+        // the terminal response names it. The header is captured before the body
+        // is read, so it carries the requested route until this point, and a
+        // terminal response that names another model rebinds it there.
+        // A response that names NO model says nothing about whose turn this is:
+        // a refused, torn or aborted body leaves the caller's own token exactly
+        // as it was, so a live turn survives an incomplete answer instead of
+        // being re-rolled into a fresh conversation.
+        const answered = result.route.model;
+        const turn =
+          nativeContinuation && answered !== null && nativeContinuation.route.model !== answered
+            ? { ...nativeContinuation, route: { ...nativeContinuation.route, model: answered } }
+            : nativeContinuation;
+        return {
+          ...result,
+          ...(effortResolution
+            ? {
+                effortResolution: {
+                  ...effortResolution,
+                  observed: result.appliedOptions.reasoningEffort ?? null,
+                  observedSource: result.appliedOptions.reasoningEffort
+                    ? "codex.responses.reasoning.effort"
+                    : null,
+                },
+              }
+            : {}),
+          ...(nativeContinuation === undefined ? {} : { nativeContinuation: turn }),
+          ...(observed
+            ? {
+                processing: observed,
+                cost: { ...result.cost, processing: codexProcessingCost(observed) },
+              }
+            : {}),
+        };
+      };
       try {
         if (
           request.source !== "codex" ||
@@ -195,6 +314,7 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
         validateCodexModelOptions(request.options);
         const auth = await prepareCodexModelAuth(context.profile, context.signal, deps);
         route = { ...route, accountFingerprint: auth.accountFingerprint };
+        nativeContinuation = prepareTurnContinuation(request.nativeContinuation, route);
         const discovered = context.catalog;
         if (
           discovered &&
@@ -211,30 +331,64 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
         // obtain fresh metadata rather than inventing a fingerprint or a limit.
         const catalog = discovered?.accountFingerprint
           ? discovered
-          : await catalogFor(auth, context, fetcher, now);
+          : await catalogFor(auth, context, fetcher, now, clientVersion);
+        // The account catalog is a complete enumeration for the declared
+        // client version, so absence IS proof here (INV-104): authoritative.
         const checked = validateModel(
           request.model,
           catalog.models.map((model) => model.id),
           "api",
+          "authoritative",
         );
         const model = catalog.models.find((entry) => entry.id === request.model);
+        // Strict on purpose: the catalog row is the request contract (efforts,
+        // service tiers, windows). The refusal names the declared client
+        // version, because that filter — not the account — decides the list.
         if (checked.status !== "ok" || !model)
           throw new CodexModelError(
             "model_unavailable",
-            "The requested model is not in this account's Codex model catalog.",
+            `The requested model is not in this account's Codex model catalog as served to ${describeCodexClientVersion(catalog)}.`,
+            {
+              clientVersion: catalog.clientVersion,
+              clientVersionSource: catalog.clientVersionSource,
+            },
           );
-        if (
-          request.options.reasoningEffort &&
-          !model.reasoningEfforts.includes(request.options.reasoningEffort)
-        ) {
-          throw new CodexModelError(
-            "unsupported_parameter",
-            "The requested reasoning effort is not advertised for this model.",
-            { parameter: "reasoningEffort" },
+        effortResolution = codexModelEffortResolution(
+          request.options.reasoningEffort,
+          model,
+          catalog.models,
+        );
+        if (effortResolution.resolution === "rejected") {
+          throw new CodexModelError("unsupported_parameter", effortResolution.reason!, {
+            parameter: "reasoningEffort",
+          });
+        }
+        processing = prepareCodexProcessing(
+          request.options.processingPreference,
+          model.processing,
+          request.options.serviceTier,
+        );
+        const { reasoningEffort: _requestedEffort, ...otherOptions } = request.options;
+        const physicalRequest = {
+          ...request,
+          options: {
+            ...otherOptions,
+            ...(effortResolution.submitted === null
+              ? {}
+              : { reasoningEffort: effortResolution.submitted }),
+            ...(processing?.submittedNative ? { serviceTier: processing.submittedNative } : {}),
+          },
+        };
+        const body = JSON.stringify(buildResponsesRequest(physicalRequest, route));
+        delivery = new RequestDelivery(body);
+        const requestHeaders = new Headers(headers(auth));
+        requestHeaders.set("Content-Length", String(delivery.bytes.length));
+        if (nativeContinuation) {
+          requestHeaders.set(
+            "x-codex-turn-state",
+            record(nativeContinuation.payload)!.turnState as string,
           );
         }
-        const body = JSON.stringify(buildResponsesRequest(request, route));
-        const requestHeaders = new Headers(headers(auth));
         if (request.options.cacheKey !== undefined) {
           try {
             requestHeaders.set("session_id", request.options.cacheKey);
@@ -253,27 +407,41 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
         const response = await fetcher(`${ENDPOINT}/responses`, {
           method: "POST",
           headers: requestHeaders,
-          body,
+          ...delivery.request(),
           signal: context.signal,
           redirect: "error",
         });
         if (!response.ok) {
           const result = emptyModelResult({ ...route, model: null });
-          let error: unknown = null;
-          try {
-            error = await response.json();
-          } catch {
-            /* HTTP status remains an authoritative refusal. */
-          }
-          result.problem = authenticatedProblem(response, error, auth, now());
-          return result;
+          const error = await capture.readRefusal(response);
+          result.problem = processingAdmissionProblem(
+            authenticatedProblem(response, error, auth, now()),
+            request.options,
+            processing,
+          );
+          return withTurnState(capture.finish(result));
         }
-        return await readResponsesStream(response, route);
+        // Capture before reading the stream. A truncated body still owns this
+        // same turn, and an already captured first header wins on later calls.
+        const turnState = response.headers.get("x-codex-turn-state");
+        if (nativeContinuation === null && turnState) {
+          nativeContinuation = { route, format: TURN_FORMAT, payload: { turnState } };
+        }
+        return withTurnState(
+          await readResponsesStream(response, route, context.captureFailureEvidence),
+        );
       } catch (error) {
         const result = emptyModelResult({ ...route, model: null });
-        result.outcome = dispatched ? "unknown" : "failed";
-        result.problem =
-          error instanceof CodexModelError
+        const proof = dispatched ? delivery?.notDelivered() : null;
+        result.outcome = dispatched && !proof ? "unknown" : "failed";
+        result.problem = proof
+          ? new CodexModelError(
+              "transport_not_delivered",
+              "The complete Codex request was not delivered; generation did not start.",
+              { generationStarted: false, requestDelivery: proof },
+              true,
+            ).problem
+          : error instanceof CodexModelError
             ? error.problem
             : new CodexModelError(
                 dispatched
@@ -287,7 +455,12 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
                     ? "The model operation was cancelled before dispatch."
                     : "The Codex model request could not be prepared.",
               ).problem;
-        return result;
+        if (dispatched) {
+          capture.caught(error);
+          if (delivery && !proof && result.problem)
+            result.problem.context.requestDelivery = delivery.facts();
+        }
+        return withTurnState(dispatched ? capture.finish(result) : result);
       }
     },
   };

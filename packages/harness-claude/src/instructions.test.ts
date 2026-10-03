@@ -22,18 +22,33 @@ function spec(over: Partial<HarnessRunSpec> = {}): HarnessRunSpec {
   } as HarnessRunSpec;
 }
 
-describe("claude --append-system-prompt (W5)", () => {
+describe("claude --append-system-prompt-file (W5)", () => {
   it("appends caller instructions in both the one-shot and interactive transports", () => {
     for (const interactive of [false, true]) {
-      const args = claudeArgsForSpec(spec({ instructions: "be terse" }), interactive);
-      const idx = args.indexOf("--append-system-prompt");
+      const args = claudeArgsForSpec(
+        spec({ instructions: "be terse" }),
+        interactive,
+        false,
+        undefined,
+        "/private-input/instructions.txt",
+      );
+      const idx = args.indexOf("--append-system-prompt-file");
       expect(idx).toBeGreaterThan(-1);
-      expect(args[idx + 1]).toBe("be terse");
+      expect(args[idx + 1]).toBe("/private-input/instructions.txt");
+      expect(args).not.toContain("be terse");
+      expect(args).not.toContain("--append-system-prompt");
     }
   });
 
   it("omits the flag when there are no instructions", () => {
-    expect(claudeArgsForSpec(spec())).not.toContain("--append-system-prompt");
-    expect(claudeArgsForSpec(spec({ instructions: "  " }))).not.toContain("--append-system-prompt");
+    expect(claudeArgsForSpec(spec())).not.toContain("--append-system-prompt-file");
+    expect(claudeArgsForSpec(spec({ instructions: "  " }))).not.toContain(
+      "--append-system-prompt-file",
+    );
+  });
+  it("cannot silently omit instructions when its owned file is missing", () => {
+    expect(() => claudeArgsForSpec(spec({ instructions: "be terse" }))).toThrow(
+      "require an owned file",
+    );
   });
 });

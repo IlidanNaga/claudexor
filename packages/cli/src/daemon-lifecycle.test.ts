@@ -61,7 +61,11 @@ describe("armDaemonLifecycle", () => {
       lifecycle.finalize();
       expect(readFileSync(pidsPath, "utf8")).toBe(previousLife);
       // The later NORMAL start's crash-GC consumes the reap list.
-      await runStartupCrashGc({ daemonDir: root, logPath: join(root, "daemon.log") });
+      await runStartupCrashGc({
+        daemonDir: root,
+        logPath: join(root, "daemon.log"),
+        knownProjectRoots: () => [],
+      });
       expect(existsSync(pidsPath)).toBe(false);
     } finally {
       vi.useRealTimers();

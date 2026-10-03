@@ -14,9 +14,10 @@
           "enum": [
             "patch",
             "new_repo",
-            "report"
+            "report",
+            "files"
           ],
-          "description": "Kind of work product a run produces: a patch against the base tree, a newly created repository, or a report document."
+          "description": "Kind of work product: Git patch, new repository, report, or complete directory file manifest with retained bytes."
         },
         "source_task_id": {
           "type": "string",
@@ -49,7 +50,7 @@
         "source_task_id"
       ],
       "additionalProperties": false,
-      "description": "The deliverable a run produced (patch, new repo, or report), referenced by apply/delivery verbs."
+      "description": "The deliverable a run produced, referenced by apply/delivery verbs; files uses files.manifest and meta.manifest_sha256."
     }
   },
   "$schema": "http://json-schema.org/draft-07/schema#"

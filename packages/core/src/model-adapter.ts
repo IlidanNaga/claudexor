@@ -13,6 +13,8 @@ export interface ModelAdapterContext {
   /** Operation-local discovery only. Revalidate against current adapter-owned
    * credentials before reuse; never a cross-operation/account catalog cache. */
   catalog?: ControlModelCatalogResponse;
+  /** Keep exact failed-response evidence in the existing private result resource. */
+  captureFailureEvidence?: boolean;
   /** Durably mark dispatch immediately before the single inference POST. */
   onDispatch: (route: ModelRoute) => Promise<void>;
 }

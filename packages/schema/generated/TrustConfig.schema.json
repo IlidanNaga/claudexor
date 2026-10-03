@@ -24,7 +24,7 @@
         "allow_full_access": {
           "type": "boolean",
           "default": false,
-          "description": "Per-repo allow required before any run may use the full access profile."
+          "description": "Per-repo allow required before a run an operator starts at a surface may use the full access profile. An execution.delegated run carries the external orchestrator's own authority and does not need it."
         },
         "repo_root": {
           "type": [

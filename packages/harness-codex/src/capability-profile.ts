@@ -1,7 +1,17 @@
 import {
   HarnessCapabilityProfile as HarnessCapabilityProfileSchema,
   type HarnessCapabilityProfile,
+  type HarnessInputLimit,
 } from "@claudexor/schema";
+
+/** Recorded native RPC boundary; move this provenance only with a matching probe. */
+export const CODEX_TURN_INPUT_LIMIT: HarnessInputLimit = {
+  scope: "turn_text",
+  unit: "unicode_scalars",
+  limit: 1_048_576,
+  source: "codex.app-server.turn/start",
+  verified_against: "codex-cli 0.156.1",
+};
 
 /** One manifest-owned declaration of the managed login's stdin contract. */
 export const CODEX_MANAGED_LOGIN = { stdin: "none" } as const;
@@ -23,6 +33,10 @@ export const CODEX_CAPABILITY_PROFILE: HarnessCapabilityProfile =
     // Codex's workspace-write seatbelt cancels the belt's daemon-crossing MCP
     // call; only full access lets it through.
     mcp_injection_requires_full_access: true,
+    // LIVE-VERIFIED (codex-cli 0.156.1): `turn/steer` injects a user message
+    // into the ACTIVE turn and the app-server echoes it as a userMessage item
+    // carrying our clientId (fixtures/app-server/recorded-steer-0.156.1.jsonl).
+    live_input: "mid_turn",
     attachment_inputs: [
       {
         kind: "image",

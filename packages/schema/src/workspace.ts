@@ -1,12 +1,10 @@
 import { z } from "zod/v3";
 import { DirtyPolicy, Id, IsoTimestamp } from "./primitives.js";
+import { WorkspaceKind, WorkspaceScopePath } from "./files-manifest.js";
 
 /**
- * An isolated execution envelope. A private Git checkout isolates files; the envelope
- * additionally isolates env/HOME/harness-config dirs. (Container/
- * service-sandbox isolation is a future scoped feature, not modeled here.
- * The dead `env_dir`/`logs_dir`/`artifacts_dir`/`ports` fields — created but
- * never read anywhere — were deleted per the staged-field rule.)
+ * The execution tree and its scoped HOME/configs. Git retains repository
+ * identity; ordinary directory execution records a selected copy or live path.
  */
 export const WorkspaceEnvelope = z
   .object({
@@ -14,14 +12,21 @@ export const WorkspaceEnvelope = z
     task_id: Id.describe("Task the envelope belongs to."),
     attempt_id: Id.describe("Attempt the envelope belongs to."),
     repo_root: z.string().describe("Absolute path of the source repository root."),
-    base_ref: z.string().describe("Git ref the checkout was created from."),
+    base_ref: z.string().nullable().describe("Git base ref; null for directory execution."),
     base_sha: z
       .string()
       .nullable()
       .default(null)
       .describe("Resolved base commit SHA; null when not recorded."),
-    worktree_path: z.string().describe("Absolute path of the isolated Git checkout."),
-    branch_name: z.string().describe("Clone-local branch created for the checkout."),
+    worktree_path: z
+      .string()
+      .describe("Absolute actual execution directory, whether Git-backed or plain."),
+    branch_name: z
+      .string()
+      .nullable()
+      .describe("Clone-local branch; null for directory execution."),
+    workspace_kind: WorkspaceKind.optional(),
+    scope_paths: z.array(WorkspaceScopePath).optional(),
     home_dir: z
       .string()
       .describe("Scoped HOME directory for the harness process (kept outside the checkout)."),
@@ -39,6 +44,6 @@ export const WorkspaceEnvelope = z
     created_at: IsoTimestamp.describe("When the envelope was created."),
   })
   .describe(
-    "An isolated execution envelope: a private Git checkout plus scoped env/HOME/harness-config isolation.",
+    "Execution directory and scoped HOME/configs. Git checkouts retain their Git identity; directory execution uses a selected copy or the live source without Git initialization.",
   );
 export type WorkspaceEnvelope = z.infer<typeof WorkspaceEnvelope>;

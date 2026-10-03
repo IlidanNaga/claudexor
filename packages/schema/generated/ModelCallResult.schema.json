@@ -141,7 +141,7 @@
                     "format"
                   ],
                   "additionalProperties": false,
-                  "description": "Complete provider-native assistant turn, bound to its account and model; replaces reconstruction on replay."
+                  "description": "Opaque provider-native continuation bound to its account and model; its format distinguishes assistant content from live transport state."
                 }
               },
               "required": [
@@ -159,6 +159,30 @@
         },
         "route": {
           "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/nativeContinuation/properties/route"
+        },
+        "modelMismatch": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "requested": {
+                  "type": "string"
+                },
+                "observed": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "requested",
+                "observed"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Requested-vs-observed model mismatch on a completed or incomplete terminal response; null or absent when they match or either side is unknown. The outcome is unchanged."
         },
         "usage": {
           "type": "object",
@@ -230,6 +254,42 @@
         "cost": {
           "type": "object",
           "properties": {
+            "processing": {
+              "type": "object",
+              "properties": {
+                "nativeMode": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/tool_calls/items/properties/function/properties/name"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "User-supplied string that must contain visible content, not just whitespace."
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "included",
+                    "paid_credits",
+                    "cash",
+                    "valuation",
+                    "unknown"
+                  ]
+                },
+                "source": {
+                  "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/tool_calls/items/properties/function/properties/name"
+                }
+              },
+              "required": [
+                "nativeMode",
+                "kind",
+                "source"
+              ],
+              "additionalProperties": false,
+              "description": "Mode-qualified billing evidence for an existing cost record. Authentication alone does not establish included premium service; credits, cash, and token valuation stay distinct."
+            },
             "knowledge": {
               "type": "string",
               "enum": [
@@ -323,6 +383,15 @@
               "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/tool_calls/items/properties/function/properties/name",
               "description": "User-supplied string that must contain visible content, not just whitespace."
             },
+            "processingPreference": {
+              "type": "string",
+              "enum": [
+                "standard",
+                "fast",
+                "economy"
+              ],
+              "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
+            },
             "parallelToolCalls": {
               "type": "boolean"
             },
@@ -339,7 +408,181 @@
             }
           },
           "additionalProperties": false,
-          "description": "Generation options only, not a caller's context/output reserve; unsupported explicit options refuse before inference."
+          "description": "Generation options only, not a caller's context/output reserve; reasoningEffort is an adaptive preference, while unsupported other explicit options refuse before inference."
+        },
+        "effortResolution": {
+          "type": "object",
+          "properties": {
+            "requested": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/tool_calls/items/properties/function/properties/name"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Original effort preference before adaptation; null when none was requested."
+            },
+            "submitted": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/tool_calls/items/properties/function/properties/name"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Native option prepared for transport; null means omitted, never the explicit token none. Not proof of dispatch."
+            },
+            "resolution": {
+              "type": "string",
+              "enum": [
+                "exact",
+                "downward",
+                "floor",
+                "omitted",
+                "unverifiable",
+                "rejected"
+              ]
+            },
+            "source": {
+              "type": "string",
+              "enum": [
+                "account_catalog",
+                "live_probe",
+                "versioned_snapshot",
+                "adapter"
+              ]
+            },
+            "parameter": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/tool_calls/items/properties/function/properties/name"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Native carrier, such as reasoning.effort, model_reasoning_effort or --effort; null when no separate knob is carried."
+            },
+            "observed": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/tool_calls/items/properties/function/properties/name"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Provider-reported effort only; null when unobserved, never copied from submission."
+            },
+            "observedSource": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/tool_calls/items/properties/function/properties/name"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Provider event/field that reported observed effort; null when unobserved."
+            },
+            "reason": {
+              "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/tool_calls/items/properties/function/properties/name",
+              "description": "Diagnostic explanation; consumers branch on resolution, never prose."
+            }
+          },
+          "required": [
+            "requested",
+            "submitted",
+            "resolution",
+            "source",
+            "parameter",
+            "observed",
+            "observedSource"
+          ],
+          "additionalProperties": false,
+          "description": "Prepared and observed effort evidence; model operations retain it only when creation requests captureEffortEvidence=true. Legacy results omit it before immutable publication."
+        },
+        "processing": {
+          "type": "object",
+          "properties": {
+            "requested": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ModelCallResult/properties/appliedOptions/properties/processingPreference"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
+            },
+            "submitted": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ModelCallResult/properties/appliedOptions/properties/processingPreference"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
+            },
+            "submittedNative": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/tool_calls/items/properties/function/properties/name"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "User-supplied string that must contain visible content, not just whitespace."
+            },
+            "observed": {
+              "type": "string",
+              "enum": [
+                "standard",
+                "fast",
+                "economy",
+                "mixed",
+                "unknown"
+              ]
+            },
+            "observedNative": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/tool_calls/items/properties/function/properties/name"
+              }
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/tool_calls/items/properties/function/properties/name"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "User-supplied string that must contain visible content, not just whitespace."
+            },
+            "source": {
+              "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/tool_calls/items/properties/function/properties/name"
+            }
+          },
+          "required": [
+            "requested",
+            "submitted",
+            "submittedNative",
+            "observed",
+            "observedNative",
+            "reason",
+            "source"
+          ],
+          "additionalProperties": false,
+          "description": "Requested intent, submitted native control, and observed execution are independent facts. A submitted flag never proves observed service; mixed or missing session observations remain explicit."
         },
         "problem": {
           "anyOf": [
@@ -400,6 +643,93 @@
               "type": "null"
             }
           ]
+        },
+        "failureEvidence": {
+          "type": "object",
+          "properties": {
+            "bodyBase64": {
+              "type": "string"
+            },
+            "receivedBytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "bodyComplete": {
+              "type": "boolean",
+              "description": "True only when the response reader observed EOF."
+            },
+            "stage": {
+              "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/tool_calls/items/properties/function/properties/name"
+            },
+            "errors": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "message": {
+                    "type": "string"
+                  },
+                  "stack": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "code": {
+                    "anyOf": [
+                      {
+                        "type": [
+                          "string",
+                          "number"
+                        ]
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "name",
+                  "message",
+                  "stack",
+                  "code"
+                ],
+                "additionalProperties": false
+              },
+              "description": "Original exception followed by causes and AggregateError members in depth-first order; empty when none was thrown."
+            },
+            "causeCycle": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "bodyBase64",
+            "receivedBytes",
+            "bodyComplete",
+            "stage",
+            "errors",
+            "causeCycle"
+          ],
+          "additionalProperties": false,
+          "description": "Private failed-response evidence: every byte returned to the reader, never an unreceived suffix. Retained only inside the model result resource when requested."
+        },
+        "nativeContinuation": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/nativeContinuation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Live transport continuation, present only when the request opted in; preserve independently of response body success."
         }
       },
       "required": [

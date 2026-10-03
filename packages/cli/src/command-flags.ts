@@ -30,6 +30,9 @@ export const COMMON_RUN_FLAGS: readonly string[] = [
   "web",
   "model",
   "effort",
+  "processing",
+  "workspace-kind",
+  "scope-path",
   "portfolio",
   "routing-goal",
   "profile",
@@ -153,7 +156,7 @@ export const CLI_FLAGS: readonly CliFlagSpec[] = [
   booleanFlag("create", "Create-from-scratch intent (agent)"),
   booleanFlag(
     "council",
-    "Council (plan): N harnesses draft in parallel, the primary merges into one plan + one question set; --n sets members (2..4)",
+    "Council (plan): N harnesses draft in parallel, the primary merges into one plan + one question set; --n sets members (at least 2, up to the configured Council cap)",
   ),
   booleanFlag(
     "delegate",
@@ -196,7 +199,7 @@ export const CLI_FLAGS: readonly CliFlagSpec[] = [
   valueFlag(
     "reviewer-panel-json",
     "'<json-array>'",
-    "Enable review with structured reviewer entries as a JSON array; use credentialProfileId for a strict per-slot account pin",
+    "Enable review with structured reviewer entries as a JSON array; use credentialProfileId for an account pin and processingPreference for a service override",
   ),
   valueFlag(
     "reviewer-model",
@@ -208,6 +211,21 @@ export const CLI_FLAGS: readonly CliFlagSpec[] = [
   valueFlag("web", "<mode>", "External web/search policy: off|auto|cached|live"),
   valueFlag("model", "<id>", "Model hint forwarded to the selected harness route"),
   valueFlag("effort", "<level>", `Reasoning effort hint: ${EFFORT_HINT_HELP}`),
+  valueFlag(
+    "processing",
+    "<standard|fast|economy>",
+    "Advisory processing preference; fallback never introduces Fast.",
+  ),
+  valueFlag(
+    "workspace-kind",
+    "<git|directory>",
+    "Workspace geometry; directory execution requires no Git initialization",
+  ),
+  valueFlag(
+    "scope-path",
+    "<relative-path>",
+    "Selected file or directory footprint (repeatable); '.' selects the whole folder",
+  ),
   valueFlag(
     "primary-harness",
     "<id>",
@@ -273,6 +291,7 @@ export const CLI_FLAGS: readonly CliFlagSpec[] = [
   booleanFlag("accept-risk", null),
   booleanFlag("override", null),
   booleanFlag("revert", null),
+  booleanFlag("discard", "Discard a retained directory result without claiming rollback"),
   booleanFlag("accept-clean-patch", null),
   booleanFlag("rerun", null),
   valueFlag("apply-mode", "<m>", null),

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import {
   DaemonClient,
   commandProjection,
+  commandScopeRoots,
   interactionProjection,
   operatorDecisionProjection,
   runEventProjection,
@@ -26,6 +27,7 @@ import {
   ensureDaemonRuntimeRoot,
   logPath,
   socketAlive,
+  LiveInputRegistry,
 } from "@claudexor/daemon";
 import { DaemonControlApiServer } from "@claudexor/control-api";
 import {
@@ -43,12 +45,15 @@ import {
   recoveryBlockedPartitions,
 } from "./daemon-startup.js";
 import { engineBuildIdentity, noProjectRepoRoot, redactSecrets } from "@claudexor/util";
+import { loadConfig } from "@claudexor/config";
+import { runtimeConcurrencyCaps } from "@claudexor/schema";
 import { scheduleStartupRetention } from "./retention-service.js";
 import { controlServices } from "./control-services.js";
 import { AuthReadinessService } from "@claudexor/gateway";
+import { bindCredentialMutationWindow } from "@claudexor/core";
 import { buildGateway } from "./registry.js";
 import { createSetupJobManager } from "./setup-jobs.js";
-import { bustGlobalCredentialStatusCaches } from "./credential-status-invalidation.js";
+import { bustLoginCredentialState } from "./credential-status-invalidation.js";
 import { SetupJobStore } from "./setup-job-store.js";
 import { SetupLifecycleBinding } from "./setup-lifecycle-binding.js";
 import { DaemonRuntimeShutdown } from "./daemon-runtime-shutdown.js";
@@ -65,7 +70,6 @@ import { runStopIfRequested } from "./runtime-replacement-stop.js";
 import { createDaemonAgentRunner } from "./daemon-agent-runner.js";
 import { createModelServices } from "./model-services.js";
 import { isModelOperation } from "@claudexor/schema";
-const NO_PROJECT_ROOT = noProjectRepoRoot();
 
 export async function main(): Promise<void> {
   // Probe and identity-proven stop must run before any durable startup.
@@ -86,11 +90,15 @@ export async function main(): Promise<void> {
   let releaseWriterLease = true;
   let lifecycle: ReturnType<typeof armDaemonLifecycle> | null = null;
   let quotaPoller: ReturnType<typeof createDaemonQuotaPoller> | null = null;
+  // Maintenance failures, typed declines and `journal.records_retired`
+  // receipts land in the daemon log and the startup diagnostics record.
   const journalMaintenance = new JournalMaintenance(daemonDir(), (message) =>
-    logLine(logPath(), redactSecrets(message)),
+    startupDiagnostics.log("journal_maintenance", message),
   );
   try {
     const token = ensureToken();
+    const startupConfig = loadConfig(noProjectRepoRoot()).global;
+    const startupConcurrencyCaps = runtimeConcurrencyCaps(startupConfig);
 
     if (await socketAlive(socketPath)) {
       throw new Error(`a claudexor daemon is already listening on ${socketPath}; stop it first`);
@@ -165,6 +173,11 @@ export async function main(): Promise<void> {
       forRequest: (params) => threads.interactionsForRequest(params),
       all: () => threads.interactionStores(),
     });
+    // Live-input targets (POST /v2/runs/:id/messages): in-process only, fed by
+    // the agent runner per attempt; a pending question blocks a send (INV-048).
+    const liveInputs = new LiveInputRegistry({
+      pendingForRun: (runId) => interactions.pendingForRun(runId),
+    });
     // C5b: construction mkdirs under the daemon dir and the recovery plane
     // serves no resources — the store materializes on first product use.
     let resourceStore: ResourceStore | null = null;
@@ -184,19 +197,23 @@ export async function main(): Promise<void> {
       quotaStore: () => quotaStoreSlot.current(),
       threads,
       interactions,
+      liveInputs,
       resources,
       bus,
+      runtimeConcurrencyCaps: startupConcurrencyCaps,
     });
 
     const server = new DaemonServer({
       socketPath,
       token,
       commands: threads,
+      runtimeConcurrencyCaps: startupConcurrencyCaps,
       servingMode: admission.snapshot,
       delegationAuthority: delegationBudgetAuthority,
       onCommandTerminal: (record) => models.operations.onCommandTerminal(record),
       onRunTerminal: (runId, threadId) => {
         interactions.dropForRun(runId);
+        liveInputs.dropForRun(runId);
         // Run-terminal is the one W12 path with no thread-store mutation to
         // ride — the terminal changes the thread's presented state, so ping.
         if (threadId) threads.pingThreadHead(threadId);
@@ -225,17 +242,20 @@ export async function main(): Promise<void> {
     bindDelegationDaemon(server);
 
     const authReadiness = new AuthReadinessService(buildGateway({ includeFakes: false }), {
-      cwd: NO_PROJECT_ROOT,
+      cwd: noProjectRepoRoot(),
     });
     const setupBinding = new SetupLifecycleBinding(setupStoreSlot, (store) =>
       createSetupJobManager({
         rootDir: daemonDir(),
         store,
-        onCredentialStateMayHaveChanged: (harness) => {
-          bustGlobalCredentialStatusCaches(() => quotaStoreSlot.current());
-          authReadiness.invalidate(harness);
-        },
+        onCredentialStateMayHaveChanged: (harness) =>
+          bustLoginCredentialState(() => quotaStoreSlot.current(), authReadiness, harness),
       }),
+    );
+    // #363: every process-local credential observer reads the login window from
+    // the durable setup lifecycle; an unbound or recovering generation reads open.
+    bindCredentialMutationWindow((harness) =>
+      setupBinding.current().credentialMutationOpen(harness),
     );
     let control: DaemonControlApiServer | null = null;
     shutdownRuntime = new DaemonRuntimeShutdown({
@@ -261,6 +281,7 @@ export async function main(): Promise<void> {
     // the startup retention pass below consumes them directly.
     const services = controlServices(
       interactions,
+      liveInputs,
       () => projectStoreSlot.current(),
       threads,
       setupBinding,
@@ -269,6 +290,7 @@ export async function main(): Promise<void> {
       resources,
       () => quotaStoreSlot.current(),
       () => selfClient.list(),
+      startupConcurrencyCaps,
     );
     const runRetention = services.runRetention;
     services.runRetention = models.withRetention(runRetention);
@@ -300,6 +322,10 @@ export async function main(): Promise<void> {
       global: journalManager,
       partitions: threads,
       diagnostics: startupDiagnostics,
+      knownProjectRoots: () => {
+        const commands = commandStoreSlot.prepared();
+        return [...commandScopeRoots(commands.records()), ...commands.prunedScopeRoots()];
+      },
       normalPlane: {
         requested: () => shutdownRuntime!.requested(),
         armQuotaPolling: () => quotaPoller!.arm(),
@@ -316,6 +342,7 @@ export async function main(): Promise<void> {
             logPath: logPath(),
             shuttingDown: () => shutdownRuntime!.requested(),
           }),
+        pruneCommandHistory: () => server.pruneHistory(),
         armJournalMaintenance: () => journalMaintenance.arm(),
       },
     });

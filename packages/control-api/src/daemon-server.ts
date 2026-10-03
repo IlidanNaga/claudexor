@@ -1,13 +1,12 @@
-import { timingSafeEqual } from "node:crypto";
 import {
-  existsSync,
-  lstatSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  renameSync,
-  writeFileSync,
-} from "node:fs";
+  readTextArtifact,
+  readRawTextArtifact,
+  readStructured,
+  safeReadStructuredArtifact,
+} from "./run-artifact-read.js";
+import { controlRunResult, readDeliveryState, markRunApplyState } from "./run-delivery-state.js";
+import { timingSafeEqual } from "node:crypto";
+import { existsSync, lstatSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { type IncomingMessage, type Server, type ServerResponse, createServer } from "node:http";
 import { basename, extname, join } from "node:path";
 import {
@@ -20,11 +19,15 @@ import {
 import { appendRunEvent, lastSeqInFile } from "@claudexor/event-log";
 import { isVanishedErrno, safeArtifactPath, safeArtifactRoot } from "./artifact-paths.js";
 import { TERMINAL_STATES } from "./sse-shared.js";
+import { readFilesWorkProduct } from "./files-work-product.js";
+import { applyFilesResult } from "./files-apply-route.js";
+import { deliverableWorkspaceChanges } from "@claudexor/workspace";
 import { streamRunEvents } from "./run-events-stream.js";
 import { boundedArtifactText, outputReadyState, primaryOutput } from "./primary-output.js";
 import {
   budgetValuationFromEvents,
   cashEstimatedFromLedgerEvent,
+  cashKnowledgeFromEvents,
   normalizeLegacyBudgetComponents,
 } from "./budget-valuation.js";
 import {
@@ -52,7 +55,6 @@ import {
 import * as runStart from "./run-start.js";
 import { cancelDelegationFamily } from "./delegation-control.js";
 import {
-  directDelegatedChildrenFromRecords,
   delegatedDescendantsFromRecords,
   paramsRecord,
   type ControlOperatorDecisionRecord,
@@ -65,6 +67,7 @@ export {
   type DaemonRunRecord,
 } from "./run-record.js";
 import { handleRunRetryRoute } from "./run-retry-routes.js";
+import { handleRunMessageRoute } from "./run-message-routes.js";
 import {
   handleRunApplyRoutes,
   runIdempotentDelivery,
@@ -125,6 +128,7 @@ import {
   PlanQuestionsArtifact,
   CouncilProjection,
   derivePlanReadiness,
+  directDelegatedChildrenFromRecords,
   type ApplyEligibility,
   ControlAuthReadinessRefreshRequest,
   ControlAuthReadinessRefreshResponse,
@@ -135,7 +139,7 @@ import {
   ControlApplyRequest,
   AgentCapabilityCatalog,
   ControlHarnessListResponse,
-  ControlHarnessModelsResponse,
+  ControlHarnessModelsQueryResponse,
   ControlSetupJob,
   ControlSetupJobCreateRequest,
   ControlSetupJobInputRequest,
@@ -152,7 +156,6 @@ import {
   ControlRunDetail,
   ControlRunListResponse,
   ControlRunSummary,
-  ControlRunResult,
   ControlBudgetSnapshot,
   PaidBudget,
   ControlSettingsSnapshot,
@@ -172,6 +175,8 @@ import {
   ControlInteractionAnswerResponse,
   type ControlPendingInteraction,
   type ControlRouteInfo,
+  type LiveMessageDelivery,
+  type LiveMessageInput,
   ControlRunDecisionRequest,
   ControlRunDecisionResponse,
   ControlRunApplicabilityResponse,
@@ -185,7 +190,6 @@ import {
   ModeKind,
   RoutingGoal,
   ReviewFinding,
-  RunDeliveryState,
   RunEventType,
   RunFailure,
   RunTelemetry,
@@ -212,7 +216,6 @@ import {
   containsSecretLikeToken,
   errorCode,
   noProjectRepoRoot,
-  nowIso,
   redactSecrets,
   safeProblemContext,
   safeProblemRequiredActions,
@@ -247,6 +250,8 @@ export interface DaemonControlApiOptions {
       harnessModels?: (input: {
         harnessId: string;
         route?: "local_session" | "api_key";
+        view?: "accounts";
+        credentialProfileId?: string;
       }) => Promise<unknown>;
       authReadiness?: (input: {
         harnessId: string;
@@ -290,6 +295,8 @@ export interface DaemonControlApiOptions {
         interactionId: string,
         answers: unknown,
       ) => { status: string; message?: string };
+      /** Live message into a running attempt; typed verdict, never a throw for a non-delivery. */
+      sendRunMessage?: (input: LiveMessageInput) => Promise<LiveMessageDelivery>;
       operatorDecision?: (runId: string, params: unknown) => ControlOperatorDecisionRecord | null;
       findOperatorDecisionByIdempotency?: (
         runId: string,
@@ -792,6 +799,23 @@ export class DaemonControlApiServer {
     )
       return;
 
+    if (
+      await handleRunMessageRoute(
+        {
+          services: this.opts.services,
+          findRun: (id) => this.findRun(id),
+          readBody: (request) => this.readBody(request),
+          json: (response, status, body) => this.json(response, status, body),
+          requestError: (response, error) => this.requestError(response, error),
+        },
+        method,
+        path,
+        req,
+        res,
+      )
+    )
+      return;
+
     const runDetailMatch = /^\/runs\/([^/]+)$/.exec(path);
     if (method === "GET" && runDetailMatch) {
       const rec = await this.findRun(decodeURIComponent(runDetailMatch[1] as string));
@@ -800,9 +824,13 @@ export class DaemonControlApiServer {
       // included) after it — see the detailFor doc comment.
       const lastSeq = rec.runDir ? lastSeqInFile(join(rec.runDir, "events.jsonl")) : 0;
       const parentRunId = rec.runId ?? rec.id;
+      // Addressed child read: the daemon selects this parent's direct children
+      // before it projects, so parent detail never pays for the params of every
+      // other retained run. The same bounded rule is re-applied here, because an
+      // engine that predates the query answers with the whole list.
       const children = directDelegatedChildrenFromRecords(
         parentRunId,
-        await this.opts.daemon.list(),
+        await this.opts.daemon.list({ delegatedFromRunId: parentRunId }),
       ).map((candidate) => this.summarizeRunOrDiagnostic(candidate));
       return this.json(
         res,
@@ -1065,7 +1093,7 @@ export class DaemonControlApiServer {
               chainMutation: (record, work) => this.chainRunMutation(record, work),
               workStateVeto: (record) => this.runWorkStateVeto(record),
               needsDecision: (record) => this.runNeedsDecision(record),
-              readPatch,
+              readPatch: (record) => readFilesWorkProduct(record)?.text ?? readPatch(record),
               writeProjection: writeOperatorDecisionProjection,
               appendAudit: (record, payload) =>
                 appendRunAuditEvent(record, "control.applied", payload),
@@ -1150,7 +1178,75 @@ export class DaemonControlApiServer {
         }
       }
 
+      if (body.action === "discard") {
+        try {
+          const response = await this.chainRunMutation(rec, () =>
+            runIdempotentDelivery(this.opts.services, {
+              params: rec.params,
+              key: decisionKey,
+              operation: "run.decision.discard",
+              request: { runId: rec.runId ?? rec.id, body },
+              work: async () => {
+                const files = readFilesWorkProduct(rec);
+                const state = controlRunResult(rec).applyState;
+                if (
+                  !TERMINAL_STATES.has(rec.state) ||
+                  !files ||
+                  files.manifest.isolation !== "envelope" ||
+                  (state !== "not_applied" && state !== "discarded")
+                )
+                  throw Object.assign(
+                    new Error(
+                      "Only an unapplied copied files result can be discarded; direct effects remain in place",
+                    ),
+                    { status: 409 },
+                  );
+                markRunApplyState(rec, "discarded", undefined, true);
+                appendRunAuditEvent(rec, "control.applied", {
+                  decision: "discard",
+                  manifest_sha256: files.manifestSha256,
+                });
+                return ControlRunDecisionResponse.parse({
+                  accepted: true,
+                  status: "discarded",
+                  message:
+                    "Pending file application discarded; retained result follows normal retention.",
+                });
+              },
+            }),
+          );
+          return this.json(res, 200, response);
+        } catch (error) {
+          return this.requestError(res, error);
+        }
+      }
+
       if (body.action === "accept_clean_patch") {
+        if (readFilesWorkProduct(rec)) {
+          try {
+            const target = body.target ?? { kind: "original_project" as const };
+            const root = applyTargetRoot(target, rec);
+            if (!root) throw Object.assign(new Error("project root is required"), { status: 400 });
+            const delivered = await applyFilesResult(
+              this.runApplyRouteCtx(),
+              rec,
+              ControlApplyRequest.parse({ mode: body.applyMode ?? "apply", target }),
+              decisionKey,
+              root,
+            );
+            return this.json(
+              res,
+              200,
+              ControlRunDecisionResponse.parse({
+                accepted: delivered.applied,
+                status: delivered.applied ? "applied" : "rejected",
+                message: delivered.detail,
+              }),
+            );
+          } catch (error) {
+            return this.requestError(res, error);
+          }
+        }
         const patch = readPatch(rec);
         if (patch === null) return this.json(res, 404, { error: "no patch artifact for this run" });
         if (containsSecretLikeToken(patch))
@@ -1263,7 +1359,12 @@ export class DaemonControlApiServer {
     const harnessModelsMatch = /^\/harnesses\/([^/]+)\/models$/.exec(path);
     if (method === "GET" && harnessModelsMatch) {
       try {
-        assertOnlyQueryParams(url, ["route"]);
+        assertOnlyQueryParams(url, ["route", "view", "credentialProfileId"]);
+        const view = singleQuery(url, "view");
+        if (view !== undefined && view !== "accounts") throw new Error("view must be accounts");
+        const profile = singleQuery(url, "credentialProfileId");
+        if (profile !== undefined && view !== "accounts")
+          throw new Error("credentialProfileId requires view=accounts");
         const routeParam = url.searchParams.get("route");
         if (routeParam !== null && routeParam !== "local_session" && routeParam !== "api_key") {
           throw new Error("route must be exactly local_session or api_key");
@@ -1274,8 +1375,10 @@ export class DaemonControlApiServer {
           {
             harnessId: decodeURIComponent(harnessModelsMatch[1] as string),
             ...(routeParam ? { route: routeParam } : {}),
+            ...(view ? { view } : {}),
+            ...(profile !== undefined ? { credentialProfileId: Id.parse(profile) } : {}),
           },
-          ControlHarnessModelsResponse,
+          ControlHarnessModelsQueryResponse,
         );
       } catch (error) {
         return this.requestError(res, error);
@@ -1893,8 +1996,13 @@ export class DaemonControlApiServer {
     return this.json(res, status, body);
   }
 
+  /** One addressed run by job id or run id, or null when it is not retained.
+   * The daemon selects that record before projecting it, so a status poll costs
+   * a reference scan instead of every retained run's redacted params. The exact
+   * match stays here too: an engine older than the query answers with the full
+   * list, and a transport failure THROWS rather than reading as absence. */
   private async findRun(id: string): Promise<DaemonRunRecord | null> {
-    const runs = await this.opts.daemon.list();
+    const runs = await this.opts.daemon.list({ id });
     return runs.find((r) => r.id === id || r.runId === id) ?? null;
   }
 
@@ -2040,6 +2148,15 @@ export class DaemonControlApiServer {
       chainMutation: (record, work) => this.chainRunMutation(record, work),
       appendAudit: appendRunAuditEvent,
       markApplied: (record) => markRunApplyState(record, "applied"),
+      markFilesApplied: (record, paths, manifest) => {
+        const applied = [
+          ...new Set([...(readDeliveryState(record)?.appliedPaths ?? []), ...paths]),
+        ];
+        const complete =
+          deliverableWorkspaceChanges(manifest).every((entry) => applied.includes(entry.path)) &&
+          !manifest.entries.some((entry) => entry.before === "unknown" && entry.after !== null);
+        markRunApplyState(record, complete ? "applied" : "not_applied", applied, true);
+      },
       deliveredApplyState: (record) => controlRunResult(record).applyState,
     };
   }
@@ -2301,105 +2418,6 @@ function strategyFromParams(
  * changed), patches report a real diffStat, and a race-adopted patch reports
  * adopted=true.
  */
-function controlRunResult(rec: DaemonRunRecord): ControlRunResult {
-  const wp = safeReadStructuredArtifact(rec, "final/work_product.yaml", WorkProduct);
-  const meta = (wp?.meta ?? {}) as Record<string, unknown>;
-  const kindRaw = meta["result_kind"];
-  const kind =
-    kindRaw === "patch" || kindRaw === "answer" || kindRaw === "plan" || kindRaw === "report"
-      ? kindRaw
-      : "none";
-  const ds = meta["diffstat"] as
-    { files?: unknown; additions?: unknown; deletions?: unknown } | undefined;
-  const diffStat =
-    ds && typeof ds.files === "number"
-      ? {
-          files: ds.files,
-          additions: typeof ds.additions === "number" ? ds.additions : 0,
-          deletions: typeof ds.deletions === "number" ? ds.deletions : 0,
-        }
-      : null;
-  // Delivery/apply state is MUTABLE and lives in its own artifact
-  // (final/delivery_state.yaml, V8/PLAN addendum 2); work_product.yaml is the
-  // immutable run snapshot. Prefer the delivery-state overlay when present,
-  // else fall back to the initial snapshot the orchestrator stamped.
-  const delivery = readDeliveryState(rec);
-  const applyStateRaw = delivery?.applyState ?? meta["apply_state"];
-  const applyState =
-    applyStateRaw === "applied" ||
-    applyStateRaw === "applied_review_blocked" ||
-    applyStateRaw === "reverted"
-      ? applyStateRaw
-      : "not_applied";
-  const preTurnSha = typeof meta["pre_turn_sha"] === "string" ? meta["pre_turn_sha"] : null;
-  const postTurnSha =
-    delivery?.postTurnSha ??
-    (typeof meta["post_turn_sha"] === "string" ? meta["post_turn_sha"] : null);
-  const revertAnchorId =
-    delivery?.revertAnchorId ??
-    (typeof meta["revert_anchor_id"] === "string" ? meta["revert_anchor_id"] : null);
-  const revertable =
-    (applyState === "applied" || applyState === "applied_review_blocked") &&
-    revertAnchorId !== null;
-  return ControlRunResult.parse({
-    kind,
-    diffStat,
-    blockers: typeof meta["blockers"] === "number" ? meta["blockers"] : 0,
-    adopted: typeof meta["adopted"] === "boolean" ? meta["adopted"] : null,
-    applyState,
-    preTurnSha,
-    postTurnSha,
-    revertAnchorId,
-    revertable,
-  });
-}
-
-/** Read the MUTABLE delivery/apply state overlay (final/delivery_state.yaml);
- * null when the run never delivered/reverted (its state is the immutable
- * work_product snapshot). */
-function readDeliveryState(rec: DaemonRunRecord): RunDeliveryState | null {
-  return safeReadStructuredArtifact(rec, "final/delivery_state.yaml", RunDeliveryState);
-}
-
-/** Flip the run's MUTABLE delivery/apply state after a successful apply or
- * revert — ONE owner of the durable outcome fact that controlRunResult
- * projects AND retention's hasActionableWorkProduct consumes (round-15 #2: an
- * applied-but-unmarked patch would read as actionable forever and pin the run
- * against GC). Writes final/delivery_state.yaml (V8/PLAN addendum 2), leaving
- * work_product.yaml immutable. Idempotent and best-effort: the delivery/revert
- * already happened; a metadata write failure must not 500 the response. */
-function markRunApplyState(rec: DaemonRunRecord, state: "applied" | "reverted"): void {
-  try {
-    if (!rec.runDir) return;
-    const root = safeArtifactRoot(rec.runDir);
-    if (!root) return;
-    const dsPath = join(root, "final", "delivery_state.yaml");
-    const prev = existsSync(dsPath)
-      ? (RunDeliveryState.safeParse(parseYaml(readFileSync(dsPath, "utf8"))).data ?? null)
-      : null;
-    // Carry the revert anchor / post-turn sha from the work_product snapshot
-    // when this is the first delivery-state write.
-    const wp = safeReadStructuredArtifact(rec, "final/work_product.yaml", WorkProduct);
-    const meta = (wp?.meta ?? {}) as Record<string, unknown>;
-    const next = RunDeliveryState.parse({
-      applyState: state,
-      deliveredAt: state === "applied" ? nowIso() : (prev?.deliveredAt ?? null),
-      revertAnchorId:
-        prev?.revertAnchorId ??
-        (typeof meta["revert_anchor_id"] === "string" ? meta["revert_anchor_id"] : null),
-      postTurnSha:
-        prev?.postTurnSha ??
-        (typeof meta["post_turn_sha"] === "string" ? meta["post_turn_sha"] : null),
-    });
-    // Atomic tmp+rename: a crash mid-write must never leave the file half-written.
-    const tmp = `${dsPath}.tmp-${process.pid}`;
-    writeFileSync(tmp, stringifyYaml(next), "utf8");
-    renameSync(tmp, dsPath);
-  } catch {
-    /* best-effort: the revert succeeded regardless of this metadata flip */
-  }
-}
-
 /** Project the D8 terminal outcome AXES for a run: decision.facts when present
  * (the arbitrated truth), else derived from the typed failure category + the
  * lifecycle (a decision-less plan/readonly/crash terminal). Null while the run
@@ -2548,6 +2566,7 @@ function summarizeRun(
     inputTokens: telemetry?.usage_totals.input_tokens ?? null,
     outputTokens: telemetry?.usage_totals.output_tokens ?? null,
     cachedInputTokens: telemetry?.usage_totals.cached_input_tokens ?? null,
+    inputTokenUsage: telemetry?.usage_totals.input_token_usage,
     // The single engine validator's receipt, projected verbatim — surfaces
     // never re-validate the answer (null = no structured-output contract).
     outputConformance: outputConformance?.status ?? null,
@@ -2662,7 +2681,15 @@ function detailFor(
     expectedRunFacts(rec),
   );
   const planProjection = planProjectionFor(rec, summary.mode);
+  const telemetry = safeReadStructuredArtifact(rec, "final/telemetry.yaml", RunTelemetry);
   return ControlRunDetail.parse({
+    attemptExecution: telemetry?.attempts.map((attempt) => ({
+      attemptId: attempt.attempt_id,
+      harnessId: attempt.harness_id,
+      processing: attempt.processing,
+      processingCostBasis: attempt.processing_cost_basis,
+      usageCost: attempt.usage_cost,
+    })),
     summary: {
       ...summary,
       outcomeFacts,
@@ -2706,20 +2733,6 @@ function detailFor(
     // canonical terminal actions plus legitimate post-terminal overlays.
     requiredActions,
   });
-}
-
-function readTextArtifact(rec: DaemonRunRecord, relPath: string, redact = true): string | null {
-  const text = readRawTextArtifact(rec, relPath);
-  return text === null ? null : redact ? redactSecrets(text) : text;
-}
-
-function readRawTextArtifact(rec: DaemonRunRecord, relPath: string): string | null {
-  if (!rec.runDir) return null;
-  const path = safeArtifactPath(rec.runDir, relPath);
-  if (!path) return null;
-  const st = lstatSync(path);
-  if (st.isSymbolicLink() || st.isDirectory()) return null;
-  return readFileSync(path, "utf8");
 }
 
 function parseAccessMaybe(value: unknown): AccessProfile | undefined {
@@ -2820,6 +2833,9 @@ function budgetSnapshot(
     }
     if (observationEstimated && lastCash === null) estimated = true;
   }
+  const cashKnowledge = cashKnowledgeFromEvents(evs);
+  if (cashKnowledge === "unknown") spendUsd = null;
+  if (cashKnowledge !== undefined) estimated = cashKnowledge !== "exact";
   const remainingUsd =
     paidBudget.kind === "finite" && spendUsd !== null
       ? Math.max(0, paidBudget.maxUsd - spendUsd)
@@ -2829,6 +2845,7 @@ function budgetSnapshot(
   // projected spend must never present as clean when its evidence was not.
   const evidence = integrity ? evidenceLevel(integrity) : "complete";
   return ControlBudgetSnapshot.parse({
+    cashKnowledge,
     paidBudget,
     spendUsd,
     valuationUsd,
@@ -2838,21 +2855,6 @@ function budgetSnapshot(
     source,
     evidence,
   });
-}
-
-function readStructured<T>(
-  text: string | null,
-  ext: string,
-  schema: { parse(value: unknown): T },
-): T | null {
-  if (text === null) return null;
-  if (ext === ".json") {
-    return schema.parse(JSON.parse(text));
-  }
-  if (ext === ".yaml" || ext === ".yml") {
-    return schema.parse(parseYaml(text));
-  }
-  throw new Error(`unsupported structured artifact extension: ${ext}`);
 }
 
 function readPatch(rec: DaemonRunRecord): string | null {
@@ -2913,6 +2915,7 @@ function applyGateInputFor(
   targetRepoRoot: string,
   operatorDecision: ControlOperatorDecisionRecord | null,
 ): ApplyGateInput {
+  const files = readFilesWorkProduct(rec);
   const decision = safeReadStructuredArtifact(rec, "arbitration/decision.yaml", DecisionRecord);
   const terminal = effectiveTerminalFacts(
     rec.runDir,
@@ -2925,10 +2928,16 @@ function applyGateInputFor(
     decision: terminal.decision,
     workProduct: safeReadStructuredArtifact(rec, "final/work_product.yaml", WorkProduct),
     patch,
+    ...(files ? { filesManifest: files.manifest, manifestSha256: files.manifestSha256 } : {}),
     originalRepoRoot: runRepoRoot(rec),
     targetRepoRoot,
     operatorDecision: operatorDecision
-      ? { action: operatorDecision.action, patch_sha256: operatorDecision.patchSha256 }
+      ? {
+          action: operatorDecision.action,
+          ...(files
+            ? { manifest_sha256: operatorDecision.patchSha256 }
+            : { patch_sha256: operatorDecision.patchSha256 }),
+        }
       : null,
     // Effective mutable delivery/apply state from the SAME owner that projects
     // summary.result.applyState (delivery_state overlay → work_product snapshot):
@@ -2973,10 +2982,11 @@ function applyEligibilityFor(
   operatorDecision: ControlOperatorDecisionRecord | null,
 ): ApplyEligibility | null {
   const patch = readPatch(rec);
-  if (patch === null || patch.trim() === "") return null;
+  const files = readFilesWorkProduct(rec);
+  if (!files && (patch === null || patch.trim() === "")) return null;
   const root = runRepoRoot(rec);
   if (!root) return null;
-  return deriveApplyEligibility(applyGateInputFor(rec, patch, root, operatorDecision));
+  return deriveApplyEligibility(applyGateInputFor(rec, patch ?? "", root, operatorDecision));
 }
 
 /** Compatibility projection for artifact-only CLI reads; the journal record is authority. */
@@ -2998,18 +3008,6 @@ function writeOperatorDecisionProjection(
     }),
     "utf8",
   );
-}
-
-function safeReadStructuredArtifact<T>(
-  rec: DaemonRunRecord,
-  relPath: string,
-  schema: { parse(value: unknown): T },
-): T | null {
-  try {
-    return readStructured(readTextArtifact(rec, relPath), extname(relPath), schema);
-  } catch {
-    return null;
-  }
 }
 
 function gateSpecsForRun(

@@ -4340,6 +4340,15 @@ struct AppModelRefreshTests {
         // explicit cash-estimated bit even when the cumulative cash value is 0.
         #expect(model.liveBoxes["run-cash"]?.spendUsd == 0)
         #expect(model.liveBoxes["run-cash"]?.spendEstimated == true)
+        model.ingestStreamEnvelope(BusEnvelope(seq: 5, kind: "budget", event: .object([
+            "type": .string("budget.cash"),
+            "payload": .object(["cash_spend_usd": .number(0), "estimated": .bool(true),
+                                "cash_knowledge": .string("unknown"), "valuation_usd": .number(2)])
+        ])), to: "run-cash")
+        for _ in 0..<40 where model.liveBoxes["run-cash"]?.spendKnown != false {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(model.liveBoxes["run-cash"]?.spendKnown == false)
     }
 
     @Test func winnerEvidenceSeparatesSelectionFromFinalReviewTruth() throws {

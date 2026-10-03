@@ -19,6 +19,7 @@ export function projectImmediateRunDetail(
   expected: ExpectedRunFactsIdentity = {},
 ) {
   return {
+    attemptExecution: detail?.["attemptExecution"],
     runFacts: projectRunFacts(detail, expected),
     outcomeFacts: projectRunOutcomeFacts(detail),
     applyEligibility: projectApplyEligibility(detail),
@@ -72,6 +73,7 @@ export function projectRecoveryRunDetail(
             : {}),
         });
   const base = {
+    attemptExecution: detail["attemptExecution"],
     runId,
     runDir: typeof summary["runDir"] === "string" ? summary["runDir"] : null,
     status,

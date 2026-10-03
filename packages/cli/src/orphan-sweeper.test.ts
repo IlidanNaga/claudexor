@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { processStartTime, WorkspaceManager } from "@claudexor/workspace";
 import { projectRuntimeDir } from "@claudexor/util";
-import { DurableJournal } from "@claudexor/journal";
+import { commandScopeRoots } from "@claudexor/daemon";
 import { sweepOrphanWorkspaces } from "./orphan-sweeper.js";
 
 function initRepo(): string {
@@ -47,16 +47,10 @@ function envelope(
   return base;
 }
 
-function recordProject(stateDir: string, root: string): string {
-  const journalRoot = join(realpathSync(stateDir), "journal");
-  const journal = new DurableJournal({ rootDir: journalRoot, partition: "global" });
-  journal.append("command.accepted", {
-    record: { params: { scope: { kind: "project", root } } },
-    keyDigest: "test",
-    requestDigest: "test",
-  });
-  journal.close();
-  return journalRoot;
+/** The composition root hands the sweep the scope roots of the ALREADY
+ * PREPARED global command projection — never a second journal replay. */
+function recordProject(root: string): () => string[] {
+  return () => commandScopeRoots([{ params: { scope: { kind: "project", root } } }]);
 }
 
 describe("crash-GC live-owner guard", () => {
@@ -78,8 +72,8 @@ describe("crash-GC live-owner guard", () => {
       // Legacy envelope without a marker: swept (pre-marker debris).
       const legacy = envelope(root, "task-legacy", "a01");
 
-      const journalRoot = recordProject(stateDir, root);
-      const actions = await sweepOrphanWorkspaces({ journalRoot });
+      const knownProjectRoots = recordProject(root);
+      const actions = await sweepOrphanWorkspaces({ knownProjectRoots });
 
       expect(existsSync(live)).toBe(true);
       expect(existsSync(dead)).toBe(false);
@@ -115,7 +109,7 @@ describe("crash-GC live-owner guard", () => {
       ]) {
         utimesSync(path, old, old);
       }
-      const journalRoot = recordProject(stateDir, root);
+      const knownProjectRoots = recordProject(root);
       // Inverse case: dirs are OLD but one nested file is fresh — editing an
       // existing file bumps only the file's mtime, and that must count as
       // liveness (the walk looks at files, not just directory entries).
@@ -129,7 +123,7 @@ describe("crash-GC live-owner guard", () => {
         utimesSync(path, old, old);
       }
       // tree/work.txt keeps its fresh mtime (just created).
-      await sweepOrphanWorkspaces({ journalRoot });
+      await sweepOrphanWorkspaces({ knownProjectRoots });
       expect(existsSync(fresh)).toBe(true);
       expect(existsSync(stale)).toBe(false);
       expect(existsSync(nested)).toBe(true);
@@ -147,7 +141,12 @@ describe("crash-GC live-owner guard", () => {
       // file it creates here fails activation's revalidation and traps the
       // root on the recovery plane.
       const journalRoot = join(realpathSync(stateDir), "journal");
-      const actions = await sweepOrphanWorkspaces({ journalRoot });
+      const actions = await sweepOrphanWorkspaces({
+        // An unreadable command projection means no sweep, never a journal read.
+        knownProjectRoots: () => {
+          throw new Error("global command projection unavailable");
+        },
+      });
       // No project root is known on a clean root, so no envelope/branch action
       // may appear (the shared tmpdir ro-home sweep is environment-owned).
       expect(actions.filter((action) => !action.includes("stale tmp dir"))).toEqual([]);
@@ -184,9 +183,9 @@ describe("crash-GC live-owner guard", () => {
           started: "Thu Jan  1 00:00:00 1970",
         })}\n`,
       );
-      const journalRoot = recordProject(stateDir, root);
+      const knownProjectRoots = recordProject(root);
 
-      const actions = await sweepOrphanWorkspaces({ journalRoot });
+      const actions = await sweepOrphanWorkspaces({ knownProjectRoots });
 
       expect(actions.some((action) => action.includes("task-inplace-orphan/a01"))).toBe(true);
       expect(existsSync(base)).toBe(false);
@@ -197,5 +196,21 @@ describe("crash-GC live-owner guard", () => {
       rmSync(root, { recursive: true, force: true });
       rmSync(stateDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("commandScopeRoots", () => {
+  it("collects unique project scope roots from accepted command records only", () => {
+    expect(
+      commandScopeRoots([
+        { params: { scope: { kind: "project", root: "/a" } } },
+        { params: { scope: { kind: "project", root: "/a" } } },
+        { params: { scope: { kind: "project", root: "/b", ephemeral: true } } },
+        { params: { scope: { kind: "none" } } },
+        { params: { scope: { kind: "project", root: 7 } } },
+        { params: "not an object" },
+        {},
+      ]),
+    ).toEqual(["/a", "/b"]);
   });
 });

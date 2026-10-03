@@ -23,6 +23,40 @@ const unlimited: DelegationPolicy = {
 };
 
 describe("delegation belt policy (D32)", () => {
+  it("round-trips captured Standard and directory scope into an isolated child", async () => {
+    const policy = {
+      ...unlimited,
+      processingPreference: "standard" as const,
+      workspaceKind: "directory" as const,
+      scopePaths: ["input", "large.bin"],
+    };
+    const restored = readDelegationPolicy(
+      delegationEnv({ ...policy, parentRunId: "parent", repoRoot: "/source" }),
+    );
+    expect(restored).toMatchObject({
+      processingPreference: "standard",
+      workspaceKind: "directory",
+      scopePaths: ["input", "large.bin"],
+    });
+    let request: Record<string, unknown> | undefined;
+    const tool = beltClaudexorTools(async (params) => {
+      request = params;
+      return { runId: "child", status: "succeeded", spendUsd: 0 };
+    }, restored).find((entry) => entry.name === "claudexor_run")!;
+    await tool.handler({ prompt: "write output" }, {});
+    expect(request).toMatchObject({
+      processingPreference: "standard",
+      parentRunId: "parent",
+      delegatedFromRunId: "parent",
+      repoPath: "/source",
+      execution: {
+        isolation: "envelope",
+        workspaceKind: "directory",
+        scopePaths: ["input", "large.bin"],
+      },
+    });
+    expect(request?.execution as object).not.toHaveProperty("workspaceRoot");
+  });
   it("refuses depth > 0 (nesting is limited to depth 1)", () => {
     expect(delegationDepthRefusal(0)).toBeNull();
     expect(delegationDepthRefusal(1)).toMatch(/depth 1/);

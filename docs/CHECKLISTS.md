@@ -117,14 +117,42 @@ pnpm test
   terminal.
 - Run success/no-op semantics must be evidence-based: auth/API/harness failures
   are failed diagnostics, not empty-diff `no_op`.
+- For directory execution, exercise both direct and copied ordinary folders with
+  no source Git initialization and no strategy substitution. Prove complete
+  selected inputs and binary/large/file-only outputs survive capture and disposal;
+  preview limits and an empty text patch must not erase a result. Direct execution
+  must not require a whole-tree baseline or claim full rollback. Copied delivery
+  must verify retained bytes and per-file target preimages, preserve unrelated
+  edits, record partial paths, and retain remaining custody until apply or discard.
+  Portable filesystem tests do not certify a native harness or Windows acceptance.
+- Processing follows the [single rule](DEVELOPMENT.md#processing-preference).
+  Check request/submitted/observed evidence independently through helpers, reviewer
+  slots, retries and Exact Retry. Prove ordinary included billing survives,
+  premium service is not made free by native authentication, list-price amounts
+  are not cash, and existing finite/no-paid limits still govern dispatch and
+  streamed usage. A typed no-generation HTTP refusal may permit a new Standard
+  request/reservation; physical dispatch stays recorded and unknown outcomes do
+  not authorize it. Include positive native execution for supported controls.
+- Account catalog views must be negotiated through the operation catalog. Check
+  strict legacy shapes, all enabled account inventories, exact pins, independent
+  failures, and original observation/provenance. A union must not manufacture a
+  maximum capability or weaken fresh execution admission.
 - Tool success, web evidence, and tmp/workspace claims must be evidence-based:
   preserve redacted tool error detail; `tool_result.is_error === true` blocks
   claimed success unless verified recovery exists; absolute `/tmp/...` is not
   project diff evidence.
 - No regex governance for risk, permissions, tool success, web-required
   detection, winners, or tests-passed.
-- If a native surface is discovered but not wired to active runs, expose it as a
-  capability note only; do not enable live input/steering controls.
+- Live input into active runs ships only as a declared per-adapter channel
+  (`capability_profile.live_input`, projected as the catalog row's `liveInput`)
+  with journaled typed delivery: `message.accepted` before any native dispatch,
+  then `message.delivered` (a correlated consumption echo) or `message.refused`
+  with `outcome` and `reason`; an `accepted` receipt writes no second row and
+  consumption surfaces as the adapter's status event. An
+  adapter without a truthful channel declares `none` and answers `unsupported`
+  with no native write. If a native surface is discovered but not wired to
+  active runs, expose it as a capability note only; do not enable live
+  input/steering controls for that lane.
 - Treat manifest auth sources as source availability only. Aggregate/default
   readiness and Auth UI default status come from doctor status, enabled intents,
   and smoke/conformance checks; a selected account route comes from its exact
@@ -367,9 +395,11 @@ pnpm test
 - Reviewer panels and protected-path approvals are Agent-only. Ask and Plan
   must reject them at the schema boundary; use Council when a Plan needs
   multi-harness critique, never the retired standalone Plan-review path.
-- Review-panel spend is route-scoped: native subscription reviewers settle to
-  valuation, API-key reviewers to cash. Verify mixed panels preserve both
-  totals and never debit the aggregate as cash.
+- Review-panel spend is event- and Processing-scoped. Verify cash, valuation and
+  unknown amounts retain independent evidence through mixed sessions, retries,
+  streaming cap cancellation and final settlement. A prospective paid-credit
+  tariff is not an actual debit receipt; preserve proven ordinary inclusion
+  without reclassifying premium or unknown amounts as free.
 - Reviewers must inspect the complete Git-visible candidate and read file-backed
   evidence (`DIFF.patch`, user dialogue, decided tradeoffs, tests, gate receipt)
   from the sealed evidence directory. Do not divide the repository into tiny
@@ -377,15 +407,16 @@ pnpm test
   The native harness reads files directly and may use the internet where source
   verification is useful.
 - Reviewer workspaces must project one frozen source inventory: Git-visible
-  files plus exact diff-touched paths, or diff-touched postimages only when no
-  Git inventory exists. Prove that unrelated ignored local instructions and an
-  ignored sibling beside a diff-touched file are absent, while explicit evidence
-  remains available through its separate packet boundary.
+  files plus exact diff-touched paths, or the explicit complete selected postimage
+  manifest for directory work. The legacy no-inventory path remains diff-only.
+  Prove unrelated local files stay absent while every selected file, including
+  unchanged inputs and generated binary paths, remains available with an empty
+  text diff. Explicit evidence keeps its separate packet boundary.
 - Synthesis follows the same argv-size law: candidate diffs/findings are a
   temporary file inside the synthesis envelope, never concatenated into the
   process prompt. Verify the file is recreated on retry and removed before
   diff/gate/review; a race with large/binary diffs must not fail `spawn E2BIG`.
-- When a candidate answer links generated screenshots, verify bounded raster
+- For Git patch candidates, when an answer links generated screenshots, verify bounded raster
   copies survive envelope disposal in the run-artifact plane and the winner's
   relative markdown links resolve; do not claim dead worktree paths.
 - Cursor parser fixtures must cover `{failure:{exitCode}}` tool results as
@@ -406,7 +437,7 @@ pnpm test
   durably invalidate dependencies.
 - Retry accounting: fixtures must switch native→API-key within one candidate
   and one reviewer; each usage event settles by its own/current typed route,
-  never the attempt's first route.
+  and amount basis, never the attempt's first route or a blanket native-is-free assumption.
 - Synthesis staging must restore a pre-existing sentinel byte/mode-identically
   and refuse live or dangling symlinks using no-follow creation; success/retry/
   failure must leave no staging diff or host-side target.

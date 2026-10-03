@@ -5,6 +5,23 @@ import ClaudexorKit
 /// calls; nil = the LOAD failed (offline/transport) — distinct from an
 /// honest empty list, so the gallery can render its error state.
 extension AppModel {
+    /// Preserve the server's typed failure while retaining the original bytes
+    /// for a gallery snapshot. Text decoding remains a consumer decision.
+    func artifactDataOutcome(
+        runId: String, path: String, produced: Bool,
+        locationID: ExecutionLocationID? = nil
+    ) async -> Result<Data, PayloadError> {
+        guard let requestClient = gateway(for: locationID ?? selectedExecutionLocation) else {
+            return .failure(ArtifactFetchError.offline(path: path))
+        }
+        do {
+            let data = produced
+                ? try await requestClient.producedData(runId: runId, path: path)
+                : try await requestClient.artifactData(runId: runId, path: path)
+            return .success(data)
+        } catch { return .failure(ArtifactFetchError.payloadError(from: error, path: path)) }
+    }
+
     // MARK: - Artifacts (Phase 3 gallery)
 
     /// List a run's produced artifacts (path/kind/bytes/mime) for the gallery.

@@ -9,7 +9,9 @@
  */
 import type {
   AuthPreference,
+  AuthVerification,
   CredentialProfile,
+  CredentialProfileStatus,
   CredentialUnusableObservation,
   HarnessRunSpec,
   QuotaAbsence,
@@ -21,18 +23,28 @@ import {
   HarnessUnavailableError,
   credentialProfilePolicyProblem,
   credentialProfilePolicyState,
+  stampCredentialProfileSelection,
 } from "@claudexor/core";
 import type { EventLog } from "@claudexor/event-log";
+import { accountPoolRows } from "./account-pool.js";
 import { PoolRouteFlags, resolveAccountForRun } from "./account-resolution.js";
+import type { AttemptOutputMarkers } from "./attemptOutputMarkers.js";
+import { profileBillingVerification } from "./auth-route-classification.js";
 import { currentSubjectProber, readyProfilesForRotation } from "./credential-differential.js";
 import {
   resolveCredentialProfile,
   probeCredentialProfileStatus,
   profileStatusAdmits,
+  selectedProfileAvailability,
   vendorVerifiedProfileStatus,
   type ProfilePolicy,
   type VendorQuotaObservations,
 } from "./credential-profiles.js";
+import {
+  preProgressRefusalSubject,
+  type PreProgressRefusalMemory,
+  type PreProgressRefusalSubject,
+} from "./pre-progress-refusal.js";
 import type { TransientFailureObservation } from "./transientClassify.js";
 import type { RunInput } from "./orchestrator.js";
 
@@ -62,6 +74,8 @@ export interface CredentialResolutionHost {
   quotaAbsences(): readonly QuotaAbsence[];
   credentialUnusable(): readonly CredentialUnusableObservation[];
   recordCredentialUnusable(obs: CredentialUnusableObservation): void;
+  /** #363 cross-run pre-progress refusal memory (absent = nothing remembered). */
+  preProgressRefusals(): PreProgressRefusalMemory | undefined;
   authPreferenceForHarness(
     repoRoot: string,
     harnessId: string,
@@ -97,6 +111,33 @@ export function rotatedSpecInLaneHome(
   return rotatedLane ? { ...rotated, env: rotatedLane } : rotated;
 }
 
+type ProfileProbe = (profile: CredentialProfile) => Promise<CredentialProfileStatus>;
+
+/** The profile probes ONE admission pass made, recorded as they happen so the
+ * billing read (#260) reuses the verdict that admitted a row instead of
+ * probing it again. Latest wins: the selection's own probe overwrites an
+ * earlier gate probe of the same row. */
+export class AdmissionProfileProbes {
+  private readonly made = new Map<string, Promise<CredentialProfileStatus>>();
+
+  record(probe: ProfileProbe | undefined): ProfileProbe | undefined {
+    return (
+      probe &&
+      ((profile) => {
+        const status = probe(profile);
+        this.made.set(`${profile.harness_id}\0${profile.profile_id}`, status);
+        return status;
+      })
+    );
+  }
+
+  /** This exact row's recorded probe, else the adapter probe itself. */
+  reuse(profile: CredentialProfile, probe: ProfileProbe | undefined): ProfileProbe | undefined {
+    const made = this.made.get(`${profile.harness_id}\0${profile.profile_id}`);
+    return made ? () => made : probe;
+  }
+}
+
 export class OrchestratorCredentials {
   /** Q3=A explicit paid-route flags, keyed per run input (see PoolRouteFlags). */
   private readonly poolApiKeyRoutes = new PoolRouteFlags();
@@ -106,6 +147,15 @@ export class OrchestratorCredentials {
   /** The EXPLICIT pin (INV-135): strict. Null = unpinned (preflightProfile). */
   effectiveProfileId(input: RunInput, _harnessId: string): string | null {
     return input.credentialProfileId ?? null;
+  }
+
+  /** #363: tell the adapter's spawn-time route check whether `spec`'s resolved
+   * profile is this run's explicit pin; only an unpinned choice may start on a
+   * row's bounded last positive status answer. */
+  stampProfileSelection(spec: HarnessRunSpec, input: RunInput, harnessId: string): void {
+    stampCredentialProfileSelection(spec, {
+      pinned: this.effectiveProfileId(input, harnessId) !== null,
+    });
   }
 
   poolApiKeyRoute(input: RunInput, harnessId: string): boolean {
@@ -162,7 +212,7 @@ export class OrchestratorCredentials {
     const policy = this.host.config(repoRoot)?.global.harnesses?.[harnessId]?.profile_policy;
     // A6: an ABSENT policy means `auto` (kind-aware: rotate for subscription
     // subjects, fail for metered) — resolved later by effectiveLimitAction.
-    return policy ?? { limit_action: "auto", rotation_eligible: [], headroom_threshold: 0.9 };
+    return policy ?? { limit_action: "auto", rotation_eligible: [], headroom_threshold: 1 };
   }
 
   /** The quota poller's authenticated vendor evidence for THIS decision epoch,
@@ -200,12 +250,20 @@ export class OrchestratorCredentials {
     });
   }
 
+  /** #363: bind one try's pre-progress refusal subject before its session
+   * spawns, so its outcome never crosses a credential change made mid-try. */
+  bindPreProgressRefusal(harnessId: string, spec: HarnessRunSpec) {
+    return preProgressRefusalSubject(this.host.preProgressRefusals(), harnessId, spec);
+  }
+
   /** A7 wiring for one reactive rotation decision: the sibling differential
-   * prober of the CURRENT subject plus this epoch's live observations. */
+   * prober of the CURRENT subject plus this epoch's live observations, and the
+   * #363 sink for a started session's pre-progress refusal. */
   rotationObservations(
     adapter: HarnessAdapter,
     spec: HarnessRunSpec,
     transients: readonly TransientFailureObservation[],
+    refusal: PreProgressRefusalSubject | null,
   ) {
     return {
       probeCurrentSubject: currentSubjectProber({
@@ -215,9 +273,94 @@ export class OrchestratorCredentials {
         quota: this.vendorQuotaObservations(),
         transients,
         probe: adapter.probeCredentialProfile?.bind(adapter),
-        record: (obs) => this.host.recordCredentialUnusable(obs),
+        // #363: a verdict about a credential the try no longer holds — a
+        // login or profile change landed since it spawned — is not recorded.
+        record: (obs) => {
+          if (refusal?.current() ?? true) this.host.recordCredentialUnusable(obs);
+        },
       }),
       liveUnusable: this.host.credentialUnusable(),
+      notePreProgressRefusal: () => refusal?.note(),
+    };
+  }
+
+  /** #363 clearing: a try whose account made agent progress, or delivered
+   * without an error, served its requested model — its refusal mark is stale. */
+  noteTryServed(
+    refusal: PreProgressRefusalSubject | null,
+    markers: AttemptOutputMarkers,
+    delivered: boolean,
+  ): void {
+    try {
+      refusal?.noteServed(markers, delivered);
+    } catch {
+      /* ordering evidence must never fail the attempt */
+    }
+  }
+
+  /**
+   * Row admission for one harness lane (INV-135): an explicit pin is judged
+   * alone (bounded stale LKG allowed, a last positive after a timeout not);
+   * otherwise, when the default login is not ready, the bound row and then
+   * every enabled pool row are judged on their OWN readiness until one admits
+   * (only the bound row may consume stale LKG; any unpinned row may consume a
+   * last positive after a timeout, #363). When unpinned rows exist and
+   * none admits, `unreadyRows` names each row with what its probe observed —
+   * the default login's doctor advice never speaks for registered rows (#363).
+   */
+  async admitRouteRows(args: {
+    input: RunInput;
+    harnessId: string;
+    defaultReady: boolean;
+    model: string | null;
+    quota: VendorQuotaObservations;
+    unusable: readonly CredentialUnusableObservation[];
+    probe: ((profile: CredentialProfile) => Promise<CredentialProfileStatus>) | undefined;
+  }): Promise<{ admitted: boolean; pinVerdict: string | null; unreadyRows: string | null }> {
+    const { input, harnessId } = args;
+    const registry = this.host.config(input.repoRoot)?.global.credential_profiles ?? [];
+    const explicitPin = this.effectiveProfileId(input, harnessId);
+    const bound = input.threadAccountBindings?.[harnessId] ?? null;
+    const candidateIds: string[] = [];
+    if (explicitPin) {
+      candidateIds.push(explicitPin);
+    } else if (!args.defaultReady) {
+      const pool = accountPoolRows(registry, harnessId);
+      candidateIds.push(
+        ...(bound && pool.some((row) => row.profile_id === bound) ? [bound] : []),
+        ...pool.map((row) => row.profile_id).filter((rowId) => rowId !== bound),
+      );
+    }
+    const verdicts: string[] = [];
+    let lastVerdict: string | null = null;
+    for (const candidateId of candidateIds) {
+      const verdict = await selectedProfileAvailability({
+        registry,
+        profileId: candidateId,
+        harnessId,
+        probe: args.probe,
+        // `verification: passed` from the local store only means a login file
+        // is present. The poller's authenticated vendor call is the only
+        // liveness evidence; admission must act on it or dispatch may use a revoked token.
+        quota: args.quota,
+        unusable: args.unusable,
+        model: args.model,
+        // Only an explicit/bound route may consume bounded stale LKG evidence;
+        // only an unpinned one may consume a last positive after a timeout.
+        allowStale: explicitPin !== null || bound === candidateId,
+        unpinned: explicitPin === null,
+      });
+      if (verdict === "available") return { admitted: true, pinVerdict: null, unreadyRows: null };
+      lastVerdict = verdict;
+      verdicts.push(`${candidateId}: ${verdict ?? "not ready"}`);
+    }
+    return {
+      admitted: false,
+      pinVerdict: explicitPin ? lastVerdict : null,
+      unreadyRows:
+        !explicitPin && verdicts.length > 0
+          ? `${harnessId} has no ready account (${verdicts.join("; ")})`
+          : null,
     };
   }
 
@@ -280,6 +423,7 @@ export class OrchestratorCredentials {
       snapshots: this.host.quotaSnapshots(),
       quota,
       unusable: this.host.credentialUnusable(),
+      refusals: this.host.preProgressRefusals()?.live(),
       probe: adapter?.probeCredentialProfile?.bind(adapter),
       pinnedProfile,
       excludedProfileIds: input.excludedProfileIds,
@@ -303,12 +447,14 @@ export class OrchestratorCredentials {
     model: string | null,
     log: EventLog | undefined,
     defaultRoute: "local_session" | "api_key" | null,
+    probes?: AdmissionProfileProbes,
   ): Promise<CredentialProfile | null> {
     const adapter = this.host.registry().get(harnessId);
     const registry = this.host.config(input.repoRoot)?.global.credential_profiles ?? [];
     const profileCardinality = credentialProfilePolicyState({ adapter, registry });
     if (profileCardinality.ambiguous)
       throw credentialProfilePolicyProblem(profileCardinality, "credential_profile_ambiguous");
+    const probe = adapter?.probeCredentialProfile?.bind(adapter);
     return resolveAccountForRun({
       harnessId,
       registry,
@@ -317,7 +463,8 @@ export class OrchestratorCredentials {
       snapshots: this.host.quotaSnapshots(),
       quota: this.vendorQuotaObservations(),
       unusable: this.host.credentialUnusable(),
-      probe: adapter?.probeCredentialProfile?.bind(adapter),
+      refusals: this.host.preProgressRefusals()?.live(),
+      probe: probes ? probes.record(probe) : probe,
       pinnedProfile: this.resolveCredentialProfile(input, harnessId),
       boundProfileId: input.threadAccountBindings?.[harnessId] ?? null,
       threadId: input.threadId ?? null,
@@ -332,5 +479,24 @@ export class OrchestratorCredentials {
       notePoolApiKeyRoute: () => this.poolApiKeyRoutes.note(input, harnessId),
       emit: (type, payload) => log?.emit(type, payload),
     });
+  }
+
+  /** Billing verification for the EXACT profile quota admission selected
+   * (#260): the default doctor's auth sources describe another credential
+   * store, so they never classify a named profile. The pass's recorded probe
+   * is reused; the adapter is probed only when this pass never probed the row. */
+  async selectedProfileBillingVerification(
+    profile: CredentialProfile,
+    probes?: AdmissionProfileProbes,
+  ): Promise<AuthVerification> {
+    const adapter = this.host.registry().get(profile.harness_id);
+    const adapterProbe = adapter?.probeCredentialProfile?.bind(adapter);
+    const probe = probes ? probes.reuse(profile, adapterProbe) : adapterProbe;
+    return profileBillingVerification(
+      vendorVerifiedProfileStatus(
+        await probeCredentialProfileStatus(profile, probe),
+        this.vendorQuotaObservations(),
+      ),
+    );
   }
 }

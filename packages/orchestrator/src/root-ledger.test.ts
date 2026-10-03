@@ -117,12 +117,14 @@ describe("root ledger cash and valuation disclosure", () => {
         cash_spend_usd: 0,
         valuation_usd: 0.6,
         estimated: false,
+        cash_knowledge: "exact",
         valuation_knowledge: "estimated",
       },
       {
         cash_spend_usd: 0.25,
         valuation_usd: 0.6,
         estimated: false,
+        cash_knowledge: "exact",
         valuation_knowledge: "estimated",
       },
     ]);
@@ -131,6 +133,7 @@ describe("root ledger cash and valuation disclosure", () => {
         cash_spend_usd: 0.25,
         valuation_usd: 0,
         estimated: false,
+        cash_knowledge: "exact",
         valuation_knowledge: "unknown",
       },
     ]);
@@ -139,5 +142,68 @@ describe("root ledger cash and valuation disclosure", () => {
       expect(event["type"]).toBe("budget.cash");
       expect(["exact", "estimated", "unknown"]).toContain(payload["valuation_knowledge"]);
     }
+  });
+  it("keeps unknown native Fast cash distinct from estimated zero across the family", () => {
+    const parentLog = log("run-parent", "task-parent");
+    const childLog = log("run-child", "task-child");
+    const authority = new DelegationBudgetAuthority({ cancelAdmission: () => {} });
+    const parent = createRootLedger({
+      input: { runId: "run-parent" } as RunInput,
+      contract: contract("task-parent"),
+      log: parentLog.eventLog,
+      authority,
+      quotaSnapshots: [],
+    });
+    authority.registerParent("run-parent", parent);
+    authority.noteChildAccepted("run-parent", "job-child");
+    const child = createRootLedger({
+      input: {
+        runId: "run-child",
+        delegatedFromRunId: "run-parent",
+        delegationAdmissionId: "job-child",
+      } as RunInput,
+      contract: contract("task-child"),
+      log: childLog.eventLog,
+      authority,
+      quotaSnapshots: [],
+    });
+    const lease = child.reserve({
+      taskId: "task-child",
+      intent: "implement",
+      harnessId: "native-fast",
+    }).lease!;
+    child.settle(lease.lease_id, {
+      knowledge: "unknown",
+      cashKnowledge: "unknown",
+      cashUsd: 0,
+      source: "native-fast-no-debit",
+      provenance: ["fixture"],
+    });
+    expect(child.cashKnowledge()).toBe("unknown");
+    expect(parent.cashKnowledge()).toBe("unknown");
+    for (const path of [parentLog.path, childLog.path])
+      expect(events(path).at(-1)?.payload).toMatchObject({
+        cash_spend_usd: 0,
+        estimated: true,
+        cash_knowledge: "unknown",
+      });
+    const ordinary = parent.reserve({
+      taskId: "task-parent",
+      intent: "implement",
+      harnessId: "included",
+      cost: routeCostEvidence({
+        billing: "subscription_entitlement",
+        source: "fixture",
+        provenance: ["fixture"],
+      }),
+    }).lease!;
+    parent.settle(ordinary.lease_id, {
+      knowledge: "exact",
+      cashKnowledge: "exact",
+      cashUsd: 0,
+      source: "fixture",
+      provenance: ["fixture"],
+    });
+    expect(parent.cashKnowledge()).toBe("unknown");
   });
 });

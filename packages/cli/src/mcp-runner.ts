@@ -2,6 +2,8 @@ import {
   ControlProblem,
   isTerminalLifecycle,
   ModeKind,
+  RunExecution,
+  type ProcessingPreference,
   normalizeCancelReasonCode,
   type RunOutcomeFacts,
 } from "@claudexor/schema";
@@ -30,6 +32,8 @@ import {
 } from "./mcp-run-projections.js";
 import { readRunDetailResponse } from "./run-detail-response.js";
 import { catalogQuery } from "./mcp-catalog-query.js";
+import { threadQuery } from "./mcp-thread-query.js";
+import { journalRecoveryQuery } from "./mcp-journal-recovery.js";
 
 export interface SurfaceRunnerHooks {
   onEvent?: (event: any) => void;
@@ -38,18 +42,16 @@ export interface SurfaceRunnerHooks {
 }
 
 export interface McpSurfaceRunnerOptions {
-  /** Belt subprocesses must bind to their already-running parent daemon and
-   * never create a second authority under a scoped HOME. */
+  /** Bind belt subprocesses to their existing parent daemon. */
   requireExistingDaemon?: boolean;
   /** Belt-only lineage bound by the bridge from its injected environment.
    * Raw tool arguments can never switch the generic MCP runner into this path. */
   delegationParentRunId?: string | null;
-  /** Belt-only original project root, bound by the engine descriptor. Raw tool
-   * arguments cannot redirect a child into the parent envelope or another repo. */
+  /** Original project root from the engine descriptor, never from child arguments. */
   delegationRepoRoot?: string | null;
-  /** ACP composition is supplied only by the ACP-aware bridge. Keeping this
-   * dependency injected prevents the packaged belt self-entry from pulling in
-   * or initializing the ACP surface. */
+  delegationProcessingPreference?: ProcessingPreference;
+  delegationExecution?: Pick<RunExecution, "workspaceKind" | "scopePaths">;
+  /** ACP-aware bridges inject this; the packaged belt does not initialize ACP. */
   acpSessionQuery?: (
     input: any,
     hooks: SurfaceRunnerHooks | undefined,
@@ -93,6 +95,13 @@ export function mcpSurfaceRunner(options: McpSurfaceRunnerOptions = {}) {
       );
     }
     if (p?.mode === "__journal_recovery") return journalRecoveryQuery(p);
+    if (
+      p?.mode === "__thread_create" ||
+      p?.mode === "__thread_turn" ||
+      p?.mode === "__thread_read"
+    ) {
+      return threadQuery(p, options.requireExistingDaemon === true);
+    }
     if (typeof p?.mode === "string" && p.mode.startsWith("__acp_session_")) {
       if (!options.acpSessionQuery) {
         throw new Error("ACP session operation reached a non-ACP surface");
@@ -111,11 +120,16 @@ export function mcpSurfaceRunner(options: McpSurfaceRunnerOptions = {}) {
     const repoRoot =
       options.delegationRepoRoot ??
       (typeof p?.repoPath === "string" && p.repoPath.trim() ? p.repoPath : process.cwd());
+    const processingPreference = options.delegationParentRunId
+      ? options.delegationProcessingPreference
+      : p?.processingPreference;
     const body: Record<string, unknown> = {
       prompt: String(p?.prompt ?? ""),
       mode,
       scope: { kind: "project", root: repoRoot },
-      execution: { isolation: "envelope" },
+      execution: options.delegationParentRunId
+        ? { ...options.delegationExecution, isolation: "envelope" }
+        : RunExecution.parse(p?.execution ?? { isolation: "envelope" }),
       ...(p?.harness ? { harnesses: [String(p.harness)] } : {}),
       ...(p?.primaryHarness ? { primaryHarness: String(p.primaryHarness) } : {}),
       ...(p?.race === true
@@ -128,6 +142,7 @@ export function mcpSurfaceRunner(options: McpSurfaceRunnerOptions = {}) {
       ...(p?.council === true ? { council: true } : {}),
       ...(Array.isArray(p?.tests) ? { tests: p.tests } : {}),
       ...(p?.paidBudget ? { paidBudget: p.paidBudget } : {}),
+      ...(p?.credentialProfileId ? { credentialProfileId: String(p.credentialProfileId) } : {}),
       ...(p?.access ? { access: String(p.access) } : {}),
       // `externalContextPolicy` is the control-api-parity alias of `web`; the
       // validator already enforced equality when both are present. Honor the
@@ -139,6 +154,7 @@ export function mcpSurfaceRunner(options: McpSurfaceRunnerOptions = {}) {
           : {}),
       ...(p?.model ? { model: String(p.model) } : {}),
       ...(p?.effort ? { effort: String(p.effort) } : {}),
+      ...(processingPreference !== undefined ? { processingPreference } : {}),
       ...(typeof p?.review === "boolean" ? { review: p.review } : {}),
       ...(Array.isArray(p?.reviewerPanel) ? { reviewerPanel: p.reviewerPanel } : {}),
       ...(p?.reviewerModels && typeof p.reviewerModels === "object"
@@ -431,44 +447,6 @@ async function recoveryQuery(
     eligible: true,
     check: body,
   };
-}
-
-async function journalRecoveryQuery(input: Record<string, unknown>): Promise<unknown> {
-  const conn = await connectDaemonIfRunning();
-  if (!conn) throw new Error("the Claudexor daemon is not running");
-  const action = String(input["action"] ?? "inspect");
-  const partition = String(input["partition"] ?? "");
-  if (!partition) throw new Error("partition is required");
-  const base = `/recovery/partitions/${encodeURIComponent(partition)}`;
-  const suffix =
-    action === "inspect"
-      ? ""
-      : action === "validate" || action === "export" || action === "quarantine"
-        ? `/${action}`
-        : null;
-  if (suffix === null) throw new Error(`unknown journal recovery action '${action}'`);
-  const body =
-    action === "quarantine"
-      ? {
-          expectedFingerprint: String(input["expectedFingerprint"] ?? ""),
-          confirmation: String(input["confirmation"] ?? ""),
-        }
-      : undefined;
-  const response = await controlApiFetch(conn.addr, `${base}${suffix}`, {
-    method: action === "inspect" ? "GET" : "POST",
-    ...(body
-      ? { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }
-      : {}),
-  });
-  const result = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-  if (!response.ok) {
-    throw new Error(
-      typeof result["message"] === "string"
-        ? (result["message"] as string)
-        : `journal recovery failed (HTTP ${response.status})`,
-    );
-  }
-  return result;
 }
 
 /**

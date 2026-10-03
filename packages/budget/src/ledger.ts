@@ -1,5 +1,6 @@
+import { UNKNOWN_COST } from "./cost-evidence.js";
+export { routeCostEvidence, attemptCostEvidence } from "./cost-evidence.js";
 import type {
-  BillingKnowledge,
   BudgetLease,
   BudgetObservation,
   CostEvidence,
@@ -83,26 +84,24 @@ export interface ReserveResult {
   denied?: "hard_cap" | "estimate_headroom" | "finite_zero" | "unknown_paid_in_flight";
 }
 
-const UNKNOWN_COST: CostEvidence = {
-  knowledge: "unknown",
-  billing: "unknown",
-  source: "route_preflight",
-  provenance: ["route:billing-unknown"],
-  estimatedUsd: null,
-};
-
 /** Stable fingerprint of a prompt for loop detection. */
 export function promptFingerprint(prompt: string): string {
   return sha256(prompt.trim().replace(/\s+/g, " ").toLowerCase());
 }
 
-/**
- * One view over a shared financial authority. The root view reports aggregate
- * family cash/valuation; `scopedToTask` reports only that child's totals while
- * sharing leases, holds, unknown-paid exclusion, and the hard cap. Routing
- * observations, quota snapshots, and prompt-loop counters stay view-local.
- */
+/** Root and task-scoped views share family finances, leases, holds and caps.
+ * Task views expose their own totals; routing, quota and prompt-loop evidence
+ * stay view-local. */
 export class BudgetLedger {
+  markPhysicalDispatchStarted(leaseId: string): void {
+    const lease = this.financial.leases.get(leaseId);
+    if (
+      lease &&
+      lease.cost?.billing !== "proven_zero" &&
+      lease.cost?.billing !== "subscription_entitlement"
+    )
+      this.financial.physicalDispatchStarted.add(leaseId);
+  }
   private readonly observations: BudgetObservation[] = [];
   private readonly quotaSnapshots = new Map<string, QuotaSnapshot>();
   private readonly promptCounts = new Map<string, number>();
@@ -113,6 +112,7 @@ export class BudgetLedger {
     valuationUsd: number,
     cashEstimated: boolean,
     valuationKnowledge: CostKnowledge,
+    cashKnowledge: CostKnowledge,
   ) => void;
   private released = false;
 
@@ -132,6 +132,7 @@ export class BudgetLedger {
         valuationUsd: number,
         cashEstimated: boolean,
         valuationKnowledge: CostKnowledge,
+        cashKnowledge: CostKnowledge,
       ) => void;
     } = {},
     shared?: { financial: SharedFinancialState; taskScope: string },
@@ -149,6 +150,7 @@ export class BudgetLedger {
       valuationUsd: number,
       cashEstimated: boolean,
       valuationKnowledge: CostKnowledge,
+      cashKnowledge: CostKnowledge,
     ) => void,
   ): BudgetLedger {
     if (!taskId.trim()) throw new Error("budget task scope must not be empty");
@@ -165,7 +167,8 @@ export class BudgetLedger {
 
   private outstandingHolds(): number {
     let sum = 0;
-    for (const value of this.financial.holds.values()) sum += value;
+    for (const value of this.financial.holds.values())
+      sum += Math.max(value.reservedUsd, value.observedUsd);
     return sum;
   }
 
@@ -195,6 +198,59 @@ export class BudgetLedger {
   reserve(input: ReserveInput): ReserveResult {
     this.assertTaskScope(input.taskId);
     const cost = CostEvidenceSchema.parse(input.cost ?? UNKNOWN_COST);
+    const denied = this.reservationDenial(cost);
+    if (denied) return denied;
+    const zeroCash = cost.billing === "proven_zero" || cost.billing === "subscription_entitlement";
+    const estimate = zeroCash ? 0 : (cost.estimatedUsd ?? 0);
+    const unknownPaid = !zeroCash && cost.knowledge === "unknown";
+    const lease = BudgetLeaseSchema.parse({
+      lease_id: newId("lease"),
+      task_id: input.taskId,
+      attempt_id: input.attemptId,
+      intent: input.intent,
+      harness_id: input.harnessId,
+      model_hint: input.modelHint ?? null,
+      cost,
+      reason: input.reason ?? [],
+      created_at: nowIso(),
+      state: "reserved",
+    });
+    this.financial.leases.set(lease.lease_id, lease);
+    if (estimate > 0)
+      this.financial.holds.set(lease.lease_id, { reservedUsd: estimate, observedUsd: 0 });
+    if (unknownPaid && this.cap() !== null) this.financial.unknownPaidInFlight.add(lease.lease_id);
+    return { granted: true, tier: this.tier(), lease };
+  }
+
+  /** Admit the exact next physical send under its existing logical lease.
+   * Previous streamed amounts and unknown-paid debt survive until settlement. */
+  repriceReservedLease(leaseId: string, evidence: CostEvidence): ReserveResult {
+    const lease = this.leaseForMutation(leaseId, true);
+    if (lease.state !== "reserved") throw new Error("cannot reprice a closed budget lease");
+    const cost = CostEvidenceSchema.parse(evidence);
+    const zeroCash = cost.billing === "proven_zero" || cost.billing === "subscription_entitlement";
+    const previous = this.financial.holds.get(leaseId) ?? { reservedUsd: 0, observedUsd: 0 };
+    const requiredHold = Math.max(
+      previous.reservedUsd,
+      previous.observedUsd + (zeroCash ? 0 : (cost.estimatedUsd ?? 0)),
+    );
+    const denied = this.reservationDenial(cost, leaseId, requiredHold);
+    if (denied) return denied;
+    lease.cost = cost;
+    if (requiredHold > 0)
+      this.financial.holds.set(leaseId, { ...previous, reservedUsd: requiredHold });
+    if (!zeroCash && cost.knowledge === "unknown" && this.cap() !== null)
+      this.financial.unknownPaidInFlight.add(leaseId);
+    else if (zeroCash && !this.financial.physicalDispatchStarted.has(leaseId))
+      this.financial.unknownPaidInFlight.delete(leaseId);
+    return { granted: true, tier: this.tier(), lease };
+  }
+
+  private reservationDenial(
+    cost: CostEvidence,
+    ownLeaseId?: string,
+    requiredHold?: number,
+  ): ReserveResult | null {
     const zeroCash = cost.billing === "proven_zero" || cost.billing === "subscription_entitlement";
     const cap = this.cap();
     if (cap === 0 && !zeroCash) {
@@ -209,7 +265,12 @@ export class BudgetLedger {
       return { granted: false, tier: "hard", denied: "hard_cap", reason: "budget exhausted" };
     }
     const unknownPaid = !zeroCash && cost.knowledge === "unknown";
-    if (cap !== null && cap > 0 && unknownPaid && this.financial.unknownPaidInFlight.size > 0) {
+    if (
+      cap !== null &&
+      cap > 0 &&
+      unknownPaid &&
+      [...this.financial.unknownPaidInFlight].some((id) => id !== ownLeaseId)
+    ) {
       return {
         granted: false,
         tier: this.tier(),
@@ -217,9 +278,13 @@ export class BudgetLedger {
         reason: "one unknown-cost paid unit is already in flight",
       };
     }
-    const estimate = zeroCash ? 0 : (cost.estimatedUsd ?? 0);
-    const headroom = this.remainingUsd();
-    if (estimate > 0 && headroom !== null && estimate >= headroom) {
+    const estimate = requiredHold ?? (zeroCash ? 0 : (cost.estimatedUsd ?? 0));
+    const ownHold = ownLeaseId ? this.financial.holds.get(ownLeaseId) : undefined;
+    const headroom =
+      cap === null
+        ? null
+        : this.remainingUsd()! + (ownHold ? Math.max(ownHold.reservedUsd, ownHold.observedUsd) : 0);
+    if (!zeroCash && estimate > 0 && headroom !== null && estimate >= headroom) {
       return {
         granted: false,
         tier: this.tier(),
@@ -227,22 +292,7 @@ export class BudgetLedger {
         reason: `insufficient headroom for estimated cost (${estimate.toFixed(2)} USD >= ${headroom.toFixed(2)} USD remaining)`,
       };
     }
-    const lease = BudgetLeaseSchema.parse({
-      lease_id: newId("lease"),
-      task_id: input.taskId,
-      attempt_id: input.attemptId,
-      intent: input.intent,
-      harness_id: input.harnessId,
-      model_hint: input.modelHint ?? null,
-      cost,
-      reason: input.reason ?? [],
-      created_at: nowIso(),
-      state: "reserved",
-    });
-    this.financial.leases.set(lease.lease_id, lease);
-    if (estimate > 0) this.financial.holds.set(lease.lease_id, estimate);
-    if (unknownPaid && cap !== null) this.financial.unknownPaidInFlight.add(lease.lease_id);
-    return { granted: true, tier: this.tier(), lease };
+    return null;
   }
 
   /** Raise the hold from actual streamed cash/unknown usage. Subscription
@@ -250,8 +300,9 @@ export class BudgetLedger {
   updateHold(leaseId: string, streamedCashUsd: number): void {
     const lease = this.leaseForMutation(leaseId, false);
     if (!lease || lease.state !== "reserved") return;
-    const current = this.financial.holds.get(leaseId) ?? 0;
-    if (streamedCashUsd > current) this.financial.holds.set(leaseId, streamedCashUsd);
+    const current = this.financial.holds.get(leaseId) ?? { reservedUsd: 0, observedUsd: 0 };
+    if (streamedCashUsd > current.observedUsd)
+      this.financial.holds.set(leaseId, { ...current, observedUsd: streamedCashUsd });
   }
 
   settle(leaseId: string, settlement: BudgetSettlement): void {
@@ -259,9 +310,12 @@ export class BudgetLedger {
     if (lease.state !== "reserved") return;
     lease.state = "settled";
     this.financial.holds.delete(leaseId);
+    const previousPaidUnresolved = this.financial.unknownPaidInFlight.has(leaseId);
     this.financial.unknownPaidInFlight.delete(leaseId);
+    this.financial.physicalDispatchStarted.delete(leaseId);
     const reservedZeroCash =
-      lease.cost.billing === "proven_zero" || lease.cost.billing === "subscription_entitlement";
+      !previousPaidUnresolved &&
+      (lease.cost.billing === "proven_zero" || lease.cost.billing === "subscription_entitlement");
     // A route can change inside one attempt. Component-specific settlement
     // evidence from the actual usage stream outranks the preflight reservation:
     // an API retry must remain cash even when the lease began on subscription.
@@ -275,7 +329,6 @@ export class BudgetLedger {
     );
     const taskTotals = taskFinancialTotals(this.financial, lease.task_id);
     const cashKnowledge = zeroCash ? "exact" : (settlement.cashKnowledge ?? settlement.knowledge);
-    const cashEstimated = cashKnowledge !== "exact";
     const valuationReported =
       settlement.valuationUsd !== undefined ||
       settlement.valuationKnowledge !== undefined ||
@@ -285,7 +338,7 @@ export class BudgetLedger {
       taskTotals,
       cashUsd,
       valuationUsd,
-      cashEstimated,
+      cashKnowledge,
       valuationReported ? (settlement.valuationKnowledge ?? settlement.knowledge) : null,
     );
     if (this.financial.budget.kind === "finite") {
@@ -297,6 +350,7 @@ export class BudgetLedger {
       taskTotals.valuationUsd,
       taskTotals.cashEstimated,
       taskTotals.valuationKnowledge ?? "unknown",
+      taskTotals.cashKnowledge ?? "unknown",
     );
   }
   cancel(leaseId: string): void {
@@ -304,11 +358,20 @@ export class BudgetLedger {
     if (lease?.state === "reserved") lease.state = "cancelled";
     this.financial.holds.delete(leaseId);
     this.financial.unknownPaidInFlight.delete(leaseId);
+    this.financial.physicalDispatchStarted.delete(leaseId);
   }
   spend(): number {
     return this.taskScope === null
       ? this.financial.cashUsd
       : (this.financial.totalsByTask.get(this.taskScope)?.cashUsd ?? 0);
+  }
+
+  cashKnowledge(): CostKnowledge {
+    return (
+      (this.taskScope === null
+        ? this.financial.cashKnowledge
+        : this.financial.totalsByTask.get(this.taskScope)?.cashKnowledge) ?? "unknown"
+    );
   }
 
   valuation(): number {
@@ -538,37 +601,6 @@ export class BudgetLedger {
   isLoop(fingerprint: string, threshold = 3): boolean {
     return (this.promptCounts.get(fingerprint) ?? 0) >= threshold;
   }
-}
-
-export function routeCostEvidence(input: {
-  billing?: BillingKnowledge;
-  knowledge?: CostKnowledge;
-  source: string;
-  provenance: string[];
-  estimatedUsd?: number | null;
-}): CostEvidence {
-  return CostEvidenceSchema.parse({
-    billing: input.billing ?? "unknown",
-    knowledge: input.knowledge ?? "unknown",
-    source: input.source,
-    provenance: input.provenance,
-    estimatedUsd: input.estimatedUsd ?? null,
-  });
-}
-
-export function attemptCostEvidence(
-  harnessId: string,
-  attemptId: string,
-  estimatedUsd?: number,
-  billing: BillingKnowledge = "unknown",
-): CostEvidence {
-  return routeCostEvidence({
-    source: "route-preflight",
-    provenance: [`harness:${harnessId}`, `attempt:${attemptId}`, `billing:${billing}`],
-    billing,
-    knowledge: estimatedUsd === undefined ? "unknown" : "estimated",
-    estimatedUsd: estimatedUsd ?? null,
-  });
 }
 
 export function isBudgetTerminal(reason: string | null): reason is Exclude<BudgetTerminal, null> {

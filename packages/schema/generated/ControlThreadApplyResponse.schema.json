@@ -51,6 +51,12 @@
                 "applied": {
                   "type": "boolean"
                 },
+                "appliedPaths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
                 "branch": {
                   "type": "string"
                 },
@@ -86,6 +92,10 @@
                 "finalVerify": {
                   "type": "object",
                   "properties": {
+                    "base_manifest_sha256": {
+                      "type": "string",
+                      "description": "Exact directory manifest verified; not a Git commit identifier."
+                    },
                     "attempted": {
                       "type": "boolean",
                       "description": "Whether the final verify was attempted."

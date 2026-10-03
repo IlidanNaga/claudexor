@@ -58,7 +58,7 @@
                 "full",
                 "inherit_native"
               ],
-              "description": "Active filesystem/command access profile for a run: readonly (no writes), workspace_write (use the harness's native workspace-write policy), full (unrestricted; requires the per-repo trust allow), inherit_native (defer to the harness's own native settings)."
+              "description": "Active filesystem/command access profile for a run: readonly (no writes), workspace_write (use the harness's native workspace-write policy), full (unrestricted; requires the per-repo trust allow for a run an operator starts at a surface, not for an execution.delegated run), inherit_native (defer to the harness's own native settings)."
             },
             {
               "type": "null"

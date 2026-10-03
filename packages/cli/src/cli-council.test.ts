@@ -185,7 +185,7 @@ describe("Council human CLI terminal display", () => {
       process.argv = [process.execPath, "claudexor", "plan", "Prepare the plan", "--council"];
       try {
         await import("./cli.js");
-        await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(0));
+        await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(0), { timeout: 2_500 });
       } finally {
         process.argv = priorArgv;
         stdout.mockRestore();

@@ -5,6 +5,7 @@ import {
   DurableJournal,
   JournalRecoveryRequiredError,
   journalPartitionDirectory,
+  type DurableJournalOptions,
   type JournalRecoveryState,
 } from "@claudexor/journal";
 import {
@@ -36,6 +37,7 @@ import {
   type QuarantineOperation,
 } from "./journal-recovery-operation.js";
 import { journalEvents } from "./journal-events.js";
+import { daemonJournalOptions } from "./journal-manager-journal.js";
 import {
   applyPreparedOperation,
   completePreparedReceipt,
@@ -81,6 +83,7 @@ export class JournalManager {
   private readonly now: () => Date;
   private readonly faults: Partial<Record<JournalManagerFault, () => void>>;
   private readonly registrations = new Map<string, ProjectionRegistration>();
+  private readonly journalOptions: DurableJournalOptions;
   private journal: DurableJournal | null = null;
   private recovery: JournalRecoveryState = { status: "ready", discardedTailBytes: 0 };
   private generationValue = 0;
@@ -100,6 +103,13 @@ export class JournalManager {
     this.artifactPrefix = basename(this.partitionDir);
     this.operationsDir = join(this.rootDir, "recovery-operations", basename(this.partitionDir));
     this.quarantineDir = join(this.rootDir, "journal-quarantine");
+    this.journalOptions = daemonJournalOptions({
+      rootDir: this.journalRoot,
+      partition: this.partition,
+      now: this.now,
+      requestMaintenance: options.requestMaintenance,
+      current: () => this.journal,
+    });
   }
 
   registerProjection<T>(descriptor: JournalProjectionDescriptor<T>): JournalProjectionSlot<T> {
@@ -136,12 +146,7 @@ export class JournalManager {
     this.generationValue += 1;
     const projectionStatus: ControlJournalValidation["projectionStatus"] = [];
     try {
-      this.journal = DurableJournal.prepare({
-        rootDir: this.journalRoot,
-        partition: this.partition,
-        now: this.now,
-        deferCompaction: this.options.requestMaintenance !== undefined,
-      });
+      this.journal = DurableJournal.prepare(this.journalOptions);
       this.recovery = this.journal.state();
       this.preparedOperation = inspectPreparedOperation({
         rootDir: this.rootDir,
@@ -472,12 +477,7 @@ export class JournalManager {
     this.clearSlots();
     this.generationValue += 1;
     try {
-      this.journal = new DurableJournal({
-        rootDir: this.journalRoot,
-        partition: this.partition,
-        now: this.now,
-        deferCompaction: this.options.requestMaintenance !== undefined,
-      });
+      this.journal = new DurableJournal(this.journalOptions);
       this.recovery = this.journal.state();
       if (this.recovery.status === "recovery_required") {
         this.enterRecovery(this.recovery);

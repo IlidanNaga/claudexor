@@ -4,6 +4,13 @@
     "ControlApplyRequest": {
       "type": "object",
       "properties": {
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
         "target": {
           "anyOf": [
             {

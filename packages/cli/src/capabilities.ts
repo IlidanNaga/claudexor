@@ -8,6 +8,7 @@ import {
   RUN_START_CLIENT_REJECTED_KEYS,
   RunApplyState,
   WorkspaceMode,
+  WorkspaceKind,
   type CatalogHarness,
   type ControlHarnessModelsResponse,
 } from "@claudexor/schema";
@@ -16,10 +17,16 @@ import { validateModel } from "@claudexor/core";
 import { defaultClaudexorTools } from "@claudexor/mcp-server";
 import { CLAUDEXOR_VERSION } from "@claudexor/util";
 import { CLI_COMMANDS } from "./command-registry.js";
-import { buildGateway, buildRegistry, harnessModels } from "./registry.js";
+import {
+  buildGateway,
+  buildRegistry,
+  checkHarnessModelTruth,
+  harnessModelTruth,
+} from "./registry.js";
 import { delegationCapabilityFor } from "./delegation-capability.js";
 import { probeGitCapability } from "@claudexor/workspace";
 import { effectiveSetupLoginCapability } from "./setup-login-capability.js";
+import { catalogInputLimits } from "@claudexor/orchestrator";
 
 /** MCP tool names from the server's own descriptor producer (noop runner). */
 export function mcpToolNames(): readonly string[] {
@@ -50,30 +57,33 @@ export async function buildAgentCapabilityCatalog(): Promise<AgentCapabilityCata
       // Model truth degrades soft: a catalog is a status surface, so an
       // unreachable vendor CLI yields source=none instead of throwing the
       // whole catalog away. The fallback is the full typed response shape.
-      const truth: ControlHarnessModelsResponse = await harnessModels(
-        s.id,
-        NO_PROJECT_ROOT,
-        false,
-      ).catch((): ControlHarnessModelsResponse => ({
-        harnessId: s.id,
-        models: [],
-        source: "none",
-        verifiedAgainst: null,
-      }));
       const configured = cfg.global.harnesses[s.id]?.default_model ?? null;
-      const check = configured
-        ? validateModel(
-            configured,
-            truth.models.map((m) => m.id),
-            truth.source === "api" ? "api" : "manifest",
-          )
-        : null;
+      // One truth read serves the catalog's model summary and the
+      // configured-model verdict, which honours the harness's own absence
+      // declaration (INV-104) through the shared registry gate.
+      const { truth, check } = await harnessModelTruth(s.id, NO_PROJECT_ROOT, false)
+        .then((read) => ({
+          truth: read.response,
+          check: configured ? checkHarnessModelTruth(read, configured) : null,
+        }))
+        .catch(() => ({
+          truth: {
+            harnessId: s.id,
+            models: [],
+            source: "none",
+            verifiedAgainst: null,
+          } satisfies ControlHarnessModelsResponse,
+          // An unreachable vendor CLI verifies nothing: the stored model is
+          // reported invalid exactly as before, never admitted on a guess.
+          check: configured ? validateModel(configured, [], "manifest", "authoritative") : null,
+        }));
       const profile = s.manifest?.capability_profile;
       // Settings can disable a harness outright (harnesses.<id>.enabled=false);
       // routing drops it, so the catalog must not advertise it as available.
       const enabled = cfg.global.harnesses[s.id]?.enabled !== false;
       return {
         id: s.id,
+        ...(profile?.input_limits ? { inputLimits: catalogInputLimits(profile.input_limits) } : {}),
         enabled,
         displayName: s.manifest?.display_name ?? s.id,
         status: s.status,
@@ -91,10 +101,13 @@ export async function buildAgentCapabilityCatalog(): Promise<AgentCapabilityCata
         webPolicy: s.manifest?.capabilities.web_policy ?? "none",
         attachmentInputs: [...(profile?.attachment_inputs ?? [])],
         effortLevels: [...(s.manifest?.capabilities.effort_levels ?? [])],
+        processingPreferences: [...(s.manifest?.capabilities.processing_preferences ?? [])],
+        accountCatalog: true,
         accessProfilesSupported: [...(s.manifest?.access_profiles_supported ?? [])],
         readonlyMechanism: profile?.access_control.readonly_mechanism ?? "none",
         writeMechanism: profile?.access_control.write_mechanism ?? "none",
         delegation: delegationCapabilityFor(s.manifest),
+        liveInput: profile?.live_input ?? "none",
         setupLogin: await effectiveSetupLoginCapability(s.id, {
           getAdapter: (id) => adapters.get(id),
         }),
@@ -121,6 +134,7 @@ export async function buildAgentCapabilityCatalog(): Promise<AgentCapabilityCata
     runControlKeys,
     outputSchemaDialects: OUTPUT_SCHEMA_DIALECTS.map((dialect) => ({ ...dialect })),
     mutability: {
+      workspaceKinds: [...WorkspaceKind.options],
       readOnlyModes: ModeKind.options.filter((m) => MODE_MUTABILITY[m] === "read"),
       writeModes: ModeKind.options.filter((m) => MODE_MUTABILITY[m] === "write"),
       isolationKinds: ["envelope", "live"],

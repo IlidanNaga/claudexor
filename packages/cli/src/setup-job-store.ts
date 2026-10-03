@@ -230,6 +230,14 @@ export class SetupJobStore {
     return rows.map(cloneJob);
   }
 
+  /** Read-only predicate over the live projection, without cloning every job:
+   * the credential-mutation window is read on hot observer paths (#363). */
+  some(predicate: (job: Readonly<ControlSetupJob>) => boolean): boolean {
+    this.assertAvailable();
+    for (const job of this.jobs.values()) if (predicate(job)) return true;
+    return false;
+  }
+
   snapshot(jobId: string): ControlSetupJobSnapshot {
     this.assertAvailable();
     return {
@@ -245,8 +253,7 @@ export class SetupJobStore {
     const afterSeq = this.journal.sequenceAfter(afterCursor);
     let previousCursor = afterCursor ?? null;
     const events: ControlSetupJobEvent[] = [];
-    for (const record of this.journal.records<SetupJournalPayload>(afterSeq)) {
-      if (record.type !== "setup.job.saved") continue;
+    for (const record of this.journal.records<SetupJournalPayload>(afterSeq, ["setup.job.saved"])) {
       const parsed = ControlSetupJobSchema.safeParse(record.payload?.job);
       if (!parsed.success || parsed.data.jobId !== jobId) continue;
       const cursor = this.journal.cursorFor(record);

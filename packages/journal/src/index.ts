@@ -1,22 +1,25 @@
-import { recoverJournal } from "./journal-recovery.js";
 import { randomUUID } from "node:crypto";
-import { closeSync, fstatSync, lstatSync, renameSync, rmSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { ensureCanonicalPrivateDirectory, fsyncDirectory } from "@claudexor/util";
-import { prepareAppendBatch } from "./append-batch.js";
+import { fstatSync, lstatSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { ensureCanonicalPrivateDirectory } from "@claudexor/util";
+import { cloneJson, prepareAppendBatch } from "./append-batch.js";
 import { ZERO_HASH, type JournalRecord } from "./frame-codec.js";
-import { prepareJournalCompaction, type JournalCompactionResult } from "./journal-compaction.js";
+import {
+  declinedCompaction,
+  prepareJournalCompaction,
+  type JournalCompactionDeclineReason,
+  type JournalCompactionDeclined,
+  type JournalCompactionOutcome,
+} from "./journal-compaction.js";
 import {
   prepareBackgroundCompaction,
   sameBoundary,
   type CompactionBoundary,
 } from "./journal-background-compaction.js";
+import { JournalCore, type DurableJournalOptions } from "./journal-core.js";
 import {
-  appendAndSync,
   ensurePrivateFile,
   sameJournalFile,
-  openJournalWriter,
-  reopenOriginalWriter,
   readIntent,
   removeFile,
   writeIntent,
@@ -29,52 +32,28 @@ import {
   type JournalPreparationReceipt,
   type PreparedJournalInspection,
 } from "./read-only-preparation.js";
-export type { JournalRecord, JournalPreparationReceipt };
+export type { JournalRecord, JournalPreparationReceipt, DurableJournalOptions };
 export { JournalCursorError } from "./journal-cursor.js";
 export { journalPartitionDirectory } from "./journal-partition.js";
 export { JournalRecoveryRequiredError, JournalAppendUncertainError };
 export type { JournalRecoveryLocation, JournalRecoveryState } from "./journal-recovery-state.js";
+export type { FoldRecord, FoldVerdict, JournalFold } from "./journal-fold.js";
+export { keepEverything } from "./journal-fold.js";
+export type {
+  JournalCompactionDeclined,
+  JournalCompactionOutcome,
+  JournalCompactionReceipt,
+} from "./journal-compaction.js";
 import {
   JournalRecoveryRequiredError,
   JournalAppendUncertainError,
-  journalRecoveryAt,
   type JournalRecoveryState,
 } from "./journal-recovery-state.js";
-export interface DurableJournalOptions {
-  rootDir: string;
-  partition: string;
-  now?: () => Date;
-  epochFactory?: () => string;
-  appendAndSync?: (fd: number, bytes: Buffer) => void;
-  compactionThresholdBytes?: number;
-  /** The daemon opts into after-admission maintenance; standalone callers keep inline compaction. */
-  deferCompaction?: boolean;
-}
 
 const PREPARED_JOURNAL = Symbol("prepared-journal");
 
 /** Single-writer, checksummed journal. A returned append has reached fsync. */
-export class DurableJournal {
-  readonly options: Readonly<DurableJournalOptions>;
-  readonly partitionDir: string;
-  readonly path: string;
-  private readonly now: () => Date;
-  private readonly appendFrame: (fd: number, bytes: Buffer) => void;
-  private fd = -1;
-  private entries: JournalRecord[] = [];
-  private background: {
-    controller: AbortController;
-    promise: Promise<JournalCompactionResult["receipt"] | null>;
-  } | null = null;
-  private epoch: string;
-  private nextSeq = 1;
-  private previousFrameHash = ZERO_HASH;
-  private knownFileBytes = 0;
-  private recovery: JournalRecoveryState = { status: "ready", discardedTailBytes: 0 };
-  private preparationState: JournalPreparationReceipt | null = null;
-  private writable = false;
-  private closed = false;
-
+export class DurableJournal extends JournalCore {
   static prepare(options: DurableJournalOptions): DurableJournal {
     if (!options.partition.trim()) throw new Error("journal partition must not be empty");
     const partitionDir = journalPartitionDirectory(options.rootDir, options.partition);
@@ -85,6 +64,7 @@ export class DurableJournal {
       intentPath: join(partitionDir, "append.pending.json"),
       partition: options.partition,
       initialEpoch: (options.epochFactory ?? randomUUID)(),
+      fold: options.fold,
     });
     const InternalJournal = DurableJournal as unknown as {
       new (
@@ -102,12 +82,7 @@ export class DurableJournal {
     token?: typeof PREPARED_JOURNAL,
     prepared?: PreparedJournalInspection,
   ) {
-    if (!options.partition.trim()) throw new Error("journal partition must not be empty");
-    this.options = Object.freeze({ ...options });
-    this.now = options.now ?? (() => new Date());
-    this.appendFrame = options.appendAndSync ?? appendAndSync;
-    this.partitionDir = journalPartitionDirectory(options.rootDir, options.partition);
-    this.path = join(this.partitionDir, "journal.bin");
+    super(options);
     if (token === PREPARED_JOURNAL && prepared) {
       this.preparationState = prepared.receipt;
       this.recovery = structuredClone(prepared.recovery);
@@ -116,6 +91,8 @@ export class DurableJournal {
       this.nextSeq = prepared.nextSeq;
       this.previousFrameHash = prepared.previousFrameHash;
       this.knownFileBytes = prepared.knownFileBytes;
+      this.replayRetired = { count: prepared.retiredCount, bytes: prepared.retiredBytes };
+      this.compactionBaselineBytes = this.replayBaselineBytes();
       return;
     }
     ensureCanonicalPrivateDirectory(options.rootDir);
@@ -123,7 +100,7 @@ export class DurableJournal {
     ensureCanonicalPrivateDirectory(this.partitionDir);
     ensurePrivateFile(this.path);
     this.openWriter();
-    this.recover();
+    this.replay();
     this.compactAtThreshold();
   }
 
@@ -169,7 +146,7 @@ export class DurableJournal {
       this.knownFileBytes = 0;
       this.recovery = { status: "ready", discardedTailBytes: 0 };
       this.openWriter();
-      this.recover();
+      this.replay();
       const activatedRecovery = this.state();
       if (activatedRecovery.status === "recovery_required") {
         throw new JournalRecoveryRequiredError(activatedRecovery);
@@ -224,8 +201,22 @@ export class DurableJournal {
     return this.knownFileBytes;
   }
 
-  /** Atomically replace physical frames with one checksummed compressed frame. */
+  /** What the configured fold retired while replaying the file (preparation,
+   * construction or activation). Compaction-time retirement is reported on the
+   * compaction receipt instead, so the daemon can log both. */
+  retiredAtReplay(): { count: number; bytes: number } {
+    this.assertOpen();
+    return { ...this.replayRetired };
+  }
+
+  /** Atomically replace physical frames with one checksummed compressed frame.
+   * Refused when a fold is configured: this lossless single-frame writer would
+   * persist the retained set renumbered from 1 as a complete history, which an
+   * older engine cannot tell apart from a lossless snapshot. */
   compact(): { beforeBytes: number; afterBytes: number; records: number } | null {
+    if (this.options.fold) {
+      throw new Error("synchronous compaction is unavailable with a fold; use compactInBackground");
+    }
     this.background?.controller.abort();
     this.assertReadable();
     this.assertWritable();
@@ -246,16 +237,18 @@ export class DurableJournal {
   }
 
   /** Automatic maintenance preserves logical epoch/seq cursors, including ACKed
-   * appends during preparation. The first caller's signal owns a shared flight. */
+   * appends during preparation, and applies the configured fold. The first
+   * caller's signal owns a shared flight; a decline is typed, never silent. */
   compactInBackground(options: {
     stagingDir: string;
     signal?: AbortSignal;
-  }): Promise<JournalCompactionResult["receipt"] | null> {
+  }): Promise<JournalCompactionOutcome> {
     if (this.background) return this.background.promise;
     this.assertReadable();
     this.assertWritable();
-    if (options.signal?.aborted) return Promise.resolve(null);
-    if (!this.atCompactionThreshold() || this.entries.length === 0) return Promise.resolve(null);
+    if (options.signal?.aborted) return Promise.resolve(this.declined("aborted"));
+    if (!this.atCompactionThreshold()) return Promise.resolve(this.declined("below_threshold"));
+    if (this.nextSeq <= 1) return Promise.resolve(this.declined("empty"));
     const controller = new AbortController();
     const abort = () => controller.abort();
     options.signal?.addEventListener("abort", abort, { once: true });
@@ -284,6 +277,7 @@ export class DurableJournal {
       time: this.now().toISOString(),
       entries,
       prefix: current(),
+      fold: this.options.fold,
       current,
       install: (candidate, boundary) => {
         if (!sameBoundary(current(), boundary)) return false;
@@ -304,8 +298,17 @@ export class DurableJournal {
         return true;
       },
     }).finally(() => {
+      // Every pass that reached the data settles the growth baseline —
+      // install, real decline, a pass aborted in flight (it resolves as a
+      // declined `aborted` through this promise) or failure alike (an install
+      // already set it to the installed size): the next attempt waits for a
+      // threshold of NEW bytes instead of re-folding the whole retained
+      // prefix, and failing again, on every following append (an unwritable
+      // staging directory, an ENOSPC window).
+      this.compactionBaselineBytes = this.knownFileBytes;
       options.signal?.removeEventListener("abort", abort);
       if (this.background?.promise === promise) this.background = null;
+      this.thresholdNotified = false;
     });
     this.background = { controller, promise };
     return promise;
@@ -372,153 +375,53 @@ export class DurableJournal {
     this.nextSeq = batch.nextSeq;
     this.previousFrameHash = batch.previousFrameHash;
     this.knownFileBytes += batch.bytes.length;
+    this.notifyThreshold();
     return batch.records.map((record) => ({ ...record, payload: cloneJson(record.payload) }));
   }
 
-  private recover(): void {
-    let result: ReturnType<typeof recoverJournal>;
-    try {
-      result = recoverJournal(this.fd, this.path, this.options.partition, this.intentPath());
-    } catch (error) {
-      if (!(error instanceof JournalRecoveryRequiredError)) throw error;
-      this.recovery = error.recovery;
-      return;
-    }
-    this.entries = result.records;
-    const last = this.entries.at(-1);
-    if (last) {
-      this.epoch = last.epoch;
-      this.nextSeq = last.seq + 1;
-      this.previousFrameHash = last.frameHash;
-    }
-    this.knownFileBytes = result.knownFileBytes;
-    if (result.discardedBytes > 0) {
-      this.recovery = { status: "ready", discardedTailBytes: result.discardedBytes };
-      this.append("journal.recovery_tail_discarded", {
-        recoveryId: randomUUID(),
-        discardedBytes: result.discardedBytes,
-        validBytes: result.knownFileBytes,
-        originalBytes: result.knownFileBytes + result.discardedBytes,
-        detectedAt: this.now().toISOString(),
-      });
-    }
+  /** Replay, then journal a discarded pending suffix through the ordinary append path. */
+  private replay(): void {
+    const discardedBytes = this.recover();
+    if (discardedBytes === 0) return;
+    this.append("journal.recovery_tail_discarded", {
+      recoveryId: randomUUID(),
+      discardedBytes,
+      validBytes: this.knownFileBytes,
+      originalBytes: this.knownFileBytes + discardedBytes,
+      detectedAt: this.now().toISOString(),
+    });
   }
 
-  private intentPath(): string {
-    return join(this.partitionDir, "append.pending.json");
+  /** Edge-triggered: one notification per crossing, decoupled from the ACK
+   * already returned to the appender and silent once the journal is closed;
+   * any completed maintenance pass re-arms it. */
+  private notifyThreshold(): void {
+    const hook = this.options.onCompactionThreshold;
+    if (!hook || this.thresholdNotified || !this.atCompactionThreshold()) return;
+    this.thresholdNotified = true;
+    queueMicrotask(() => {
+      if (!this.closed) hook();
+    });
   }
 
-  private openWriter(): void {
-    this.fd = openJournalWriter(this.path);
-    this.writable = true;
+  /** An immediate decline is a completed pass too: it re-arms the hook. It
+   * never moves the growth baseline — nothing was observed over the data, and
+   * moving it on a below-threshold request would delay the first crossing. */
+  private declined(reason: JournalCompactionDeclineReason): JournalCompactionDeclined {
+    this.thresholdNotified = false;
+    return declinedCompaction(reason);
   }
 
+  /** A fold implies deferred, seq-preserving background compaction: the
+   * lossless synchronous path would mint a new epoch and renumber the
+   * retained set. Explicit `compact()` keeps its own contract. */
   private compactAtThreshold(): void {
     if (
       !this.options.deferCompaction &&
+      !this.options.fold &&
       this.recovery.status === "ready" &&
       this.atCompactionThreshold()
     )
       this.compact();
   }
-
-  private atCompactionThreshold(): boolean {
-    return this.knownFileBytes >= (this.options.compactionThresholdBytes ?? 8 * 1024 * 1024);
-  }
-
-  /** One physical install owner for both producers; no serialization or await. */
-  private installCompaction(result: JournalCompactionResult): void {
-    const original = fstatSync(this.fd);
-    if (result.knownFileBytes >= this.knownFileBytes)
-      throw new Error("compaction did not reclaim bytes");
-    let renamed = false;
-    let closed = false;
-    const fd = this.fd;
-    this.fd = -1;
-    this.writable = false;
-    try {
-      closeSync(fd);
-      closed = true;
-      renameSync(result.path, this.path);
-      renamed = true;
-      fsyncDirectory(dirname(this.path));
-      this.openWriter();
-    } catch (error) {
-      this.closeWriter();
-      if (closed && !renamed) {
-        this.fd = reopenOriginalWriter(this.path, original);
-        this.writable = this.fd >= 0;
-      }
-      if (!this.writable)
-        throw new JournalRecoveryRequiredError(
-          this.requireRecovery(
-            0,
-            `journal compaction install failed: ${error instanceof Error ? error.message : String(error)}`,
-          ),
-        );
-      throw error;
-    }
-    this.entries = result.records;
-    this.epoch = result.epoch;
-    this.nextSeq = result.nextSeq;
-    this.previousFrameHash = result.previousFrameHash;
-    this.knownFileBytes = result.knownFileBytes;
-  }
-
-  private closeWriter(): void {
-    const fd = this.fd;
-    this.fd = -1;
-    this.writable = false;
-    if (fd < 0) return;
-    try {
-      closeSync(fd);
-    } catch {
-      /* best-effort revocation: the handle number is never reused by this writer */
-    }
-  }
-
-  private failPreparedActivation(error: unknown): never {
-    this.closeWriter();
-    this.entries.length = 0;
-    this.nextSeq = 1;
-    this.previousFrameHash = ZERO_HASH;
-    this.knownFileBytes = 0;
-    const recovery =
-      error instanceof JournalRecoveryRequiredError
-        ? error.recovery
-        : this.requireRecovery(
-            0,
-            `prepared activation failed: ${error instanceof Error ? error.message : String(error)}`,
-          );
-    this.recovery = structuredClone(recovery);
-    throw new JournalRecoveryRequiredError(recovery);
-  }
-
-  private requireRecovery(
-    byteOffset: number,
-    reason: string,
-  ): Extract<JournalRecoveryState, { status: "recovery_required" }> {
-    this.recovery = journalRecoveryAt(byteOffset, reason);
-    this.background?.controller.abort();
-    return this.recovery;
-  }
-
-  private assertReadable(): void {
-    this.assertOpen();
-    if (this.recovery.status === "recovery_required") {
-      throw new JournalRecoveryRequiredError(this.recovery);
-    }
-  }
-
-  private assertWritable(): void {
-    if (!this.writable) throw new Error("journal preparation is not activated");
-  }
-
-  private assertOpen(): void {
-    if (this.closed) throw new Error("journal writer is closed");
-  }
-}
-
-function cloneJson<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
 }

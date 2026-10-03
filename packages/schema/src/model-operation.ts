@@ -1,3 +1,4 @@
+import { EffortResolution } from "./effort.js";
 import { z } from "zod/v3";
 import { CostEvidence } from "./budget.js";
 import { CostKnowledge } from "./auth.js";
@@ -6,6 +7,7 @@ import { Id, IsoTimestamp, NonBlankString } from "./primitives.js";
 import { ControlProblem } from "./problem.js";
 import { RunLifecycle } from "./status-projection.js";
 import { TokenUsage } from "./telemetry.js";
+import { ProcessingCapability, ProcessingPreference, ProcessingReceipt } from "./processing.js";
 
 export const ModelPayloadRef = z
   .object({
@@ -44,7 +46,7 @@ export const ModelNativeContinuation = z
   })
   .strict()
   .describe(
-    "Complete provider-native assistant turn, bound to its account and model; replaces reconstruction on replay.",
+    "Opaque provider-native continuation bound to its account and model; its format distinguishes assistant content from live transport state.",
   );
 export type ModelNativeContinuation = z.infer<typeof ModelNativeContinuation>;
 
@@ -102,6 +104,7 @@ export const ModelCallOptions = z
   .object({
     reasoningEffort: NonBlankString.optional(),
     serviceTier: NonBlankString.optional(),
+    processingPreference: ProcessingPreference.optional(),
     parallelToolCalls: z.boolean().optional(),
     cacheKey: NonBlankString.optional(),
     maxOutputTokens: z.number().int().positive().optional(),
@@ -109,7 +112,7 @@ export const ModelCallOptions = z
   })
   .strict()
   .describe(
-    "Generation options only, not a caller's context/output reserve; unsupported explicit options refuse before inference.",
+    "Generation options only, not a caller's context/output reserve; reasoningEffort is an adaptive preference, while unsupported other explicit options refuse before inference.",
   );
 export type ModelCallOptions = z.infer<typeof ModelCallOptions>;
 
@@ -122,6 +125,11 @@ export const ModelCallRequest = z
     tools: z.array(ModelTool).default([]),
     toolChoice: ModelToolChoice.default("auto"),
     options: ModelCallOptions.default({}),
+    nativeContinuation: ModelNativeContinuation.nullable()
+      .optional()
+      .describe(
+        "Caller-owned live transport turn: omit for stateless compatibility, null to start empty. Separate from historical assistant continuations.",
+      ),
   })
   .strict()
   .describe(
@@ -144,15 +152,61 @@ export const ModelCostEvidence = CostEvidence.extend({
 );
 export type ModelCostEvidence = z.infer<typeof ModelCostEvidence>;
 
+export const ModelFailureEvidence = z
+  .object({
+    bodyBase64: z.string(),
+    receivedBytes: z.number().int().nonnegative(),
+    bodyComplete: z.boolean().describe("True only when the response reader observed EOF."),
+    stage: NonBlankString,
+    errors: z
+      .array(
+        z
+          .object({
+            name: z.string().nullable(),
+            message: z.string(),
+            stack: z.string().nullable(),
+            code: z.union([z.string(), z.number()]).nullable(),
+          })
+          .strict(),
+      )
+      .describe(
+        "Original exception followed by causes and AggregateError members in depth-first order; empty when none was thrown.",
+      ),
+    causeCycle: z.boolean(),
+  })
+  .strict()
+  .describe(
+    "Private failed-response evidence: every byte returned to the reader, never an unreceived suffix. Retained only inside the model result resource when requested.",
+  );
+export type ModelFailureEvidence = z.infer<typeof ModelFailureEvidence>;
+
 export const ModelCallResult = z
   .object({
     outcome: z.enum(["completed", "incomplete", "failed", "unknown"]),
     message: ModelMessage.nullable(),
     route: ModelRoute,
+    modelMismatch: z
+      .object({ requested: z.string(), observed: z.string() })
+      .strict()
+      .nullable()
+      .optional()
+      .describe(
+        "Requested-vs-observed model mismatch on a completed or incomplete terminal response; null or absent when they match or either side is unknown. The outcome is unchanged.",
+      ),
     usage: ModelUsage,
     cost: ModelCostEvidence,
     appliedOptions: ModelCallOptions,
+    effortResolution: EffortResolution.optional().describe(
+      "Prepared and observed effort evidence; model operations retain it only when creation requests captureEffortEvidence=true. Legacy results omit it before immutable publication.",
+    ),
+    processing: ProcessingReceipt.optional(),
     problem: ControlProblem.nullable(),
+    failureEvidence: ModelFailureEvidence.optional(),
+    nativeContinuation: ModelNativeContinuation.nullable()
+      .optional()
+      .describe(
+        "Live transport continuation, present only when the request opted in; preserve independently of response body success.",
+      ),
   })
   .strict()
   .describe(
@@ -170,8 +224,21 @@ export const ModelCatalogEntry = z
     maxOutputTokens: z.number().int().positive().nullable(),
     inputModalities: z.array(z.string()),
     reasoningEfforts: z.array(z.string()),
+    reasoningEffortPreferenceOrder: z
+      .array(NonBlankString)
+      .optional()
+      .describe(
+        "Internal vendor order for preference adaptation when it includes choices the raw transport cannot submit. Not accepted values; projected out of both public catalog views.",
+      ),
+    reasoningEffortsVerified: z
+      .boolean()
+      .optional()
+      .describe(
+        "Whether the provider supplied a fully parsed effort array, including a known empty array. Missing on historical catalogs means unverified.",
+      ),
     defaultReasoningEffort: z.string().nullable(),
     supportedOptions: z.array(z.string()),
+    processing: ProcessingCapability.optional(),
   })
   .strict()
   .describe(
@@ -195,13 +262,52 @@ export const ControlModelSourcesResponse = z
   .describe("Available raw model transports, distinct from agent harness inventory.");
 export type ControlModelSourcesResponse = z.infer<typeof ControlModelSourcesResponse>;
 
+export const ControlModelSourcesAccountsResponse = z
+  .object({
+    sources: z.array(
+      ControlModelSourcesResponse.shape.sources.element.extend({
+        processingPreferences: z.array(ProcessingPreference),
+        accountCatalog: z.literal(true),
+      }),
+    ),
+  })
+  .strict();
+export type ControlModelSourcesAccountsResponse = z.infer<
+  typeof ControlModelSourcesAccountsResponse
+>;
+export const ControlModelSourcesQueryResponse = z.union([
+  ControlModelSourcesResponse,
+  ControlModelSourcesAccountsResponse,
+]);
+export type ControlModelSourcesQueryResponse = z.infer<typeof ControlModelSourcesQueryResponse>;
+
 export const ControlModelCatalogResponse = z
   .object({
     source: Id,
     credentialProfileId: Id,
     accountFingerprint: z.string().nullable(),
-    observedAt: IsoTimestamp,
-    provenance: NonBlankString,
+    observedAt: IsoTimestamp.describe(
+      "Original catalog observation time; cached reuse never advances it.",
+    ),
+    provenance: NonBlankString.describe(
+      "provider_http means the catalog body was read and validated from a successful upstream HTTP response at observedAt. Other values do not certify provider contact.",
+    ),
+    /** The backend filters this catalog by the client version the transport
+     * declared; a model above that version's floor is absent here even when
+     * the same account can generate with it. Null only for catalogs handed
+     * over by an older engine. */
+    clientVersion: NonBlankString.nullable()
+      .default(null)
+      .describe(
+        "Client version the transport declared when it read this catalog; the backend lists only models whose minimum client version is at or below it. Null for catalogs from an older engine.",
+      ),
+    clientVersionSource: z
+      .enum(["verified_transport", "installed_cli"])
+      .nullable()
+      .default(null)
+      .describe(
+        "Where the declared client version came from: verified_transport (the version this Claudexor release verified its HTTP transport against) or installed_cli (a newer installed Codex CLI raised it). Null for catalogs from an older engine.",
+      ),
     models: z.array(ModelCatalogEntry),
   })
   .strict()
@@ -210,6 +316,37 @@ export const ControlModelCatalogResponse = z
   );
 export type ControlModelCatalogResponse = z.infer<typeof ControlModelCatalogResponse>;
 
+export const AccountCatalogAvailability = z
+  .object({
+    credentialProfileId: Id,
+    availability: z.enum(["available", "unavailable", "unknown"]),
+    problem: ControlProblem.nullable(),
+  })
+  .strict()
+  .describe(
+    "Current account evidence for display; this does not certify fresh execution admission.",
+  );
+export type AccountCatalogAvailability = z.infer<typeof AccountCatalogAvailability>;
+
+export const ControlModelAccountCatalogResponse = z
+  .object({
+    source: Id,
+    accounts: z.array(
+      AccountCatalogAvailability.extend({ catalog: ControlModelCatalogResponse.nullable() }),
+    ),
+    partial: z.boolean(),
+  })
+  .strict()
+  .describe(
+    "All enabled managed model accounts, or one strict pin, retaining independent catalogs and failures. A missing catalog makes partial true.",
+  );
+export type ControlModelAccountCatalogResponse = z.infer<typeof ControlModelAccountCatalogResponse>;
+export const ControlModelCatalogQueryResponse = z.union([
+  ControlModelCatalogResponse,
+  ControlModelAccountCatalogResponse,
+]);
+export type ControlModelCatalogQueryResponse = z.infer<typeof ControlModelCatalogQueryResponse>;
+
 export const ModelDispatch = z
   .object({
     state: z.enum(["not_started", "started", "response_received", "unknown"]),
@@ -217,7 +354,9 @@ export const ModelDispatch = z
     route: ModelRoute.nullable(),
   })
   .strict()
-  .describe("Started means the physical send may have begun, not proof the upstream accepted it.");
+  .describe(
+    "Started means the physical send may have begun, not proof the upstream accepted it. A terminal not_started may refine that attempted send only with typed proof no complete inference request was delivered; startedAt and route retain the attempt.",
+  );
 export type ModelDispatch = z.infer<typeof ModelDispatch>;
 
 export const ModelResponseCustody = z
@@ -244,7 +383,12 @@ export const ModelResponseCustody = z
 export type ModelResponseCustody = z.infer<typeof ModelResponseCustody>;
 
 export const ModelOperationParams = z
-  .object({ kind: z.literal("model"), request: ModelPayloadRef })
+  .object({
+    kind: z.literal("model"),
+    request: ModelPayloadRef,
+    captureFailureEvidence: z.literal(true).optional(),
+    captureEffortEvidence: z.literal(true).optional(),
+  })
   .strict();
 export type ModelOperationParams = z.infer<typeof ModelOperationParams>;
 

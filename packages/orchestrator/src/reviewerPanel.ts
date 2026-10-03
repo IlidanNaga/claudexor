@@ -2,11 +2,19 @@
  * Explicit reviewer-panel resolution (owner-configured panels). Every entry
  * must pass the SAME gates auto-selection uses — registered real harness,
  * enabled in settings, doctor-ok on the review route, readonly-review
- * capable — plus the STRICT model truth gate (INV-104: live inventory
- * when the adapter has `models()`, else manifest `known_models`; empty truth
+ * capable — plus the model truth gate (INV-104: live inventory when the
+ * adapter has `models()`, else manifest `known_models`; empty manifest truth
  * refuses) and the declared effort ladder. Violations throw typed
  * HarnessUnavailableError; the orchestrator turns them into review_preflight
  * failure ARTIFACTS after run-dir creation, before candidates spend money.
+ *
+ * The one thing the EXPLICIT gate does not decide is an absence its harness
+ * cannot prove: where the adapter declared `model_inventory_absence:
+ * "advisory"`, a live list or a manifest hint list that lacks the requested
+ * model (or a live answer with nothing at all) forwards the explicit model to
+ * the vendor unchanged rather than refusing it here. An authoritative harness
+ * refuses as before, the AUTOMATIC panel always skips an unlisted family at
+ * zero cost, and no list is ever substituted for another.
  */
 import type {
   AuthPreference,
@@ -16,6 +24,7 @@ import type {
   EffortHint,
   Intent,
   ModelEffortCapability,
+  ModelInventoryAbsence,
   ProviderFamily,
 } from "@claudexor/schema";
 import {
@@ -25,7 +34,13 @@ import {
   knownModelIdsForRoute,
 } from "@claudexor/schema";
 import type { HarnessAdapter } from "@claudexor/core";
-import { HarnessUnavailableError, validateModel } from "@claudexor/core";
+import {
+  HarnessUnavailableError,
+  hasModelInventoryForRoute,
+  validateModel,
+  resolveEffort,
+  effortRankLadder,
+} from "@claudexor/core";
 import { WorkspaceManager } from "@claudexor/workspace";
 import type { ReviewerSpec } from "@claudexor/review";
 import { safeErrorMessage } from "./runSupport.js";
@@ -84,7 +99,18 @@ function reviewerEffortRefusal(
   // recorded it, else the harness-wide merged ladder — which is then the only
   // honest set, and the refusal says so.
   const advertised = effortLevelsForModel(capabilities, model);
-  if (advertised.includes(requestedEffort)) return null;
+  if (
+    advertised.length &&
+    resolveEffort(
+      requestedEffort,
+      advertised,
+      effortRankLadder([
+        capabilities.effort_levels,
+        ...Object.values(capabilities.model_effort_levels).map((entry) => entry.levels),
+      ]),
+    ).status === "ok"
+  )
+    return null;
   const perModel =
     model !== null && (capabilities.model_effort_levels[model]?.levels.length ?? 0) > 0;
   const supported = advertised.join(", ");
@@ -171,6 +197,7 @@ export async function resolveExplicitReviewerPanel(
           `reviewer credential profile "${entry.credentialProfileId}" cannot be resolved because the account-pool owner is unavailable`,
         );
       }
+      const profilePinned = Boolean(entry.credentialProfileId);
       const excludedProfileIds = new Set<string>();
       for (;;) {
         const credentialProfile = deps.resolveReviewerProfile
@@ -252,19 +279,21 @@ export async function resolveExplicitReviewerPanel(
           );
         }
         if (requestedModel) {
-          if (typeof adapter.models !== "function") {
-            // STRICT: the manifest list is the truth source here; an empty
-            // list means the harness cannot verify models and the explicit
-            // model is refused (validateModel phrases both refusals).
+          const route = credentialProfile
+            ? credentialProfileAuthRoute(credentialProfile)
+            : estimateEffectiveAuthRoute(authPreference, status.authSources);
+          if (
+            !hasModelInventoryForRoute(adapter, manifest.capabilities.model_inventory_routes, route)
+          ) {
+            // The manifest list is the truth source here, judged under the
+            // harness's own absence declaration (INV-104): an authoritative
+            // harness refuses a miss and an empty list (validateModel phrases
+            // both); an advisory harness forwards the explicit model instead.
             const check = validateModel(
               requestedModel,
-              knownModelIdsForRoute(
-                manifest.capabilities.known_models,
-                credentialProfile
-                  ? credentialProfileAuthRoute(credentialProfile)
-                  : estimateEffectiveAuthRoute(authPreference, status.authSources),
-              ),
+              knownModelIdsForRoute(manifest.capabilities.known_models, route),
               "manifest",
+              manifest.capabilities.model_inventory_absence ?? "authoritative",
             );
             if (check.status !== "ok") {
               if (!entry.credentialProfileId && credentialProfile && deps.resolveReviewerProfile) {
@@ -276,6 +305,11 @@ export async function resolveExplicitReviewerPanel(
               );
             }
           } else {
+            // The LIVE path asks the SAME question the run gate asks: what does
+            // this inventory actually prove? An advisory producer proves
+            // presence only, so a miss (and an empty answer) forwards the
+            // explicit model to the vendor instead of refusing it here.
+            const absence = manifest.capabilities.model_inventory_absence ?? "authoritative";
             const inventoryKey = `${entry.harness}\0${authPreference}\0${credentialProfile?.profile_id ?? "default"}`;
             if (!modelInventory.has(inventoryKey)) {
               modelInventory.set(
@@ -287,11 +321,13 @@ export async function resolveExplicitReviewerPanel(
                   env: reviewModelEnv,
                   harnessId: entry.harness,
                   requestedModel,
+                  absence,
                 }),
               );
             }
             const models = modelInventory.get(inventoryKey);
-            if (models && models.size > 0 && !models.has(requestedModel)) {
+            const check = validateModel(requestedModel, [...(models ?? [])], "api", absence);
+            if (models && check.status !== "ok") {
               if (!entry.credentialProfileId && credentialProfile && deps.resolveReviewerProfile) {
                 excludedProfileIds.add(credentialProfile.profile_id);
                 continue;
@@ -305,14 +341,15 @@ export async function resolveExplicitReviewerPanel(
           }
         }
         const requestedEffort = entry.effort ?? null;
-        // An EXPLICIT panel entry is a precise owner statement — an unadvertised
-        // level stays a hard, typed refusal (never forwarded to die natively).
-        const refusal = reviewerEffortRefusal(
-          entry.harness,
-          requestedEffort,
-          manifest.capabilities,
-          requestedModel,
-        );
+        // Native effort adapters resolve after the final account/model is bound.
+        const refusal = adapter.effortParameter
+          ? null
+          : reviewerEffortRefusal(
+              entry.harness,
+              requestedEffort,
+              manifest.capabilities,
+              requestedModel,
+            );
         if (refusal) throw new HarnessUnavailableError(refusal);
         specs.push({
           adapter,
@@ -320,7 +357,8 @@ export async function resolveExplicitReviewerPanel(
           requestedModel,
           requestedEffort,
           authPreference,
-          ...(deps.resolveReviewerProfile ? { credentialProfile } : {}),
+          processingPreference: entry.processingPreference,
+          ...(deps.resolveReviewerProfile ? { credentialProfile, profilePinned } : {}),
         });
         break;
       }
@@ -428,41 +466,49 @@ export async function resolveAutoReviewerPanel(
           discloseAutoSkip(deps, adapter.id, "readonly review capability unavailable");
           continue familyLoop;
         }
-        // STRICT: the auto panel applies the SAME model truth gate as the
-        // explicit panel — a doomed reviewer model is refused here, never
-        // forwarded to die as an opaque native error mid-review.
+        // STRICT: the auto panel skips a family whose truth source does not
+        // list the model, at zero cost. It does NOT inherit the explicit panel's
+        // advisory forward (INV-104): nobody asked for this family by name.
         if (requestedModel) {
-          const inventory =
-            typeof adapter.models === "function"
-              ? await readAutoModelInventory(adapter, {
-                  cwd,
-                  env: reviewHome.env,
-                  authPreference,
-                  ...(credentialProfile ? { credentialProfile } : {}),
-                })
-              : (() => {
-                  const ids = knownModelIdsForRoute(
-                    m.capabilities.known_models,
-                    credentialProfile
-                      ? credentialProfileAuthRoute(credentialProfile)
-                      : estimateEffectiveAuthRoute(authPreference, report.auth_sources),
-                  );
-                  return ids.length > 0
-                    ? {
-                        status: "available" as const,
-                        ids: new Set(ids),
-                        source: "manifest" as const,
-                      }
-                    : {
-                        status: "unknown" as const,
-                        reason: "manifest model inventory unavailable",
-                      };
-                })();
+          const route = credentialProfile
+            ? credentialProfileAuthRoute(credentialProfile)
+            : estimateEffectiveAuthRoute(authPreference, report.auth_sources);
+          const inventory = hasModelInventoryForRoute(
+            adapter,
+            m.capabilities.model_inventory_routes,
+            route,
+          )
+            ? await readAutoModelInventory(adapter, {
+                cwd,
+                env: reviewHome.env,
+                authPreference,
+                ...(credentialProfile ? { credentialProfile } : {}),
+              })
+            : (() => {
+                const ids = knownModelIdsForRoute(m.capabilities.known_models, route);
+                return ids.length > 0
+                  ? {
+                      status: "available" as const,
+                      ids: new Set(ids),
+                      source: "manifest" as const,
+                    }
+                  : {
+                      status: "unknown" as const,
+                      reason: "manifest model inventory unavailable",
+                    };
+              })();
           if (inventory.status === "unknown") {
             discloseAutoSkip(deps, adapter.id, inventory.reason);
             continue familyLoop;
           }
-          const check = validateModel(requestedModel, [...inventory.ids], inventory.source);
+          // Locked: automatic selection never spawns on a guess, whatever the
+          // harness declares, so absence is judged authoritative here.
+          const check = validateModel(
+            requestedModel,
+            [...inventory.ids],
+            inventory.source,
+            "authoritative",
+          );
           if (check.status !== "ok") {
             if (credentialProfile && deps.resolveReviewerProfile) {
               excludedProfileIds.add(credentialProfile.profile_id);
@@ -476,22 +522,12 @@ export async function resolveAutoReviewerPanel(
             continue familyLoop;
           }
         }
-        // DISCLOSE-AND-DROP, deliberately weaker than the model gate above: the
-        // per-family `reviewerEfforts` map also rides stored replay surfaces
-        // (Exact Retry params, `ControlRunAgainDraft.request`), so a map recorded
-        // before a reviewer/catalog change must not hard-fail a replay that used
-        // to run. A fresh request and a replayed draft are indistinguishable at
-        // this layer, so the disclosed drop applies everywhere — the honest
-        // middle: the panel still reviews, at the reviewer's default effort, and
-        // the drop is disclosed instead of a typed refusal killing the run.
-        // (Explicit `reviewerPanel[].effort` entries above stay hard refusals.)
+        // Preserve native preferences through final-account resolution; adapters
+        // without a separate knob retain their existing conflict/drop behavior.
         let requestedEffort = overrides.reviewerEfforts?.[m.provider_family] ?? null;
-        const dropped = reviewerEffortRefusal(
-          adapter.id,
-          requestedEffort,
-          m.capabilities,
-          requestedModel,
-        );
+        const dropped = adapter.effortParameter
+          ? null
+          : reviewerEffortRefusal(adapter.id, requestedEffort, m.capabilities, requestedModel);
         if (dropped) {
           deps.onIgnoredSetting?.(`reviewer effort dropped: ${dropped}`);
           requestedEffort = null;
@@ -503,7 +539,7 @@ export async function resolveAutoReviewerPanel(
           requestedModel,
           requestedEffort,
           authPreference,
-          ...(deps.resolveReviewerProfile ? { credentialProfile } : {}),
+          ...(deps.resolveReviewerProfile ? { credentialProfile, profilePinned: false } : {}),
         });
         break;
       }
@@ -517,7 +553,12 @@ export async function resolveAutoReviewerPanel(
 
 /** One retry with a short delay: transient inventory hiccups (cold auth,
  * slow first call) must not fail a panel that would succeed a moment later —
- * but a persistently empty/erroring inventory still refuses loudly. */
+ * but a persistently empty/erroring inventory still refuses loudly, UNLESS the
+ * producer declared its absences advisory: an empty answer from such a source
+ * proves nothing, so it is returned as the empty set and the caller's shared
+ * decision forwards the explicit model to the vendor (a second probe would ask
+ * the same source the same unanswerable question). A thrown call is still a
+ * failure, not an answer, and still refuses. */
 async function listModelIdsWithRetry(
   listModels: NonNullable<HarnessAdapter["models"]>,
   input: {
@@ -527,6 +568,7 @@ async function listModelIdsWithRetry(
     env: () => Record<string, string>;
     harnessId: string;
     requestedModel: string;
+    absence: ModelInventoryAbsence;
   },
 ): Promise<Set<string>> {
   let lastError: unknown = null;
@@ -539,6 +581,7 @@ async function listModelIdsWithRetry(
         ...(input.credentialProfile ? { credentialProfile: input.credentialProfile } : {}),
       });
       if (models.length === 0) {
+        if (input.absence === "advisory") return new Set();
         throw new Error("model inventory was empty");
       }
       return new Set(models.map((m) => m.id));

@@ -1,5 +1,5 @@
-import type { CancelReasonCode } from "@claudexor/schema";
-import { MAX_DELEGATED_CHILDREN } from "@claudexor/schema";
+import type { CancelReasonCode, CommandListQuery } from "@claudexor/schema";
+import { delegatedParentOf } from "@claudexor/schema";
 
 export interface DaemonRunRecord {
   id: string;
@@ -39,7 +39,9 @@ export interface DaemonFacadeClient {
     },
   ): Promise<DaemonRunRecord | null>;
   status(id: string): Promise<DaemonRunRecord>;
-  list(): Promise<DaemonRunRecord[]>;
+  /** Addressed read (`{id}` XOR `{delegatedFromRunId}`) so the daemon selects
+   * before it projects; omitted, it returns the whole retained product list. */
+  list(query?: CommandListQuery): Promise<DaemonRunRecord[]>;
   cancel(id: string, reasonCode?: CancelReasonCode): Promise<unknown>;
   fenceDelegationParent?(runId: string): Promise<unknown>;
 }
@@ -58,47 +60,17 @@ export function paramsRecord(record: DaemonRunRecord): Record<string, unknown> {
     : {};
 }
 
-/** Bounded direct Delegate children for reload projections. Exact persisted
- * lineage only; ordinary parentRunId is intentionally ignored. */
-export function directDelegatedChildrenFromRecords(
-  parentRunId: string,
-  runs: readonly DaemonRunRecord[],
-  limit = MAX_DELEGATED_CHILDREN,
-): DaemonRunRecord[] {
-  const boundedLimit = Math.max(0, limit);
-  if (boundedLimit === 0) return [];
-  const ordered = runs
-    .filter(
-      (run) =>
-        paramsRecord(run)["delegatedFromRunId"] === parentRunId &&
-        (run.runId ?? run.id) !== parentRunId,
-    )
-    .sort((a, b) => {
-      const created = (a.createdAt ?? "\uffff").localeCompare(b.createdAt ?? "\uffff");
-      const runId = (a.runId ?? a.id).localeCompare(b.runId ?? b.id);
-      return created || runId || a.id.localeCompare(b.id);
-    });
-  const out: DaemonRunRecord[] = [];
-  const seen = new Set<string>([parentRunId]);
-  for (const run of ordered) {
-    const runId = run.runId ?? run.id;
-    if (seen.has(runId)) continue;
-    seen.add(runId);
-    out.push(run);
-    if (out.length >= boundedLimit) break;
-  }
-  return out;
-}
-
-/** Persisted Delegate-only descendant graph; ordinary parentRunId is ignored. */
+/** Persisted Delegate-only descendant graph; ordinary parentRunId is ignored.
+ * Unlike the addressed direct-child read, the cancellation cascade this feeds
+ * is deliberately UNCAPPED: every live descendant must be reachable. */
 export function delegatedDescendantsFromRecords(
   parentRunId: string,
   runs: readonly DaemonRunRecord[],
 ): DaemonRunRecord[] {
   const children = new Map<string, DaemonRunRecord[]>();
   for (const run of runs) {
-    const parent = paramsRecord(run)["delegatedFromRunId"];
-    if (typeof parent !== "string") continue;
+    const parent = delegatedParentOf(run.params);
+    if (parent === null) continue;
     const rows = children.get(parent) ?? [];
     rows.push(run);
     children.set(parent, rows);

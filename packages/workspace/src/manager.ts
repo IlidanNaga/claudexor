@@ -1,8 +1,12 @@
-import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
-import type { AccessProfile, DirtyPolicy, WorkspaceEnvelope } from "@claudexor/schema";
+import type {
+  AccessProfile,
+  DirtyPolicy,
+  WorkspaceEnvelope,
+  WorkspaceKind,
+} from "@claudexor/schema";
 import { WorkspaceEnvelope as WorkspaceEnvelopeSchema } from "@claudexor/schema";
 import { runCaptureRaw, WorkspaceError } from "@claudexor/core";
 import {
@@ -14,11 +18,17 @@ import {
 } from "@claudexor/util";
 import { ensureLaneHomeEnv, type LaneHomeEnv } from "./lanes.js";
 import { ArtifactOwnership } from "./artifact-ownership.js";
-import { readEnvelopeRecoveryRecord } from "./envelope-recovery.js";
+import {
+  captureDirectoryWorkspace,
+  createDirectoryEnvelope,
+  type CapturedWorkspaceFiles,
+} from "./directory-workspace.js";
+import { processStartTime, readEnvelopeRecoveryRecord } from "./envelope-recovery.js";
 import {
   excludePlainDiffPathPrefix,
   plainDiffBinarySecretLike,
   relativizePlainDiffHeaders,
+  snapshotLegacyDirectoryBaseline,
 } from "./plain-diff.js";
 import {
   CLAUDE_BRIDGE_BASENAME,
@@ -46,6 +56,8 @@ export interface CreateEnvelopeOptions {
   baseRef?: string;
   accessProfile?: AccessProfile;
   dirtyPolicy?: DirtyPolicy;
+  workspaceKind?: WorkspaceKind;
+  scopePaths?: string[];
   /**
    * Run against the live `repoRoot` directly instead of an isolated git worktree.
    * Used for external stateful environments that may not be git repositories
@@ -61,36 +73,14 @@ export interface CreateEnvelopeOptions {
  * per-harness config dirs, and dirty-tree handling. Claudexor owns these
  * envelopes (it does not rely on a harness's native --worktree).
  */
-/** `ps` start time for a pid, or null when unavailable. Pid+start-time
- * equality is the recycling-proof liveness identity for envelope owners
- * (command names/titles mutate; the kernel start time never does). */
-export function processStartTime(pid: number): string | null {
-  try {
-    const out = execFileSync("ps", ["-p", String(pid), "-o", "lstart="], {
-      encoding: "utf8",
-    }).trim();
-    return out.length > 0 ? out : null;
-  } catch {
-    return null;
-  }
-}
+export { processStartTime } from "./envelope-recovery.js";
 
 export class WorkspaceManager {
   private readonly runtimeRoot: string;
   private readonly artifactOwnership: ArtifactOwnership;
 
-  /**
-   * Envelope ids whose worktree bridge THIS manager's prep actually created
-   * (`ensureClaudeBridge` returned `created: true`) during THIS run. The
-   * diff-exclusion of the generated `CLAUDE.md` bridge is gated on this recorded
-   * fact — not on content alone (A-3 residual): byte-equality cannot tell "we
-   * wrote this bridge this run" from "a candidate rewrote a PRE-EXISTING
-   * committed CLAUDE.md to exactly CLAUDE_BRIDGE_CONTENT", and excluding the
-   * latter would silently drop the candidate's real edit. This state is
-   * intentionally in-memory and per-manager: if a daemon upgrade recreates the
-   * manager mid-run the fact is lost, and its ABSENCE fails toward CAPTURE
-   * (exclude only on positive proof), matching the safe-direction doctrine.
-   */
+  /** Current-prep bridge ownership, also persisted beside owner.json for recovery.
+   * Only a bridge created here and still byte-identical is excluded from capture. */
   private readonly bridgeCreatedEnvelopes = new Set<string>();
 
   constructor(
@@ -177,8 +167,20 @@ export class WorkspaceManager {
         created_at: nowIso(),
         envelope_id: envelopeId,
         workspace_mode: workspaceMode,
+        workspace_kind: opts.workspaceKind,
       }) + "\n",
     );
+
+    if (opts.workspaceKind === "directory") {
+      return createDirectoryEnvelope({
+        ...opts,
+        sourceRoot: this.repoRoot,
+        envelopeRoot: base,
+        envelopeId,
+        homeDir,
+        harnessConfigDirs,
+      });
+    }
 
     // In-place mode: mutate the live repoRoot directly (no isolated checkout).
     // Used for thread turns (chat-first: the next turn sees this one's work) and
@@ -192,7 +194,7 @@ export class WorkspaceManager {
       // delivery. The native adapter policy owns the promised read-only mode.
       const readOnly = opts.accessProfile === "readonly";
       const baseSha = !readOnly && gitRepo ? await snapshotTree(this.repoRoot) : null;
-      if (!readOnly && !gitRepo) this.snapshotBaseline(base);
+      if (!readOnly && !gitRepo) snapshotLegacyDirectoryBaseline(this.repoRoot, base);
       return WorkspaceEnvelopeSchema.parse({
         id: envelopeId,
         task_id: opts.taskId,
@@ -281,27 +283,6 @@ export class WorkspaceManager {
     return envelope;
   }
 
-  /**
-   * Best-effort baseline copy of the live tree for in-place diff(). Copies each
-   * top-level entry individually while skipping only VCS/heavy ephemeral dirs.
-   * The baseline is external, so project `.claudexor/` content is ordinary user
-   * state and is copied like every other project path. On any failure the
-   * baseline is absent and diff() returns empty; reviewers still read the tree.
-   */
-  private snapshotBaseline(base: string): void {
-    const baseline = join(base, "baseline");
-    const skip = new Set([".git", "node_modules", "__pycache__", ".venv", "venv"]);
-    try {
-      ensureDir(baseline);
-      for (const entry of readdirSync(this.repoRoot)) {
-        if (skip.has(entry)) continue;
-        cpSync(join(this.repoRoot, entry), join(baseline, entry), { recursive: true });
-      }
-    } catch {
-      /* baseline unavailable -> diff() falls back to empty */
-    }
-  }
-
   /** Env vars that scope a child harness to this envelope (HOME + per-harness config dirs). */
   envFor(env: WorkspaceEnvelope): Record<string, string> {
     return {
@@ -371,6 +352,10 @@ export class WorkspaceManager {
     diff: string;
     binarySecretLike: boolean;
   }> {
+    if (env.workspace_kind === "directory")
+      throw new WorkspaceError(
+        "Directory results use captureFiles; a text diff is not their work product",
+      );
     if (env.policy_profile === "readonly") {
       return { diff: "", binarySecretLike: false };
     }
@@ -472,6 +457,27 @@ export class WorkspaceManager {
     return (await this.captureDiff(env)).diff;
   }
 
+  /** Directory work products retain full files, independently of diff previews. */
+  async captureFiles(
+    env: WorkspaceEnvelope,
+    runRoot: string,
+    options: {
+      observedPaths?: string[];
+      sourceRoot?: string;
+    } = {},
+  ): Promise<CapturedWorkspaceFiles> {
+    if (env.workspace_kind !== "directory")
+      throw new WorkspaceError("captureFiles requires a directory workspace");
+    const owned = this.ownedArtifactRelativeDirectory(env);
+    return captureDirectoryWorkspace({
+      executionRoot: env.worktree_path,
+      envelopeRoot: this.envelopeBase(env.task_id, env.attempt_id),
+      runRoot,
+      ...options,
+      excludedPaths: owned ? [owned] : [],
+    });
+  }
+
   /** The created-this-run bridge fact for diff(): in-memory set first, else
    *  the persisted envelope-id-bound marker (survives manager recreation). */
   private bridgeCreatedFact(env: WorkspaceEnvelope): boolean {
@@ -487,7 +493,7 @@ export class WorkspaceManager {
     // worktree or the tree itself in that case.
     const inPlace = env.worktree_path === env.repo_root;
     if (inPlace) this.artifactOwnership.removeDirectory(env);
-    if (!inPlace) {
+    if (!inPlace && env.workspace_kind !== "directory") {
       const privateClone = existsSync(
         join(this.envelopeBase(env.task_id, env.attempt_id), "private-clone-v1"),
       );
@@ -530,7 +536,7 @@ export class WorkspaceManager {
     } catch {
       /* best-effort */
     }
-    if (!inPlace) {
+    if (!inPlace && env.workspace_kind !== "directory") {
       try {
         await worktreePrune(this.repoRoot);
       } catch {
@@ -557,15 +563,17 @@ export class WorkspaceManager {
       );
     }
     const inPlace = recovery?.workspaceMode === "in_place";
+    const directory = recovery?.workspaceKind === "directory";
     const envelope = WorkspaceEnvelopeSchema.parse({
       id: recovery?.envelopeId ?? newId("env"),
       task_id: taskId,
       attempt_id: attemptId,
       repo_root: this.repoRoot,
-      base_ref: "HEAD",
-      base_sha: inPlace ? null : "0000000000000000000000000000000000000000",
+      base_ref: directory ? null : "HEAD",
+      base_sha: directory || inPlace ? null : "0000000000000000000000000000000000000000",
+      workspace_kind: recovery?.workspaceKind,
       worktree_path: inPlace ? this.repoRoot : join(base, "tree"),
-      branch_name: inPlace ? "inplace" : `claudexor/${taskId}/${attemptId}`,
+      branch_name: directory ? null : inPlace ? "inplace" : `claudexor/${taskId}/${attemptId}`,
       home_dir: join(base, "home"),
       harness_config_dirs: {
         codex_home: join(base, "home", ".codex"),

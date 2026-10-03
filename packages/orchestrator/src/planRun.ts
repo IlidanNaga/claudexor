@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import {
   PlanQuestionsArtifact,
+  MAX_COUNCIL_MEMBERS_DEFAULT,
   type ActiveTaskContract,
   derivePlanReadiness,
   makeOutcomeFacts,
@@ -12,8 +13,10 @@ import { ArtifactStore, type RunPaths } from "@claudexor/artifact-store";
 import { EventLog } from "@claudexor/event-log";
 import { BudgetLedger } from "@claudexor/budget";
 import type { AttemptTelemetry } from "./attemptTelemetry.js";
-import { readOnlyNoSuccessTerminal, type AttemptOutcomeClass } from "./attemptFinalize.js";
+import { readOnlyNoSuccessTerminal } from "./attemptFinalize.js";
 import { cancelledResult, writeFailure } from "./runTerminals.js";
+import { requestRefusalFailure } from "./runTerminalResults.js";
+import { unanimousDeclaredFailure } from "./candidateEvidence.js";
 import { type BudgetDenial, budgetFailureRecord, classifyBudgetFailure } from "./budgetFailure.js";
 import { extractPlanQuestions } from "./planQuestions.js";
 import { emitPlanTerminal, resolvePlanTerminalFacts } from "./planTerminal.js";
@@ -27,13 +30,12 @@ import {
 } from "./council.js";
 import { stageCouncilDraft, type CouncilMergeInput } from "./council-input.js";
 import type { OrchestratorResult, RoutedAdapter, RunInput } from "./orchestrator.js";
-import type { PlannerAttemptArgs, PlannerAttemptOutcome } from "./plannerAttempt.js";
-type PlanAttemptSummary = Pick<
-  PlannerAttemptOutcome,
-  "attemptId" | "harnessId" | "status" | "error"
-> & {
-  outcomeClass?: AttemptOutcomeClass;
-};
+import {
+  plannerAttemptSummary,
+  type PlannerAttemptArgs,
+  type PlannerAttemptOutcome,
+} from "./plannerAttempt.js";
+type PlanAttemptSummary = ReturnType<typeof plannerAttemptSummary>;
 /** Council orchestration and shared solo/Council finalize/failure tails. */
 export interface PlanRunDeps {
   /** One planner spawn (native plan mode, read-only) — the SAME machinery the
@@ -56,18 +58,14 @@ export interface PlanRunDeps {
   /** The solo planner prompt (native plan-mode template with the tagged Open
    * Questions block); council members draft with the same prompt. */
   planPrompt(goal: string): string;
+  /** Startup-frozen cap for Council membership. */
+  maxCouncilMembers?: number;
 }
 
-/**
- * Council plan strategy (INV-031 / D31). Round 1: every member drafts a plan
- * in parallel, REUSING the same planner spawn (native plan mode, read-only,
- * own lane home on a thread turn). Drafts land as file-backed run artifacts.
- * Merge: ONE extra planner iteration on the PRIMARY (intent=synthesize) whose
- * prompt POINTS at the surviving draft files by absolute path — the tagged
- * Open-Questions parser then runs on the MERGE output only, producing the
- * same final artifacts a solo plan produces (downstream unchanged). A failed
- * member stays failed; its narrowly eligible unverified text may still be input.
- */
+/** Council (INV-031/D31) drafts in parallel through the ordinary read-only
+ * planner, then the primary synthesizes surviving file-backed inputs.
+ * Only the merged plan supplies final questions/artifacts. Failed members stay
+ * failed even when their narrowly eligible unverified text informs the merge. */
 export async function runCouncilPlan(
   deps: PlanRunDeps,
   args: {
@@ -96,7 +94,11 @@ export async function runCouncilPlan(
   // Distinct pool members, primary first (adapters are already ordered +
   // deduped by resolveCandidateAdapters with n=undefined). Council never
   // duplicates a harness into two members.
-  const { requested, members: memberCount } = resolveCouncilWidth(input.n, adapters.length);
+  const { requested, members: memberCount } = resolveCouncilWidth(
+    input.n,
+    adapters.length,
+    deps.maxCouncilMembers ?? MAX_COUNCIL_MEMBERS_DEFAULT,
+  );
   const memberAdapters = adapters.slice(0, memberCount);
   log.emit("council.started", {
     requested,
@@ -144,10 +146,8 @@ export async function runCouncilPlan(
           telemetry: outcome.telemetry,
         });
       planAttempts.push({
-        attemptId: outcome.attemptId,
-        harnessId: outcome.harnessId,
+        ...plannerAttemptSummary(outcome),
         status: outcome.status === "success" && !staged.input ? "failed" : outcome.status,
-        outcomeClass: outcome.outcomeClass,
         error: staged.error,
       });
       if (outcome.budgetDenied) councilBudgetDenial ??= outcome.budgetDenial ?? null;
@@ -225,6 +225,7 @@ export async function runCouncilPlan(
         planAttempts,
         attemptTelemetries,
         budgetDenial: councilBudgetDenial,
+        aggregateFailure: true,
         preservedDrafts,
       },
       "all council members failed",
@@ -268,13 +269,7 @@ export async function runCouncilPlan(
       harnessId: mergeOutcome.harnessId,
       telemetry: mergeOutcome.telemetry,
     });
-  planAttempts.push({
-    attemptId: mergeOutcome.attemptId,
-    harnessId: mergeOutcome.harnessId,
-    status: mergeOutcome.status,
-    outcomeClass: mergeOutcome.outcomeClass,
-    error: mergeOutcome.error,
-  });
+  planAttempts.push(plannerAttemptSummary(mergeOutcome));
 
   const mergedBy = mergeOutcome.status === "success" ? primary.adapter.id : null;
   // QA-047 root cause 4: a member card carries its DRAFT error only — the
@@ -471,9 +466,7 @@ export function finalizePlanRun(
   };
 }
 
-/** Shared typed-failure tail for a plan run where NO plan body was produced
- * (every planner failed, or the council merge failed). Mirrors the solo
- * plans.length===0 path so both surfaces disclose identically. */
+/** Shared failure projection when solo planning or Council produces no plan. */
 export function writePlanHarnessFailure(
   deps: PlanRunDeps,
   ctx: {
@@ -486,24 +479,21 @@ export function writePlanHarnessFailure(
     ledger: BudgetLedger;
     planAttempts: PlanAttemptSummary[];
     attemptTelemetries: { attemptId: string; harnessId: string; telemetry: AttemptTelemetry }[];
-    /** QA-050: the typed budget denial captured when a planner slot was refused
-     * pre-spawn, so plan/council terminals emit a budget failure (typed code +
-     * remediation) instead of a harness auth/setup template. */
+    /** QA-050: preserve a planner's pre-spawn budget denial. */
     budgetDenial?: BudgetDenial | null;
     preservedDrafts?: string[];
+    aggregateFailure?: boolean;
   },
   fallbackMessage: string,
 ): OrchestratorResult {
   const { contract, taskId, runId, store, paths, log, ledger, planAttempts } = ctx;
   const blocked = planAttempts.some((p) => p.status === "blocked");
-  // QA-050: a budget refusal (pre-spawn denial, or a settled budget terminal)
-  // is a BUDGET failure across plan + council, not a harness one.
+  // QA-050: budget and policy precedence is independent of input refusals.
   const budgetMapping =
     !blocked && (ctx.budgetDenial || ledger.terminal())
       ? classifyBudgetFailure({ denial: ctx.budgetDenial ?? null, terminal: ledger.terminal() })
       : null;
-  // QA-047 root cause 3: a proven-success draft can NEVER read "failed". Only
-  // non-success attempts feed failure lines; drafts are preserved evidence.
+  // QA-047: successful drafts remain preserved evidence, never failure lines.
   const failedLines = planAttempts
     .filter((p) => p.status !== "success")
     .map((p) => `${p.attemptId}/${p.harnessId}: ${p.error ?? "failed"}`);
@@ -537,24 +527,41 @@ export function writePlanHarnessFailure(
       }),
     );
   } else {
+    const refusals = (ctx.aggregateFailure ? planAttempts : planAttempts.slice(-1)).map(
+      (p) =>
+        p.declaredFailure ??
+        (() => {
+          const refusal = ctx.attemptTelemetries.find((a) => a.attemptId === p.attemptId)?.telemetry
+            .requestRefusal;
+          return refusal && requestRefusalFailure(refusal);
+        })(),
+    );
+    const declared = blocked
+      ? null
+      : unanimousDeclaredFailure(
+          refusals.map((refusal) => ({
+            declaredFailure: refusal,
+          })),
+        );
     const harnessCategory = dominantHarnessFailureCategory(
       ctx.attemptTelemetries.flatMap((attempt) => attempt.telemetry.transientFailures),
     );
     writeFailure(store, paths, {
       phase: "harness",
-      category: blocked ? "policy" : "harness_error",
+      category: blocked ? "policy" : (declared?.category ?? "harness_error"),
+      code: declared?.code,
+      requestRefusal: declared?.requestRefusal,
       safeMessage: message,
       eventRefs: planAttempts.map((p) => `attempts/${p.attemptId}/events.jsonl`),
       runDir: paths.root,
-      nextActions: harnessFailureNextActions(harnessCategory),
+      nextActions: harnessFailureNextActions(
+        declared?.category === "config_error" ? "config_error" : harnessCategory,
+      ),
     });
   }
-  // D-16 r9: when NO planner blocked/budget-failed and some ran out of
-  // context, the terminal is interrupted — not a generic harness failure.
+  // D-16: context exhaustion stays interrupted after policy/budget precedence.
   const anyInterrupted = planAttempts.some((p) => p.outcomeClass === "interrupted");
-  // The Plan failure tail has no canonical final/plan.md by definition. Reuse
-  // the read-only deliverable owner so a policy-blocked raw response cannot be
-  // promoted to a successful "Needs review" run after its plan was discarded.
+  // No canonical plan: the read-only owner must not promote discarded raw output.
   const noPlanTerminal = readOnlyNoSuccessTerminal({
     webBlocked: blocked,
     hasDeliverable: false,

@@ -2,6 +2,20 @@ import { describe, expect, it } from "vitest";
 import { defaultClaudexorTools } from "./index.js";
 
 describe("MCP run-control applicability", () => {
+  it("advertises and preserves shared execution geometry with explicit Processing", async () => {
+    let received: unknown;
+    const tool = defaultClaudexorTools(async (params) => {
+      received = params;
+      return {};
+    }).find((entry) => entry.name === "claudexor_run")!;
+    expect((tool.inputSchema as any).properties.execution.properties.workspaceKind.enum).toEqual([
+      "git",
+      "directory",
+    ]);
+    const execution = { workspaceKind: "directory", scopePaths: ["assets", "brief.txt"] };
+    await tool.handler({ prompt: "go", processingPreference: "standard", execution }, {});
+    expect(received).toMatchObject({ mode: "agent", execution, processingPreference: "standard" });
+  });
   const tools = defaultClaudexorTools(async () => ({ summary: "ok" }));
 
   it.each(["claudexor_ask", "claudexor_plan"])(

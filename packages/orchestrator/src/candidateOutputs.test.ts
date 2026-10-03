@@ -193,6 +193,29 @@ describe("candidate produced-output persistence", () => {
     expect(packet.content).toContain("fix the blocker");
   });
 
+  it("carries complete directory manifest references into synthesis content", () => {
+    const packet = buildFileBackedSynthesisInput({
+      instructions: "Combine files.",
+      findings: [],
+      candidates: [
+        {
+          label: "Files A",
+          attemptId: "a01",
+          diff: "",
+          files: {
+            manifestPath: "attempts/a01/files/manifest.json",
+            manifestSha256: "sha256:manifest",
+            artifactRoot: "/tmp/attempt-a01",
+            manifest: { entries: [{ path: "out.bin", after: { kind: "file" } }] },
+          },
+        },
+      ],
+    });
+    expect(packet.content).toContain("attempts/a01/files/manifest.json");
+    expect(packet.content).toContain("/tmp/attempt-a01");
+    expect(packet.content).toContain('"out.bin"');
+  });
+
   it("stages synthesis context transiently and cleans it before diffing", () => {
     const worktree = root("claudexor-synthesis-tree-");
     const path = join(worktree, ".claudexor-synthesis-input.md");

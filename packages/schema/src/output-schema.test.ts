@@ -1,11 +1,82 @@
 import { describe, expect, it } from "vitest";
 import {
   normalizeUserOutputSchema,
+  restoreStrictOptionalNulls,
   strictifyOutputSchema,
   UnsupportedOutputSchemaError,
 } from "./output-schema.js";
 
 describe("strictifyOutputSchema", () => {
+  it("restores adapter-created nulls only for optional non-nullable properties", () => {
+    const schema = {
+      type: "object",
+      properties: {
+        optionalText: { type: "string" },
+        nullableText: { type: ["string", "null"] },
+        legacyNullable: { type: "string", nullable: true },
+        requiredText: { type: "string" },
+        nested: {
+          type: "object",
+          properties: { child: { type: "string" } },
+          required: [],
+        },
+      },
+      required: ["requiredText"],
+    };
+    const restored = restoreStrictOptionalNulls(schema, {
+      optionalText: null,
+      nullableText: null,
+      legacyNullable: null,
+      requiredText: null,
+      nested: { child: null },
+    });
+    expect(restored).toEqual({
+      value: { nullableText: null, legacyNullable: null, requiredText: null, nested: {} },
+      erasedCount: 2,
+    });
+  });
+
+  it("fails closed when branch-dependent schema applicators are present", () => {
+    const schema = {
+      type: "object",
+      properties: { status: { type: "string" } },
+      anyOf: [{ properties: { status: { type: ["string", "null"] } } }],
+    };
+    expect(restoreStrictOptionalNulls(schema, { status: null })).toEqual({
+      value: { status: null },
+      erasedCount: 0,
+    });
+  });
+
+  it("keeps keyword-looking property names and fails closed for nested applicators", () => {
+    expect(
+      restoreStrictOptionalNulls(
+        {
+          type: "object",
+          properties: { if: { type: "string" }, anyOf: { type: "string" } },
+          required: [],
+        },
+        { if: null, anyOf: null },
+      ),
+    ).toEqual({ value: {}, erasedCount: 2 });
+    expect(
+      restoreStrictOptionalNulls(
+        {
+          type: "object",
+          properties: {
+            nested: {
+              type: "object",
+              properties: { note: { type: "string" } },
+              anyOf: [{ properties: { note: { type: ["string", "null"] } } }],
+            },
+          },
+          required: [],
+        },
+        { nested: { note: null } },
+      ),
+    ).toEqual({ value: { nested: { note: null } }, erasedCount: 0 });
+  });
+
   it("keeps the dialect declaration out of the native provider transport", () => {
     const source = {
       $schema: "https://json-schema.org/draft/2020-12/schema",

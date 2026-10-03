@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { HarnessAdapter } from "@claudexor/core";
-import { HarnessRunSpec, type CredentialProfile } from "@claudexor/schema";
+import { HarnessRunSpec, CredentialProfile } from "@claudexor/schema";
 import {
   assertRouteModelsAllowed,
   runModelGovernedRoute,
@@ -50,7 +50,7 @@ describe("runModelGovernedRoute", () => {
       }
     };
     await expect(consume()).rejects.toThrow(
-      /profile 'rotated'.*verify or re-authenticate that profile/,
+      /profile 'rotated' supplied this live inventory \(\d+ models\); inspect that profile's own vendor model list/,
     );
     expect(models).toHaveBeenCalledWith({
       cwd: "/repo/attempt",
@@ -261,5 +261,221 @@ describe("profile-less auto is answered as auto, never rewritten", () => {
     await assertRouteModelsAllowed([routed], undefined, "/repo");
 
     expect(seen).toEqual([{ cwd: "/repo" }]);
+  });
+});
+
+/**
+ * The regression this change exists for. A codex `model/list` probe whose
+ * remote fetch timed out answers with the CLI's bundled default list — live in
+ * shape, stale in content — and nothing on the wire marks it. Under the old
+ * strict gate that list refused `gpt-6-astra` on the very accounts that were
+ * serving it, in under a second, for free, as an untyped failure. An advisory
+ * inventory now forwards the explicit model and says once that it was unlisted.
+ */
+describe("advisory live inventory (absence is not proof)", () => {
+  // The exact list observed in the live refusals: astra dropped from the front,
+  // gpt-5.2 appended at the back — a previous generation of the same list.
+  const STALE = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.2"];
+  const NOTE =
+    "model \"gpt-6-astra\" is not in this account's listed models; this harness's list " +
+    "cannot prove a model is absent, so the request is forwarded to the vendor";
+
+  const codexish = (
+    absence: "authoritative" | "advisory" | undefined,
+    list: readonly string[],
+    runSpecs: HarnessRunSpec[] = [],
+  ): ModelGovernedRoute => ({
+    adapter: {
+      id: "codex",
+      models: async () => list.map((id) => ({ id, label: null })),
+      run: (spec: HarnessRunSpec) =>
+        (async function* () {
+          runSpecs.push(spec);
+          yield* [];
+        })(),
+    } as unknown as HarnessAdapter,
+    knownModels: ["gpt-6-astra"],
+    modelInventory: {
+      model_inventory_routes: ["local_session"],
+      ...(absence ? { model_inventory_absence: absence } : {}),
+    },
+    authRouteEstimate: "local_session",
+    quotaAdmission: { profile: null },
+    settings: { defaultModel: "gpt-6-astra", fallbackModel: null },
+  });
+
+  const astraSpec = (session: string): HarnessRunSpec =>
+    HarnessRunSpec.parse({
+      session_id: session,
+      intent: "audit",
+      prompt: "review",
+      cwd: "/repo",
+      env: { HOME: "/state" },
+      auth_preference: "subscription",
+      model_hint: "gpt-6-astra",
+    });
+
+  it("admits the unlisted model at BOTH gates, discloses once, and spawns the spec byte-identical", async () => {
+    const runSpecs: HarnessRunSpec[] = [];
+    const routed = codexish("advisory", STALE, runSpecs);
+    // Preflight stays SILENT (it has no event stream; the spawn gate speaks).
+    await assertRouteModelsAllowed([routed], undefined, "/repo");
+    const spec = astraSpec("ses-advisory-stale");
+    const events = [];
+    for await (const event of runModelGovernedRoute(routed, spec)) events.push(event);
+    const disclosures = events.filter((event) => event.type === "status" && event.text);
+    expect(disclosures).toHaveLength(1);
+    expect(disclosures[0]?.text).toBe(NOTE);
+    expect(disclosures[0]?.session_id).toBe("ses-advisory-stale");
+    // Never a second list: the manifest (which HAS astra) is not substituted,
+    // and the spec the adapter receives is the one the caller asked for.
+    expect(runSpecs).toEqual([spec]);
+    expect(runSpecs[0]?.model_hint).toBe("gpt-6-astra");
+  });
+
+  it("forwards an EMPTY live answer too, with the note naming that case", async () => {
+    const runSpecs: HarnessRunSpec[] = [];
+    const routed = codexish("advisory", [], runSpecs);
+    await assertRouteModelsAllowed([routed], undefined, "/repo");
+    const events = [];
+    for await (const event of runModelGovernedRoute(routed, astraSpec("ses-advisory-empty")))
+      events.push(event);
+    expect(
+      events.filter((event) => event.type === "status" && event.text).map((event) => event.text),
+    ).toEqual([
+      "the harness returned no model list; this harness's list cannot prove a model is " +
+        "absent, so the request is forwarded to the vendor",
+    ]);
+    expect(runSpecs).toHaveLength(1);
+  });
+
+  it("emits no model warning when the live list DOES carry the model", async () => {
+    const routed = codexish("advisory", [...STALE, "gpt-6-astra"]);
+    const events = [];
+    for await (const event of runModelGovernedRoute(routed, astraSpec("ses-advisory-listed")))
+      events.push(event);
+    expect(events.filter((event) => event.text)).toEqual([]);
+    expect(events[0]?.effort_resolution).toMatchObject({ requested: null, resolution: "omitted" });
+  });
+
+  it("an AUTHORITATIVE adapter still refuses the same list with today's exact text", async () => {
+    for (const absence of ["authoritative", undefined] as const) {
+      const runSpecs: HarnessRunSpec[] = [];
+      const routed = codexish(absence, STALE, runSpecs);
+      const consume = async () => {
+        for await (const _event of runModelGovernedRoute(routed, astraSpec("ses-strict"))) {
+          /* the refusal precedes every event */
+        }
+      };
+      await expect(consume()).rejects.toThrow(
+        "harness 'codex' refused model 'gpt-6-astra' (truth source: api): " +
+          'model "gpt-6-astra" is not in the harness\'s live model inventory ' +
+          "(gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5, gpt-5.2); " +
+          "run `claudexor models --harness codex`",
+      );
+      await expect(assertRouteModelsAllowed([routed], undefined, "/repo")).rejects.toThrow(
+        /refused model 'gpt-6-astra'/,
+      );
+      expect(runSpecs).toEqual([]);
+    }
+  });
+
+  it("an authoritative adapter still refuses an EMPTY inventory with today's exact text", async () => {
+    const routed = codexish("authoritative", []);
+    await expect(assertRouteModelsAllowed([routed], undefined, "/repo")).rejects.toThrow(
+      "harness 'codex' refused model 'gpt-6-astra' (truth source: api): this harness cannot " +
+        "verify models (no live model inventory); repair the live account/auth route or use " +
+        "the harness default (omit the model); run `claudexor models --harness codex`",
+    );
+  });
+
+  it("carries the advisory declaration to MANIFEST truth on another route (the harness declares, not the list)", async () => {
+    // An api_key route reads the manifest hints. Those are one day's memory of
+    // the same vendor menu, so the harness's declaration governs them too:
+    // advisory forwards the miss; authoritative refuses it with today's text.
+    // No list is swapped for another either way (the live list is never read).
+    const profile = CredentialProfile.parse({
+      profile_id: "api",
+      harness_id: "codex",
+      display_name: "API",
+      credential_kind: "api_key",
+      secret_ref: "openai:api",
+    });
+    const forwarded: ModelGovernedRoute = {
+      ...codexish("advisory", STALE),
+      knownModels: [{ id: "manifest-only", routes: ["api_key"] }],
+      quotaAdmission: { profile },
+    };
+    await expect(
+      assertRouteModelsAllowed([forwarded], { codex: "gpt-6-astra" }, "/repo"),
+    ).resolves.toBeUndefined();
+    const refused: ModelGovernedRoute = {
+      ...codexish("authoritative", STALE),
+      knownModels: [{ id: "manifest-only", routes: ["api_key"] }],
+      quotaAdmission: { profile },
+    };
+    await expect(
+      assertRouteModelsAllowed([refused], { codex: "gpt-6-astra" }, "/repo"),
+    ).rejects.toThrow(
+      /truth source: manifest, route: api_key.*manifest known-model list \(manifest-only\)/,
+    );
+  });
+});
+
+describe("route-scoped live model producer", () => {
+  it("admits the API-key manifest model at preflight and actual spawn without borrowing native inventory", async () => {
+    const profile = CredentialProfile.parse({
+      profile_id: "api-key",
+      harness_id: "generic",
+      display_name: "API",
+      credential_kind: "api_key",
+      secret_ref: "openai:api",
+    });
+    const models = vi.fn(async () => []);
+    const run = vi.fn((_spec: HarnessRunSpec) =>
+      (async function* () {
+        yield* [];
+      })(),
+    );
+    const routed: ModelGovernedRoute = {
+      adapter: { id: "generic", models, run } as unknown as HarnessAdapter,
+      knownModels: [{ id: "api-model", routes: ["api_key"] }],
+      modelInventory: { model_inventory_routes: ["local_session"] },
+      authRouteEstimate: "local_session",
+      quotaAdmission: { profile },
+      settings: { defaultModel: "api-model", fallbackModel: null },
+    };
+    await assertRouteModelsAllowed([routed], undefined, "/repo");
+    const spec = HarnessRunSpec.parse({
+      session_id: "api-model",
+      intent: "audit",
+      prompt: "test",
+      cwd: "/repo",
+      credential_profile: profile,
+      model_hint: "api-model",
+    });
+    for await (const _event of runModelGovernedRoute(routed, spec)) {
+      /* consume */
+    }
+    expect(models).not.toHaveBeenCalled();
+    expect(run).toHaveBeenCalledWith(spec);
+    await expect(
+      assertRouteModelsAllowed([routed], { generic: "native-model" }, "/repo"),
+    ).rejects.toThrow(/truth source: manifest, route: api_key/);
+    const nativeProfile = CredentialProfile.parse({
+      ...profile,
+      credential_kind: "config_dir_login",
+      secret_ref: null,
+      isolation_locator: "/profiles/native",
+    });
+    const native = {
+      ...routed,
+      knownModels: ["api-model"],
+      quotaAdmission: { profile: nativeProfile },
+    };
+    await expect(assertRouteModelsAllowed([native], undefined, "/repo")).rejects.toThrow(
+      /truth source: api.*cannot verify models/,
+    );
+    expect(models).toHaveBeenCalledWith({ cwd: "/repo", credentialProfile: nativeProfile });
   });
 });

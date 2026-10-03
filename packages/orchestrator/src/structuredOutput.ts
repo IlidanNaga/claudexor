@@ -16,6 +16,7 @@ import {
   outputSchemaDialectFromUri,
   SCHEMA_VERSION,
   StructuredOutputConformance,
+  restoreStrictOptionalNulls,
   type OutputSchemaDialect,
 } from "@claudexor/schema";
 import { hashJson, nowIso } from "@claudexor/util";
@@ -23,6 +24,7 @@ import { hashJson, nowIso } from "@claudexor/util";
 export interface StructuredOutputVerdict {
   status: "passed" | "failed";
   reason: string | null;
+  normalizedOptionalNulls?: number;
 }
 
 /** A declared dialect is caller-actionable, not a retryable engine failure. */
@@ -121,6 +123,8 @@ export function finalizeStructuredOutput(opts: {
   log: EventLog;
   schema: Record<string, unknown>;
   answerText: string | null | undefined;
+  /** True only when the answer rode the adapter-owned strict transport copy. */
+  transportStrictified?: boolean;
 }): StructuredOutputVerdict {
   const schemaDialect = outputSchemaDialect(opts.schema);
   const text = opts.answerText?.trim() ?? "";
@@ -140,15 +144,21 @@ export function finalizeStructuredOutput(opts: {
     }
   }
   let status: "passed" | "failed" = "failed";
+  let normalizedOptionalNulls = 0;
   if (parsed) {
     // strict:false — accept the JSON Schema dialect as-authored; do not
     // re-litigate meta-schema strictness (the boundary already proved it
     // compiles). This validates the ORIGINAL caller schema.
+    const restored = opts.transportStrictified
+      ? restoreStrictOptionalNulls(opts.schema, value)
+      : { value, erasedCount: 0 };
+    normalizedOptionalNulls = restored.erasedCount;
     const compiler = outputSchemaCompiler(opts.schema);
     try {
       const validate = compiler.ajv.compile(compiler.schema);
-      if (validate(value) === true) {
+      if (validate(restored.value) === true) {
         status = "passed";
+        value = restored.value;
       } else {
         reason =
           (validate.errors ?? [])
@@ -180,6 +190,7 @@ export function finalizeStructuredOutput(opts: {
     status,
     reason: status === "passed" ? null : reason,
     output_path: outputPath,
+    normalized_optional_nulls: normalizedOptionalNulls,
     generated_at: nowIso(),
   });
   opts.store.writeYaml(join(opts.finalDir, "structured_output.yaml"), receipt);
@@ -190,5 +201,5 @@ export function finalizeStructuredOutput(opts: {
       ...(status === "passed" ? {} : { state: "diagnostic" }),
     });
   }
-  return { status, reason: receipt.reason };
+  return { status, reason: receipt.reason, normalizedOptionalNulls };
 }

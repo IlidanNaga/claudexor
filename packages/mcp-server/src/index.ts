@@ -1,3 +1,4 @@
+import { runExecutionSchema } from "./run-execution-schema.js";
 import { isAbsolute } from "node:path";
 import agentCapabilityCatalogSchemaRaw from "@claudexor/schema/generated/AgentCapabilityCatalog.schema.json" with { type: "json" };
 import accountsQuerySchemaRaw from "@claudexor/schema/generated/ControlCredentialProfilesQueryResponse.schema.json" with { type: "json" };
@@ -27,44 +28,9 @@ import { journalRecoveryTools } from "./recovery-tools.js";
 import { formatRunResult, structuredRunResult } from "./run-result-format.js";
 import { assertNoPluginArtifactSkew } from "./plugin-skew.js";
 import { accountsTool } from "./accounts-tool.js";
-import { reviewerPanelEntrySchema } from "./reviewer-panel-schema.js";
-// Inline generated refs once at load; the SDK requires self-contained schemas.
-function inlineJsonSchemaRefs(schema: Record<string, unknown>): Record<string, unknown> {
-  const resolvePointer = (pointer: string): unknown => {
-    let node: unknown = schema;
-    for (const rawSegment of pointer.split("/").slice(1)) {
-      const segment = rawSegment.replaceAll("~1", "/").replaceAll("~0", "~");
-      if (Array.isArray(node)) node = node[Number(segment)];
-      else if (node && typeof node === "object") node = (node as Record<string, unknown>)[segment];
-      else return undefined;
-    }
-    return node;
-  };
-  const resolve = (node: unknown, stack: readonly string[]): unknown => {
-    if (Array.isArray(node)) return node.map((child) => resolve(child, stack));
-    if (!node || typeof node !== "object") return node;
-    const obj = node as Record<string, unknown>;
-    const ref = obj["$ref"];
-    if (typeof ref === "string" && ref.startsWith("#/")) {
-      // Generated schemas are trees; fail loudly if a refactor introduces recursion.
-      if (stack.includes(ref))
-        throw new Error(
-          `cyclic $ref '${ref}' in a generated tool schema — flatten the schema or drop its outputSchema`,
-        );
-      const target = resolvePointer(ref);
-      if (target === undefined)
-        throw new Error(`unresolved $ref '${ref}' in a generated tool schema`);
-      return resolve(target, [...stack, ref]);
-    }
-    const out: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(obj)) {
-      if (key === "definitions") continue;
-      out[key] = resolve(value, stack);
-    }
-    return out;
-  };
-  return resolve(schema, []) as Record<string, unknown>;
-}
+import { threadTools } from "./thread-tools.js";
+import { inlineJsonSchemaRefs } from "./inline-json-schema-refs.js";
+import { reviewerPanelEntrySchema, processingPreferenceSchema } from "./reviewer-panel-schema.js";
 const mcpRunToolResultSchema = inlineJsonSchemaRefs(
   mcpRunToolResultSchemaRaw as Record<string, unknown>,
 );
@@ -87,7 +53,7 @@ const RUN_STRATEGY_PROPERTIES = {
   plan: {
     council: {
       type: "boolean",
-      description: "Draft n (2..4) plans in parallel, then merge one plan and question set.",
+      description: "Draft n plans (2 to the configured cap), then merge one plan and question set.",
     },
   },
   agent: {
@@ -117,7 +83,13 @@ export interface McpToolAnnotations {
 }
 
 /** Tool output: plain text, or text plus a structured mirror (structuredContent). */
-export type McpToolOutput = string | { text: string; structured?: Record<string, unknown> };
+export type McpToolOutput =
+  | string
+  | {
+      text: string;
+      structured?: Record<string, unknown>;
+      isError?: boolean;
+    };
 
 export interface McpTool {
   name: string;
@@ -177,6 +149,7 @@ export function buildMcpServer(opts: {
         return {
           content: [{ type: "text" as const, text }],
           ...(structured !== undefined ? { structuredContent: structured } : {}),
+          ...(typeof out !== "string" && out.isError ? { isError: true } : {}),
         };
       }) as any,
     );
@@ -184,10 +157,7 @@ export function buildMcpServer(opts: {
   return server;
 }
 
-/**
- * Serve Claudexor over stdio. The SDK entry owns the era decision per
- * connection; the factory registers the same tools for every era.
- */
+/** Serve the same tools over stdio; the SDK selects the connection's protocol era. */
 export function serveClaudexorMcp(opts: McpServerOptions): { close(): Promise<void> } {
   assertNoPluginArtifactSkew(opts.version);
   const serveOpts: ServeStdioOptions = {
@@ -297,6 +267,7 @@ export function defaultClaudexorTools(runner: RunnerFn): McpTool[] {
         description: "Optional model override for the primary harness.",
       },
       effort: effortJsonSchema("Optional effort override for the primary harness."),
+      processingPreference: processingPreferenceSchema,
       web: {
         type: "string",
         enum: ExternalContextPolicy.options,
@@ -317,7 +288,14 @@ export function defaultClaudexorTools(runner: RunnerFn): McpTool[] {
         type: "string",
         description: "Absolute path of the target project. Defaults to the MCP server cwd.",
       },
+      execution: runExecutionSchema,
       paidBudget: paidBudgetSchema,
+      credentialProfileId: {
+        type: "string",
+        minLength: 1,
+        pattern: "\\S",
+        description: "Strict credential profile for this run; never falls back to another account.",
+      },
       access: {
         type: "string",
         enum: AccessProfile.options,
@@ -471,6 +449,7 @@ export function defaultClaudexorTools(runner: RunnerFn): McpTool[] {
         create: true,
       },
     ),
+    ...threadTools(runner),
     {
       name: "claudexor_status",
       description:

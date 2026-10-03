@@ -5,6 +5,7 @@ export interface TaskFinancialTotals {
   cashUsd: number;
   valuationUsd: number;
   cashEstimated: boolean;
+  cashKnowledge: CostKnowledge | null;
   valuationKnowledge: CostKnowledge | null;
 }
 
@@ -12,12 +13,14 @@ export interface SharedFinancialState {
   budget: PaidBudget;
   thresholds: CircuitThresholds;
   leases: Map<string, BudgetLease>;
-  holds: Map<string, number>;
+  holds: Map<string, { reservedUsd: number; observedUsd: number }>;
   unknownPaidInFlight: Set<string>;
+  physicalDispatchStarted: Set<string>;
   totalsByTask: Map<string, TaskFinancialTotals>;
   cashUsd: number;
   valuationUsd: number;
   cashEstimated: boolean;
+  cashKnowledge: CostKnowledge | null;
   valuationKnowledge: CostKnowledge | null;
   overshot: boolean;
   unverifiable: boolean;
@@ -26,6 +29,7 @@ export interface SharedFinancialState {
     valuationUsd: number,
     cashEstimated: boolean,
     valuationKnowledge: CostKnowledge,
+    cashKnowledge: CostKnowledge,
   ) => void;
 }
 
@@ -37,6 +41,7 @@ export function newSharedFinancialState(
     valuationUsd: number,
     cashEstimated: boolean,
     valuationKnowledge: CostKnowledge,
+    cashKnowledge: CostKnowledge,
   ) => void,
 ): SharedFinancialState {
   return {
@@ -45,10 +50,12 @@ export function newSharedFinancialState(
     leases: new Map(),
     holds: new Map(),
     unknownPaidInFlight: new Set(),
+    physicalDispatchStarted: new Set(),
     totalsByTask: new Map(),
     cashUsd: 0,
     valuationUsd: 0,
     cashEstimated: false,
+    cashKnowledge: null,
     valuationKnowledge: null,
     overshot: false,
     unverifiable: false,
@@ -61,15 +68,17 @@ export function recordSharedSettlement(
   taskTotals: TaskFinancialTotals,
   cashUsd: number,
   valuationUsd: number,
-  cashEstimated: boolean,
+  cashKnowledge: CostKnowledge,
   valuationKnowledge: CostKnowledge | null,
 ): void {
   financial.cashUsd += cashUsd;
   financial.valuationUsd += valuationUsd;
   taskTotals.cashUsd += cashUsd;
   taskTotals.valuationUsd += valuationUsd;
-  taskTotals.cashEstimated ||= cashEstimated;
-  financial.cashEstimated ||= cashEstimated;
+  taskTotals.cashKnowledge = mergeKnowledge(taskTotals.cashKnowledge, cashKnowledge);
+  financial.cashKnowledge = mergeKnowledge(financial.cashKnowledge, cashKnowledge);
+  taskTotals.cashEstimated = taskTotals.cashKnowledge !== "exact";
+  financial.cashEstimated = financial.cashKnowledge !== "exact";
   if (valuationKnowledge !== null) {
     taskTotals.valuationKnowledge = mergeKnowledge(
       taskTotals.valuationKnowledge,
@@ -82,6 +91,7 @@ export function recordSharedSettlement(
     financial.valuationUsd,
     financial.cashEstimated,
     financial.valuationKnowledge ?? "unknown",
+    financial.cashKnowledge ?? "unknown",
   );
 }
 
@@ -91,7 +101,13 @@ export function taskFinancialTotals(
 ): TaskFinancialTotals {
   let totals = financial.totalsByTask.get(taskId);
   if (!totals) {
-    totals = { cashUsd: 0, valuationUsd: 0, cashEstimated: false, valuationKnowledge: null };
+    totals = {
+      cashUsd: 0,
+      valuationUsd: 0,
+      cashEstimated: false,
+      cashKnowledge: null,
+      valuationKnowledge: null,
+    };
     financial.totalsByTask.set(taskId, totals);
   }
   return totals;

@@ -42,12 +42,23 @@ conversation and tool execution remain its own; Claudexor translates the model
 exchange and reports what happened. This reuses the account and control plane
 instead of embedding another relay or importing the person's ordinary CLI login.
 
+The caller can also retain opaque provider transport state for its live reasoning
+turn. Claudexor binds this state to the actual account and model, preserves it
+through body failures, and leaves turn lifetime with the caller. It does not
+create a second conversation store or retry an uncertain generation.
+
 Model content and authorization are distinct responsibilities. The caller's model
 payload keeps its supplied content, including examples that resemble credentials;
 the adapter's own authorization never enters that payload. Temporary exchange
 bytes support result recovery, while compact receipts retain operation identity.
 The calling application remains responsible for conversation history. This narrow
 content boundary does not change the protections on Agent tasks and attachments.
+
+A caller can retain failed-response source evidence in that same private exchange,
+so a lost connection and a local interpretation failure remain reconstructible.
+The evidence describes only bytes actually received. Provider completion and the
+ability to use its message are separate facts: rejecting a message does not erase
+the provider's terminal outcome or reported usage, and it never implies a retry.
 
 ## One Conversation, Many Executors
 
@@ -103,7 +114,14 @@ ordinary row at startup (its credential bytes never move; the vendor's
 ordinary host stores are never read or mutated). An unpinned run routes
 through the quota-aware pool of enabled ready rows, an unpinned conversation
 stays sticky on its account and switches only with a disclosed lane change,
-and an explicit pin is strict — that account or a typed refusal.
+and an explicit pin is strict — that account or a typed refusal. A Cursor
+probe timeout may use that store's bounded previous positive for unpinned
+selection, disclosed as stale unknown; it never becomes a fresh authentication
+claim or relaxes an explicit pin. Managed login invalidates the affected
+observations through the existing setup lifecycle.
+Catalog visibility and execution eligibility are different facts. Discovery can
+show the separate inventories of enabled accounts, including unavailable ones,
+without implying that their combined capabilities belong to any single route.
 Selecting an account never narrows the harness pool; choosing a strategy
 never implicitly pins an account, while an explicit reviewer-slot pin does.
 Quota is read per account from the vendor's own
@@ -124,6 +142,11 @@ Rejected alternative: a privileged "orchestrator harness" role. Harnesses are
 tools; intents route to whichever tool is ready and capable. A primary
 harness exists only as an ordering bias — who answers in chat — never as a
 semantic role.
+
+Processing is a separate service preference for the selected model. A request,
+a submitted native control and observed service are independent evidence;
+changing service does not redefine routing or strategy. The advisory rule has
+one home in [DEVELOPMENT](DEVELOPMENT.md#processing-preference).
 
 ## Conversation Intents, Not A Mode Zoo
 
@@ -176,8 +199,9 @@ deliverable or native subagent; only a matching operation success recovers it.
 Children are pinned by the engine to the original user project rather than the
 parent's temporary envelope, so model-supplied paths cannot change that trust
 boundary. An envelope result from a failed operation remains diagnostic; an
-explicitly in-place run that already wrote live bytes records them as applied
-but review-blocked and revertable before it reports failure.
+explicitly in-place run records already-written bytes honestly. Git-backed
+changes may retain a fenced revert anchor, while direct directory effects keep
+their separate observation limits.
 
 Rejected alternatives, recorded so they stay rejected: a user-facing
 "orchestrate" mode (no leading tool exposes orchestration as a mode; users
@@ -189,11 +213,13 @@ frozen plan document with required sections replaced it); a separate
 
 ## Evidence Beats Summaries
 
-Model prose is context, never proof. Work product is proven by git diffs
-captured in the execution tree, deterministic checks, reviewer artifacts,
-typed events, and recorded side effects. Diffs round-trip byte-faithfully;
-a patch that cannot survive re-application to a clean base does not touch
-the live tree.
+Model prose is context, never proof. Work product is proven by Git diffs or
+complete file manifests captured in the execution tree, deterministic checks,
+reviewer artifacts, typed events, and recorded side effects. Diffs round-trip
+byte-faithfully; a patch that cannot survive re-application to a clean base does not touch
+the live tree. A copied file result likewise binds the complete selected input
+and output bytes, so a preview limit or an empty text diff cannot erase a binary,
+large or file-only outcome. Direct effects carry their actual observation limits.
 
 Status is multi-axis and honest: whether the process finished, whether
 deterministic checks passed (or none are configured — a distinct, named
@@ -231,10 +257,17 @@ completion gate.
 
 No regex governance: risk, permissions, winners, web evidence, and
 tests-passed come from typed contracts and events, never from string-matching
-model output. Unknown cost is unknown — subscription valuation, metered cash,
-and absence are three different typed facts. A route fallback announced before
+model output. Unknown cost is unknown. Ordinary included service, prospective
+premium billing, observed cash, list-price valuation and missing amount evidence
+are different facts. A paid-credit tariff is not a receipt for credit consumption, and native
+authentication cannot make premium service free. A route fallback announced before
 the vendor process starts is selection evidence, not a fabricated paid attempt;
 receipt certainty is judged only across real started intervals.
+
+Token measurement follows the same rule. Normalized input totals and separate
+cache reads/writes retain unknown fields across missing contributions; older
+harness-specific counters keep their original meanings. A cache-read percentage
+therefore requires a measured numerator and denominator from the same scope.
 
 Run evidence lives in two labeled planes: Claudexor's internal orchestration
 record (contracts, events, attempts, reviews), and the project's produced
@@ -299,52 +332,30 @@ run.
 
 ## Workspace Semantics
 
-Chat write turns run in-place in the thread execution tree: the live project for
-an `in_place` thread or its persistent worktree for an `isolated` thread. Both
-use snapshots and a fenced revert as the safety net; candidates, scouts, and
-delegated sub-runs run in isolated envelopes outside the execution tree.
-Git admission follows the execution shape, not read versus write alone:
-explicitly isolated workspaces and Git-backed candidate envelopes may initialize
-a non-git project loudly, while supported in-place paths remain available
-without initialization. Vendor homes and scoped auth state live outside every
-worktree so `git add -A` can never capture credentials.
+Workspace geometry must match the work. Git-backed execution provides branches,
+patches and source-control delivery. Explicit directory execution lets an ordinary
+folder remain an ordinary folder, whether work happens directly there or in a
+copy of the selected inputs. Isolation therefore does not itself authorize Git
+initialization or force a different execution strategy.
 
-Automatic Git initialization is a deliberate outlier among coding agents, and
-the position is architectural, not accidental: the envelope/worktree model
-needs a real Git boundary at the project for honest diffs, and the mutation is
-announced via a typed `project.git.initialized` event — never silent. The
-comparator field:
+Stable project identity remains separate from the folder where the harness runs.
+The caller selects the input footprint; a copy retains that complete footprint
+and its outputs for inspection and later delivery. Applying a copied result is a
+separate decision against the original files. Partial application keeps custody
+of the rest, while discard ends pending delivery without undoing work.
 
-| Agent       | Non-git project root                                                                             | User home directory                             |
-| ----------- | ------------------------------------------------------------------------------------------------ | ----------------------------------------------- |
-| Codex CLI   | `codex exec` refuses to run outside a trusted git repository unless `--skip-git-repo-check`; never runs `git init` in a user's project | the same refusal                                |
-| Claude Code | requires no git (checkpoints/rewind degrade); never initializes one                               | non-persisted trust prompt re-asked every session |
-| Cursor CLI  | no git requirement; creates nothing                                                               | no special rail                                 |
-| Aider       | default-yes consent prompt to create a repo                                                       | refuses to even offer init in the home directory |
-
-(Gemini CLI and opencode keep shadow git state outside the project tree;
-scaffolders such as `cargo new` and `create-next-app` init git only for
-projects they themselves create.) Claudexor also adopts the one norm every
-comparator shares — no one silently initializes an existing user home
-directory: a root equal to the user home or a filesystem root, or one that
-cannot be classified (no safe home resolves, or the root itself does not
-physically resolve — both fail closed), is refused with the typed
-`git_boundary_root_refused` error carrying cause-specific required actions
-(the home and filesystem-root refusals offer a project subfolder or a
-self-run `git init` plus a first commit; an unclassifiable root names its
-classification failure and its own remedy); a home that is already a healthy
-repository (dotfiles users) is
-respected untouched, mirroring Claude Code's `$HOME` rail and Aider's home
-guard. A fuller consent model — auto-init only for empty or freshly created
-roots, consent prompts for non-empty ones, a user's own `git init` as consent,
-a one-click initialize remediation — is a designed backlog item
-(`docs/BACKLOG.md`), not a rejected idea.
+Direct execution records effects already made in the selected folder. Observed
+bytes and known preimages are useful evidence, but they cannot establish an
+unobserved whole-tree state or promise a complete rollback. Filesystem portability
+and native harness support remain separate claims, each requiring its own proof.
+The operational boundaries live in [ARCHITECTURE](ARCHITECTURE.md#directory-execution).
 
 Instruction files stay unified. The recommendation is one `AGENTS.md` at the
 project root — the file Codex, Cursor, and OpenCode already read natively. So a
 Claude Code executor reads the same guidance, Claudexor bridges it with a thin
 `CLAUDE.md` (`@AGENTS.md` plus an ownership marker) whenever the root has an
-`AGENTS.md` and no `CLAUDE.md`. The bridge is exclusive-create and no-follow, so
+`AGENTS.md` and no `CLAUDE.md` on its Git-backed preparation path. The bridge is
+exclusive-create and no-follow, so
 a hand-written `CLAUDE.md` is never touched, and it is written both to the
 project root (durable, announced as a run event) and into each disposable
 envelope checkout — which materializes only committed files — so a candidate
@@ -366,7 +377,8 @@ they do not author concept — owner decisions and the Bible outrank reviewer
 preference, and a finding without evidence blocks nothing.
 
 Reviewer access is also evidence-scoped. The candidate workspace is projected
-from version-control-visible files plus the reviewed diff, while the review
+from version-control-visible files plus the reviewed diff, or from the complete
+selected postimage manifest for directory work, while the review
 packet crosses through a separate sealed or redacted channel. Ignored local
 operator state is therefore not silently promoted into reviewer context.
 
@@ -384,3 +396,9 @@ separate, mechanically verified contract.
 Not a SaaS, no accounts of its own, no telemetry beyond public download
 counts, no autonomous self-modification, no privileged harness, no second
 source of truth beside the engine.
+
+Operator capacity and strategy width are independent: a daemon-wide job pool
+limits simultaneously admitted work, while per-run candidate, scout and Council
+limits govern fan-out within a job. These capacities are user-configurable and
+fixed for the daemon lifetime. Settings distinguish configured values from
+currently effective capacity, so pending changes never look already applied.

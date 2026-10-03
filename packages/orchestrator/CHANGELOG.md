@@ -1,5 +1,552 @@
 # @claudexor/orchestrator
 
+## 3.18.0
+
+### Patch Changes
+
+- 09d08fb: Attribute named-account billing to the selected account's own verification during routing, reservation, inline continuity summaries, and credential rotation. Preserve the original ranking evidence while checking the account that actually dispatches, so a default login or a previous account cannot lend its subscription entitlement.
+
+  Preserve valid reservation estimates and typed pre-send policy refusals. Keep included reviewer panels eligible beside an existing unknown family-budget hold, while retaining declared or observed paid reviewer costs. Cursor status now keeps successful server evidence distinct from its local-token fallback, without changing login readiness or paid-fallback policy.
+
+- Updated dependencies [b00408e]
+  - @claudexor/core@3.18.0
+  - @claudexor/context@3.18.0
+  - @claudexor/delivery@3.18.0
+  - @claudexor/gateway@3.18.0
+  - @claudexor/review@3.18.0
+  - @claudexor/workspace@3.18.0
+  - @claudexor/policy@3.18.0
+  - @claudexor/arbitration@3.18.0
+  - @claudexor/artifact-store@3.18.0
+  - @claudexor/budget@3.18.0
+  - @claudexor/config@3.18.0
+  - @claudexor/event-log@3.18.0
+  - @claudexor/schema@3.18.0
+  - @claudexor/synthesis@3.18.0
+  - @claudexor/util@3.18.0
+
+## 3.17.2
+
+### Patch Changes
+
+- Preserve native input-size refusals without account retries or unrelated quota resets, publish measured ASK input budgets, distinguish proven undelivered Codex model requests, and move large Claude and AGY inputs off process arguments.
+- Updated dependencies
+  - @claudexor/schema@3.17.2
+  - @claudexor/arbitration@3.17.2
+  - @claudexor/budget@3.17.2
+  - @claudexor/config@3.17.2
+  - @claudexor/context@3.17.2
+  - @claudexor/core@3.17.2
+  - @claudexor/delivery@3.17.2
+  - @claudexor/event-log@3.17.2
+  - @claudexor/gateway@3.17.2
+  - @claudexor/policy@3.17.2
+  - @claudexor/review@3.17.2
+  - @claudexor/workspace@3.17.2
+  - @claudexor/synthesis@3.17.2
+  - @claudexor/artifact-store@3.17.2
+  - @claudexor/util@3.17.2
+
+## 3.17.1
+
+### Patch Changes
+
+- 72825b9: Resolve effort preferences at the final native route using the strongest supported level at or below a known request, with an explicitly recorded minimum or vendor-default omission when applicable. Preserve advertised future values, original preferences and model identities. Add shared typed effort evidence to model results and final attempt telemetry; keep adaptation disclosures in logs.
+
+  Preserve strict legacy model results unless creation opts into `captureEffortEvidence=true`, binding that choice to idempotency while keeping exact stored bytes and digest acknowledgement. Keep effort verification metadata in negotiated account catalogs only. Refuse unplaceable effort without retrying another route, clean temporary Codex authorization on preparation exit, and describe prepared controls without claiming dispatch.
+
+- Updated dependencies [72825b9]
+  - @claudexor/schema@3.17.1
+  - @claudexor/core@3.17.1
+  - @claudexor/arbitration@3.17.1
+  - @claudexor/budget@3.17.1
+  - @claudexor/config@3.17.1
+  - @claudexor/context@3.17.1
+  - @claudexor/delivery@3.17.1
+  - @claudexor/event-log@3.17.1
+  - @claudexor/gateway@3.17.1
+  - @claudexor/policy@3.17.1
+  - @claudexor/review@3.17.1
+  - @claudexor/workspace@3.17.1
+  - @claudexor/synthesis@3.17.1
+  - @claudexor/artifact-store@3.17.1
+  - @claudexor/util@3.17.1
+
+## 3.17.0
+
+### Patch Changes
+
+- Updated dependencies [092ec2b]
+- Updated dependencies [951489f]
+  - @claudexor/core@3.17.0
+  - @claudexor/schema@3.17.0
+  - @claudexor/context@3.17.0
+  - @claudexor/delivery@3.17.0
+  - @claudexor/gateway@3.17.0
+  - @claudexor/review@3.17.0
+  - @claudexor/workspace@3.17.0
+  - @claudexor/arbitration@3.17.0
+  - @claudexor/budget@3.17.0
+  - @claudexor/config@3.17.0
+  - @claudexor/event-log@3.17.0
+  - @claudexor/policy@3.17.0
+  - @claudexor/synthesis@3.17.0
+  - @claudexor/artifact-store@3.17.0
+  - @claudexor/util@3.17.0
+
+## 3.16.0
+
+### Minor Changes
+
+- 788ddca: Add `POST /v2/runs/:id/messages`: a live message into a running run's active attempt with journal-first admission, typed outcomes (delivered, accepted, rejected, not_active, unsupported, delivery_unknown) plus reasons, and a key-required idempotent receipt. Each harness declares its live-input channel as `capability_profile.live_input`, projected as `liveInput` in the agent-capability catalog.
+
+### Patch Changes
+
+- Updated dependencies [788ddca]
+  - @claudexor/schema@3.16.0
+  - @claudexor/arbitration@3.16.0
+  - @claudexor/budget@3.16.0
+  - @claudexor/config@3.16.0
+  - @claudexor/context@3.16.0
+  - @claudexor/core@3.16.0
+  - @claudexor/delivery@3.16.0
+  - @claudexor/event-log@3.16.0
+  - @claudexor/gateway@3.16.0
+  - @claudexor/policy@3.16.0
+  - @claudexor/review@3.16.0
+  - @claudexor/workspace@3.16.0
+  - @claudexor/synthesis@3.16.0
+  - @claudexor/artifact-store@3.16.0
+  - @claudexor/util@3.16.0
+
+## 3.15.1
+
+### Patch Changes
+
+- @claudexor/arbitration@3.15.1
+- @claudexor/artifact-store@3.15.1
+- @claudexor/budget@3.15.1
+- @claudexor/config@3.15.1
+- @claudexor/context@3.15.1
+- @claudexor/core@3.15.1
+- @claudexor/delivery@3.15.1
+- @claudexor/event-log@3.15.1
+- @claudexor/gateway@3.15.1
+- @claudexor/policy@3.15.1
+- @claudexor/review@3.15.1
+- @claudexor/schema@3.15.1
+- @claudexor/synthesis@3.15.1
+- @claudexor/util@3.15.1
+- @claudexor/workspace@3.15.1
+
+## 3.15.0
+
+### Patch Changes
+
+- Updated dependencies [3bc8af4]
+  - @claudexor/core@3.15.0
+  - @claudexor/context@3.15.0
+  - @claudexor/delivery@3.15.0
+  - @claudexor/gateway@3.15.0
+  - @claudexor/review@3.15.0
+  - @claudexor/workspace@3.15.0
+  - @claudexor/policy@3.15.0
+  - @claudexor/arbitration@3.15.0
+  - @claudexor/artifact-store@3.15.0
+  - @claudexor/budget@3.15.0
+  - @claudexor/config@3.15.0
+  - @claudexor/event-log@3.15.0
+  - @claudexor/schema@3.15.0
+  - @claudexor/synthesis@3.15.0
+  - @claudexor/util@3.15.0
+
+## 3.14.0
+
+### Minor Changes
+
+- fb42a94: Model admission is the harness's own declaration, honoured on every list it owns.
+
+  `model_inventory_absence` used to govern only a live `models()` answer; every manifest hint list stayed strict by construction, so a settings write, the doctor's configured-model check and the explicit reviewer panel refused any id the shipped list lacked (and `claudexor models` could show nothing beyond that list), so a new vendor model needed a Claudexor release to become usable through them (#338, #340). `validateModel` now takes the list, its source and the declaration with no defaults; the manifest branches of the run gate and the reviewer panel read the declaration; one registry gate (`checkHarnessModel`) replaces the four hand-built copies in the settings write, doctor readiness and the capability catalog.
+
+  Claude, Codex and Cursor declare `advisory` (cursor gains the declaration here; claude's producer lands beside it): their lists prove presence, never absence, so an unlisted explicit model is persisted or forwarded byte-identical and the vendor decides. Each admitting consumer says so once: the settings read-back carries server-owned `notes` (the CLI prints them), the readiness row carries the note in its detail (the text `doctor` prints it too), the per-spawn gate keeps its status event; the agent capability catalog's `configuredModelValid` stays a boolean that reports such an admission as valid without the note (its description says so). raw-api, agy and opencode stay authoritative; the automatic reviewer panel keeps skipping an unlisted family at zero cost; HTTP model operations stay strict against the account catalog read at a named client version. Refusals state observations (which account supplied which list, how many models) instead of guessing a cause such as re-authentication.
+
+  Invariants: INV-104 amended with the owner's approval of 2026-09-24 (CONCEPT-CHANGE): absence is a per-harness declaration honoured on live and manifest lists alike; the settings-write-strict canary moves to agy and `[INV-104:settings-write-advisory]` pins the codex path. INV-105 unchanged (the per-spawn disclosure stays). INV-020/INV-022 hold: `notes` has a producer (the settings write) and readers (the CLI, the canary).
+
+### Patch Changes
+
+- Updated dependencies [2c024ac]
+- Updated dependencies [7e615b6]
+- Updated dependencies [fb42a94]
+  - @claudexor/core@3.14.0
+  - @claudexor/schema@3.14.0
+  - @claudexor/gateway@3.14.0
+  - @claudexor/context@3.14.0
+  - @claudexor/delivery@3.14.0
+  - @claudexor/review@3.14.0
+  - @claudexor/workspace@3.14.0
+  - @claudexor/arbitration@3.14.0
+  - @claudexor/budget@3.14.0
+  - @claudexor/config@3.14.0
+  - @claudexor/event-log@3.14.0
+  - @claudexor/policy@3.14.0
+  - @claudexor/synthesis@3.14.0
+  - @claudexor/artifact-store@3.14.0
+  - @claudexor/util@3.14.0
+
+## 3.13.0
+
+### Patch Changes
+
+- @claudexor/arbitration@3.13.0
+- @claudexor/artifact-store@3.13.0
+- @claudexor/budget@3.13.0
+- @claudexor/config@3.13.0
+- @claudexor/context@3.13.0
+- @claudexor/core@3.13.0
+- @claudexor/delivery@3.13.0
+- @claudexor/event-log@3.13.0
+- @claudexor/gateway@3.13.0
+- @claudexor/policy@3.13.0
+- @claudexor/review@3.13.0
+- @claudexor/schema@3.13.0
+- @claudexor/synthesis@3.13.0
+- @claudexor/util@3.13.0
+- @claudexor/workspace@3.13.0
+
+## 3.12.10
+
+### Patch Changes
+
+- A run's failure record carries the vendor's own failure code beside its words.
+
+  When a Codex turn fails, `codex exec --json` delivers only the vendor's sentence, while Codex's own rollout record of the same thread keeps a machine-readable code (a capacity refusal is `server_overloaded`). Claudexor labelled such a run a process crash, advised that the harness process crashed, and reported the configured retry ceiling as if two retries had run.
+
+  `RunFailure` gains one optional, nullable object, `vendorFailure: { code, message, source }`: the vendor's code and words, read fail-soft from the rollout after the process exited, bound to the current turn, `null` on any doubt and for every harness without such a channel. The code is opaque evidence: nothing in Claudexor branches on its value, and it is not a member of `RunFailureCode`.
+
+  The shared run loop records a typed terminal fact, `harness_reported_error`, only when the harness's own stdout frames produced an error event. A harness that voiced its own error and then exited non-zero is classified `unknown_harness_error` with an explicit `retryable: false` instead of `process_crash`; a signal kill, a spawn failure and a silent non-zero exit keep their labels. Retry, rotation, cooldown and credential condemnation read exactly the inputs they read before. `route.transient.exhausted` reports the observed retries beside the configured maximum.
+
+  Invariants: none amended. INV-013, INV-046 and INV-049 hold (typed adapter evidence, no prose governance); INV-104's disclosed residual stays literally true, and the new field is additive evidence beside it. INV-020 and INV-022 hold: the schema field ships with its producer (the Codex adapter and the terminal writers) and its consumers (the failure record and the CLI inspect line). The app compatibility floor is unchanged.
+
+- Updated dependencies
+  - @claudexor/schema@3.12.10
+  - @claudexor/core@3.12.10
+  - @claudexor/arbitration@3.12.10
+  - @claudexor/budget@3.12.10
+  - @claudexor/config@3.12.10
+  - @claudexor/context@3.12.10
+  - @claudexor/delivery@3.12.10
+  - @claudexor/event-log@3.12.10
+  - @claudexor/gateway@3.12.10
+  - @claudexor/policy@3.12.10
+  - @claudexor/review@3.12.10
+  - @claudexor/workspace@3.12.10
+  - @claudexor/synthesis@3.12.10
+  - @claudexor/artifact-store@3.12.10
+  - @claudexor/util@3.12.10
+
+## 3.12.9
+
+### Patch Changes
+
+- 125aea9: A Codex model list that omits a model no longer refuses a run that asks for it.
+
+  The vendor CLI fetches its model list remotely and falls back to a bundled default list when that fetch times out, and nothing on the wire says which list answered. Claudexor treated the answer as account truth, so an explicit model the list lacked was refused before dispatch, in under a second, as an untyped failure. Observed live: `gpt-6-astra` was refused 32 times over two days on thirteen accounts that ran it successfully 262 times in the same window, and an empty answer refused the same way.
+
+  A harness now declares what its live inventory proves. The new optional manifest capability `model_inventory_absence` defaults to `authoritative`, which is today's strict behaviour for every harness; Codex declares `advisory`, because its list can prove a model is present but never that one is absent. On an advisory source a missing (or empty) list stops being a refusal: the explicit model is forwarded to the vendor exactly as asked, the vendor accepts or refuses it, and the per-spawn gate discloses once, in the run's events, that the model was not listed. The same decision now serves the explicit reviewer panel, so an owner-chosen reviewer model is no longer refused by a stale list either.
+
+  Nothing else moved. Manifest truth stays strict and is never substituted to admit a model, settings writes and the doctor's configured-model check still read the manifest and still refuse, automatic reviewer selection still skips an unlisted family at zero cost, authenticated account catalog operations still return a typed `model_unavailable`, pinned accounts still never rotate, and the probe cache and its TTL are unchanged.
+
+  Three consequences are worth stating plainly. The explicit reviewer panel forwards an unlisted model without the run-event disclosure, because a reviewer spawn does not pass through the per-spawn gate. A vendor CLI that refuses a forwarded model reports it as an ordinary error carrying the vendor's own text, not as a typed model failure (only the HTTP model operations are typed, and those stay strict). And a mistyped model name on such a harness now costs one spawn at the vendor instead of failing for free at the gate.
+
+  Invariants: INV-104 is amended with the owner's explicit approval of 2026-09-21 — strict wherever the truth source can prove absence, forward and disclose where it cannot, and never substitute one list for another. INV-105 follows from it: an explicit model can now reach a route its truth source could not vouch for, and the run discloses that instead of staying silent. INV-020 (schema first, regenerate, then consumers) and INV-022 (a field ships with its producer and consumer) hold: the capability is declared by the Codex manifest and read by the model gate and the reviewer panel in this change. The app compatibility floor is unchanged.
+
+- Updated dependencies [125aea9]
+  - @claudexor/schema@3.12.9
+  - @claudexor/core@3.12.9
+  - @claudexor/arbitration@3.12.9
+  - @claudexor/budget@3.12.9
+  - @claudexor/config@3.12.9
+  - @claudexor/context@3.12.9
+  - @claudexor/delivery@3.12.9
+  - @claudexor/event-log@3.12.9
+  - @claudexor/gateway@3.12.9
+  - @claudexor/policy@3.12.9
+  - @claudexor/review@3.12.9
+  - @claudexor/workspace@3.12.9
+  - @claudexor/synthesis@3.12.9
+  - @claudexor/artifact-store@3.12.9
+  - @claudexor/util@3.12.9
+
+## 3.12.8
+
+### Patch Changes
+
+- @claudexor/arbitration@3.12.8
+- @claudexor/artifact-store@3.12.8
+- @claudexor/budget@3.12.8
+- @claudexor/config@3.12.8
+- @claudexor/context@3.12.8
+- @claudexor/core@3.12.8
+- @claudexor/delivery@3.12.8
+- @claudexor/event-log@3.12.8
+- @claudexor/gateway@3.12.8
+- @claudexor/policy@3.12.8
+- @claudexor/review@3.12.8
+- @claudexor/schema@3.12.8
+- @claudexor/synthesis@3.12.8
+- @claudexor/util@3.12.8
+- @claudexor/workspace@3.12.8
+
+## 3.12.7
+
+### Patch Changes
+
+- Restore adapter-created nulls for optional review fields before original-schema validation, preserving the caller contract and substantive findings. Codex Responses failure evidence now records monotonic chunk timing and deterministic interrupted-stream diagnostics without adding automatic retries.
+- Updated dependencies
+  - @claudexor/schema@3.12.7
+  - @claudexor/arbitration@3.12.7
+  - @claudexor/budget@3.12.7
+  - @claudexor/config@3.12.7
+  - @claudexor/context@3.12.7
+  - @claudexor/core@3.12.7
+  - @claudexor/delivery@3.12.7
+  - @claudexor/event-log@3.12.7
+  - @claudexor/gateway@3.12.7
+  - @claudexor/policy@3.12.7
+  - @claudexor/review@3.12.7
+  - @claudexor/workspace@3.12.7
+  - @claudexor/synthesis@3.12.7
+  - @claudexor/artifact-store@3.12.7
+  - @claudexor/util@3.12.7
+
+## 3.12.6
+
+### Patch Changes
+
+- @claudexor/arbitration@3.12.6
+- @claudexor/artifact-store@3.12.6
+- @claudexor/budget@3.12.6
+- @claudexor/config@3.12.6
+- @claudexor/context@3.12.6
+- @claudexor/core@3.12.6
+- @claudexor/delivery@3.12.6
+- @claudexor/event-log@3.12.6
+- @claudexor/gateway@3.12.6
+- @claudexor/policy@3.12.6
+- @claudexor/review@3.12.6
+- @claudexor/schema@3.12.6
+- @claudexor/synthesis@3.12.6
+- @claudexor/util@3.12.6
+- @claudexor/workspace@3.12.6
+
+## 3.12.5
+
+### Patch Changes
+
+- State a served-model mismatch on a model operation as the typed `modelMismatch` result fact without changing its outcome, rank an account that recently answered a model's request with a different model after the other selectable accounts for later Auto selections (a 30-minute in-memory observation that never excludes an account, a pin or a preferred account), and send a turn the same account served with another model through its canonical content and tool calls instead of refusing the next request with `invalid_continuation`.
+- Updated dependencies
+  - @claudexor/schema@3.12.5
+  - @claudexor/arbitration@3.12.5
+  - @claudexor/budget@3.12.5
+  - @claudexor/config@3.12.5
+  - @claudexor/context@3.12.5
+  - @claudexor/core@3.12.5
+  - @claudexor/delivery@3.12.5
+  - @claudexor/event-log@3.12.5
+  - @claudexor/gateway@3.12.5
+  - @claudexor/policy@3.12.5
+  - @claudexor/review@3.12.5
+  - @claudexor/workspace@3.12.5
+  - @claudexor/synthesis@3.12.5
+  - @claudexor/artifact-store@3.12.5
+  - @claudexor/util@3.12.5
+
+## 3.12.4
+
+### Patch Changes
+
+- @claudexor/arbitration@3.12.4
+- @claudexor/artifact-store@3.12.4
+- @claudexor/budget@3.12.4
+- @claudexor/config@3.12.4
+- @claudexor/context@3.12.4
+- @claudexor/core@3.12.4
+- @claudexor/delivery@3.12.4
+- @claudexor/event-log@3.12.4
+- @claudexor/gateway@3.12.4
+- @claudexor/policy@3.12.4
+- @claudexor/review@3.12.4
+- @claudexor/schema@3.12.4
+- @claudexor/synthesis@3.12.4
+- @claudexor/util@3.12.4
+- @claudexor/workspace@3.12.4
+
+## 3.12.3
+
+### Patch Changes
+
+- @claudexor/arbitration@3.12.3
+- @claudexor/artifact-store@3.12.3
+- @claudexor/budget@3.12.3
+- @claudexor/config@3.12.3
+- @claudexor/context@3.12.3
+- @claudexor/core@3.12.3
+- @claudexor/delivery@3.12.3
+- @claudexor/event-log@3.12.3
+- @claudexor/gateway@3.12.3
+- @claudexor/policy@3.12.3
+- @claudexor/review@3.12.3
+- @claudexor/schema@3.12.3
+- @claudexor/synthesis@3.12.3
+- @claudexor/util@3.12.3
+- @claudexor/workspace@3.12.3
+
+## 3.12.2
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.12.2
+  - @claudexor/arbitration@3.12.2
+  - @claudexor/budget@3.12.2
+  - @claudexor/config@3.12.2
+  - @claudexor/context@3.12.2
+  - @claudexor/core@3.12.2
+  - @claudexor/delivery@3.12.2
+  - @claudexor/event-log@3.12.2
+  - @claudexor/gateway@3.12.2
+  - @claudexor/policy@3.12.2
+  - @claudexor/review@3.12.2
+  - @claudexor/workspace@3.12.2
+  - @claudexor/synthesis@3.12.2
+  - @claudexor/artifact-store@3.12.2
+  - @claudexor/util@3.12.2
+
+## 3.12.1
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.12.1
+  - @claudexor/arbitration@3.12.1
+  - @claudexor/budget@3.12.1
+  - @claudexor/config@3.12.1
+  - @claudexor/context@3.12.1
+  - @claudexor/core@3.12.1
+  - @claudexor/delivery@3.12.1
+  - @claudexor/event-log@3.12.1
+  - @claudexor/gateway@3.12.1
+  - @claudexor/policy@3.12.1
+  - @claudexor/review@3.12.1
+  - @claudexor/workspace@3.12.1
+  - @claudexor/synthesis@3.12.1
+  - @claudexor/artifact-store@3.12.1
+  - @claudexor/util@3.12.1
+
+## 3.12.0
+
+### Patch Changes
+
+- Updated dependencies [217d53f]
+  - @claudexor/schema@3.12.0
+  - @claudexor/arbitration@3.12.0
+  - @claudexor/budget@3.12.0
+  - @claudexor/config@3.12.0
+  - @claudexor/context@3.12.0
+  - @claudexor/core@3.12.0
+  - @claudexor/delivery@3.12.0
+  - @claudexor/event-log@3.12.0
+  - @claudexor/gateway@3.12.0
+  - @claudexor/policy@3.12.0
+  - @claudexor/review@3.12.0
+  - @claudexor/workspace@3.12.0
+  - @claudexor/synthesis@3.12.0
+  - @claudexor/artifact-store@3.12.0
+  - @claudexor/util@3.12.0
+
+## 3.11.0
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.11.0
+  - @claudexor/arbitration@3.11.0
+  - @claudexor/budget@3.11.0
+  - @claudexor/config@3.11.0
+  - @claudexor/context@3.11.0
+  - @claudexor/core@3.11.0
+  - @claudexor/delivery@3.11.0
+  - @claudexor/event-log@3.11.0
+  - @claudexor/gateway@3.11.0
+  - @claudexor/policy@3.11.0
+  - @claudexor/review@3.11.0
+  - @claudexor/workspace@3.11.0
+  - @claudexor/synthesis@3.11.0
+  - @claudexor/artifact-store@3.11.0
+  - @claudexor/util@3.11.0
+
+## 3.10.5
+
+### Patch Changes
+
+- @claudexor/arbitration@3.10.5
+- @claudexor/artifact-store@3.10.5
+- @claudexor/budget@3.10.5
+- @claudexor/config@3.10.5
+- @claudexor/context@3.10.5
+- @claudexor/core@3.10.5
+- @claudexor/delivery@3.10.5
+- @claudexor/event-log@3.10.5
+- @claudexor/gateway@3.10.5
+- @claudexor/policy@3.10.5
+- @claudexor/review@3.10.5
+- @claudexor/schema@3.10.5
+- @claudexor/synthesis@3.10.5
+- @claudexor/util@3.10.5
+- @claudexor/workspace@3.10.5
+
+## 3.10.4
+
+### Patch Changes
+
+- Codex model operations carry the caller's live `x-codex-turn-state` transport continuation on the existing route-bound opaque envelope (opt-in per request, first successful header captured before the body, replayed unchanged on the matching route, empty on a changed route). Attempt telemetry, run telemetry and run summaries gain an additive normalized `input_token_usage` / `inputTokenUsage` object (complete input total, cache reads, cache writes; null stays unknown) folded strictly across contributions; legacy token fields keep their harness-specific meanings.
+- Updated dependencies
+  - @claudexor/schema@3.10.4
+  - @claudexor/arbitration@3.10.4
+  - @claudexor/budget@3.10.4
+  - @claudexor/config@3.10.4
+  - @claudexor/context@3.10.4
+  - @claudexor/core@3.10.4
+  - @claudexor/delivery@3.10.4
+  - @claudexor/event-log@3.10.4
+  - @claudexor/gateway@3.10.4
+  - @claudexor/policy@3.10.4
+  - @claudexor/review@3.10.4
+  - @claudexor/workspace@3.10.4
+  - @claudexor/synthesis@3.10.4
+  - @claudexor/artifact-store@3.10.4
+  - @claudexor/util@3.10.4
+
+## 3.10.3
+
+### Patch Changes
+
+- @claudexor/arbitration@3.10.3
+- @claudexor/artifact-store@3.10.3
+- @claudexor/budget@3.10.3
+- @claudexor/config@3.10.3
+- @claudexor/context@3.10.3
+- @claudexor/core@3.10.3
+- @claudexor/delivery@3.10.3
+- @claudexor/event-log@3.10.3
+- @claudexor/gateway@3.10.3
+- @claudexor/policy@3.10.3
+- @claudexor/review@3.10.3
+- @claudexor/schema@3.10.3
+- @claudexor/synthesis@3.10.3
+- @claudexor/util@3.10.3
+- @claudexor/workspace@3.10.3
+
 ## 3.10.2
 
 ### Patch Changes

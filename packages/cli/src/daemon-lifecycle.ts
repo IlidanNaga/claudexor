@@ -54,7 +54,10 @@ function lifecycleDiagnostic(
 /** Pre-start: kill surviving children of a previous daemon life, then GC
  * envelopes/branches/tmp-homes nothing owns anymore. */
 export async function runStartupCrashGc(
-  deps: Pick<LifecycleDeps, "daemonDir" | "diagnostics" | "logPath">,
+  deps: Pick<LifecycleDeps, "daemonDir" | "diagnostics" | "logPath"> & {
+    /** Scope roots of the stage-2 prepared global command projection. */
+    knownProjectRoots: () => readonly string[];
+  },
 ): Promise<void> {
   const pidsPath = join(deps.daemonDir, "pids.json");
   for (const action of reapRecordedOrphans(pidsPath)) {
@@ -62,7 +65,7 @@ export async function runStartupCrashGc(
   }
   try {
     const sweepActions = await sweepOrphanWorkspaces({
-      journalRoot: join(deps.daemonDir, "journal"),
+      knownProjectRoots: deps.knownProjectRoots,
     });
     for (const action of sweepActions) {
       lifecycleDiagnostic(deps, { stage: "crash_gc_sweep", message: `sweep: ${action}` });

@@ -42,7 +42,7 @@ export const RunDeliverableFacts = z
   .object({
     present: z.boolean().describe("Whether the canonical primary deliverable exists."),
     kind: z
-      .enum(["answer", "report", "plan", "patch", "structured_output"])
+      .enum(["answer", "report", "plan", "patch", "files", "structured_output"])
       .nullable()
       .describe("Kind of canonical primary deliverable; null when none exists."),
     path: z
@@ -120,7 +120,7 @@ export type RunApplyFacts = z.infer<typeof RunApplyFacts>;
 export const RunPresentationPrimary = z
   .object({
     kind: z
-      .enum(["answer", "report", "plan", "patch", "structured_output", "diagnostic"])
+      .enum(["answer", "report", "plan", "patch", "files", "structured_output", "diagnostic"])
       .describe("Presentation kind of the terminal primary artifact."),
     path: z
       .string()
@@ -457,8 +457,8 @@ export function validateRunFactsInvariants(value: unknown): RunFacts {
     if (facts.mode !== "agent") {
       violations.push("apply eligibility can be true only for agent mode");
     }
-    if (!deliverable.present || deliverable.kind !== "patch") {
-      violations.push("apply eligibility can be true only for a patch deliverable");
+    if (!deliverable.present || (deliverable.kind !== "patch" && deliverable.kind !== "files")) {
+      violations.push("apply eligibility can be true only for a patch or files deliverable");
     }
     if (outcome.lifecycle !== "succeeded") {
       violations.push("apply eligibility cannot be true for a non-succeeded lifecycle");

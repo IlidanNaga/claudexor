@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import {
   chmodSync,
@@ -411,7 +412,12 @@ describe("JournalManager", () => {
     const exported = manager.exportRecovery();
     const manifest = JSON.parse(
       readFileSync(join(exported.bundlePath, "manifest.json"), "utf8"),
-    ) as { entries: Array<{ name: string; copiedAs: string | null }> };
+    ) as { entries: Array<{ name: string; copiedAs: string | null; sha256: string | null }> };
+    // The partition file is streamed into the bundle byte for byte (never read whole).
+    expect(readFileSync(join(exported.bundlePath, "journal.bin")).equals(corruptBytes)).toBe(true);
+    expect(manifest.entries.find((row) => row.name === "journal.bin")?.sha256).toBe(
+      createHash("sha256").update(corruptBytes).digest("hex"),
+    );
     expect(manifest.entries.find((row) => row.name === "unknown-link")?.copiedAs).toBeNull();
     expect(manifest.entries.find((row) => row.name === "unknown-hardlink")?.copiedAs).toBeNull();
     expect(readFileSync(outside, "utf8")).toBe("secret-sentinel");

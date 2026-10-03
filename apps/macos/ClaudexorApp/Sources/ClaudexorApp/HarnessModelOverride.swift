@@ -2,10 +2,11 @@ import SwiftUI
 import ClaudexorKit
 
 /// Model override control for one harness row (ADP4). A Picker over the
-/// harness's model TRUTH SOURCE (live inventory or manifest known-good
-/// hints). STRICT: there is no free-text entry — a harness with no
-/// truth source runs its default only, and a model outside the source would
-/// be refused by the engine anyway. The view owns catalog loading so a
+/// harness's model list (live inventory or manifest known-good hints); there
+/// is no free-text entry — a harness with no list runs its default only. What
+/// an id outside the list means is the harness's own declaration (INV-104):
+/// refused by an authoritative harness, forwarded and disclosed by an advisory
+/// one. The view owns catalog loading so a
 /// transport failure is distinguishable from an ANSWERED "no truth source".
 @MainActor
 struct HarnessModelOverrideField: View {
@@ -63,10 +64,10 @@ struct HarnessModelOverrideField: View {
                 Picker("Model override", selection: $modelDraft) {
                     Text("Harness default").tag("")
                     // A stored override the truth source no longer lists (legacy
-                    // value) stays visible so the user can SEE and clear it — the
-                    // engine refuses it at run preflight either way. Rendered
-                    // through the shared cap so a pathological stored id cannot
-                    // widen the open menu (the tag keeps the FULL id).
+                    // value) stays visible so the user can SEE and clear it — run
+                    // preflight judges it by the harness's own declaration (refused
+                    // on an authoritative list, forwarded with a note on an advisory
+                    // one). Shared cap: a long stored id cannot widen the open menu.
                     if !modelDraft.isEmpty, !models.models.contains(where: { $0.id == modelDraft }) {
                         Text("\(HarnessModelPresentation.menuTitle(label: nil, id: modelDraft)) (not in \(models.source) list)")
                             .tag(modelDraft)
@@ -81,13 +82,15 @@ struct HarnessModelOverrideField: View {
         }
     }
 
-    /// The harness ANSWERED with no truth source: a stored legacy override
-    /// will be refused at preflight, so SHOW it and offer the only
-    /// meaningful action — clearing it (explicit null on save).
+    /// The harness ANSWERED with no truth source while a legacy override is
+    /// stored: an authoritative harness refuses it at preflight, an advisory
+    /// one sends it to the vendor as-is and says so (INV-104). Either way the
+    /// picker cannot offer it, so SHOW it with the one meaningful action —
+    /// clearing it (explicit null on save).
     private var refusedLegacy: some View {
         LabeledContent("Model") {
                 HStack(spacing: Theme.Spacing.xs) {
-                    Text("\(modelDraft) — refused (no truth source)")
+                    Text("\(modelDraft) — not in this harness's model list")
                         .font(.caption).foregroundStyle(.orange)
                     Button("Clear") { modelDraft = "" }
                         .controlSize(.small)
@@ -134,7 +137,7 @@ struct HarnessModelOverrideField: View {
 
     private var modelFallbackHelp: String {
         if loadingModels { return "Loading \(family.label) models…" }
-        return "\(family.label) exposes no model truth source, so runs use its default model; an explicit model would be refused (strict model governance)."
+        return "\(family.label) exposes no model list, so runs use its default model; an explicit override is judged at run time by the harness's own declaration (refused where its lists are authoritative, forwarded and disclosed where they are advisory)."
     }
 
     private func loadModels(force: Bool = false) async {

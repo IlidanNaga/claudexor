@@ -27,7 +27,7 @@ describe("normalizeEffort against vendor-ordered ladders", () => {
     expect(normalizeEffort("low", ["high", "xhigh"], MERGED)).toBe("high");
   });
 
-  it("clamps an interior gap to the nearest position (ties -> the cheaper level)", () => {
+  it("resolves an interior gap downward inside the vendor order", () => {
     const MERGED = ["low", "medium", "high", "xhigh", "max"];
     // medium is equidistant from low and high in the merged order -> the lower wins.
     expect(normalizeEffort("medium", ["low", "high"], MERGED)).toBe("low");

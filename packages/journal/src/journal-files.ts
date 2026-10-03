@@ -124,14 +124,6 @@ export function ensurePrivateFile(path: string): void {
   }
 }
 
-export function readDescriptor(fd: number): Buffer {
-  const size = Number(fstatSync(fd, { bigint: true }).size);
-  if (!Number.isSafeInteger(size) || size < 0) throw new Error("journal file size is invalid");
-  const bytes = readFileSync(fd);
-  if (bytes.length !== size) throw new Error("journal changed while being read");
-  return bytes;
-}
-
 export function readIntent(path: string): AppendIntent | null {
   if (!existsSync(path)) return null;
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);

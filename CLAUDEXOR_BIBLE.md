@@ -208,7 +208,7 @@ invariant or operator decision before proceeding.
   own: best-of-N (`--n`), capped repair (`--attempts`), repair-to-clean
   (`--until-clean`), research sweep (`ask --deep-scan`), create-from-scratch
   (`agent --create`), delegation belt (`agent --delegate`), council planning
-  (`plan --council`, with `--n 2..4` legal only under council). verify: CLI
+  (`plan --council`, with `--n` of at least two, bounded by the operator-configured Council capacity, legal only under council). verify: CLI
   help + docs-truth flag check.
 - **INV-032** Old mode ids are not compatibility aliases; they hard-error at
   every wire boundary unless explicitly reintroduced in schema and docs.
@@ -254,8 +254,11 @@ invariant or operator decision before proceeding.
   line, event, doctor report, run artifact, or source reference. Model
   prose is context, not proof. verify: review protocol; reviewer evidence
   preflight in reviewEngine.
-- **INV-041** Diffs come from git in the isolated worktree or live in-place
-  target, never from model edit narration. Captured diffs must round-trip:
+- **INV-041** Git diffs come from git in the isolated worktree or live in-place
+  target, never from model edit narration. Directory work products record observed
+  file bytes in a digest-bound manifest; a text diff is only a preview. Copied
+  file results retain the selected baseline and complete output bytes for exact
+  delivery, while direct effects disclose any unknown preimages. Captured diffs must round-trip:
   what the engine records as the work product must `git apply` cleanly to
   the base it was captured against (no silent corruption — CRLF, quoted
   paths, binary — between capture and delivery). verify: workspace diff
@@ -270,6 +273,12 @@ invariant or operator decision before proceeding.
   the shared sensitive-resource boundary, are the candidate plane; the
   sealed/redacted evidence packet is a separate explicit plane. Gitignored
   local state that is absent from the diff never crosses the reviewer boundary.
+  For an explicit directory result, the complete selected file manifest supplies
+  the candidate inventory instead of Git membership. Retained unchanged inputs
+  and observed output bytes remain available, with baseline/output evidence in
+  the explicit packet and the same sensitive-resource boundary. A selected file
+  is not excluded merely because its directory name usually denotes generated
+  output; unselected source siblings are never implicitly copied.
   verify: reviewEngine route-proof,
   candidate-inventory, and ignored-sibling tests; per-reviewer artifact
   checklist.
@@ -479,7 +488,10 @@ invariant or operator decision before proceeding.
 - **INV-072** Ordinary project runs (and Best-of candidates) execute in
   isolated envelopes under the external per-project runtime namespace
   (`~/.claudexor/v3/projects/<project-sha256>/workspaces/.../tree`), with the
-  harness cwd at the envelope worktree. The repository's `.claudexor/`
+  harness cwd at the envelope worktree. Explicit directory execution uses either
+  the selected live folder or an isolated copy of the caller-selected footprint,
+  without initializing Git. Stable project identity and execution address remain
+  separate facts. The repository's `.claudexor/`
   remains user-owned versioned config. verify: workspace manager tests.
 - **INV-073** Chat thread WRITE turns run IN-PLACE in the thread's
   explicit execution tree — the live project for an `in_place` thread, or
@@ -506,8 +518,10 @@ invariant or operator decision before proceeding.
   resolve) — is refused with a typed error naming the remediation BEFORE any
   mutation, instead of being initialized; a home that is already a healthy
   repository is respected untouched.
-  Supported in-place paths that do not cross a Git boundary remain available
-  without initialization. Claudexor never creates or edits the project's
+  Explicit directory workspaces, live or copied, need no Git boundary and never
+  initialize the original folder or change the requested run strategy. Supported
+  in-place paths that do not cross a Git boundary remain available without
+  initialization. Claudexor never creates or edits the project's
   `.gitignore`; repo `.claudexor/` is user-owned state and runtime stays
   external. verify: git-init, boundary-root refusal, lazy isolated-thread,
   run-applicability, and gitignore non-interference workspace tests.
@@ -601,24 +615,57 @@ invariant or operator decision before proceeding.
   schema (no `routing.default_model`); canaries
   `[INV-103:scalar-model-primary-only]` and `[INV-103:no-global-model]`;
   routing tests. Locked operator decision.
-- **INV-104** A model outside the harness's model truth source (live
-  inventory or manifest known-good list) is refused at settings-write, run
-  preflight (typed failure WITH artifacts before any CLI spawns), and both
-  reviewer-resolution paths — never forwarded to the vendor CLI to die as an
-  opaque native error. Refusals name the harness, the model, and the truth
-  source; model truth is surfaced to UIs (`source: api | manifest`), and
-  known-model hints carry a `verifiedAgainst` freshness note checked by the
-  model-hints-freshness gate. verify: canaries
+- **INV-104** A model list is evidence of PRESENCE at one runtime identity,
+  account and time. Whether an absence from it is evidence too is the
+  HARNESS's own declaration (`model_inventory_absence`), honoured wherever its
+  lists are read — the live inventory and the manifest known-good list alike,
+  at settings-write, run preflight (typed failure WITH artifacts before any
+  CLI spawns), doctor readiness and the explicit reviewer-resolution path,
+  while `claudexor models` shows each list's source and hint marks and
+  automatic reviewer selection keeps the zero-cost skip stated below.
+  `authoritative` (the declaration a silent manifest gets) keeps the
+  strict rule: a model outside the list is refused with the harness, the model
+  and the truth source named, never forwarded to the vendor CLI to die as an
+  opaque native error, and a harness with no list refuses every explicit model.
+  `advisory` (claude: the picker is an alias menu of one binary version plus the
+  account's bootstrap rows; codex: a `model/list` reply carries no provenance
+  and the CLI serves a bundled default list when its remote fetch times out;
+  cursor: `--list-models` is a fail-soft menu blind to routing variants) means
+  presence still admits while absence decides nothing: the EXPLICIT model is
+  forwarded byte-identical, the vendor accepts or refuses it, and the consumer
+  that admitted it says so once — the settings read-back carries `notes`, the
+  readiness row carries the note in its detail, the per-spawn gate discloses a
+  status event. Hint ids count as present. No list is ever substituted for
+  another to admit a model; model truth is surfaced to UIs (`source: api |
+  manifest`); known-model hints carry a `verifiedAgainst` freshness note
+  checked by the model-hints-freshness gate; automatic reviewer selection still
+  skips an unlisted family at zero cost; HTTP model operations stay strict
+  against the account catalog read at a named client version; raw-api, agy and
+  opencode stay authoritative by declaration, not by proof of completeness.
+  Residuals, disclosed: the explicit reviewer panel forwards without the
+  run-event disclosure (its spawn does not pass the per-spawn gate); on the CLI
+  run path a vendor model refusal arrives as an untyped error carrying the
+  vendor's text; a mistyped explicit model on an advisory harness costs one
+  spawn, and bounded account failover may spend one start per account before a
+  typed account-independent stop exists. verify: canaries
   `[INV-104:model-truth-refusal]`, `[INV-104:models-manifest-fallback]`,
-  `[INV-104:settings-write-strict]`; settings-service tests;
-  modelGovernance preflight tests. Locked operator decision: strict
-  everywhere.
+  `[INV-104:settings-write-strict]`, `[INV-104:settings-write-advisory]`;
+  settings-service tests; modelGovernance preflight tests;
+  `packages/core/src/model.test.ts`; `packages/cli/src/model-truth.test.ts`;
+  `packages/orchestrator/src/reviewerPanel.test.ts`;
+  `packages/harness-codex/src/astra.test.ts`. Operator decisions 2026-09-21
+  (strict wherever a truth source can prove absence) and 2026-09-24 (absence is
+  the harness's declaration; claude, codex and cursor declare advisory).
 - **INV-105** Per-harness knobs a manifest does not support are disclosed as
   `ignored_settings` on `harness.started` — never silently dropped. This
   covers max_turns, tool lists, and effort (an empty declared ladder); an
-  explicit MODEL never reaches an unsupporting route at all — the strict
-  truth-source preflight refuses it first (INV-104). verify: knob
-  disclosure tests incl. the INV-105 effort-disclosure test.
+  explicit MODEL reaches a route only where its truth source could not refuse
+  it (INV-104), and then the run says so: the per-spawn gate discloses the
+  unverified model, and the effort a model absent from the probed list resolves
+  against the sibling ladders is sent verbatim, clamped-and-disclosed, or
+  dropped-and-disclosed — never silently changed. verify: knob
+  disclosure tests incl. the INV-105 effort-disclosure test;
+  `packages/harness-codex/src/astra.test.ts` stale-list effort resolution.
 
 ## 11. Delivery Is Server-Owned
 
@@ -629,12 +676,16 @@ invariant or operator decision before proceeding.
   negotiated major, while unversioned product aliases are refused. verify:
   control-api handshake/catalog tests; docs-truth catalog parity; UI review.
 - **INV-111** Apply is allowed only for successful runs with a successful
-  decision record and a patch WorkProduct for the original verified repo
+  decision record and a digest-bound patch or copied-files WorkProduct for the original verified repo
   root — with one typed, server-owned exception: an operator decision
   (`POST /v2/runs/:id/decision`, `accept_risk`/`override_needs_human`)
   persists an auditable, patch-hash-bound record that unblocks apply for a
   `blocked` run; a mutated patch invalidates the override. The human
-  decision is never client-faked state. verify: apply-gate tests; canary
+  decision is never client-faked state. Direct file effects are already in place
+  and do not offer a second apply or an unproved full rollback. Explicit discard
+  ends pending copy delivery without applying or reverting files; existing
+  retention owns the retained result. Partial application preserves custody of
+  unselected changes. verify: apply-gate tests; canary
   `[INV-112:apply-needs-verified-review]`.
 - **INV-112** Ordinary Agent work defaults to no internal model review,
   independently of how its executor was selected. Explicit review controls
@@ -657,6 +708,9 @@ invariant or operator decision before proceeding.
   enumerated in ARCHITECTURE with its fence, and each has one: envelope
   delivery, manual apply, race adoption, and thread apply
   go through the delivery-owned fresh verifier immediately before mutation;
+  copied directory files use the same delivery owner with per-file preimages and
+  complete content artifacts, while direct directory execution records observed
+  effects without pretending they await application;
   (the retired `orchestrate-apply` path is gone — delegation sub-runs carry
   no apply tool, so the parent integrates their results through the ordinary
   apply path, CONCEPT-CHANGE(INV-113));
@@ -690,7 +744,9 @@ invariant or operator decision before proceeding.
   manual apply, race winner, thread delivery, or convergence result — it is
   re-verified by the delivery owner in a fresh
   envelope (`git apply` to a clean base + configured deterministic gates
-  there) immediately before the target preimage check; the result is recorded
+  there) immediately before the target preimage check; a copied directory result
+  instead verifies its manifest, full content hashes, and reproduction on the
+  retained selected baseline through that same verifier owner. The result is recorded
   in the decision/receipt, and a missing, stale, or failed verifier
   infrastructure error blocks fail-closed exactly like a proven failure.
   A patch that cannot survive a clean base does not touch the live tree.
@@ -875,8 +931,32 @@ invariant or operator decision before proceeding.
   quota after known-positive headroom but before exhausted (stale quota
   never authorizes routing — D3; an OBSERVED live block — a reactive
   vendor-limit cooldown or spent window, stale-but-live included — ranks a
-  row exhausted with its release instant), deterministic profile-id
-  tie-break. The per-harness `limit_action` stored default is the kind-aware
+  row exhausted with its release instant), a row that recently answered this
+  model's request with a different model (a live, self-expiring
+  model-substitution observation), or whose session an unpinned run started
+  on it recently ended before any progress for this same requested model (a
+  live, self-expiring pre-progress refusal observation, scoped to that exact
+  account and requested model and never recorded by a pin), ranks after
+  every other selectable row, oldest observation first, and is never
+  excluded by it; deterministic profile-id tie-break.
+  **CONCEPT-CHANGE(INV-135), #363:** an unpinned choice is admitted on FRESH
+  readiness, with one bounded exception for Cursor rows: when a row's
+  `cursor-agent status` probe did not answer within its own budget, that row
+  store's last POSITIVE status answer, if younger than five minutes, may admit
+  the row to an UNPINNED choice (bound row, pool, rotation, `next_up`). The
+  row stays disclosed as stale unknown — never a fresh pass, never an
+  identity — and a spawn on it says so. A logged-out answer from that store
+  or any Claudexor-handled credential mutation revokes it. No positive answer,
+  an expired one, any other probe failure, and an explicit pin keep the
+  strict behavior: a pin is never admitted on it, and every other stale
+  observation still serves only an already selected route. Rationale: an
+  unanswered probe is not vendor evidence of either state, whatever delayed
+  it; the row's own recent positive answer with no observed logout since is
+  the best evidence at hand, and refusing it let unanswered probes alone
+  report "no ready account". The exception widens only unpinned
+  availability, where a wrong guess meets the pool's ordinary failover,
+  and leaves the pin contract
+  unchanged. The per-harness `limit_action` stored default is the kind-aware
   `auto` — it RESOLVES at decision time to `rotate` for subscription
   (`local_session`) subjects and `fail` for metered API-key or unknown
   routes, while explicitly persisted `fail`/`ask`/`rotate` keep their exact
@@ -910,7 +990,9 @@ invariant or operator decision before proceeding.
   rollback command, run BEFORE installing an older engine. verify: schema
   credential-profile.ts + accounts-migration.ts; orchestrator
   preflightProfile/account-pool tests; the accounts-unified-migration
-  battery; threads binding/resume-isolation tests; profile-delete tests.
+  battery; threads binding/resume-isolation tests; profile-delete tests;
+  `packages/harness-cursor/src/status-cache.test.ts` +
+  `packages/orchestrator/src/rowAdmission.test.ts` (#363 stale admission).
 - **INV-136** High-volume UI evidence is PROGRESSIVE, BOUNDED, and honest:
   per-run milestone bursts are exactly one in-flight request plus at most one
   trailing refresh (events during the trailing load cannot chain more GETs);

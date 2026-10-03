@@ -25,10 +25,15 @@ export interface AttemptOutputMarkers {
   /** Count of typed `file_change` events observed this attempt (tool-less
    * frames included). */
   fileChanges: number;
+  /** The adapter reported a typed `started` event: the vendor session came up
+   * under this credential. An adapter's own pre-spawn refusal (a readiness
+   * probe that could not confirm the login, a bad flag) never emits one.
+   * Absent reads as false: missing evidence never marks an account. */
+  sawSessionStart?: boolean;
 }
 
 export function newAttemptOutputMarkers(): AttemptOutputMarkers {
-  return { sawAgentProgress: false, fileChanges: 0 };
+  return { sawAgentProgress: false, fileChanges: 0, sawSessionStart: false };
 }
 
 /**
@@ -55,5 +60,6 @@ function marksAgentProgress(ev: HarnessEvent): boolean {
 
 export function observeAttemptOutputMarkers(m: AttemptOutputMarkers, ev: HarnessEvent): void {
   if (ev.type === "file_change") m.fileChanges += 1;
+  if (ev.type === "started") m.sawSessionStart = true;
   if (!m.sawAgentProgress && marksAgentProgress(ev)) m.sawAgentProgress = true;
 }

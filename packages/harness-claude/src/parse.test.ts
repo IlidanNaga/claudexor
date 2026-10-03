@@ -312,6 +312,11 @@ describe("parseClaudeEvent", () => {
     expect(ok.map((e) => e.type)).toEqual(["usage", "message"]);
     expect(ok[0]?.usage?.cost_usd).toBe(0.25);
     expect(ok[0]?.usage?.cached_input_tokens).toBe(100);
+    expect(ok[0]?.usage?.input_token_usage).toEqual({
+      total_tokens: 110,
+      cache_read_tokens: 90,
+      cache_write_tokens: 10,
+    });
     expect(ok[1]?.text).toBe("[]");
     // The terminal result is claude's TYPED final answer (F2.5 W-C1).
     expect(ok[1]?.final).toBe(true);
@@ -600,7 +605,8 @@ describe("parseClaudeEvent", () => {
     });
     expect(claudeArgsForSpec(spec)).toEqual([
       "-p",
-      "review",
+      "--input-format",
+      "text",
       "--output-format",
       "stream-json",
       "--verbose",
@@ -650,6 +656,24 @@ describe("parseClaudeEvent", () => {
     expect(denied).toContain("Write");
     expect(denied).toContain("Agent");
     expect(denied).toContain("Glob");
+  });
+
+  it("asks for the stdin replay echo on the interactive argv only (the live-input receipt), never on a one-shot run", () => {
+    const spec = HarnessRunSpec.parse({
+      session_id: "ses-replay-flag",
+      intent: "implement",
+      prompt: "do it",
+      cwd: "/tmp",
+      access: "full",
+    });
+    const interactive = claudeArgsForSpec(spec, true);
+    expect(interactive).toContain("--replay-user-messages");
+    expect(interactive).toContain("--input-format");
+    // One-shot runs pipe no stdin frames, so there is nothing to echo.
+    const oneShot = claudeArgsForSpec(spec, false);
+    expect(oneShot).not.toContain("--replay-user-messages");
+    expect(oneShot).not.toContain("do it");
+    expect(oneShot[oneShot.indexOf("--input-format") + 1]).toBe("text");
   });
 
   it("keeps the readonly AskUserQuestion channel open without pre-approving it", () => {
@@ -874,10 +898,10 @@ describe("parseClaudeEvent", () => {
     expect(args[promptToolIdx + 1]).toBe("stdio");
     // The prompt must NOT travel as an argv prompt in interactive mode.
     expect(args).not.toContain("make a plan");
-    // One-shot mode keeps the prompt arg and no control-channel flags.
+    // One-shot mode owns text stdin without control-channel flags.
     const oneShot = claudeArgsForSpec(spec);
-    expect(oneShot).toContain("make a plan");
-    expect(oneShot).not.toContain("--input-format");
+    expect(oneShot).not.toContain("make a plan");
+    expect(oneShot[oneShot.indexOf("--input-format") + 1]).toBe("text");
     expect(oneShot).not.toContain("--permission-prompt-tool");
   });
 
@@ -991,5 +1015,171 @@ describe("structured output flag", () => {
       }),
     );
     expect(bare).not.toContain("--json-schema");
+  });
+});
+
+describe("claude normalized input measurement", () => {
+  function normalized(usage: Record<string, unknown>) {
+    return parseClaudeEvent({ type: "result", usage }, "counters")?.find(
+      (event) => event.type === "usage",
+    )?.usage?.input_token_usage;
+  }
+  it("keeps reads and writes separate, including measured zero", () => {
+    expect(
+      normalized({
+        input_tokens: 100,
+        cache_read_input_tokens: 80,
+        cache_creation_input_tokens: 10,
+      }),
+    ).toEqual({
+      total_tokens: 190,
+      cache_read_tokens: 80,
+      cache_write_tokens: 10,
+    });
+    expect(
+      normalized({ input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }),
+    ).toEqual({
+      total_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+    });
+  });
+  it.each([0, 1, 2])("preserves each independently missing component %s", (missing) => {
+    const fields = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"];
+    const native: Record<string, unknown> = Object.fromEntries(
+      fields.map((field, index) => [field, [100, 80, 10][index]]),
+    );
+    delete native[fields[missing]!];
+    expect(normalized(native)).toEqual({
+      total_tokens: null,
+      cache_read_tokens: missing === 1 ? null : 80,
+      cache_write_tokens: missing === 2 ? null : 10,
+    });
+  });
+  it.each([undefined, null, -1, 0.5, "10", Infinity, NaN])(
+    "preserves unknown write rather than treating %j as zero",
+    (value) => {
+      expect(
+        normalized({
+          input_tokens: 100,
+          cache_read_input_tokens: 80,
+          cache_creation_input_tokens: value,
+        }),
+      ).toEqual({
+        total_tokens: null,
+        cache_read_tokens: 80,
+        cache_write_tokens: null,
+      });
+    },
+  );
+});
+
+/**
+ * Native queue fold (live-input.ts): a live message that arrives during the
+ * final text runs as the NEXT native turn of the same process, so one run can
+ * carry two `system/init` and two `result` frames with a CUMULATIVE
+ * total_cost_usd. Recorded on 2.1.283 (fixtures/stream-json/).
+ */
+describe("claude parser: multi-turn session folding", () => {
+  const init = {
+    type: "system",
+    subtype: "init",
+    model: "claude-sonnet-5",
+    session_id: "native-1",
+  };
+  const resultWithCost = (total: number) => ({
+    type: "result",
+    subtype: "success",
+    total_cost_usd: total,
+    usage: { input_tokens: 10, output_tokens: 5 },
+    result: "ok",
+  });
+
+  it("emits ONE started across two inits; an init after a result is a typed native_turn_started status", () => {
+    const parse = createClaudeParser();
+    const first = parse(init, "s1") as HarnessEvent[];
+    expect(first.map((e) => e.type)).toEqual(["started"]);
+    // The recorded boundary: result#1 closes the first native turn, then the
+    // same process re-inits for the queued message (an init with NO result
+    // before it is still a fresh start — see the required-MCP re-init pins).
+    parse(resultWithCost(0.1), "s1");
+    const second = parse(init, "s1") as HarnessEvent[];
+    expect(second).toEqual([
+      expect.objectContaining({
+        type: "status",
+        payload: { code: "native_turn_started", turn: 2 },
+      }),
+    ]);
+    expect(second.some((e) => e.type === "started")).toBe(false);
+    for (const ev of [...first, ...second]) expect(() => HarnessEvent.parse(ev)).not.toThrow();
+  });
+
+  it("emits the first result's cost in full and every later result's cost as the delta of the cumulative total", () => {
+    const parse = createClaudeParser();
+    const first = parse(resultWithCost(0.0963518), "s1") as HarnessEvent[];
+    expect(first.find((e) => e.type === "usage")?.usage?.cost_usd).toBe(0.0963518);
+    const second = parse(resultWithCost(0.114749), "s1") as HarnessEvent[];
+    expect(second.find((e) => e.type === "usage")?.usage?.cost_usd).toBeCloseTo(0.0183972, 10);
+    expect(second.some((e) => e.type === "status")).toBe(false);
+    // Tokens stay per turn (never differenced).
+    expect(second.find((e) => e.type === "usage")?.usage?.input_tokens).toBe(10);
+    // A fresh parser (another run) starts from the full value again: the
+    // cumulative memory is per parser, never shared across runs.
+    const other = createClaudeParser()(resultWithCost(0.5), "s2") as HarnessEvent[];
+    expect(other.find((e) => e.type === "usage")?.usage?.cost_usd).toBe(0.5);
+    // A result without total_cost_usd leaves the cost unknown and the memory untouched.
+    const unknown = parse({ type: "result", subtype: "success", result: "ok" }, "s1");
+    expect(unknown?.find((e) => e.type === "usage")?.usage?.cost_usd).toBeUndefined();
+    const third = parse(resultWithCost(0.2), "s1") as HarnessEvent[];
+    expect(third.find((e) => e.type === "usage")?.usage?.cost_usd).toBeCloseTo(0.085251, 10);
+  });
+
+  it("clamps a negative delta to 0 and discloses it as a status event", () => {
+    const parse = createClaudeParser();
+    parse(resultWithCost(0.2), "s1");
+    const out = parse(resultWithCost(0.15), "s1") as HarnessEvent[];
+    expect(out.find((e) => e.type === "usage")?.usage?.cost_usd).toBe(0);
+    expect(out).toContainEqual(
+      expect.objectContaining({
+        type: "status",
+        payload: { code: "usage_cost_delta_negative", total_cost_usd: 0.15, previous: 0.2 },
+      }),
+    );
+  });
+
+  it("treats the --replay-user-messages echo and command_lifecycle frames as recognized plumbing (no events, never dropped)", () => {
+    const parse = createClaudeParser();
+    expect(
+      parse(
+        {
+          type: "user",
+          isReplay: true,
+          uuid: "u-1",
+          message: { role: "user", content: [{ type: "text", text: "Also say MANGO." }] },
+        },
+        "s1",
+      ),
+    ).toEqual([]);
+    expect(
+      parse({ type: "command_lifecycle", command_uuid: "u-1", state: "queued" }, "s1"),
+    ).toEqual([]);
+    // A non-replay user frame with a tool_result still parses as before.
+    parse(
+      {
+        type: "assistant",
+        message: {
+          content: [{ type: "tool_use", id: "toolu_r", name: "Bash", input: { command: "echo" } }],
+        },
+      },
+      "s1",
+    );
+    const out = parse(
+      {
+        type: "user",
+        message: { content: [{ type: "tool_result", tool_use_id: "toolu_r", content: "ok" }] },
+      },
+      "s1",
+    ) as HarnessEvent[];
+    expect(out.map((e) => e.type)).toEqual(["tool_result"]);
   });
 });

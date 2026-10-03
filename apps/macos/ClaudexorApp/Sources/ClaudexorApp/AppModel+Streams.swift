@@ -507,7 +507,7 @@ extension AppModel {
                 // engine's cash truth and its cash-specific certainty verbatim,
                 // without route inference.
                 box.spendUsd = cash
-                box.spendKnown = true
+                box.spendKnown = payload["cash_knowledge"]?.stringValue != "unknown"
                 let estimated = payload["estimated"]?.boolValue ?? false
                 let legacyExactZero = payload["valuation_knowledge"] == nil
                     && estimated

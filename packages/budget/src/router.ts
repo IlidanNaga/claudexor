@@ -1,5 +1,7 @@
 import type {
   AuthVerification,
+  CostEvidence,
+  ProcessingCostBasis,
   BillingKnowledge,
   CredentialRoute,
   EffortHint,
@@ -42,6 +44,7 @@ export function billingKnowledgeForAuthRoute(evidence: RouteAuthEvidence): Billi
 }
 
 export interface RouterCandidate {
+  costEvidence?: CostEvidence;
   harnessId: string;
   available: boolean;
   /** Known model id, null for an intentional vendor-native default, or omitted
@@ -98,8 +101,20 @@ function tierIndex(candidate: RouterCandidate, ctx: RouteContext): number | null
 /** Effective billing knowledge: the typed auth route is authoritative when
  * present (QA-034), else the explicitly supplied value, else unknown. */
 function effectiveBilling(candidate: RouterCandidate): BillingKnowledge {
+  if (candidate.costEvidence) return candidate.costEvidence.billing;
   if (candidate.authRoute) return billingKnowledgeForAuthRoute(candidate.authRoute);
   return candidate.billingKnowledge ?? "unknown";
+}
+
+/** A mode-qualified native receipt outranks authentication-only inference. */
+export function processingBillingKnowledge(
+  basis: ProcessingCostBasis | undefined,
+  ordinary: BillingKnowledge,
+): BillingKnowledge {
+  if (!basis) return ordinary;
+  if (basis.kind === "included") return "subscription_entitlement";
+  if (basis.kind === "cash" || basis.kind === "paid_credits") return "metered";
+  return "unknown";
 }
 
 function isIncrementalPaid(candidate: RouterCandidate): boolean {

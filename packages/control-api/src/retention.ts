@@ -452,6 +452,15 @@ function hasTerminalEvidence(runRoot: string): boolean {
  * undelivered/applyable patch, OR a needs-decision terminal (decision.facts
  * review blocked / checks failed) with a work product present. */
 function hasActionableWorkProduct(runRoot: string): boolean {
+  const delivery = readTextSafe(join(runRoot, "final", "delivery_state.yaml"));
+  if (delivery !== null) {
+    try {
+      if ((yamlParse(delivery) as { applyState?: unknown })?.applyState === "discarded")
+        return false;
+    } catch {
+      return true;
+    }
+  }
   // Needs-decision keep: a succeeded terminal whose review is blocked or checks
   // failed is actionable regardless of apply state.
   const decisionText = readTextSafe(join(runRoot, "arbitration", "decision.yaml"));
@@ -477,7 +486,12 @@ function hasActionableWorkProduct(runRoot: string): boolean {
     // The canonical discriminator is the TOP-LEVEL kind (release wave
     // round-13): convergence writes kind: patch without meta.result_kind, and
     // deleting its unapplied tree would destroy actionable work.
-    if (doc.kind !== "patch" && doc.kind !== "new_repo" && meta["result_kind"] !== "patch")
+    if (
+      doc.kind !== "patch" &&
+      doc.kind !== "files" &&
+      doc.kind !== "new_repo" &&
+      meta["result_kind"] !== "patch"
+    )
       return false;
     // Delivery/apply state is the mutable overlay (final/delivery_state.yaml);
     // fall back to the immutable work_product snapshot. An undelivered patch is
@@ -492,7 +506,7 @@ function hasActionableWorkProduct(runRoot: string): boolean {
         return true;
       }
     }
-    return applyState !== "applied" && applyState !== "reverted";
+    return applyState !== "applied" && applyState !== "reverted" && applyState !== "discarded";
   } catch {
     return true; // unreadable work product: fail closed, keep the tree
   }

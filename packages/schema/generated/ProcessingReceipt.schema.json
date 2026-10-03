@@ -1,0 +1,94 @@
+{
+  "$ref": "#/definitions/ProcessingReceipt",
+  "definitions": {
+    "ProcessingReceipt": {
+      "type": "object",
+      "properties": {
+        "requested": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "standard",
+                "fast",
+                "economy"
+              ],
+              "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
+        },
+        "submitted": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProcessingReceipt/properties/requested/anyOf/0"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
+        },
+        "submittedNative": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "\\S",
+              "description": "User-supplied string that must contain visible content, not just whitespace."
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "User-supplied string that must contain visible content, not just whitespace."
+        },
+        "observed": {
+          "type": "string",
+          "enum": [
+            "standard",
+            "fast",
+            "economy",
+            "mixed",
+            "unknown"
+          ]
+        },
+        "observedNative": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ProcessingReceipt/properties/submittedNative/anyOf/0"
+          }
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProcessingReceipt/properties/submittedNative/anyOf/0"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "User-supplied string that must contain visible content, not just whitespace."
+        },
+        "source": {
+          "$ref": "#/definitions/ProcessingReceipt/properties/submittedNative/anyOf/0"
+        }
+      },
+      "required": [
+        "requested",
+        "submitted",
+        "submittedNative",
+        "observed",
+        "observedNative",
+        "reason",
+        "source"
+      ],
+      "additionalProperties": false,
+      "description": "Requested intent, submitted native control, and observed execution are independent facts. A submitted flag never proves observed service; mixed or missing session observations remain explicit."
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

@@ -14,7 +14,8 @@
             "applied",
             "requeued",
             "rejected",
-            "unsupported"
+            "unsupported",
+            "discarded"
           ],
           "description": "Outcome: applied, requeued (a new turn was enqueued), rejected, or unsupported."
         },

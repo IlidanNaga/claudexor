@@ -3,12 +3,13 @@ import { credentialProfilePolicyState } from "@claudexor/core";
 import { loadConfig } from "@claudexor/config";
 import {
   ModelOperations,
+  ModelSubstitutionLedger,
   type CredentialUnusableLedger,
   type DaemonClient,
   type ModelOperationDependencies,
   type QuotaRegistry,
 } from "@claudexor/daemon";
-import { createCodexModelAdapter } from "@claudexor/harness-codex";
+import { createCodexModelAdapter, describeCodexClientVersion } from "@claudexor/harness-codex";
 import {
   differentialSubjectVerdict,
   probeCredentialProfileStatus,
@@ -20,11 +21,13 @@ import {
 } from "@claudexor/orchestrator";
 import {
   ControlModelCatalogResponse,
+  ControlModelAccountCatalogResponse,
   ControlProblem,
   GlobalConfig,
   type CredentialProfile,
   type HarnessEvent,
   type ModelAccountChoice,
+  type ModelCallResult,
   type ModelUsage,
 } from "@claudexor/schema";
 import { errorCode, noProjectRepoRoot, redactSecrets } from "@claudexor/util";
@@ -32,6 +35,14 @@ import { accountsMigrationGate } from "./accounts-unified-migration.js";
 import { buildRegistry } from "./registry.js";
 import { credentialUnusableLedger } from "./run-orchestrator.js";
 import type { RetentionRunner } from "./retention-service.js";
+import { catalogProfiles, enumerateAccountCatalogs } from "./account-catalog.js";
+
+/**
+ * Daemon-lifetime model-substitution observations: in-memory and bounded, like
+ * the unusable-credential ledger, and cleared at the same credential-generation
+ * call sites. Model operations are their only producer and consumer.
+ */
+export const modelSubstitutionLedger = new ModelSubstitutionLedger();
 
 interface ModelSource {
   adapter: ModelAdapter;
@@ -46,6 +57,7 @@ interface Dependencies extends Pick<ModelOperationDependencies, "commands" | "re
   registry?: AdapterRegistry;
   sources?: readonly ModelSource[];
   unusable?: CredentialUnusableLedger;
+  substitutions?: ModelSubstitutionLedger;
   migrationGate?: typeof accountsMigrationGate;
 }
 
@@ -62,6 +74,7 @@ export function createModelServices(deps: Dependencies) {
   const registry = deps.registry ?? buildRegistry({ includeFakes: false });
   const config = deps.config ?? (() => loadConfig(noProjectRepoRoot()).global);
   const unusable = deps.unusable ?? credentialUnusableLedger;
+  const substitutions = deps.substitutions ?? modelSubstitutionLedger;
   const lifetime = new AbortController();
   const getSource = (id: string): ModelSource => {
     const source = sources.find((entry) => entry.adapter.id === id);
@@ -165,6 +178,7 @@ export function createModelServices(deps: Dependencies) {
           snapshots: currentQuota.snapshots,
           quota: currentQuota,
           unusable: unusable.live(),
+          substitutions: substitutions.live(),
           probe,
           pinnedProfile,
           boundProfileId: account.mode === "auto" ? (account.preferredProfileId ?? null) : null,
@@ -193,7 +207,13 @@ export function createModelServices(deps: Dependencies) {
               ]
             : [];
           for (const refusal of catalogRefusals.values()) {
-            causes.add(refusal.code === "auth_required" ? "auth" : "quota");
+            causes.add(
+              refusal.code === "auth_required"
+                ? "auth"
+                : refusal.code === "subscription_window_exhausted"
+                  ? "quota"
+                  : "unavailable",
+            );
             if (refusal.code === "subscription_window_exhausted")
               resets.push(
                 typeof refusal.context.resetsAt === "string" ? refusal.context.resetsAt : null,
@@ -251,11 +271,7 @@ export function createModelServices(deps: Dependencies) {
         const problem = ControlProblem.safeParse(
           error && typeof error === "object" && "problem" in error ? error.problem : null,
         );
-        if (
-          !problem.success ||
-          !["auth_required", "subscription_window_exhausted"].includes(problem.data.code)
-        )
-          throw error;
+        if (!problem.success) throw error;
         const refusal = {
           ...problem.data,
           context: {
@@ -290,7 +306,7 @@ export function createModelServices(deps: Dependencies) {
       if (account.mode === "pin")
         throw modelError(
           "model_unavailable",
-          "The pinned account does not advertise the requested model",
+          `The pinned account does not advertise the requested model in its catalog as served to ${describeCodexClientVersion(catalog)}`,
         );
       excluded.add(profile.profile_id);
     }
@@ -317,8 +333,11 @@ export function createModelServices(deps: Dependencies) {
         cached_input_tokens: usage?.cached_input_tokens ?? undefined,
       },
     };
-    if (problem?.code === "subscription_window_exhausted") {
-      const context = problem.context;
+    // A cooldown is an assertion about time, so only the vendor's own reset or
+    // retry delay may produce one. Without either field the registry would
+    // invent a window instead of admitting it does not know.
+    const context = problem?.context ?? {};
+    if (typeof context.resetsAt === "string" || typeof context.retryAfterMs === "number") {
       event.rate_limit = {
         resets_at: typeof context.resetsAt === "string" ? context.resetsAt : null,
         retry_delay_ms: typeof context.retryAfterMs === "number" ? context.retryAfterMs : null,
@@ -362,12 +381,31 @@ export function createModelServices(deps: Dependencies) {
         adapter: {
           ...source.adapter,
           invoke: async (input, context) => {
-            const result = await source.adapter.invoke(input, { ...context, catalog });
+            const served = await source.adapter.invoke(input, { ...context, catalog });
+            // A typed fact about this generation, never a changed outcome: set
+            // only when a terminal response disclosed a model and its exact id
+            // differs from the requested one. The caller decides what to do.
+            const observed = served.route.model;
+            const result: ModelCallResult =
+              (served.outcome === "completed" || served.outcome === "incomplete") &&
+              observed !== null &&
+              observed !== input.model
+                ? { ...served, modelMismatch: { requested: input.model, observed } }
+                : served;
             // Evidence maintenance must not erase an already-received model result.
             try {
+              // The next Auto selection for this model prefers other accounts.
+              if (result.modelMismatch)
+                substitutions.record({
+                  harness_id: source.credentialHarness,
+                  profile_id: profile.profile_id,
+                  requested_model: result.modelMismatch.requested,
+                });
               await observe(source, profile, result.problem, result.usage, result.route.model);
             } catch (error) {
-              deps.warn?.(`Model quota evidence was not recorded: ${redactSecrets(String(error))}`);
+              deps.warn?.(
+                `Model account evidence was not recorded: ${redactSecrets(String(error))}`,
+              );
             }
             return result;
           },
@@ -378,28 +416,59 @@ export function createModelServices(deps: Dependencies) {
   return {
     operations,
     routes: {
-      modelSources: async () => ({
+      modelSources: async (view?: "accounts") => ({
         sources: sources.map(({ adapter, label, credentialHarness }) => ({
           id: adapter.id,
           label,
           credentialHarness,
+          ...(view === "accounts"
+            ? { processingPreferences: ["standard", "fast", "economy"], accountCatalog: true }
+            : {}),
         })),
       }),
       modelCatalog: async (
         sourceId: string,
         credentialProfileId?: string,
         requestedModel?: string,
-      ) =>
-        (
-          await resolve(
-            getSource(sourceId),
-            credentialProfileId
-              ? { mode: "pin", profileId: credentialProfileId }
-              : { mode: "auto" },
-            requestedModel ?? null,
-            lifetime.signal,
-          )
-        ).catalog,
+      ) => {
+        const { catalog } = await resolve(
+          getSource(sourceId),
+          credentialProfileId ? { mode: "pin", profileId: credentialProfileId } : { mode: "auto" },
+          requestedModel ?? null,
+          lifetime.signal,
+        );
+        return {
+          ...catalog,
+          models: catalog.models.map(({ processing: _processing, ...model }) => model),
+        };
+      },
+      modelAccountCatalog: async (sourceId: string, credentialProfileId?: string) => {
+        const source = getSource(sourceId);
+        const context = { config: config(), quota: deps.quota().read(), unusable: unusable.live() };
+        const accounts = await enumerateAccountCatalogs({
+          context,
+          adapter: registry.get(source.credentialHarness),
+          profiles: catalogProfiles(context, source.credentialHarness, credentialProfileId, true),
+          read: async (profile, canReadCatalog) => {
+            lifetime.signal.throwIfAborted();
+            if (!canReadCatalog) return null;
+            const catalog = ControlModelCatalogResponse.parse(
+              await source.adapter.catalog({ profile, signal: lifetime.signal }),
+            );
+            if (catalog.source !== sourceId || catalog.credentialProfileId !== profile.profile_id)
+              throw modelError(
+                "model_catalog_identity_mismatch",
+                "The model catalog does not identify the requested account",
+              );
+            return catalog;
+          },
+        });
+        return ControlModelAccountCatalogResponse.parse({
+          source: sourceId,
+          accounts,
+          partial: accounts.some((entry) => entry.catalog === null),
+        });
+      },
       createModelOperation: operations.create.bind(operations),
       getModelOperation: async (id: string) => operations.inspect(id),
       readModelResult: async (id: string) => operations.readResult(id),

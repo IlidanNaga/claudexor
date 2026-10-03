@@ -7,11 +7,78 @@
 import {
   REACTIVE_COOLDOWN_SOURCE,
   legacyV320QuotaSource,
+  vendorResetDayCooldownEnd,
+  type CredentialRoute,
+  type HarnessEvent,
   type QuotaConstraint,
   type QuotaSnapshot,
+  type QuotaSource,
 } from "@claudexor/schema";
+import { hashJson } from "@claudexor/util";
+
+/** The reactive vendor-limit cooldown snapshot for a harness event: the
+ * existing subject's constraints minus the superseded/expired cooldown, plus
+ * the new bounded cooldown window. Pure: the registry finds `existing`. */
+export function reactiveCooldownSnapshot(
+  input: {
+    harness: string;
+    credentialRoute: CredentialRoute;
+    event: HarnessEvent;
+    source: QuotaSource;
+    existing: QuotaSnapshot | undefined;
+  },
+  now: Date,
+): QuotaSnapshot {
+  const { harness, credentialRoute, event, source, existing } = input;
+  const reset = event.rate_limit?.resets_at ?? null;
+  const delay = event.rate_limit?.retry_delay_ms ?? null;
+  // A day-granular vendor reset (A1 payload) bounds the cooldown at end-of-day UTC.
+  const cooldownUntil =
+    reset ??
+    vendorResetDayCooldownEnd(event.payload) ??
+    new Date(now.getTime() + (typeof delay === "number" ? delay : 5 * 60_000)).toISOString();
+  const constraintId = event.rate_limit?.constraint_id
+    ? `cooldown:${event.rate_limit.constraint_id}`
+    : "cooldown";
+  return {
+    subject: existing?.subject ?? {
+      harness,
+      credential_route: credentialRoute,
+      plan_label: null,
+      subject_id: event.credential_profile_id ?? null,
+    },
+    source,
+    observed_at: event.ts,
+    freshness: "fresh",
+    constraints: [
+      ...(existing?.constraints.filter(
+        (constraint) =>
+          constraint.id !== constraintId &&
+          !isExpiredScopedCooldown(source, constraint, now.getTime()),
+      ) ?? []),
+      {
+        id: constraintId,
+        label: "Cooldown",
+        ...(event.rate_limit?.applies_to_models !== undefined
+          ? { applies_to_models: event.rate_limit.applies_to_models }
+          : {}),
+        used_ratio: null,
+        window_seconds: null,
+        resets_at: reset,
+        cooldown_until: cooldownUntil,
+      },
+    ],
+  };
+}
 
 export const QUOTA_FRESHNESS_TTL_MS = 5 * 60_000;
+
+/** Same quota EVIDENCE: everything but the observation time (a freshness flip
+ * is evidence). A poll that only re-observed unchanged evidence keeps the fresh
+ * `observed_at` in memory without a journal frame. */
+export function sameQuotaEvidence(a: QuotaSnapshot, b: QuotaSnapshot): boolean {
+  return hashJson({ ...a, observed_at: null }) === hashJson({ ...b, observed_at: null });
+}
 
 export function snapshotKey(snapshot: QuotaSnapshot): string {
   const subject = snapshot.subject;

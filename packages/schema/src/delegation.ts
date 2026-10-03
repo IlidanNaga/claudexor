@@ -3,6 +3,66 @@ import { Id } from "./primitives.js";
 
 export const MAX_DELEGATED_CHILDREN = 8;
 
+/**
+ * The persisted Delegate parent of one command's params, or null. Ordinary
+ * `parentRunId` is broader thread/retry lineage and deliberately does not
+ * participate: only a server-owned `delegatedFromRunId` establishes Delegate
+ * provenance (INV-030). One owner, shared by daemon admission, the daemon's
+ * addressed child selection, and the control plane's lineage projections.
+ */
+export function delegatedParentOf(params: unknown): string | null {
+  if (!params || typeof params !== "object" || Array.isArray(params)) return null;
+  const value = (params as Record<string, unknown>)["delegatedFromRunId"];
+  return typeof value === "string" && value ? value : null;
+}
+
+/**
+ * The minimal command-record shape direct-child selection reads: identity,
+ * creation order, and the params carrying persisted Delegate lineage. Both the
+ * daemon's `JobRecord` and the control plane's `DaemonRunRecord` satisfy it, so
+ * neither package has to depend on the other to share this one selection rule.
+ */
+export interface DelegatedChildCandidate {
+  id: string;
+  runId?: string;
+  createdAt?: string;
+  params?: unknown;
+}
+
+/**
+ * Bounded direct Delegate children of one parent run. Exact persisted lineage
+ * only; the caller's concrete record type is preserved so the daemon selects
+ * before serialization and the control plane projects the same set on reload.
+ */
+export function directDelegatedChildrenFromRecords<T extends DelegatedChildCandidate>(
+  parentRunId: string,
+  runs: readonly T[],
+  limit = MAX_DELEGATED_CHILDREN,
+): T[] {
+  const boundedLimit = Math.max(0, limit);
+  if (boundedLimit === 0) return [];
+  const ordered = runs
+    .filter(
+      (run) =>
+        delegatedParentOf(run.params) === parentRunId && (run.runId ?? run.id) !== parentRunId,
+    )
+    .sort((a, b) => {
+      const created = (a.createdAt ?? "\uffff").localeCompare(b.createdAt ?? "\uffff");
+      const runId = (a.runId ?? a.id).localeCompare(b.runId ?? b.id);
+      return created || runId || a.id.localeCompare(b.id);
+    });
+  const out: T[] = [];
+  const seen = new Set<string>([parentRunId]);
+  for (const run of ordered) {
+    const runId = run.runId ?? run.id;
+    if (seen.has(runId)) continue;
+    seen.add(runId);
+    out.push(run);
+    if (out.length >= boundedLimit) break;
+  }
+  return out;
+}
+
 export const DelegatedChildRunIds = z
   .array(Id)
   .max(MAX_DELEGATED_CHILDREN)

@@ -1,4 +1,8 @@
-import type { CouncilMember, CouncilProjection } from "@claudexor/schema";
+import {
+  MAX_COUNCIL_MEMBERS_DEFAULT,
+  type CouncilMember,
+  type CouncilProjection,
+} from "@claudexor/schema";
 import type { CouncilMergeInput } from "./council-input.js";
 import { PLAN_WORK_REPORT_GUIDANCE } from "./plan-prompt.js";
 
@@ -17,17 +21,47 @@ import { PLAN_WORK_REPORT_GUIDANCE } from "./plan-prompt.js";
  * default can never drift. */
 export const DEFAULT_COUNCIL_MEMBERS = 3;
 
+/** Shared pre-spawn validation for daemon requests and direct engine embedders. */
+export function assertCouncilWidth(
+  requestedN: number | undefined,
+  maxMembers = MAX_COUNCIL_MEMBERS_DEFAULT,
+): void {
+  if (requestedN === undefined) return;
+  if (!Number.isSafeInteger(requestedN) || requestedN < 2) {
+    throw Object.assign(
+      new Error(`Council membership n must be a safe integer of at least 2 (got ${requestedN})`),
+      {
+        code: "council_width_invalid",
+        status: 400,
+        retryable: false,
+      },
+    );
+  }
+  if (requestedN > maxMembers) {
+    throw Object.assign(
+      new Error(`Council membership n=${requestedN} exceeds the startup-frozen cap ${maxMembers}`),
+      {
+        code: "council_width_exceeded",
+        status: 400,
+        retryable: false,
+      },
+    );
+  }
+}
+
 /** Resolve how many members draft, given the requested `n` (already validated
- * to 2..4 by runStartStrategyViolations when present) and the distinct pool
+ * to at least two by runStartStrategyViolations when present) and the distinct pool
  * size. Council NEVER duplicates a harness into two members — a member is one
  * distinct lane — so the effective count is capped by availability. A count
  * below the request is `degraded` (disclosed), not silent. */
 export function resolveCouncilWidth(
   requestedN: number | undefined,
   availableDistinct: number,
+  maxMembers = MAX_COUNCIL_MEMBERS_DEFAULT,
 ): { requested: number; members: number; degraded: boolean } {
-  const requested = requestedN ?? Math.min(availableDistinct, DEFAULT_COUNCIL_MEMBERS);
-  const members = Math.min(requested, availableDistinct);
+  assertCouncilWidth(requestedN, maxMembers);
+  const requested = requestedN ?? Math.min(availableDistinct, DEFAULT_COUNCIL_MEMBERS, maxMembers);
+  const members = Math.min(requested, availableDistinct, maxMembers);
   return { requested, members, degraded: members < requested };
 }
 

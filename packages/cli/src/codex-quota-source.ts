@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { loadConfig } from "@claudexor/config";
-import { providerScrubEnv } from "@claudexor/core";
+import { harnessRuntimeEnv, providerScrubEnv } from "@claudexor/core";
 import type { QuotaRefreshResult } from "@claudexor/daemon";
 import {
   CODEX_FILE_AUTH_ARGS,
@@ -289,7 +289,7 @@ export function codexQuotaInvocation(
   args: string[];
   env: NodeJS.ProcessEnv;
 } {
-  const env = { ...baseEnv };
+  const env = harnessRuntimeEnv(baseEnv);
   for (const key of Object.keys(providerScrubEnv())) delete env[key];
   // Explicit home wins (per-profile quota reads); the default stays the
   // Claudexor-owned native home so a bare call still binds to it.

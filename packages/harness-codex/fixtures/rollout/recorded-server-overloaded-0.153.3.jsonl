@@ -1,0 +1,5 @@
+{"timestamp":"2026-09-15T09:42:52.865Z","type":"session_meta","payload":{"id":"00000000-0000-7000-0000-000000000000","cli_version":"0.153.3","timestamp":"2026-09-15T09:42:52.779Z"}}
+{"timestamp":"2026-09-15T09:42:52.866Z","type":"event_msg","payload":{"type":"task_started","turn_id":"00000000-0000-7000-0000-000000000001","started_at":1789465372,"model_context_window":258400}}
+{"timestamp":"2026-09-15T09:42:55.191Z","type":"turn_context","payload":{"turn_id":"00000000-0000-7000-0000-000000000001","model":"gpt-6-astra"}}
+{"timestamp":"2026-09-15T09:43:57.967Z","type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"primary":{"used_percent":72.0,"window_minutes":10080,"resets_at":1789821054},"secondary":null}}}
+{"timestamp":"2026-09-15T09:43:57.973Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"00000000-0000-7000-0000-000000000001","last_agent_message":null,"error":{"message":"Selected model is at capacity. Please try a different model.","codex_error_info":"server_overloaded"},"started_at":1789465372,"completed_at":1789465437,"duration_ms":65129}}

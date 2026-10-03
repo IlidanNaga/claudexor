@@ -33,7 +33,7 @@ export function reviewUsageCostSettlement(
   ]);
   return {
     knowledge: unknownUsd > 0 ? "unknown" : aggregateKnowledge,
-    cashKnowledge: unknownUsd > 0 ? "unknown" : knowledge.cash,
+    cashKnowledge: knowledge.cash,
     ...(normalizedValuation > 0 || unknownUsd > 0
       ? {
           valuationKnowledge: unknownUsd > 0 ? ("unknown" as const) : knowledge.valuation,
@@ -74,9 +74,8 @@ export function attemptUsageCostSettlement(
     if (observed > 0 || componentEvidence) {
       const normalizedValuation = Math.max(0, split.valuationUsd);
       const cashKnowledge =
-        split.unknownUsd > 0
-          ? "unknown"
-          : (split.cashKnowledge ?? measuredKnowledge(split.cashEstimated === true));
+        split.cashKnowledge ??
+        (split.unknownUsd > 0 ? "unknown" : measuredKnowledge(split.cashEstimated === true));
       const valuationKnowledge =
         split.unknownUsd > 0
           ? "unknown"

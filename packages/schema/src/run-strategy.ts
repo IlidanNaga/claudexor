@@ -209,7 +209,9 @@ export function runStartStrategyViolations(value: {
     violations.push(`create is an agent strategy; mode is '${mode}'`);
   }
   // Council (INV-031) is a PLAN strategy: N harnesses draft in parallel, the
-  // primary merges into one plan + one question set.
+  // primary merges into one plan + one question set. The configured maximum is
+  // startup-owned and therefore checked by the daemon runner, not this
+  // transport-only coherence validator.
   if (value.council === true && mode !== "plan") {
     violations.push(`council is a plan strategy; mode is '${mode}'`);
   }
@@ -227,8 +229,8 @@ export function runStartStrategyViolations(value: {
         : `n sets the best-of race width (agent) or deep-scan width (ask); mode is '${mode}'`,
     );
   }
-  if (value.council === true && value.n !== undefined && (value.n < 2 || value.n > 4)) {
-    violations.push(`council membership n must be between 2 and 4 (got ${value.n})`);
+  if (value.council === true && value.n !== undefined && value.n < 2) {
+    violations.push(`council membership n must be at least 2 (got ${value.n})`);
   }
   if (value.delegate === true && mode !== "agent") {
     violations.push(`delegate is an agent strategy; mode is '${mode}'`);
@@ -296,7 +298,7 @@ export function runStartRequiresGit(
     access?: AccessProfile;
     untilClean?: boolean;
     attempts?: number | null;
-    execution?: { isolation?: "envelope" | "live" };
+    execution?: { isolation?: "envelope" | "live"; workspaceKind?: "git" | "directory" };
   },
   context: {
     effectiveWorkspaceRequiresGit?: boolean;
@@ -308,6 +310,7 @@ export function runStartRequiresGit(
     context.effectiveAccess ??
     resolveRunAccess(value, context.accessDefault ?? "workspace_write").effective;
   if (effectiveAccess === "readonly") return false;
+  if (value.execution?.workspaceKind === "directory") return false;
   // A thread may execute "live" *inside a worktree*: isolated threads and
   // protected-path promotion are resolved by the daemon from durable thread /
   // project state, not from the wire isolation flag. That effective workspace
