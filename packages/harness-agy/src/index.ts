@@ -82,7 +82,16 @@ async function detectVersion(): Promise<string | null> {
  * the unauthenticated plain listing fails — an empty live list would refuse
  * every explicit model (PLAN §2.6).
  */
+// gemini-3.8-flash-{high,medium,low}: confirmed live on 2026-10-03 with
+// `agy models` under a Claudexor profile HOME. The host binary answered
+// 1.1.13 right before the listing and self-updated to 1.2.16 while it ran,
+// so this is evidence of the ids on the vendor backend for that account and
+// moment, not a re-verification of the 1.1.13 fixtures; the ids follow the
+// same `-effort` suffix shape as the 3.7 entries.
 const AGY_KNOWN_MODELS = [
+  "gemini-3.8-flash-high",
+  "gemini-3.8-flash-medium",
+  "gemini-3.8-flash-low",
   "gemini-3.7-flash-high",
   "gemini-3.7-flash-medium",
   "gemini-3.7-flash-low",
