@@ -146,6 +146,7 @@ extension AppModel {
             task.effectiveAccess = detail.summary.effectiveAccess
             task.externalContextPolicy = detail.summary.externalContextPolicy
             task.tests = detail.summary.tests ?? task.tests
+            task.reviewRequested = detail.summary.review
             task.reviewerPanel = detail.summary.reviewerPanel
             task.protectedPathApprovals = detail.summary.protectedPathApprovals
             task.browserRequirementDetail = browserRequirementDetail(detail.summary.requestRequirements)

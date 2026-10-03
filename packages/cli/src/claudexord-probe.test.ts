@@ -2,10 +2,12 @@ import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { type DaemonWriterLeaseStatus } from "@claudexor/daemon";
 import { CLAUDEXOR_VERSION } from "@claudexor/util";
-import { runProbeIfRequested } from "./claudexord.js";
+import { runProbeIfRequested } from "./claudexord-entry.js";
 import {
   admitAndAwaitRuntimeReplacementStop,
+  decideRuntimeReplacementWithoutControl,
   runStopIfRequested,
 } from "./runtime-replacement-stop.js";
 
@@ -13,15 +15,75 @@ const EXPECTED_VERSION = "3.4.0";
 const EXPECTED_BUILD_SHA = "b".repeat(40);
 const STOP_ARGS = ["--stop", EXPECTED_VERSION, EXPECTED_BUILD_SHA];
 const LEASE_OWNER = { pid: 4242, token: "lease-owner" };
+const KNOWN_OBSERVATION = {
+  identity: {
+    status: "known",
+    pid: LEASE_OWNER.pid,
+    platform: "linux",
+    source: "procfs_stat",
+    startToken: "linux:4242",
+    processGroupId: LEASE_OWNER.pid,
+  },
+  linuxState: "S",
+} as const;
+const CAPABLE_LEASE = {
+  status: "owned",
+  path: "/tmp/test-daemon.sock.writer",
+  owner: LEASE_OWNER,
+  capability: {
+    status: "capable",
+    reason: "legacy_process_present",
+    observation: KNOWN_OBSERVATION,
+  },
+} satisfies DaemonWriterLeaseStatus;
+const STALE_LEASE = {
+  status: "owned",
+  path: "/tmp/test-daemon.sock.writer",
+  owner: LEASE_OWNER,
+  capability: {
+    status: "proven_stale",
+    reason: "linux_zombie",
+    observation: { ...KNOWN_OBSERVATION, linuxState: "Z" },
+  },
+} satisfies DaemonWriterLeaseStatus;
+const ABSENT_LEASE = {
+  status: "absent",
+  path: "/tmp/test-daemon.sock.writer",
+} satisfies DaemonWriterLeaseStatus;
+const UNKNOWN_LEASE = {
+  status: "unknown",
+  path: "/tmp/test-daemon.sock.writer",
+  reason: "owner_malformed",
+} satisfies DaemonWriterLeaseStatus;
+const UNKNOWN_ACTIVITY_LEASE = {
+  status: "owned",
+  path: "/tmp/test-daemon.sock.writer",
+  owner: LEASE_OWNER,
+  capability: {
+    status: "unknown",
+    reason: "identity_unavailable",
+    observation: {
+      identity: {
+        status: "unknown",
+        pid: LEASE_OWNER.pid,
+        platform: "linux",
+        reason: "permission_denied",
+      },
+      linuxState: null,
+    },
+  },
+} satisfies DaemonWriterLeaseStatus;
 
 describe("claudexord --probe (D-2 install probe)", () => {
   it("handles --probe and ignores a normal argv", () => {
     expect(runProbeIfRequested(["--probe"])).toBe(true);
     expect(runProbeIfRequested([])).toBe(false);
     expect(runProbeIfRequested(["--other"])).toBe(false);
+    expect(runProbeIfRequested(["--probe", "setup"])).toBe(false);
+    expect(runProbeIfRequested(["setup", "--probe"])).toBe(false);
   });
 
-  it("prints one JSON line {version, buildSha} and starts nothing durable", () => {
+  it("prints one additive setup_attach role on the built entry and starts nothing durable", () => {
     const dist = resolve(import.meta.dirname, "../dist/claudexord.js");
     if (!existsSync(dist)) {
       // The integration assertion needs the built daemon; `pnpm build` runs
@@ -36,13 +98,32 @@ describe("claudexord --probe (D-2 install probe)", () => {
     });
     const lines = out.trim().split("\n");
     expect(lines).toHaveLength(1);
-    const parsed = JSON.parse(lines[0]!) as { version: string; buildSha: string };
+    const parsed = JSON.parse(lines[0]!) as {
+      version: string;
+      buildSha: string;
+      roles?: string[];
+    };
     expect(parsed.version).toBe(CLAUDEXOR_VERSION);
     expect(parsed.buildSha).toBe(sha);
+    expect(parsed.roles).toEqual(["setup_attach"]);
   });
 });
 
 describe("claudexord --stop (runtime replacement admission)", () => {
+  it.each([
+    [false, ABSENT_LEASE, "already_stopped"],
+    [false, STALE_LEASE, "already_stopped"],
+    [false, CAPABLE_LEASE, "activity_unknown"],
+    [false, UNKNOWN_ACTIVITY_LEASE, "activity_unknown"],
+    [false, UNKNOWN_LEASE, "activity_unknown"],
+    [true, ABSENT_LEASE, "activity_unknown"],
+  ] satisfies readonly (readonly [boolean, DaemonWriterLeaseStatus, string])[])(
+    "shares the strict no-Control matrix for reachable=%s and lease=%s",
+    (reachable, lease, expected) => {
+      expect(decideRuntimeReplacementWithoutControl(reachable, lease).status).toBe(expected);
+    },
+  );
+
   it("projects a typed busy refusal without waiting for termination", async () => {
     const previousExitCode = process.exitCode;
     const output: string[] = [];
@@ -53,7 +134,7 @@ describe("claudexord --stop (runtime replacement admission)", () => {
         socketPath: () => "/tmp/test-daemon.sock",
         readToken: () => "test-token",
         socketAlive: async () => true,
-        leaseOwner: () => LEASE_OWNER,
+        inspectLease: () => CAPABLE_LEASE,
         client: () => ({
           shutdownForRuntimeReplacement: async () => {
             throw Object.assign(new Error("work became active"), {
@@ -94,7 +175,7 @@ describe("claudexord --stop (runtime replacement admission)", () => {
         socketPath: () => "/tmp/test-daemon.sock",
         readToken: () => "test-token",
         socketAlive: async () => true,
-        leaseOwner: () => LEASE_OWNER,
+        inspectLease: () => CAPABLE_LEASE,
         client: () => ({
           shutdownForRuntimeReplacement: async () => {
             throw new Error("daemon connection closed");
@@ -131,7 +212,7 @@ describe("claudexord --stop (runtime replacement admission)", () => {
         socketPath: () => "/tmp/test-daemon.sock",
         readToken: () => "test-token",
         socketAlive: async () => true,
-        leaseOwner: () => LEASE_OWNER,
+        inspectLease: () => CAPABLE_LEASE,
         client: () => ({
           shutdownForRuntimeReplacement: async () => {
             throw new Error("unknown method: claudexor.shutdownForRuntimeReplacement");
@@ -166,7 +247,7 @@ describe("claudexord --stop (runtime replacement admission)", () => {
         socketPath: () => "/tmp/test-daemon.sock",
         readToken: () => "test-token",
         socketAlive: async () => true,
-        leaseOwner: () => LEASE_OWNER,
+        inspectLease: () => CAPABLE_LEASE,
         client: () => ({
           shutdownForRuntimeReplacement: async (expected) => {
             expect(expected).toEqual({
@@ -250,7 +331,7 @@ describe("claudexord --stop (runtime replacement admission)", () => {
         socketPath: () => "/tmp/test-daemon.sock",
         readToken: () => null,
         socketAlive: async () => true,
-        leaseOwner: () => LEASE_OWNER,
+        inspectLease: () => CAPABLE_LEASE,
         client: () => {
           clients += 1;
           throw new Error("must not construct a client");
@@ -284,7 +365,7 @@ describe("claudexord --stop (runtime replacement admission)", () => {
         socketPath: () => "/tmp/test-daemon.sock",
         readToken: () => null,
         socketAlive: async () => false,
-        leaseOwner: () => null,
+        inspectLease: () => ABSENT_LEASE,
         client: () => {
           throw new Error("must not construct a client");
         },
@@ -294,6 +375,61 @@ describe("claudexord --stop (runtime replacement admission)", () => {
 
       expect(process.exitCode).toBeUndefined();
       expect(JSON.parse(output.join(""))).toEqual({ stopped: true, alreadyStopped: true });
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+  });
+
+  it("treats an unreachable proven-stale lease as idempotently stopped without targeting it", async () => {
+    const previousExitCode = process.exitCode;
+    const output: string[] = [];
+    let clients = 0;
+    try {
+      process.exitCode = undefined;
+      await runStopIfRequested(STOP_ARGS, {
+        socketPath: () => "/tmp/test-daemon.sock",
+        readToken: () => "unused",
+        socketAlive: async () => false,
+        inspectLease: () => STALE_LEASE,
+        client: () => {
+          clients += 1;
+          throw new Error("must not construct a client");
+        },
+        awaitTermination: async () => ({ outcome: "still_alive", detail: "unused" }),
+        write: (line) => output.push(line),
+      });
+
+      expect(clients).toBe(0);
+      expect(process.exitCode).toBeUndefined();
+      expect(JSON.parse(output.join(""))).toEqual({ stopped: true, alreadyStopped: true });
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+  });
+
+  it("refuses malformed writer-lease authority while the socket is unreachable", async () => {
+    const previousExitCode = process.exitCode;
+    const output: string[] = [];
+    try {
+      process.exitCode = undefined;
+      await runStopIfRequested(STOP_ARGS, {
+        socketPath: () => "/tmp/test-daemon.sock",
+        readToken: () => "unused",
+        socketAlive: async () => false,
+        inspectLease: () => UNKNOWN_LEASE,
+        client: () => {
+          throw new Error("must not construct a client");
+        },
+        awaitTermination: async () => ({ outcome: "exited", detail: "unused" }),
+        write: (line) => output.push(line),
+      });
+
+      expect(process.exitCode).toBe(1);
+      expect(JSON.parse(output.join(""))).toMatchObject({
+        stopped: false,
+        code: "runtime_activity_unknown",
+        retryable: true,
+      });
     } finally {
       process.exitCode = previousExitCode;
     }
@@ -310,7 +446,7 @@ describe("claudexord --stop (runtime replacement admission)", () => {
         socketPath: () => "/tmp/test-daemon.sock",
         readToken: () => "test-token",
         socketAlive: async () => false,
-        leaseOwner: () => LEASE_OWNER,
+        inspectLease: () => CAPABLE_LEASE,
         client: () => {
           clients += 1;
           throw new Error("must not construct a client");
@@ -335,6 +471,37 @@ describe("claudexord --stop (runtime replacement admission)", () => {
     }
   });
 
+  it("refuses a reachable socket whose fresh strict writer owner is proven stale", async () => {
+    const previousExitCode = process.exitCode;
+    const output: string[] = [];
+    let clients = 0;
+    try {
+      process.exitCode = undefined;
+      await runStopIfRequested(STOP_ARGS, {
+        socketPath: () => "/tmp/test-daemon.sock",
+        readToken: () => "test-token",
+        socketAlive: async () => true,
+        inspectLease: () => STALE_LEASE,
+        client: () => {
+          clients += 1;
+          throw new Error("must not construct a client");
+        },
+        awaitTermination: async () => ({ outcome: "exited", detail: "unused" }),
+        write: (line) => output.push(line),
+      });
+
+      expect(clients).toBe(0);
+      expect(process.exitCode).toBe(1);
+      expect(JSON.parse(output.join(""))).toMatchObject({
+        stopped: false,
+        code: "runtime_activity_unknown",
+        retryable: true,
+      });
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+  });
+
   it("rejects a stop invocation without exact identity before probing daemon state", async () => {
     const previousExitCode = process.exitCode;
     const output: string[] = [];
@@ -348,7 +515,7 @@ describe("claudexord --stop (runtime replacement admission)", () => {
           socketChecks += 1;
           return false;
         },
-        leaseOwner: () => null,
+        inspectLease: () => ABSENT_LEASE,
         client: () => {
           throw new Error("must not construct a client");
         },

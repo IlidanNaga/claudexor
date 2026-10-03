@@ -1,3 +1,9 @@
+export { rawScoutBundle } from "./deepScanOutput.js";
+import {
+  bindProcessingAdmission,
+  updateProcessingStreamHold,
+  ProcessingBudgetAdmissionError,
+} from "./processing-dispatch.js";
 import { join } from "node:path";
 import type {
   CostEvidence,
@@ -31,9 +37,9 @@ import {
   observeAttemptTelemetry,
   setAttemptOutcome,
   telemetrySummary,
-  toolWarnings,
 } from "./attemptTelemetry.js";
 import { settleGrantedAttemptLease } from "./attemptUsageCost.js";
+import { runModelGovernedRoute } from "./modelGovernance.js";
 
 /** The reducer runs under the fixed `synth` attempt id (roster/cost visible). */
 export const DEEP_SCAN_REDUCER_ATTEMPT_ID = "synth";
@@ -60,53 +66,6 @@ async function waitForCleanup(work: Promise<unknown>, graceMs: number): Promise<
   clearTimeout(timer);
 }
 
-/** Honest attributed fallback; never presents raw scout reports as a merge. */
-export function rawScoutBundle(args: {
-  succeeded: {
-    attemptId: string;
-    harnessId: string;
-    report: string;
-    telemetry: AttemptTelemetry;
-  }[];
-  unsuccessful: { attemptId: string; harnessId: string; status: string; error: string | null }[];
-  status: DeepScanSynthesis | null;
-}): string {
-  const total = args.succeeded.length + args.unsuccessful.length;
-  const intro =
-    args.status?.status === "skipped"
-      ? [
-          "## Raw scout report (single scout — no merge needed)",
-          "",
-          "Only one scout produced a report, so no synthesis reducer was run.",
-        ]
-      : [
-          "## Raw scout bundle — NOT a merged synthesis",
-          "",
-          `The bounded synthesis reducer did not produce a merge (${args.status?.reason ?? "synthesis unavailable"}). The scout reports below are raw and unmerged; claims are not deduplicated and disagreements are not reconciled.`,
-        ];
-  return [
-    ...intro,
-    "",
-    `Explorers succeeded: ${args.succeeded.length}/${total}.`,
-    "",
-    "## Scout reports (raw, not merged)",
-    ...args.succeeded.map((a) => {
-      const warnings = toolWarnings(a.telemetry);
-      const warningText = warnings.length
-        ? `\n\n> Tool warnings: ${warnings.map((e) => `${e.tool}: ${e.summary}`).join("; ")}`
-        : "";
-      return `\n### ${a.attemptId} / ${a.harnessId}\n\n${a.report}${warningText}`;
-    }),
-    "",
-    "## Omissions / Uncertainty",
-    ...(args.unsuccessful.length
-      ? args.unsuccessful.map((a) => `- ${a.attemptId} / ${a.harnessId} ${a.status}: ${a.error}`)
-      : [
-          "- No explorer failures recorded. Claims still need evidence review before edit execution.",
-        ]),
-  ].join("\n");
-}
-
 /** A disposable read-only route context (env + reclaim). */
 export interface ReducerHome {
   env: Record<string, string>;
@@ -116,7 +75,7 @@ export interface ReducerHome {
 /** Engine-owned dependencies; private route/session machinery stays with the caller. */
 export interface DeepScanReducerDeps {
   newReadOnlyHome: () => ReducerHome;
-  costEvidence: (harnessId: string, attemptId: string) => CostEvidence;
+  costEvidence: (harnessId: string, attemptId: string, routed?: RoutedAdapter) => CostEvidence;
   buildSpec: (
     routed: RoutedAdapter,
     homeEnv: Record<string, string>,
@@ -182,7 +141,7 @@ export async function runDeepScanReducer(
     attemptId,
     intent: "synthesize",
     harnessId: adapter.id,
-    cost: deps.costEvidence(adapter.id, attemptId),
+    cost: deps.costEvidence(adapter.id, attemptId, args.routed),
   });
   if (!lease.granted) {
     log.emit("budget.lease.created", {
@@ -203,7 +162,7 @@ export async function runDeepScanReducer(
     };
   }
 
-  type ReducerStop = "timeout" | "cancelled";
+  type ReducerStop = "timeout" | "cancelled" | "budget";
   const cleanupGraceMs = deps.cleanupGraceMs ?? REDUCER_CLEANUP_GRACE_MS;
   const reducerAbort = new AbortController();
   let resolveStop!: (reason: ReducerStop) => void;
@@ -238,6 +197,7 @@ export async function runDeepScanReducer(
   let settlementTelemetry: AttemptTelemetry | null = null;
   let cost = 0;
   let costEstimated = false;
+  let processingDenial: BudgetDenial | null = null;
   const cleanupAttempt = (): void => {
     clearTimeout(hardTimer);
     args.signal?.removeEventListener("abort", onOuterAbort);
@@ -273,7 +233,9 @@ export async function runDeepScanReducer(
   const resultForStop = (reason: ReducerStop): DeepScanReducerResult =>
     reason === "cancelled"
       ? { status: "cancelled" }
-      : { status: "failed", error: `deep-scan reducer timed out after ${deps.hardTimeoutMs}ms` };
+      : reason === "budget" && processingDenial
+        ? { status: "budget_denied", denial: processingDenial }
+        : { status: "failed", error: `deep-scan reducer timed out after ${deps.hardTimeoutMs}ms` };
 
   if (stopReason) return finishBeforeHarness(resultForStop(stopReason));
   let prompt: string;
@@ -313,6 +275,7 @@ export async function runDeepScanReducer(
 
   const built = prepared.built;
   const spec = built.spec;
+  bindProcessingAdmission(spec, ledger, lease.lease!, adapter.id, attemptId);
   activeSessionId = spec.session_id;
   if (stopReason) {
     cancelActiveSession();
@@ -324,7 +287,7 @@ export async function runDeepScanReducer(
     : reducerAbort.signal;
   const telemetry = createAttemptTelemetry(
     built.webPolicy,
-    deps.webRequired || built.webPolicy === "cached" || built.webPolicy === "live",
+    deps.webRequired,
     built.effectiveWeb,
     [],
     built.model,
@@ -355,7 +318,19 @@ export async function runDeepScanReducer(
         estimated: safeEv.usage.estimated === true,
       });
     }
-    if (acceptDeliverable) answer.observe(safeEv);
+    const streamDenial = updateProcessingStreamHold(
+      spec,
+      telemetry.usageCost,
+      ledger,
+      lease.lease!.lease_id,
+      adapter.id,
+      attemptId,
+    );
+    if (streamDenial) {
+      processingDenial ??= streamDenial;
+      requestStop("budget");
+    }
+    if (acceptDeliverable && !streamDenial) answer.observe(safeEv);
     if (safeEv.type === "error") {
       harnessError = safeEv.error ? redactSecrets(safeEv.error) : "harness emitted an error";
     }
@@ -392,7 +367,7 @@ export async function runDeepScanReducer(
       attempt_id: attemptId,
       external_context_policy: built.webPolicy,
     });
-    const watched = withInactivityWatchdog(adapter.run(spec), {
+    const watched = withInactivityWatchdog(runModelGovernedRoute(args.routed, spec), {
       timeoutMs: deps.inactivityTimeoutMs,
       countsAsProgress: countsAsAgentProgress,
       onTimeout: () => {
@@ -431,6 +406,7 @@ export async function runDeepScanReducer(
     }
   } catch (err) {
     harnessError = safeErrorMessage(err);
+    if (err instanceof ProcessingBudgetAdmissionError) processingDenial = err.denial;
   } finally {
     cleanupAttempt();
   }
@@ -489,6 +465,7 @@ export async function runDeepScanReducer(
     });
     return { status: "cancelled" };
   }
+  if (processingDenial) return { status: "budget_denied", denial: processingDenial };
   if (harnessError) {
     log.emit("harness.completed", {
       harness_id: adapter.id,

@@ -1,0 +1,52 @@
+{
+  "provenance": {
+    "captured_at": "2026-09-28",
+    "plane": "adapter-normalized HarnessEvent stream; not raw vendor bytes",
+    "source_sha256": "a4d0a281824b7144094977f1dab7025d3ee45270a3d1b8c3a896b9dd18989512",
+    "redactions": "Account and native session identifiers replaced. Vendor error and event order preserved.",
+    "historical_outcome": "The existing production journal took structural_pre_progress_failure. The new ledger was not present in that run."
+  },
+  "events": [
+    {
+      "type": "started",
+      "session_id": "[REDACTED_SESSION_ID]",
+      "ts": "2026-09-28T19:54:45.894Z",
+      "observed_model": "Grok 4.7  Extra High Fast​​",
+      "credential_route": "vendor_native",
+      "credential_source": "native_session",
+      "payload": {
+        "native_session_id": "[REDACTED_SESSION_ID]"
+      },
+      "credential_profile_id": "ACCOUNT_A",
+      "processing": {
+        "requested": "standard",
+        "submitted": null,
+        "submittedNative": "grok-4.7-xhigh-fast",
+        "observed": "unknown",
+        "observedNative": [],
+        "reason": "processing_variant_unconfirmed; selected_model_preserved",
+        "source": "cursor_account_model_inventory"
+      },
+      "processing_cost_basis": {
+        "nativeMode": "grok-4.7-xhigh-fast",
+        "kind": "unknown",
+        "source": "cursor_cli_has_no_tier_billing_receipt"
+      }
+    },
+    {
+      "type": "error",
+      "session_id": "[REDACTED_SESSION_ID]",
+      "ts": "2026-09-28T19:54:55.523Z",
+      "error": "cursor-agent exited with code 1: ActionRequiredError: Increase limits for faster responses You're out of usage. Switch to Auto, or ask your admin to increase your limit to continue."
+    },
+    {
+      "type": "completed",
+      "session_id": "[REDACTED_SESSION_ID]",
+      "ts": "2026-09-28T19:54:55.523Z",
+      "payload": {
+        "exit_code": 1,
+        "stderr_tail": "ActionRequiredError: Increase limits for faster responses You're out of usage. Switch to Auto, or ask your admin to increase your limit to continue."
+      }
+    }
+  ]
+}

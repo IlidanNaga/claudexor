@@ -59,3 +59,8 @@ export function encodeJournalPayload(value: unknown): Buffer {
   if (encoded === undefined) throw new Error("journal value is not JSON serializable");
   return Buffer.from(encoded);
 }
+
+/** Detach a JSON value from every caller-held reference. */
+export function cloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}

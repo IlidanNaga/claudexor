@@ -1,7 +1,11 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { Attachment, AttachmentInputClass } from "@claudexor/schema";
-import { runControlApplicability } from "@claudexor/schema";
+import {
+  runControlApplicability,
+  resolveRunReviewRequested,
+  type RunReviewRequest,
+} from "@claudexor/schema";
 import { describe, expect, it } from "vitest";
 import { RequestRequirementsResolver } from "./requestRequirements.js";
 
@@ -23,6 +27,7 @@ type FixtureInput = {
 };
 type Fixture = {
   generatedBy: string[];
+  reviewCases: Array<RunReviewRequest & { name: string; requested: boolean }>;
   runControls: Array<{
     name: string;
     schemaMode: "agent" | "ask" | "plan";
@@ -87,7 +92,14 @@ function declarations(names: string[] | null): AttachmentInputClass[] | null {
 
 describe("composer semantic parity fixture", () => {
   it("pins schema applicability and resolver attachment admission", () => {
-    expect(fixture.generatedBy).toEqual(["runControlApplicability", "RequestRequirementsResolver"]);
+    expect(fixture.generatedBy).toEqual([
+      "runControlApplicability",
+      "resolveRunReviewRequested",
+      "RequestRequirementsResolver",
+    ]);
+    for (const testCase of fixture.reviewCases) {
+      expect(resolveRunReviewRequested(testCase), testCase.name).toBe(testCase.requested);
+    }
     for (const testCase of fixture.runControls) {
       const actual = runControlApplicability({ mode: testCase.schemaMode });
       expect(actual.reviewerPanel, testCase.name).toEqual(testCase.reviewers);

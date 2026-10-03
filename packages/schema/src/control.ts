@@ -1,4 +1,5 @@
 import { z } from "zod/v3";
+import { CANCEL_REASON_CODES } from "./cancel-reason.js";
 import {
   AccessProfile,
   AuthPreference,
@@ -8,6 +9,7 @@ import {
   NonBlankString,
   OutputReadyState,
   ProviderFamily,
+  RecordedAccessProfile,
 } from "./primitives.js";
 import {
   PaidBudget,
@@ -18,37 +20,23 @@ import {
 } from "./budget.js";
 export { ControlQuotaResponse } from "./quota.js";
 import { RunOutcomeFacts } from "./decision.js";
-import { EffortHint, HarnessModel, InteractionQuestion } from "./harness.js";
+import { EffortHint, InputTokenUsage, InteractionQuestion } from "./harness.js";
 import { ContinuityKind, ThreadState, ThreadTurnKind, WorkspaceMode } from "./thread.js";
 import { ResourceAttachmentRef } from "./attachment.js";
 import { RequestRequirementResolution } from "./request-requirements.js";
 import { ProtectedPathApproval, TestCommandInvocation } from "./task.js";
 import { RunScope } from "./control-run-scope.js";
 import { RunFailure } from "./control-run-failure.js";
+import { RunExecution } from "./control-run-execution.js";
+import { WorkspaceScopePath } from "./files-manifest.js";
 import { makeControlRunRetrySchemas } from "./control-run-retry.js";
 import { ControlAuthRoute } from "./control-auth-route.js";
 import { DelegatedChildRunIds, RunDelegationInfo } from "./delegation.js";
 import { HARNESS_INACTIVITY_TIMEOUT_DEFAULT_MS, InteractionTimeoutValue } from "./config.js";
-
-export const RunExecution = z
-  .object({
-    isolation: z
-      .enum(["envelope", "live"])
-      .default("envelope")
-      .describe(
-        "Run isolation: envelope (isolated worktree in the external per-project runtime namespace, the default) or live (the project tree itself).",
-      ),
-    delegated: z
-      .boolean()
-      .default(false)
-      .describe(
-        "Marks a run driven by an EXTERNAL orchestrator that owns the workspace, not by the operator at a surface. Such a run is confined to a scoped harness HOME even under isolation='live' (an in-place delegated attempt therefore cannot resume a native vendor session stored under the real HOME). Unrelated to the `delegate` belt flag and to `delegatedFromRunId` (belt-child provenance).",
-      ),
-  })
-  .strict()
-  .describe("Execution isolation and delegation settings for a run.");
-export type RunExecution = z.infer<typeof RunExecution>;
-
+import { RuntimeConcurrencyState } from "./runtime-concurrency.js";
+import { ProcessingPreference } from "./processing.js";
+export { RunExecution } from "./control-run-execution.js";
+export { ControlTimelineEvent } from "./control-timeline.js";
 export const ControlReviewerPanelEntry = z
   .object({
     /** Explicit reviewer harness id. Repeated harness ids are allowed so one
@@ -64,13 +52,16 @@ export const ControlReviewerPanelEntry = z
     effort: EffortHint.optional().describe(
       "Per-reviewer effort hint, passed to that harness only.",
     ),
+    credentialProfileId: NonBlankString.optional().describe(
+      "Per-reviewer credential profile id; explicit pins are strict and never fall back.",
+    ),
+    processingPreference: ProcessingPreference.optional(),
   })
   .strict()
   .describe(
-    "One reviewer of an explicit reviewer panel — a harness plus optional model and effort. The CLI spells one entry `harness=model:effort` (e.g. `claude=claude-opus-4-8:max`).",
+    "One reviewer of an explicit reviewer panel — a harness plus optional model, effort, and strict credentialProfileId. Compact entries are unpinned; structured JSON carries pins.",
   );
 export type ControlReviewerPanelEntry = z.infer<typeof ControlReviewerPanelEntry>;
-
 export const ControlRunStartRequest = z
   .object({
     prompt: z.string().default("").describe("The user's prompt for the run."),
@@ -82,7 +73,7 @@ export const ControlRunStartRequest = z
       .string()
       .optional()
       .describe(
-        "System-level instructions layered onto every task-producing lane; delivered natively (append-system-prompt / developer_instructions) or as a delimited prompt prefix.",
+        "System-level instructions layered onto every task-producing lane; delivered natively (append-system-prompt-file / developer_instructions) or as a delimited prompt prefix.",
       ),
     /** Immutable daemon resource ids; upload/finalize happens before enqueue. */
     attachments: z
@@ -116,6 +107,7 @@ export const ControlRunStartRequest = z
         "Harness-scoped model map (harness id to model id); an entry here wins over the scalar model and over the per-harness settings default.",
       ),
     effort: EffortHint.optional().describe("Requested reasoning effort."),
+    processingPreference: ProcessingPreference.optional(),
     /** Harness-scoped effort map (harness id → effort). Specific beats general:
      * an entry here wins over the scalar `effort` and the per-harness settings
      * default, analogous to `models`. Exact Retry replays the frozen
@@ -125,6 +117,12 @@ export const ControlRunStartRequest = z
       .optional()
       .describe(
         "Harness-scoped effort map (harness id to effort); an entry here wins over the scalar effort and the per-harness settings default.",
+      ),
+    review: z
+      .boolean()
+      .optional()
+      .describe(
+        "Agent model review: ordinary runs default off; true selects an automatic panel. Explicit reviewer controls, best-of and untilClean request review. Capped attempts default to review unless explicitly false.",
       ),
     reviewerModels: z
       .record(ProviderFamily, NonBlankString)
@@ -141,6 +139,7 @@ export const ControlRunStartRequest = z
     n: z
       .number()
       .int()
+      .safe()
       .positive()
       .optional()
       .describe("Race width: number of best-of-N candidates."),
@@ -166,8 +165,8 @@ export const ControlRunStartRequest = z
     create: z.boolean().optional().describe("Agent flag: create-from-scratch intent."),
     /** plan strategy (D31/INV-031): N harnesses draft plans in parallel, the
      * primary merges them into ONE unified plan whose open questions reach the
-     * user as one set. `n` (2..4) sets the member count; default = distinct
-     * available harnesses up to 3. Legal only on mode=plan (and `n` on a plan
+     * user as one set. `n` must be at least two and cannot exceed the
+     * startup-frozen Council cap. Legal only on mode=plan (and `n` on a plan
      * run is legal ONLY with council). */
     council: z
       .boolean()
@@ -261,7 +260,7 @@ export const ControlRunStartRequest = z
       .min(1)
       .optional()
       .describe(
-        'Explicit Agent reviewer panel — who reviews the change, one entry per reviewer as `harness=model:effort` (CLI `--reviewer-panel "claude=claude-opus-4-8:max,cursor=gemini-3.1-pro"`). Duplicate harness entries are kept so one provider can review through several models; overrides the legacy reviewerModels/reviewerEfforts maps.',
+        "Explicit Agent reviewer panel — who reviews the change, one entry per reviewer as `harness=model:effort` (CLI `--reviewer-panel`, unpinned) or structured `--reviewer-panel-json` with optional strict credentialProfileId. Duplicate harness entries are kept so one provider can review through several models; overrides the legacy reviewerModels/reviewerEfforts maps.",
       ),
     /** Per-run auth route override (subscription/api_key/auto). */
     authPreference: AuthPreference.optional().describe("Per-run auth route override."),
@@ -347,6 +346,15 @@ export const ControlRunStartRequest = z
   );
 export type ControlRunStartRequest = z.infer<typeof ControlRunStartRequest>;
 
+/** Bounded decoder for immutable accepted request bodies. Active ingress must
+ * continue to parse with ControlRunStartRequest. */
+export const RecordedControlRunStartRequest = ControlRunStartRequest.extend({
+  access: RecordedAccessProfile.optional().describe(
+    "Historically accepted access profile; retired values are decoder-only.",
+  ),
+}).strict();
+export type RecordedControlRunStartRequest = z.infer<typeof RecordedControlRunStartRequest>;
+
 const RunRetrySchemas = makeControlRunRetrySchemas(ControlRunStartRequest);
 export const ControlRunStartInfo = RunRetrySchemas.startInfo;
 export type ControlRunStartInfo = z.infer<typeof ControlRunStartInfo>;
@@ -391,7 +399,7 @@ export type ControlProjectMetadata = z.infer<typeof ControlProjectMetadata>;
 
 export const ControlWebEvidence = z
   .object({
-    required: z.boolean().default(false).describe("Whether the run required web evidence."),
+    required: z.boolean().default(false).describe("Explicit stored web requirement."),
     /** Requested external-context policy for the run. */
     mode: ExternalContextPolicy.default("auto").describe(
       "Requested external-context policy for the run.",
@@ -404,11 +412,11 @@ export const ControlWebEvidence = z
     satisfied: z
       .boolean()
       .default(false)
-      .describe("Whether the web-evidence requirement was satisfied."),
+      .describe("Completed without a typed failure; retrieved content is not necessarily proven."),
     status: z
       .enum(["none", "attempted", "satisfied", "failed", "unverified"])
       .default("none")
-      .describe("Web-evidence verdict for the run."),
+      .describe("Observed web status; satisfied does not prove retrieved content was verified."),
     tool: z
       .string()
       .nullable()
@@ -483,9 +491,10 @@ export const RunApplyState = z
     "applied_review_blocked",
     /** A prior in-place application was reverted to its pre-turn snapshot. */
     "reverted",
+    "discarded",
   ])
   .describe(
-    "Honest application state of a run's changes: not_applied (no in-place mutation), applied (applied and review clean), applied_review_blocked (applied but review blocked/unconverged), or reverted.",
+    "Honest application state: not_applied (delivery pending), applied, applied_review_blocked, reverted, or discarded (remaining copied output deliberately not applied).",
   );
 export type RunApplyState = z.infer<typeof RunApplyState>;
 
@@ -499,6 +508,13 @@ export type RunApplyState = z.infer<typeof RunApplyState>;
 export const RunDeliveryState = z
   .object({
     applyState: RunApplyState.default("not_applied"),
+    appliedPaths: z
+      .array(WorkspaceScopePath)
+      .optional()
+      .describe(
+        "Paths already delivered from a directory result; remaining paths retain pending custody.",
+      ),
+    discardedAt: z.string().nullable().optional(),
     deliveredAt: z
       .string()
       .nullable()
@@ -523,10 +539,10 @@ export type RunDeliveryState = z.infer<typeof RunDeliveryState>;
 export const ControlRunResult = z
   .object({
     kind: z
-      .enum(["patch", "answer", "plan", "report", "none"])
+      .enum(["patch", "files", "answer", "plan", "report", "none"])
       .default("none")
       .describe(
-        "What the turn actually produced: a patch, an answer, a plan (no files changed), a report, or nothing.",
+        "What the turn actually produced: a Git patch, directory files, an answer, a plan, a report, or nothing.",
       ),
     diffStat: z
       .object({
@@ -619,6 +635,12 @@ export const ControlRunSummary = z
     primaryHarness: z.string().optional().describe("Primary harness the run preferred."),
     routingGoal: RoutingGoal.optional(),
     model: z.string().optional().describe("Scalar model requested for the run."),
+    review: z
+      .boolean()
+      .optional()
+      .describe(
+        "Resolved model-review intent; absent on historical runs that retain review-required semantics.",
+      ),
     reviewerPanel: z
       .array(ControlReviewerPanelEntry)
       .optional()
@@ -634,9 +656,7 @@ export const ControlRunSummary = z
       .boolean()
       .optional()
       .describe("True when settled cash is estimated rather than exact."),
-    /** Token usage summed across every attempt (money stays in spendUsd). Each
-     * field null until a harness reported it — never render null as 0, and never
-     * sum into a grand total (codex cached ⊆ input; claude cached disjoint). */
+    /** Legacy totals retain harness-specific input/cache semantics; null is unknown. */
     inputTokens: z
       .number()
       .int()
@@ -660,10 +680,10 @@ export const ControlRunSummary = z
       .describe(
         "Cached input tokens summed across all attempts; null when no harness reported them.",
       ),
-    /** Typed conformance receipt for a run started with outputSchema: passed =
-     * final/output.json conforms; failed = the answer was missing, unparsable,
-     * or non-conformant (the run still ends success-with-warnings — the
-     * embedder retries). Null when the run had no structured-output contract. */
+    inputTokenUsage: InputTokenUsage.optional().describe(
+      "Normalized input measurement projected from run telemetry; absent on older runs.",
+    ),
+    /** Engine conformance receipt; absent contract is null, failure remains a warning. */
     outputConformance: z
       .enum(["passed", "failed"])
       .nullable()
@@ -680,17 +700,19 @@ export const ControlRunSummary = z
       .describe(
         "Auth route receipt (requested/effective/source/reason + disclosing attempt), projected verbatim from telemetry; null when unavailable.",
       ),
-    access: AccessProfile.optional().describe(
+    access: RecordedAccessProfile.optional().describe(
       "Access profile of the run: the effective profile when known, else the requested one (prefer requestedAccess/effectiveAccess).",
     ),
-    requestedAccess: AccessProfile.optional().describe("Access profile the caller requested."),
-    effectiveAccess: AccessProfile.optional().describe(
+    requestedAccess: RecordedAccessProfile.optional().describe(
+      "Access profile the caller requested.",
+    ),
+    effectiveAccess: RecordedAccessProfile.optional().describe(
       "Access profile actually enforced by the engine.",
     ),
     externalContextPolicy: ExternalContextPolicy.optional().describe(
       "Requested web policy for the run.",
     ),
-    webRequired: z.boolean().optional().describe("Whether the run required web evidence."),
+    webRequired: z.boolean().optional().describe("Explicit stored web requirement."),
     webMode: ExternalContextPolicy.optional().describe(
       "Web policy actually executed by the selected route.",
     ),
@@ -753,45 +775,6 @@ export const ControlRunSummary = z
   );
 export type ControlRunSummary = z.infer<typeof ControlRunSummary>;
 
-export const ControlTimelineEvent = z
-  .object({
-    type: z.string().describe("Run event type."),
-    ts: z.string().optional().describe("Event timestamp."),
-    harnessId: z.string().nullable().default(null).describe("Harness involved, when any."),
-    attemptId: z.string().nullable().default(null).describe("Attempt involved, when any."),
-    title: z.string().describe("Human-readable event title."),
-    detail: z.string().nullable().default(null).describe("Human-readable event detail."),
-    severity: z
-      .enum(["info", "warning", "error"])
-      .default("info")
-      .describe("Display severity of the event."),
-    toolName: z.string().nullable().default(null).describe("Tool name for tool events."),
-    target: z.string().nullable().default(null).describe("Redacted tool target for tool events."),
-    errorSummary: z
-      .string()
-      .nullable()
-      .default(null)
-      .describe("Redacted error detail for error events."),
-    /** Unsupported per-harness knobs the selected route silently could not honor
-     * (INV-105): the engine discloses them on `harness.started`, and this
-     * projection carries them so the row can render a visible warning ("max_turns
-     * was ignored") instead of an indistinguishable benign start (QA-070). Empty
-     * for every event that dropped nothing. */
-    ignoredSettings: z
-      .array(z.string())
-      .default([])
-      .describe(
-        "Unsupported per-harness knobs the route could not honor (INV-105), disclosed on harness.started; empty when nothing was dropped (QA-070).",
-      ),
-    rawRef: z
-      .string()
-      .nullable()
-      .default(null)
-      .describe("Reference to the raw underlying event/artifact."),
-  })
-  .describe("One projected timeline row of a run for display.");
-export type ControlTimelineEvent = z.infer<typeof ControlTimelineEvent>;
-
 export const ControlEvidenceIntegrity = z
   .enum(["complete", "incomplete", "unavailable"])
   .describe(
@@ -801,6 +784,12 @@ export type ControlEvidenceIntegrity = z.infer<typeof ControlEvidenceIntegrity>;
 
 export const ControlBudgetSnapshot = z
   .object({
+    cashKnowledge: z
+      .enum(["exact", "estimated", "unknown"])
+      .optional()
+      .describe(
+        "Cash certainty from the ledger; explicit unknown keeps spendUsd null independently of valuation.",
+      ),
     paidBudget: PaidBudget.default({ kind: "unlimited" }),
     spendUsd: z
       .number()
@@ -936,11 +925,13 @@ export type RunControlTarget = z.infer<typeof RunControlTarget>;
 
 export const RunControl = z
   .object({
-    // `interrupt` was deleted as a fake knob: it mapped to the same daemon
-    // cancel (staged-field doctrine — no vocabulary without distinct behavior).
+    // `interrupt` was deleted as a fake knob mapping to the same daemon cancel
+    // (staged-field doctrine — no vocabulary without distinct behavior).
     kind: z.enum(["cancel"]).describe("Control verb: cancel the run."),
     target: RunControlTarget.default({}),
     reason: z.string().optional().describe("Human-readable reason for the control."),
+    // Typed cancel class (vocabulary: cancel-reason.ts); absent = user_cancelled.
+    reason_code: z.enum(CANCEL_REASON_CODES).optional(),
   })
   .describe("A control verb (cancel) aimed at a run or a narrower target inside it.");
 export type RunControl = z.infer<typeof RunControl>;
@@ -971,6 +962,7 @@ export type ApplyTarget = z.infer<typeof ApplyTarget>;
 
 export const ControlApplyCheckRequest = z
   .object({
+    paths: z.array(WorkspaceScopePath).optional(),
     target: ApplyTarget.default({ kind: "original_project" }),
   })
   .strict()
@@ -979,6 +971,7 @@ export type ControlApplyCheckRequest = z.infer<typeof ControlApplyCheckRequest>;
 
 export const ControlApplyRequest = z
   .object({
+    paths: z.array(WorkspaceScopePath).optional(),
     target: ApplyTarget.default({ kind: "original_project" }),
     mode: z
       .enum(["apply", "branch", "commit", "pr"])
@@ -1005,9 +998,10 @@ export const RunDecisionAction = z
     /** Restore the live in-place tree to this turn's pre-turn snapshot (server-owned;
      * refuses if the tree has diverged from the recorded post-turn state). */
     "revert_run",
+    "discard",
   ])
   .describe(
-    "Operator decision on a blocked run: accept_clean_patch (apply it), rerun_with_feedback, accept_risk, override_needs_human, or revert_run (restore the pre-turn snapshot).",
+    "Operator decision: apply an accepted result, rerun with feedback, accept risk, override needs-human, revert a recorded Git effect, or discard remaining copied files without applying them.",
   );
 export type RunDecisionAction = z.infer<typeof RunDecisionAction>;
 
@@ -1034,14 +1028,14 @@ export const ControlRunDecisionRequest = z
     target: ApplyTarget.optional().describe("Delivery target for accept_clean_patch."),
   })
   .strict()
-  .describe("Typed, auditable operator decision on a NEEDS_HUMAN-blocked run.");
+  .describe("Typed operator decision on a run or its pending copied result.");
 export type ControlRunDecisionRequest = z.infer<typeof ControlRunDecisionRequest>;
 
 export const ControlRunDecisionResponse = z
   .object({
     accepted: z.boolean().describe("Whether the decision was accepted."),
     status: z
-      .enum(["applied", "requeued", "rejected", "unsupported"])
+      .enum(["applied", "requeued", "rejected", "unsupported", "discarded"])
       .describe("Outcome: applied, requeued (a new turn was enqueued), rejected, or unsupported."),
     /** New run id when the decision re-enqueues a turn (rerun_with_feedback). */
     newRunId: Id.optional().describe(
@@ -1085,7 +1079,7 @@ export const ControlThread = z
         "Sticky credential profile for the thread; per-turn selection wins, null = engine-default credentials.",
       ),
     /** Sticky write scope for write turns (D26); null = repo trust default. */
-    access: AccessProfile.nullable()
+    access: RecordedAccessProfile.nullable()
       .default(null)
       .describe("Sticky write scope for write turns; null = the repo trust default."),
     state: ThreadState.default("active"),
@@ -1380,37 +1374,12 @@ export const ControlThreadDetail = z
   );
 export type ControlThreadDetail = z.infer<typeof ControlThreadDetail>;
 
-/**
- * Models enumerable for one harness. `source` is honest about provenance:
- * "api" when the adapter implemented a real enumeration (raw-api / OpenAI
- * `GET /v1/models`), "manifest" when the list is the manifest's known-good
- * hint set, "none" when the harness has no model truth source at all (the
- * list is then empty and explicit models are refused under strict model-truth validation).
- */
-export const ControlHarnessModelsResponse = z
-  .object({
-    harnessId: z.string().describe("Harness the models belong to."),
-    models: z
-      .array(HarnessModel)
-      .default([])
-      .describe("Enumerable models; empty when the harness has no model truth source."),
-    source: z
-      .enum(["api", "manifest", "none"])
-      .describe(
-        "Provenance of the list: api (a live vendor enumeration), manifest (the manifest's known-good hint set), or none (no model truth source; explicit models are refused).",
-      ),
-    /** Freshness note for manifest-sourced lists: the vendor CLI version the
-     * known-model hints were last verified against (null for api/none). */
-    verifiedAgainst: z
-      .string()
-      .nullable()
-      .default(null)
-      .describe(
-        "Vendor CLI version the manifest hints were last verified against; null for api/none sources.",
-      ),
-  })
-  .describe("Models enumerable for one harness, with honest provenance.");
-export type ControlHarnessModelsResponse = z.infer<typeof ControlHarnessModelsResponse>;
+export {
+  ControlHarnessModelsResponse,
+  ControlHarnessAccountCatalog,
+  ControlHarnessAccountModelsResponse,
+  ControlHarnessModelsQueryResponse,
+} from "./control-harness-models.js";
 
 export const ControlSettingsSnapshot = z
   .object({
@@ -1466,6 +1435,7 @@ export const ControlSettingsSnapshot = z
           .positive()
           .default(HARNESS_INACTIVITY_TIMEOUT_DEFAULT_MS)
           .describe("Inactivity watchdog for harness streams, in milliseconds."),
+        concurrency: RuntimeConcurrencyState.optional(),
         transientRetry: z
           .object({
             maxRetries: z
@@ -1550,18 +1520,19 @@ export const ControlSettingsSnapshot = z
             authPreference: AuthPreference.default("auto"),
             /** Profile-selection policy (INV-135): what happens when the
              * selected account hits its quota. Drives the app's auto-switch
-             * toggle read-back. */
+             * control read-back (tri-state since `auto` became the default). */
             profileLimitAction: z
-              .enum(["fail", "ask", "rotate"])
-              .default("fail")
+              .enum(["auto", "fail", "ask", "rotate"])
+              .default("auto")
               .describe(
-                "Profile-selection limit action: fail (stop), ask (record), rotate (auto-switch to the next eligible account).",
+                "Profile-selection limit action: auto (kind-aware default — rotate for subscription subjects, fail for metered), fail (stop), ask (record), rotate (auto-switch to the next eligible account).",
               ),
           })
           .describe("Per-harness settings."),
       )
       .default({})
       .describe("Per-harness settings keyed by harness id."),
+    notes: z.array(z.string()).default([]).describe("Admission notes of this write (INV-104)."),
   })
   .describe("Effective settings snapshot served by GET /settings.");
 export type ControlSettingsSnapshot = z.infer<typeof ControlSettingsSnapshot>;
@@ -1605,12 +1576,12 @@ export const ControlHarnessSettingsPatch = z
       .describe("New fallback model; null clears it."),
     web: ExternalContextPolicy.optional().describe("New default web policy."),
     authPreference: AuthPreference.optional().describe("New auth route preference."),
-    /** Auto-switch accounts on quota limits (INV-135): rotate enables the
-     * profile-rotation engine for this harness; fail restores the default. */
+    /** Auto-switch accounts on quota limits (INV-135): rotate forces rotation
+     * on, fail forces it off, auto restores the kind-aware default. */
     profileLimitAction: z
-      .enum(["fail", "ask", "rotate"])
+      .enum(["auto", "fail", "ask", "rotate"])
       .optional()
-      .describe("New profile-selection limit action (fail | ask | rotate)."),
+      .describe("New profile-selection limit action (auto | fail | ask | rotate)."),
   })
   .strict()
   .describe(

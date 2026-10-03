@@ -10,6 +10,11 @@ export class ClaudexorError extends Error {
 }
 
 export class HarnessUnavailableError extends ClaudexorError {}
+/** A final-route effort preference cannot be placed; changing routes cannot repair it. */
+export class EffortPreferenceRejectedError extends ClaudexorError {
+  readonly code = "effort_preference_rejected";
+  readonly retryable = false;
+}
 export class ContextOverflowError extends ClaudexorError {}
 export class WorkspaceError extends ClaudexorError {}
 
@@ -25,35 +30,28 @@ export class DelegationBeltUnavailableError extends ClaudexorError {
 }
 
 /**
- * A run marked `execution.delegated` could not be confined to a scoped harness
- * HOME. Its caller cannot audit a confinement that silently did not happen, so
- * the attempt refuses instead of degrading onto the operator's real home (which
- * holds the daemon control token and the caller's own provider settings).
+ * A run marked `execution.delegated` could not be assigned its scoped harness
+ * HOME. The attempt refuses instead of degrading onto the operator's real home.
  */
 export class DelegatedHomeUnavailableError extends ClaudexorError {
   readonly code = "delegated_home_unavailable";
   readonly category = "internal" as const;
 }
 
-/**
- * A run marked `execution.delegated` could not be given an OS-ENFORCED
- * filesystem boundary — the host does not offer one, or the profile did not
- * take effect when probed. The scoped HOME beside it is a convention that an
- * absolute path defeats, so there is nothing to degrade onto: the attempt
- * refuses. See docs/DELEGATED_CONFINEMENT.md.
- */
-export class ConfinementUnavailableError extends ClaudexorError {
-  readonly code = "delegated_confinement_unavailable";
-  readonly category = "config_error" as const;
-}
-
-/**
- * A terminal MUTATING delegated run whose attempts do not all carry the applied
- * HOME/access/profile/confinement facts. Asking for confinement is not evidence
- * that it happened, so an unauditable mutating terminal is an infrastructure
- * refusal rather than a pass.
- */
+/** A terminal mutating delegated run whose attempts do not all carry complete
+ * applied HOME/access/profile/boundary-disclosure facts. */
 export class DelegatedEvidenceIncompleteError extends ClaudexorError {
   readonly code = "delegated_evidence_incomplete";
   readonly category = "internal" as const;
+}
+
+/** A requested access mode cannot be represented by the selected native adapter. */
+export class AccessProfileIncompatibleError extends ClaudexorError {
+  readonly code = "access_profile_incompatible";
+  readonly category = "harness_unavailable" as const;
+  readonly status = 400;
+  readonly retryable = false;
+  readonly requiredActions = [
+    "Choose workspace_write on a compatible harness, or explicitly trust the repository and choose full.",
+  ];
 }

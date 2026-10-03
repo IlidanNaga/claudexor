@@ -152,6 +152,30 @@ public enum ComposerOptionParser {
         return ReviewerPanelEntry(harness: harness, model: model, effort: effort)
     }
 
+    /// Parse the structured reviewer-panel JSON form used when a slot carries
+    /// a strict credentialProfileId. Compact reviewer tokens remain intentionally
+    /// unpinned because profile ids need no escaping grammar of their own.
+    public static func parseReviewerPanelJSON(_ raw: String) -> [ReviewerPanelEntry]? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.first == "[" else { return nil }
+        guard let data = trimmed.data(using: .utf8) else { return nil }
+        do {
+            let entries = try JSONDecoder().decode([ReviewerPanelEntry].self, from: data)
+            return entries.isEmpty ? nil : entries
+        } catch {
+            return nil
+        }
+    }
+
+    /// Canonical compact JSON for round-tripping a structured reviewer panel.
+    public static func reviewerPanelJSON(_ entries: [ReviewerPanelEntry]) -> String? {
+        guard !entries.isEmpty else { return nil }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(entries) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
     public static func parseProtectedPathApproval(_ raw: String) -> ProtectedPathApproval? {
         let parts = raw
             .split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)

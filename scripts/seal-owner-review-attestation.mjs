@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-/** Seal schema-v6 evidence from one frozen Cursor-operator review wave
- * (owner decision 2026-08-06: the formal pair runs as operator subagents). */
+// Historical signed-review tooling. Current releases use the independent
+// report/disposition and maintainer confirmation in verify-release-input.mjs.
+/** Seal schema-v7 evidence from a frozen two-model-family owner review wave. */
 import { createHash, createPrivateKey, sign } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import {
@@ -32,6 +33,7 @@ import {
   releaseAttestationSigningBytes,
   validateFullGateEvidence,
   validateFullGateReceipt,
+  validateOwnerReviewModelIdentity,
   validateReleaseAttestation,
 } from "./lib/release-review-contract.mjs";
 import { readPrivateSigningKey } from "./lib/private-signing-key.mjs";
@@ -193,7 +195,7 @@ try {
     keyId: authority.keyId,
     algorithm: RELEASE_REVIEW_ATTESTATION_ALGORITHM,
     payload: {
-      contract: "owner-review-v6",
+      contract: "owner-review-v7",
       reviewProtocol: OWNER_REVIEW_PROTOCOL,
       candidateSha,
       candidateTree,
@@ -245,8 +247,7 @@ function readReviewerArtifact(dir, containsSecretLikeToken) {
 }
 
 /** One operator reviewer artifact = markdown report + metadata binding the
- * slot's actually used model slug (which must belong to the slot's
- * owner-approved tier set in OWNER_REVIEW_PANEL), exact ISO start/finish,
+ * declared approved model family, actual model and harness, exact ISO start/finish,
  * pass|warn verdict, the mandatory full review scope, and the report digest
  * to the exact sealed packet. The on-disk metadata is an exact-key shape: a
  * missing, extra, or unknown key refuses, so a contradictory field can never
@@ -257,7 +258,9 @@ function validateReviewerArtifact(artifact, required, expected) {
   if (
     !hasExactKeys(metadata, [
       "slot",
+      "model_family",
       "model",
+      "harness",
       "candidate_sha",
       "candidate_tree",
       "packet_manifest_sha256",
@@ -276,11 +279,12 @@ function validateReviewerArtifact(artifact, required, expected) {
   if (metadata.slot !== required.slot) {
     throw new Error(`${required.slot} metadata slot mismatch`);
   }
-  if (!required.allowedModels.includes(metadata.model)) {
-    throw new Error(
-      `${required.slot} model ${JSON.stringify(metadata.model ?? null)} is outside the owner-approved tier set (${required.allowedModels.join(" | ")})`,
-    );
-  }
+  const identityReasons = validateOwnerReviewModelIdentity({
+    modelFamily: metadata.model_family,
+    model: metadata.model,
+    harness: metadata.harness,
+  });
+  if (identityReasons.length > 0) throw new Error(`${required.slot} ${identityReasons.join("; ")}`);
   if (!OWNER_REVIEW_VERDICTS.includes(metadata.verdict)) {
     throw new Error(
       `${required.slot} verdict ${JSON.stringify(metadata.verdict ?? null)} is not pass or warn`,
@@ -302,8 +306,9 @@ function validateReviewerArtifact(artifact, required, expected) {
   }
   return {
     slot: required.slot,
-    // The actually used, set-validated slug is what gets sealed and signed.
+    modelFamily: metadata.model_family,
     model: metadata.model,
+    harness: metadata.harness,
     startedAt: metadata.started_at,
     completedAt: metadata.completed_at,
     verdict: metadata.verdict,
@@ -314,6 +319,9 @@ function validateReviewerArtifact(artifact, required, expected) {
 }
 
 function validateReviewerOverlap(reviews) {
+  if (new Set(reviews.map((review) => review.modelFamily)).size !== reviews.length) {
+    throw new Error("owner review model families must be distinct");
+  }
   const starts = reviews.map((review) => exactIsoMs(review.startedAt, `${review.slot} start`));
   const completions = reviews.map((review) =>
     exactIsoMs(review.completedAt, `${review.slot} completion`),

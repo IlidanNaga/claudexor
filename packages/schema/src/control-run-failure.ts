@@ -1,4 +1,5 @@
 import { z } from "zod/v3";
+import { HarnessRequestRefusal } from "./harness-input.js";
 
 /**
  * The typed run-failure contract, split out of `control.ts` for the reason the
@@ -19,21 +20,67 @@ export const RunFailureCode = z
     "cost_unverifiable",
     "delegation_child_drain_timeout",
     "subscription_window_exhausted",
-    /* A delegated run's confinement preconditions. Each is thrown as a typed
-     * error deep in the attempt loop, so it must be listed here or
-     * `declaredFailure` drops it to `code: null` and the terminal states less
+    /* The WHOLE credential pool of a harness is blocked (every rotation
+     * candidate spent/cooling/ineligible, the current subject included), so a
+     * limit-triggered or structural failover has nowhere to go. resetsAt folds
+     * the EARLIEST known release inside the pool — the first instant any
+     * member reopens — or null when any member's reset is unknown. */
+    "credential_pool_exhausted",
+    "input_too_large",
+    /* Active scoped-HOME/evidence refusals plus the historical confinement
+     * decoder code. Attempt-loop failures must be listed here or
+     * `declaredFailure` drops them to `code: null` and the terminal states less
      * than the thrower knew. See docs/DELEGATED_CONFINEMENT.md. */
     "delegated_home_unavailable",
     "delegated_confinement_unavailable",
     "delegated_evidence_incomplete",
+    "access_profile_incompatible",
+    "retired_access_profile",
   ])
   .describe(
-    "Machine-readable failure sub-code within a RunFailure category (budget-denial reasons, Delegate child-drain timeout, a spent subscription quota window whose reopen time is RunFailure.resetsAt, and the delegated-run confinement refusals: missing scoped home, no OS-enforced boundary on this host, incomplete applied evidence).",
+    "Machine-readable failure sub-code within a RunFailure category, including historical delegated-run failures and active access-profile refusals.",
   );
 export type RunFailureCode = z.infer<typeof RunFailureCode>;
 
+/** A vendor's OWN typed failure, forwarded as evidence. `code` is opaque: no
+ * Claudexor code path may branch on its value; retry, rotation, cooldown and
+ * credential verdicts never read it. `source` is an open vocabulary rather than
+ * an enum because every surface projects the whole `RunFailure` parse-or-null:
+ * a closed member list would make an older client drop the entire failure
+ * record the day a second producer appears. */
+export const VendorFailureEvidence = z
+  .object({
+    code: z
+      .string()
+      .min(1)
+      .max(128)
+      .nullable()
+      .describe(
+        "The vendor's own machine-readable failure code, verbatim; null when the vendor recorded an error without one.",
+      ),
+    message: z
+      .string()
+      .max(4000)
+      .nullable()
+      .describe(
+        "The vendor's own words from the same record, verbatim (redacted); null when absent.",
+      ),
+    source: z
+      .string()
+      .min(1)
+      .max(64)
+      .describe(
+        "Evidence channel the code was read from (codex: `codex_rollout`). An open vocabulary: consumers display it, never branch on it.",
+      ),
+  })
+  .describe(
+    "Vendor-typed failure evidence read from a vendor-owned machine-readable record, never parsed from prose.",
+  );
+export type VendorFailureEvidence = z.infer<typeof VendorFailureEvidence>;
+
 export const RunFailure = z
   .object({
+    requestRefusal: HarnessRequestRefusal.optional(),
     phase: z.string().default("unknown").describe("Pipeline phase where the failure happened."),
     category: z
       .enum([
@@ -93,6 +140,11 @@ export const RunFailure = z
       .default(null)
       .describe(
         "When the refused window reopens (a spent subscription quota window), or null when the failure has no such time. Callers schedule a retry off this field, never off safeMessage.",
+      ),
+    vendorFailure: VendorFailureEvidence.nullable()
+      .default(null)
+      .describe(
+        "The vendor's own typed failure for the attempt this record speaks for, or null when no vendor-typed evidence exists (every harness without such a channel, and any unreadable record). Facts only: carries no remedy.",
       ),
     nextActions: z.array(z.string()).default([]).describe("Suggested operator next actions."),
   })

@@ -166,6 +166,9 @@ describe("Git capability", () => {
     const inherited = join(root, "inherited");
     mkdirSync(managed);
     mkdirSync(inherited);
+    // The managed-runner prepend is refused for a group/world-writable dir, so
+    // pin the mode instead of inheriting the runner's umask (0002 -> 0o775).
+    chmodSync(managed, 0o755);
     for (const dir of [managed, inherited]) {
       writeFileSync(join(dir, "git"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
       chmodSync(join(dir, "git"), 0o700);

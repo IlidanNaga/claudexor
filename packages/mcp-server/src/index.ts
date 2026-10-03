@@ -1,5 +1,7 @@
+import { runExecutionSchema } from "./run-execution-schema.js";
 import { isAbsolute } from "node:path";
 import agentCapabilityCatalogSchemaRaw from "@claudexor/schema/generated/AgentCapabilityCatalog.schema.json" with { type: "json" };
+import accountsQuerySchemaRaw from "@claudexor/schema/generated/ControlCredentialProfilesQueryResponse.schema.json" with { type: "json" };
 import mcpRunToolResultSchemaRaw from "@claudexor/schema/generated/McpRunToolResult.schema.json" with { type: "json" };
 import mcpRunHandleResultSchemaRaw from "@claudexor/schema/generated/McpRunHandleResult.schema.json" with { type: "json" };
 import paidBudgetSchemaRaw from "@claudexor/schema/generated/PaidBudget.schema.json" with { type: "json" };
@@ -13,6 +15,7 @@ import {
 } from "@modelcontextprotocol/server/stdio";
 import {
   effortJsonSchema,
+  AccessProfile,
   ExternalContextPolicy,
   type ModeKind,
   ProviderFamily,
@@ -24,46 +27,10 @@ import { assertNoInlineSecretValues, errorCode } from "@claudexor/util";
 import { journalRecoveryTools } from "./recovery-tools.js";
 import { formatRunResult, structuredRunResult } from "./run-result-format.js";
 import { assertNoPluginArtifactSkew } from "./plugin-skew.js";
-
-// The SDK wants self-contained schemas, so inline generated internal refs once at load.
-function inlineJsonSchemaRefs(schema: Record<string, unknown>): Record<string, unknown> {
-  // Resolve full JSON-pointer refs, not just top-level definition names.
-  const resolvePointer = (pointer: string): unknown => {
-    let node: unknown = schema;
-    for (const rawSegment of pointer.split("/").slice(1)) {
-      const segment = rawSegment.replaceAll("~1", "/").replaceAll("~0", "~");
-      if (Array.isArray(node)) node = node[Number(segment)];
-      else if (node && typeof node === "object") node = (node as Record<string, unknown>)[segment];
-      else return undefined;
-    }
-    return node;
-  };
-  const resolve = (node: unknown, stack: readonly string[]): unknown => {
-    if (Array.isArray(node)) return node.map((child) => resolve(child, stack));
-    if (!node || typeof node !== "object") return node;
-    const obj = node as Record<string, unknown>;
-    const ref = obj["$ref"];
-    if (typeof ref === "string" && ref.startsWith("#/")) {
-      // Generated schemas are trees; fail loudly if a refactor introduces recursion.
-      if (stack.includes(ref))
-        throw new Error(
-          `cyclic $ref '${ref}' in a generated tool schema — flatten the schema or drop its outputSchema`,
-        );
-      const target = resolvePointer(ref);
-      if (target === undefined)
-        throw new Error(`unresolved $ref '${ref}' in a generated tool schema`);
-      return resolve(target, [...stack, ref]);
-    }
-    const out: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(obj)) {
-      if (key === "definitions") continue;
-      out[key] = resolve(value, stack);
-    }
-    return out;
-  };
-  return resolve(schema, []) as Record<string, unknown>;
-}
-
+import { accountsTool } from "./accounts-tool.js";
+import { threadTools } from "./thread-tools.js";
+import { inlineJsonSchemaRefs } from "./inline-json-schema-refs.js";
+import { reviewerPanelEntrySchema, processingPreferenceSchema } from "./reviewer-panel-schema.js";
 const mcpRunToolResultSchema = inlineJsonSchemaRefs(
   mcpRunToolResultSchemaRaw as Record<string, unknown>,
 );
@@ -75,6 +42,7 @@ const paidBudgetSchema = inlineJsonSchemaRefs(paidBudgetSchemaRaw);
 const agentCapabilityCatalogSchema = inlineJsonSchemaRefs(
   agentCapabilityCatalogSchemaRaw as Record<string, unknown>,
 );
+const accountsQuerySchema = inlineJsonSchemaRefs(accountsQuerySchemaRaw as Record<string, unknown>);
 const RUN_STRATEGY_PROPERTIES = {
   ask: {
     deepScan: {
@@ -85,7 +53,7 @@ const RUN_STRATEGY_PROPERTIES = {
   plan: {
     council: {
       type: "boolean",
-      description: "Draft n (2..4) plans in parallel, then merge one plan and question set.",
+      description: "Draft n plans (2 to the configured cap), then merge one plan and question set.",
     },
   },
   agent: {
@@ -98,16 +66,8 @@ const RUN_STRATEGY_PROPERTIES = {
 };
 
 /**
- * Claudexor's MCP surface on the official TypeScript SDK v2.
- *
- * The SDK owns the protocol core: version negotiation (2025-11-25 down to
- * 2024-10-07 — Cursor's 2025-06-18 handshake keeps working), CONCURRENT
- * request dispatch (a multi-minute race no longer blocks ping/tools/list —
- * the old hand-rolled loop awaited every call inline), structural argument
- * validation against the declared JSON Schemas.
- * This module stays a THIN surface: tool descriptors, Claudexor's semantic
- * argument checks (the parts a JSON Schema cannot express), and translation
- * between runner results and MCP shapes. No business logic.
+ * Thin MCP v2 SDK surface: negotiation, concurrent dispatch, schema validation,
+ * Claudexor semantic checks, and runner-shape translation; no business logic.
  */
 
 export interface McpToolContext {
@@ -123,7 +83,13 @@ export interface McpToolAnnotations {
 }
 
 /** Tool output: plain text, or text plus a structured mirror (structuredContent). */
-export type McpToolOutput = string | { text: string; structured?: Record<string, unknown> };
+export type McpToolOutput =
+  | string
+  | {
+      text: string;
+      structured?: Record<string, unknown>;
+      isError?: boolean;
+    };
 
 export interface McpTool {
   name: string;
@@ -183,6 +149,7 @@ export function buildMcpServer(opts: {
         return {
           content: [{ type: "text" as const, text }],
           ...(structured !== undefined ? { structuredContent: structured } : {}),
+          ...(typeof out !== "string" && out.isError ? { isError: true } : {}),
         };
       }) as any,
     );
@@ -190,10 +157,7 @@ export function buildMcpServer(opts: {
   return server;
 }
 
-/**
- * Serve Claudexor over stdio. The SDK entry owns the era decision per
- * connection; the factory registers the same tools for every era.
- */
+/** Serve the same tools over stdio; the SDK selects the connection's protocol era. */
 export function serveClaudexorMcp(opts: McpServerOptions): { close(): Promise<void> } {
   assertNoPluginArtifactSkew(opts.version);
   const serveOpts: ServeStdioOptions = {
@@ -303,6 +267,7 @@ export function defaultClaudexorTools(runner: RunnerFn): McpTool[] {
         description: "Optional model override for the primary harness.",
       },
       effort: effortJsonSchema("Optional effort override for the primary harness."),
+      processingPreference: processingPreferenceSchema,
       web: {
         type: "string",
         enum: ExternalContextPolicy.options,
@@ -323,26 +288,35 @@ export function defaultClaudexorTools(runner: RunnerFn): McpTool[] {
         type: "string",
         description: "Absolute path of the target project. Defaults to the MCP server cwd.",
       },
+      execution: runExecutionSchema,
       paidBudget: paidBudgetSchema,
+      credentialProfileId: {
+        type: "string",
+        minLength: 1,
+        pattern: "\\S",
+        description: "Strict credential profile for this run; never falls back to another account.",
+      },
       access: {
         type: "string",
-        enum: ["readonly", "workspace_write", "full", "external_sandbox_full", "inherit_native"],
+        enum: AccessProfile.options,
         description: "Optional access profile for this run.",
       },
       ...(runControlApplicability({ mode }).reviewerPanel.applicable
         ? {
+            review: {
+              type: "boolean",
+              description:
+                "Enable internal model review. Ordinary Agent defaults to false; true selects reviewers automatically. An explicit reviewer panel or reviewer overrides also enable review. Best-of and until-clean retain review.",
+            },
             reviewerPanel: {
               type: "array",
               minItems: 1,
-              description: "Explicit reviewer panel entries, preserving order and duplicates.",
+              description:
+                "Enable review with explicit panel entries, preserving order and duplicates; no additional review flag is needed.",
               items: {
                 type: "object",
                 additionalProperties: false,
-                properties: {
-                  harness: { type: "string", minLength: 1 },
-                  model: { type: "string", minLength: 1 },
-                  effort: effortJsonSchema("Effort for this reviewer entry."),
-                },
+                properties: reviewerPanelEntrySchema,
                 required: ["harness"],
               },
             },
@@ -350,13 +324,13 @@ export function defaultClaudexorTools(runner: RunnerFn): McpTool[] {
               type: "object",
               additionalProperties: false,
               properties: reviewerModelProperties,
-              description: "Per-provider reviewer model overrides.",
+              description: "Enable review with per-provider reviewer model overrides.",
             },
             reviewerEfforts: {
               type: "object",
               additionalProperties: false,
               properties: reviewerEffortProperties,
-              description: "Per-provider reviewer effort overrides.",
+              description: "Enable review with per-provider reviewer effort overrides.",
             },
           }
         : {}),
@@ -448,25 +422,34 @@ export function defaultClaudexorTools(runner: RunnerFn): McpTool[] {
   return [
     mk(
       "claudexor_ask",
-      "One-shot read-only answer through Claudexor; pass deepScan:true for a bounded multi-scout research sweep with synthesis. Returns final output, not a live thread.",
+      "Enqueue a read-only Claudexor answer; pass deepScan:true for a bounded multi-scout research sweep with synthesis. Returns a durable run handle, not terminal output; use claudexor_run_status/result for the final answer.",
       { mode: "ask" },
     ),
     mk(
       "claudexor_run",
-      "One-shot Agent-mode Claudexor run; returns the final WorkProduct summary plus runId.",
+      "Enqueue an Agent-mode Claudexor run. Internal model review is off by default; review:true selects a panel automatically, and an explicit reviewerPanel enables review. Returns a durable run handle plus any immediate start facts; use claudexor_run_status/result for the terminal WorkProduct.",
       { mode: "agent" },
     ),
     mk(
       "claudexor_best_of",
-      "One-shot best-of-N Claudexor run with cross-family review.",
+      "Enqueue a best-of-N Claudexor run with cross-family review. Returns a durable run handle; use claudexor_run_status/result for terminal output.",
       { mode: "agent", race: true },
       2,
     ),
-    mk("claudexor_plan", "One-shot read-only Claudexor implementation plan.", { mode: "plan" }),
-    mk("claudexor_create", "One-shot create-from-scratch Claudexor run.", {
-      mode: "agent",
-      create: true,
-    }),
+    mk(
+      "claudexor_plan",
+      "Enqueue a read-only Claudexor implementation plan. Returns a durable run handle; use claudexor_run_status/result for the final plan.",
+      { mode: "plan" },
+    ),
+    mk(
+      "claudexor_create",
+      "Enqueue a create-from-scratch Claudexor run. Returns a durable run handle; use claudexor_run_status/result for terminal output.",
+      {
+        mode: "agent",
+        create: true,
+      },
+    ),
+    ...threadTools(runner),
     {
       name: "claudexor_status",
       description:
@@ -502,6 +485,7 @@ export function defaultClaudexorTools(runner: RunnerFn): McpTool[] {
         };
       },
     },
+    accountsTool(runner, accountsQuerySchema),
     // Read-only daemon projections let hosts recover lost run handles.
     {
       name: "claudexor_runs",
@@ -645,5 +629,4 @@ export function defaultClaudexorTools(runner: RunnerFn): McpTool[] {
     ...journalRecoveryTools(runner, formatRunResult),
   ];
 }
-
 export * from "./delegation-belt.js";

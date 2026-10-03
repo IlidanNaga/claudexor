@@ -22,6 +22,50 @@ describe("scoped route probe fails CLOSED on absent evidence (release wave sol #
     // verdict about the host env.
     expect(statusById.get("claude")).toBe(host);
   });
+
+  it("uses the harness-specific lane env for the scoped readiness probe", async () => {
+    const host = {
+      id: "claude",
+      status: "ok",
+      manifest: { id: "claude" },
+    } as never;
+    const scoped = {
+      id: "claude",
+      status: "ok",
+      manifest: { id: "claude" },
+    } as never;
+    const statusById = new Map([["claude", host]]);
+    const seen: unknown[] = [];
+    const result = await candidateStatusInRouteContext(
+      {
+        routeStatus: async (_id, spec) => {
+          seen.push(spec);
+          return scoped;
+        },
+      },
+      {
+        cwd: "/tmp/scoped",
+        env: { HOME: "/tmp/disposable-home" },
+        envForHarness: (harnessId) =>
+          harnessId === "claude" ? { HOME: "/tmp/durable-claude-home" } : null,
+        dispose: () => {},
+      },
+      "claude",
+      "subscription",
+      statusById,
+    );
+
+    expect(seen).toEqual([
+      {
+        cwd: "/tmp/scoped",
+        env: { HOME: "/tmp/durable-claude-home" },
+        authPreference: "subscription",
+        fresh: true,
+      },
+    ]);
+    expect(result).toBe(scoped);
+    expect(statusById.get("claude")).toBe(scoped);
+  });
 });
 
 describe("cancel summary is announced only when it exists (release wave sol #3)", () => {

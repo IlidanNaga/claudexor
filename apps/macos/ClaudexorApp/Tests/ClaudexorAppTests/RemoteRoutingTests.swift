@@ -3,6 +3,77 @@ import Foundation
 import Testing
 @testable import ClaudexorApp
 
+@Suite struct RemoteSetupLoginRoutingTests {
+    @Test func currentEngineFactSelectsExactTransport() {
+        #expect(RemoteSetupLoginRouting.decision(harness: .claude, capability: .inApp)
+            == .transport(.daemon))
+        #expect(RemoteSetupLoginRouting.decision(harness: .codex, capability: .externalTerminal)
+            == .transport(.clientPty))
+    }
+
+    @Test func decodedLegacyRowKeepsOldFallback() {
+        #expect(RemoteSetupLoginRouting.decision(harness: .codex, capability: .legacyAbsent)
+            == .transport(.daemon))
+        #expect(RemoteSetupLoginRouting.decision(harness: .cursor, capability: .legacyAbsent)
+            == .transport(.clientPty))
+    }
+
+    @Test func explicitNullAndMissingCurrentProjectionRefuseLoudly() {
+        guard case .unavailable(let message) = RemoteSetupLoginRouting.decision(
+            harness: .agy, capability: .unavailable)
+        else { Issue.record("explicit null must refuse"); return }
+        #expect(message.contains("no managed login"))
+
+        for projection: [HarnessInfo]? in [nil, []] {
+            guard case .unavailable(let gap) = RemoteSetupLoginRouting.decision(
+                harness: .claude, in: projection)
+            else { Issue.record("missing current row must refuse"); continue }
+            #expect(gap.contains("current managed-login capability"))
+        }
+    }
+
+    @MainActor @Test func coldRoutingAwaitsTheCurrentProjectionBeforeSelectingTransport() async {
+        for family in [HarnessFamily.claude, .cursor] {
+            var loadCompleted = false
+            let decision = await RemoteSetupLoginRouting
+                .decisionAfterLoadingCurrentProjection(
+                    harness: SetupHarness(rawValue: family.rawValue)!) {
+                        await Task.yield()
+                        loadCompleted = true
+                        return [HarnessInfo(
+                            family: family, health: .ok, version: "current", auth: "ready",
+                            intents: ["implement"], setupLogin: .inApp)]
+                    }
+            #expect(loadCompleted)
+            #expect(decision == .transport(.daemon))
+        }
+
+        let oldEngineDecision = await RemoteSetupLoginRouting
+            .decisionAfterLoadingCurrentProjection(harness: .codex) {
+                [HarnessInfo(
+                    family: .codex, health: .ok, version: "old", auth: "ready",
+                    intents: ["implement"], setupLogin: .legacyAbsent)]
+            }
+        #expect(oldEngineDecision == .transport(.daemon))
+    }
+
+    @MainActor @Test func attemptedProjectionLoadThatReturnsNothingIsALoudGap() async {
+        var loadAttempts = 0
+        let decision = await RemoteSetupLoginRouting
+            .decisionAfterLoadingCurrentProjection(harness: .claude) {
+                loadAttempts += 1
+                await Task.yield()
+                return nil
+            }
+        #expect(loadAttempts == 1)
+        guard case .unavailable(let message) = decision else {
+            Issue.record("an attempted load with no current row must refuse")
+            return
+        }
+        #expect(message.contains("current managed-login capability"))
+    }
+}
+
 @Suite struct RemoteRoutingTests {
     private func task(id: String, phase: RunPhase) -> TaskRun {
         TaskRun(

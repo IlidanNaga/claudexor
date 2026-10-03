@@ -39,11 +39,27 @@ public struct ReviewerPanelEntry: Codable, Sendable, Equatable, Hashable {
     public var harness: String
     public var model: String?
     public var effort: String?
+    public var credentialProfileId: String?
 
-    public init(harness: String, model: String? = nil, effort: String? = nil) {
+    private enum CodingKeys: String, CodingKey, StrictCodingKey {
+        case harness, model, effort, credentialProfileId
+    }
+
+    public init(from decoder: Decoder) throws {
+        try rejectUnknownKeys(in: decoder, allowed: CodingKeys.self)
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        harness = try container.decode(String.self, forKey: .harness)
+        model = try container.decodeIfPresent(String.self, forKey: .model)
+        effort = try container.decodeIfPresent(String.self, forKey: .effort)
+        credentialProfileId = try container.decodeIfPresent(String.self, forKey: .credentialProfileId)
+    }
+
+    public init(harness: String, model: String? = nil, effort: String? = nil,
+                credentialProfileId: String? = nil) {
         self.harness = harness
         self.model = model
         self.effort = effort
+        self.credentialProfileId = credentialProfileId
     }
 }
 

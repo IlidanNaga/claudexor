@@ -17,11 +17,15 @@ export const OPERATION_SUMMARIES: Record<string, string> = {
   "GET /v2/global/events": "Subscribe to the global cross-project event stream (SSE).",
   "GET /v2/quota": "Read cached per-profile harness quota snapshots.",
   "POST /v2/quota": "Refresh and read per-profile harness quota snapshots.",
+  "GET /v2/account-pools":
+    "Read the per-harness account-pool routing verdict (who an unpinned run routes to next) under the unified account model.",
   "GET /v2/credential-profiles": "List credential profiles per harness.",
   "POST /v2/credential-profiles": "Create a credential profile for a harness.",
   "PATCH /v2/credential-profiles/:harness/:profileId":
     "Toggle a credential profile's enabled state (the accounts Enabled row).",
   "DELETE /v2/credential-profiles/:harness/:profileId": "Delete a harness credential profile.",
+  "POST /v2/accounts-migration/rollback":
+    "Reverse the unified-accounts startup migration (the supported downgrade path): continuity keys return to the engine default and the auto-registered row leaves the registry.",
   "GET /v2/harnesses": "List installed harnesses and their availability.",
   "GET /v2/projects": "List registered projects (durable handles).",
   "POST /v2/projects": "Register a project root as a durable handle.",
@@ -49,6 +53,8 @@ export const OPERATION_SUMMARIES: Record<string, string> = {
   "POST /v2/runs/:id/decision": "Record an operator unblock/rerun decision on a run.",
   "GET /v2/runs/:id/events": "Replay + tail a run's event stream (SSE).",
   "POST /v2/runs/:id/interactions/:id/answer": "Answer a run's pending interactive question.",
+  "POST /v2/runs/:id/messages":
+    "Place a live message into a run's active attempt and return a typed receipt: delivered (native consumption observed), accepted (native acceptance observed, consumption unproved), rejected, not_active, unsupported, or delivery_unknown. Every typed outcome answers HTTP 200 (unlike the answer and control routes); the Idempotency-Key is the message id and a replay returns the stored receipt.",
   "GET /v2/runs/:id/produced": "List a run's produced project outputs.",
   "GET /v2/runs/:id/produced/<path>": "Fetch one produced project-output file from a run.",
   "GET /v2/threads": "List conversation threads.",

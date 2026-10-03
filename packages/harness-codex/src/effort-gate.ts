@@ -4,10 +4,12 @@
  * so each file keeps a single altitude: the probe answers "what does the
  * vendor advertise", this module answers "what may THIS run trust".
  */
-import type { HarnessEvent, HarnessRunSpec } from "@claudexor/schema";
+import { effortResolutionEvent, resolveEffortEvidence } from "@claudexor/core";
+import type { EffortResolution, HarnessEvent, HarnessRunSpec } from "@claudexor/schema";
 import {
   CODEX_EFFORT_SNAPSHOT_VERIFIED_AGAINST,
   codexEffortDisclosureEvent,
+  codexEffortInputs,
   codexEffortsForEnv,
   type CodexEffortCatalog,
   type CodexEffortProbe,
@@ -17,13 +19,12 @@ import {
  * Whether the recorded snapshot may be TRUSTED for arg emission against the
  * installed binary (INV-105). The snapshot is another CLI version's recorded
  * `model/list` answer, so it is only that binary's truth on the exact version
- * it was captured from: 0.144.1 advertises `ultra` on gpt-5.6-sol, an older
- * codex may not, and an install whose live probe failed used to be handed the
- * 0.144.1 catalog anyway — `model_reasoning_effort="ultra"` then went to a CLI
- * that refuses the value. Mirrors `claudeSnapshotTrustedForVersion`.
+ * it was captured from. A failed live probe on an older CLI must not send
+ * newer snapshot levels that the installed version may refuse. Mirrors
+ * `claudeSnapshotTrustedForVersion`.
  *
  * The installed version string is whatever `codex --version` printed
- * (e.g. `codex-cli 0.144.1`), so the comparison extracts the full dotted
+ * (e.g. `codex-cli 0.156.1`), so the comparison extracts the full dotted
  * numeric token and requires it to EQUAL the snapshot stamp exactly. An
  * unknown or unparseable version can never vouch for the snapshot.
  */
@@ -80,11 +81,33 @@ export async function codexRunEffortResolution(
   },
   envPatch?: Record<string, string | null | undefined>,
   abortSignal?: AbortSignal,
-): Promise<{ catalog: CodexEffortCatalog; disclosure: HarnessEvent | null }> {
+): Promise<{
+  catalog: CodexEffortCatalog;
+  disclosure: HarnessEvent | null;
+  resolution: EffortResolution;
+  event: HarnessEvent;
+}> {
   const efforts = await codexEffortsForEnv(deps, envPatch);
   const catalog =
     efforts.live || !spec.effort_hint
       ? efforts.catalog
       : codexCatalogForRun(efforts, await deps.detectVersion(abortSignal, envPatch));
-  return { catalog, disclosure: codexEffortDisclosureEvent(catalog, spec) };
+  const { advertised, ladder, unverifiable } = codexEffortInputs(catalog, spec.model_hint);
+  const untrusted = !efforts.live && catalog !== efforts.catalog;
+  const resolution = resolveEffortEvidence(
+    spec.effort_hint,
+    advertised,
+    ladder,
+    untrusted ? "adapter" : efforts.live ? "live_probe" : "versioned_snapshot",
+    "model_reasoning_effort",
+    unverifiable || untrusted,
+  );
+  const disclosure = codexEffortDisclosureEvent(catalog, spec);
+  const event = {
+    ...((["downward", "floor"].includes(resolution.resolution) || untrusted) && disclosure
+      ? disclosure
+      : effortResolutionEvent(spec.session_id, resolution)),
+    effort_resolution: resolution,
+  };
+  return { catalog, resolution, event, disclosure };
 }

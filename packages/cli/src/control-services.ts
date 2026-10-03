@@ -1,70 +1,61 @@
 /** Bind typed control operations to daemon stores and engine entrypoints. */
-import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
-import { join, sep } from "node:path";
+import { mkdirSync, realpathSync } from "node:fs";
 import {
   type OperatorDecisionRecord,
   JournalManager,
   InteractionRegistry,
+  LiveInputRegistry,
   ProjectPartitions,
   ProjectStore,
   ResourceStore,
   QuotaRegistry,
 } from "@claudexor/daemon";
-import { loadConfig, updateGlobalConfig } from "@claudexor/config";
+import { loadConfig } from "@claudexor/config";
 import { listTrustService, updateTrustService } from "./trust-services.js";
 import { SecretStore, isManagedSecretName } from "@claudexor/secrets";
-import {
-  probeGitCapability,
-  purgeProfileLanes,
-  purgeThreadLanes,
-  purgeThreadWorktree,
-} from "@claudexor/workspace";
-import { claudexorOwnedRoot, noProjectRepoRoot } from "@claudexor/util";
+import { probeGitCapability, purgeThreadLanes, purgeThreadWorktree } from "@claudexor/workspace";
+import { noProjectRepoRoot } from "@claudexor/util";
 import {
   type ResourceAttachmentRef,
+  ControlAccountsMigrationRollbackRequest,
   ControlCredentialProfileCreateRequest,
-  type CredentialProfile,
-  ControlSettingsUpdateRequest,
   type ControlRunStartRequest,
+  type LiveMessageInput,
+  type RuntimeConcurrencyCaps,
   RunScope,
   TERMINAL_LIFECYCLES,
 } from "@claudexor/schema";
+import { rollbackAccountsUnifiedMigration } from "./accounts-unified-migration.js";
+import { credentialProfileMutations } from "./credential-profile-mutations.js";
 import { quotaControlServices } from "./quota-services.js";
-import { registerConfigDirProfile, removeProfileFromRegistry } from "./profile-registration.js";
-import {
-  StatusProjectionCache,
-  globalConfigVersion,
-  invalidateStatusProjections,
-} from "./status-projection-cache.js";
+import { registerConfigDirProfile } from "./profile-registration.js";
+import { StatusProjectionCache, globalConfigVersion } from "./status-projection-cache.js";
 import { vendorVerifiedProfileStatus } from "@claudexor/orchestrator";
 import { profileDoctorStatus } from "./accounts-projection.js";
 import { createRetentionRunner } from "./retention-service.js";
-import {
-  canonicalIsolationLocator,
-  invalidateDoctorCache,
-  normalizeThroughExistingAncestor,
-} from "@claudexor/core";
-import { canonicalProfileConfigDir } from "@claudexor/harness-claude";
-import { canonicalCodexProfileHome } from "@claudexor/harness-codex";
 import { AuthReadinessService } from "@claudexor/gateway";
-import { buildGateway, harnessModels } from "./registry.js";
+import { buildGateway, harnessModels, harnessAccountModels } from "./registry.js";
+import { credentialUnusableLedger } from "./run-orchestrator.js";
 import {
   createCredentialProfilesService,
   projectHarnessStatuses,
   type HarnessListInput,
 } from "./accounts-services.js";
 import { buildAgentCapabilityCatalog } from "./capabilities.js";
-import { commitSettingsUpdate, settingsSnapshot } from "./settings-service.js";
+import { settingsControlServices } from "./settings-service.js";
+import {
+  bustCredentialStatusCaches,
+  type CredentialMutationSubject,
+} from "./credential-status-invalidation.js";
 import { createSetupJobManager } from "./setup-jobs.js";
-import { ACTIVE_SETUP_STATES, SetupJobStore } from "./setup-job-store.js";
+import { SetupJobStore } from "./setup-job-store.js";
+import { activeProfileLoginJob } from "./setup-job-support.js";
+import { setupJobControlServices } from "./setup-job-control-services.js";
 import { SetupLifecycleBinding } from "./setup-lifecycle-binding.js";
 import { createRunRequirementsPreflight } from "./request-preflight.js";
 import { threadRunStartRequiresGit } from "./thread-execution-workspace.js";
 import { applyThreadDiff, type ThreadApplyOptions } from "./thread-delivery.js";
-import {
-  assertCredentialProfileCompatibility,
-  assertCredentialProfileRegistered,
-} from "./profile-compatibility.js";
+import { assertCredentialProfileCompatibility } from "./profile-compatibility.js";
 import { remoteFilesystemServices } from "./remote-filesystem.js";
 import { projectRunApplicability } from "./run-applicability.js";
 import { threadTurnServices } from "./thread-turn-services.js";
@@ -94,16 +85,20 @@ function activeRunProjectRoot(job: { runId?: string; params?: unknown }): string
 
 export function controlServices(
   interactions: InteractionRegistry,
+  liveInputs: LiveInputRegistry,
   projects: () => ProjectStore,
   threads: ProjectPartitions,
   setupBinding: SetupBinding,
   journalManager: JournalManager,
   authReadiness: AuthReadinessService,
-  resources: ResourceStore,
+  /** Lazy accessor (C5b): the store mkdirs on construction and only product
+   * routes touch it, so the recovery plane must never materialize it. */
+  resources: () => ResourceStore,
   quotaRegistry: () => QuotaRegistry,
   daemonJobs: () => Promise<
     Array<{ runId?: string; state: string; finishedAt?: string; params?: unknown }>
   >,
+  effectiveConcurrencyCaps?: RuntimeConcurrencyCaps,
 ) {
   const secretStore = new SecretStore();
   const listHarnesses = async (input?: HarnessListInput) => {
@@ -121,11 +116,8 @@ export function controlServices(
   const harnessesPollCache = new StatusProjectionCache<Awaited<ReturnType<typeof listHarnesses>>>({
     versionOf: globalConfigVersion,
   });
-  const bustStatusCaches = () => {
-    invalidateDoctorCache();
-    invalidateStatusProjections();
-    quotaRegistry().noteCredentialChange();
-  };
+  const bustStatusCaches = (subject?: CredentialMutationSubject) =>
+    bustCredentialStatusCaches(quotaRegistry, subject);
   const journalPartition = (partition: string): JournalManager =>
     partition === "global" ? journalManager : threads.journal(partition);
   const setupJobs = (): SetupJobManager => {
@@ -145,49 +137,45 @@ export function controlServices(
     }
   };
   mkdirSync(NO_PROJECT_ROOT, { recursive: true, mode: 0o700 });
-  const preflightRunRequirements = createRunRequirementsPreflight(resources, NO_PROJECT_ROOT, {
-    requiresGit: (request: ControlRunStartRequest) => {
-      const root = request.scope.kind === "project" ? request.scope.root : NO_PROJECT_ROOT;
-      const thread = request.threadId ? threads.getThread(request.threadId) : undefined;
-      return threadRunStartRequiresGit(
-        request,
-        thread,
-        loadConfig(root).project.constraints.protected_paths,
-      );
-    },
+  const lazyResources: Pick<ResourceStore, "resolve"> = {
+    resolve: (refs) => resources().resolve(refs),
+  };
+  const runStartRequiresGit = (request: ControlRunStartRequest): boolean => {
+    const root = request.scope.kind === "project" ? request.scope.root : NO_PROJECT_ROOT;
+    const thread = request.threadId ? threads.getThread(request.threadId) : undefined;
+    const config = loadConfig(root);
+    return threadRunStartRequiresGit(
+      request,
+      thread,
+      config.project.constraints.protected_paths,
+      config.trust.access_default,
+    );
+  };
+  const preflightRunRequirements = createRunRequirementsPreflight(lazyResources, NO_PROJECT_ROOT, {
+    requiresGit: runStartRequiresGit,
   });
   const preflightThreadRunRequirements = createRunRequirementsPreflight(
-    resources,
+    lazyResources,
     NO_PROJECT_ROOT,
-    {
-      requiresGit: (request: ControlRunStartRequest) => {
-        const root = request.scope.kind === "project" ? request.scope.root : NO_PROJECT_ROOT;
-        const thread = request.threadId ? threads.getThread(request.threadId) : undefined;
-        return threadRunStartRequiresGit(
-          request,
-          thread,
-          loadConfig(root).project.constraints.protected_paths,
-        );
-      },
-    },
+    { requiresGit: runStartRequiresGit },
     { git: "durable_job" },
   );
   return {
     preflightRunRequirements,
     preflightThreadRunRequirements,
     createUpload: async (input: unknown, idempotencyKey: string) =>
-      resources.create(input, idempotencyKey),
+      resources().create(input, idempotencyKey),
     writeUpload: async (uploadId: string, chunks: AsyncIterable<Uint8Array>) =>
-      resources.write(uploadId, chunks),
-    uploadStatus: async (uploadId: string) => resources.status(uploadId),
-    cancelUpload: async (uploadId: string) => resources.cancel(uploadId),
+      resources().write(uploadId, chunks),
+    uploadStatus: async (uploadId: string) => resources().status(uploadId),
+    cancelUpload: async (uploadId: string) => resources().cancel(uploadId),
     finalizeUpload: async (
       uploadId: string,
       expectedSha256: string | undefined,
       idempotencyKey: string,
-    ) => resources.finalize(uploadId, expectedSha256, idempotencyKey),
+    ) => resources().finalize(uploadId, expectedSha256, idempotencyKey),
     validateResources: async (refs: ResourceAttachmentRef[]) => {
-      resources.resolve(refs);
+      resources().resolve(refs);
     },
     runRetention: createRetentionRunner({ projects, threads, daemonJobs }),
     // F3 nested-project disclosure: each project carries its recomputed
@@ -242,7 +230,7 @@ export function controlServices(
       const { threads: rows, problems } = threads.listThreadsResilient();
       return { threads: rows as unknown[], problems: problems as unknown[] };
     },
-    ...threadTurnServices(threads, resources),
+    ...threadTurnServices(threads, lazyResources),
     updateThread: async (
       id: string,
       patch: {
@@ -313,6 +301,7 @@ export function controlServices(
     pendingInteractions: (runId: string) => interactions.pendingForRun(runId),
     answerInteraction: (runId: string, interactionId: string, answers: unknown) =>
       interactions.answer(runId, interactionId, answers),
+    sendRunMessage: (input: LiveMessageInput) => liveInputs.send(input),
     operatorDecision: (runId: string, params: unknown) => threads.operatorDecision(params, runId),
     findOperatorDecisionByIdempotency: (
       runId: string,
@@ -335,29 +324,27 @@ export function controlServices(
       !input?.includeFakes && !input?.fresh && !input?.harnessIds?.length
         ? harnessesPollCache.read(() => listHarnesses())
         : listHarnesses(input),
-    harnessModels: async (input: { harnessId: string; route?: "local_session" | "api_key" }) =>
-      harnessModels(input.harnessId, NO_PROJECT_ROOT, true, input.route),
+    harnessModels: async (input: {
+      harnessId: string;
+      route?: "local_session" | "api_key";
+      view?: "accounts";
+      credentialProfileId?: string;
+    }) =>
+      input.view === "accounts"
+        ? harnessAccountModels({
+            ...input,
+            cwd: NO_PROJECT_ROOT,
+            config: loadConfig(NO_PROJECT_ROOT).global,
+            quota: quotaRegistry().read(),
+            unusable: credentialUnusableLedger.live(),
+          })
+        : harnessModels(input.harnessId, NO_PROJECT_ROOT, true, input.route),
     authReadiness: async (input: { harnessId: string; request: unknown }) =>
       authReadiness.refresh(input.harnessId, input.request),
     agentCapabilities: async () => buildAgentCapabilityCatalog(),
     runApplicability: async (input: { repoRoot: string }) =>
       projectRunApplicability(input.repoRoot),
-    createSetupJob: async (input: { request: unknown; idempotencyKey: string; clientId: string }) =>
-      setupJobs().create(input.request, {
-        key: input.idempotencyKey,
-        client: input.clientId,
-      }),
-    listSetupJobs: async (input?: unknown) => {
-      const jobs = setupJobs();
-      return { jobs: jobs.list(input as Parameters<typeof jobs.list>[0]) };
-    },
-    setupJobStatus: async (input: unknown) => setupJobs().status(input),
-    setupJobSnapshot: async (input: unknown) => setupJobs().snapshot(input),
-    setupJobEvents: async (input: unknown) => setupJobs().events(input),
-    cancelSetupJob: async (input: unknown) => setupJobs().cancel(input),
-    setupJobInput: async (input: unknown) => setupJobs().input(input),
-    reconcileSetupJob: async (input: unknown) => setupJobs().reconcile(input),
-    extendSetupJob: async (input: unknown) => setupJobs().extend(input),
+    ...setupJobControlServices(setupJobs),
     journalEvents: async (partition: string, afterCursor?: string) =>
       journalPartition(partition).events(afterCursor),
     recoveryInspectPartition: async (partition: string) => journalPartition(partition).inspect(),
@@ -375,128 +362,38 @@ export function controlServices(
       }
       return setupBinding.replaceAfter(() => journalManager.quarantineAndStartFresh(request));
     },
-    settings: async () => settingsSnapshot(NO_PROJECT_ROOT),
+    ...settingsControlServices(NO_PROJECT_ROOT, effectiveConcurrencyCaps, bustStatusCaches),
     ...quotaControlServices(quotaRegistry),
     // INV-135: durable registry + live doctor projection, one probe per
     // profile; adapters without profile support report honest unknown.
-    credentialProfiles: createCredentialProfilesService(quotaRegistry),
-    // PATCH /credential-profiles/:harness/:id — the Enabled toggle of the
-    // accounts symmetry (INV-135). Flips the profile's durable `enabled` in the
-    // registry (one locked write) and returns the refreshed doctor projection.
-    updateCredentialProfile: async (input: unknown) => {
-      const p = (input ?? {}) as Record<string, unknown>;
-      const harnessId = typeof p["harnessId"] === "string" ? p["harnessId"] : "";
-      const profileId = typeof p["profileId"] === "string" ? p["profileId"] : "";
-      const enabled = typeof p["enabled"] === "boolean" ? p["enabled"] : undefined;
-      if (!harnessId || !profileId || enabled === undefined) {
-        throw Object.assign(new Error("harnessId, profileId and enabled are required"), {
-          status: 400,
-        });
-      }
-      assertCredentialProfileRegistered(
-        loadConfig(NO_PROJECT_ROOT).global.credential_profiles,
-        harnessId,
-        profileId,
+    // The pool-authority read (GET /v2/account-pools) shares the same cached
+    // projection so the listing and the pool verdict cannot disagree.
+    ...createCredentialProfilesService(quotaRegistry),
+    // PATCH + DELETE /credential-profiles/:harness/:id — the Enabled toggle
+    // (with the migrated row's native_credentials_enabled downgrade mirror)
+    // and the provable D-U4 removal, owned by credential-profile-mutations.ts.
+    ...credentialProfileMutations({
+      threads,
+      quotaRegistry,
+      secretStore,
+      bustStatusCaches,
+      activeLoginJob: (harnessId, profileId) =>
+        activeProfileLoginJob(setupJobs, harnessId, profileId),
+    }),
+    // POST /accounts-migration/rollback — the supported downgrade path's
+    // first step (unified account model): surgically reverses the startup
+    // migration (sessions/checkpoints/lane homes back to the engine-default
+    // keys, the auto-registered row out of the registry, its enabled state
+    // back onto the native_credentials_enabled mirror). Run BEFORE installing
+    // an engine whose canonicalizers refuse the native locator.
+    rollbackAccountsMigration: async (input: unknown) => {
+      const request = ControlAccountsMigrationRollbackRequest.parse(input ?? {});
+      const rolledBack = rollbackAccountsUnifiedMigration(
+        { threads, quota: quotaRegistry() },
+        request.harnessId,
       );
-      let updated: CredentialProfile | undefined;
-      updateGlobalConfig((config) => ({
-        ...config,
-        credential_profiles: config.credential_profiles.map((profile) => {
-          if (profile.harness_id !== harnessId || profile.profile_id !== profileId) return profile;
-          updated = { ...profile, enabled };
-          return updated;
-        }),
-      }));
-      if (!updated) {
-        throw Object.assign(new Error("profile update did not persist"), { status: 500 });
-      }
       bustStatusCaches();
-      return {
-        profile: updated,
-        // Same vendor overlay the listing applies: a single-profile response
-        // must not re-declare a revoked credential `passed` (INV-135 honesty).
-        status: vendorVerifiedProfileStatus(
-          await profileDoctorStatus(updated),
-          quotaRegistry().read(),
-        ),
-      };
-    },
-    // INV-135 deletion: registry first; scoped material cleanup is fenced and disclosed.
-    deleteCredentialProfile: async (input: unknown) => {
-      const p = (input ?? {}) as Record<string, unknown>;
-      const harnessId = typeof p["harnessId"] === "string" ? p["harnessId"] : "";
-      const profileId = typeof p["profileId"] === "string" ? p["profileId"] : "";
-      if (!harnessId || !profileId) {
-        throw Object.assign(new Error("harnessId and profileId are required"), { status: 400 });
-      }
-      const activeLogin = setupJobs()
-        .list({ harness: harnessId as "claude" | "codex" | "cursor" })
-        .find((job) => ACTIVE_SETUP_STATES.has(job.state) && job.profileId === profileId);
-      if (activeLogin) {
-        throw Object.assign(
-          new Error(
-            `a login for this account is in progress (${activeLogin.jobId}); cancel it before removing the account`,
-          ),
-          { status: 409 },
-        );
-      }
-      assertCredentialProfileRegistered(
-        loadConfig(NO_PROJECT_ROOT).global.credential_profiles,
-        harnessId,
-        profileId,
-      );
-      threads.invalidateCredentialProfile(harnessId, profileId);
-      // INV-034 lifecycle owner (b): the deleted account's durable per-lane
-      // read-only homes must not survive to be resumed. Sweep them across every
-      // project a live thread anchors to (plus the no-project partition).
-      const laneRoots = new Set<string>([NO_PROJECT_ROOT]);
-      for (const thread of threads.listThreads()) {
-        if (thread.repo?.root) laneRoots.add(thread.repo.root);
-      }
-      for (const root of laneRoots) purgeProfileLanes(root, harnessId, profileId);
-      quotaRegistry().removeSubject(harnessId, profileId);
-      const entry = removeProfileFromRegistry(harnessId, profileId);
-      let credentialCleanup: "config_dir_removed" | "secret_deleted" | "none" = "none";
-      const cleanupWarnings: string[] = [];
-      try {
-        if (entry.credential_kind === "config_dir_login" && entry.isolation_locator) {
-          const dir =
-            harnessId === "claude"
-              ? canonicalProfileConfigDir(entry.isolation_locator)
-              : harnessId === "codex"
-                ? canonicalCodexProfileHome(entry.isolation_locator)
-                : canonicalIsolationLocator(entry.isolation_locator, "credential profile dir");
-          // Recursive deletion is fenced to a strict descendant of the profiles tree.
-          const profilesRoot = normalizeThroughExistingAncestor(
-            join(claudexorOwnedRoot(), "profiles"),
-          );
-          if (!dir.startsWith(profilesRoot + sep)) {
-            throw new Error(
-              `refusing to delete "${dir}": not inside the profiles tree ${profilesRoot}`,
-            );
-          }
-          if (existsSync(dir)) {
-            rmSync(dir, { recursive: true, force: true });
-            credentialCleanup = "config_dir_removed";
-          }
-        } else if (entry.secret_ref) {
-          secretStore.delete(entry.secret_ref);
-          credentialCleanup = "secret_deleted";
-        }
-      } catch (err) {
-        cleanupWarnings.push(
-          `registry entry removed, but credential cleanup failed: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-      }
-      bustStatusCaches();
-      return {
-        profile: entry,
-        removed: true,
-        credentialCleanup,
-        ...(cleanupWarnings.length > 0 ? { cleanupWarning: cleanupWarnings.join("; ") } : {}),
-      };
+      return { rolledBack };
     },
     // POST /credential-profiles: the SAME ONE registration owner the CLI's
     // `profiles add` uses (profile-registration.ts) — never a second write
@@ -509,7 +406,7 @@ export function controlServices(
         profileId: request.profileId,
         displayName: request.displayName,
       });
-      bustStatusCaches();
+      bustStatusCaches({ harnessId: request.harnessId, profileId: request.profileId });
       return {
         profile,
         status: vendorVerifiedProfileStatus(
@@ -517,18 +414,6 @@ export function controlServices(
           quotaRegistry().read(),
         ),
       };
-    },
-    updateSettings: async (patch: unknown) => {
-      const p = ControlSettingsUpdateRequest.parse(patch ?? {});
-      // A-1 race fix: the COMPLETE read → validate → write is one atomic
-      // transaction under the config lock (see commitSettingsUpdate). The
-      // merged-effective goal/tiers invariant (D-9/#22 server half) is
-      // re-validated against the exact state being persisted, so two concurrent
-      // settings requests can never each pass on a stale snapshot and commit an
-      // invalid final combination (quality goal with zero tiers).
-      await commitSettingsUpdate(NO_PROJECT_ROOT, p);
-      bustStatusCaches();
-      return settingsSnapshot(NO_PROJECT_ROOT);
     },
     listSecrets: async () => ({
       backend: secretStore.resolvedBackend(),
@@ -549,7 +434,7 @@ export function controlServices(
         );
       }
       const backend = secretStore.set(name, value);
-      bustStatusCaches();
+      bustStatusCaches({ secretName: name });
       return {
         name,
         backend,
@@ -559,7 +444,7 @@ export function controlServices(
     },
     deleteSecret: async (name: string) => {
       secretStore.delete(name);
-      bustStatusCaches();
+      bustStatusCaches({ secretName: name });
       return { name, deleted: true };
     },
   };

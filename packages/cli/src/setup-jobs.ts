@@ -1,10 +1,10 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, writeFileSync } from "node:fs";
+import { chmodSync, writeFileSync, rmSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import {
   AuthCapabilityVerifier,
-  ProcessGroupService,
+  processGroupServiceWithWindowsSupport,
   parseProcessGroupHandle,
   type ProcessGroupHandle,
 } from "@claudexor/core";
@@ -21,15 +21,17 @@ import {
   type ControlSetupJobListFilter,
 } from "@claudexor/schema";
 import { noProjectRepoRoot } from "@claudexor/util";
-import { defaultNativeClaudeConfigDir } from "@claudexor/harness-claude";
-import { defaultNativeCodexHome } from "@claudexor/harness-codex";
 import * as NativeLogin from "./native-login.js";
 import {
   SETUP_PROFILES,
   processGroupFromJob,
   profileDoctorProbe,
-  resolveProfileBinding,
+  DEFAULT_STORE_OF,
+  assertDefaultLoginAllowed,
+  assertSetupJobExtendable,
+  resolveLoginProfileBinding,
   resolveSetupLoginRunnerPath,
+  setupProfileBindingMessage,
   shellQuote,
   stateMatchesDurableExecution,
   waitWithAbort,
@@ -55,6 +57,7 @@ import { SetupSupervisor } from "./setup-supervisor.js";
 import { createDeviceCodeDisclosureWatcher } from "./setup-device-code-disclosure.js";
 import {
   awaitingSetupUserMessage,
+  deviceCodeRejectionRemedy,
   clientPtyWaitingPatch,
   isDeviceCodeSetupJob,
   projectSetupDeviceCode,
@@ -67,11 +70,10 @@ import {
   isUrlDisclosureLoginMode,
   submitSetupLoginInput,
 } from "./setup-login-completion.js";
+import { setupRunnerFailureOutcome } from "./setup-runner-outcome.js";
+import { hasUnconfirmedSetupTermination } from "./setup-job-reducer.js";
+import * as CredentialWindow from "./setup-credential-window.js";
 
-const DEFAULT_STORE_OF: Partial<Record<string, () => string>> = {
-  codex: defaultNativeCodexHome,
-  claude: defaultNativeClaudeConfigDir,
-};
 const NO_PROJECT_ROOT = noProjectRepoRoot();
 const LOGIN_EXTENSION_MS = 15 * 60_000;
 type NativeLoginSpec = NativeLogin.NativeLoginSpec;
@@ -119,7 +121,7 @@ export interface SetupJobManagerOptions {
   sleep?: (ms: number) => Promise<void>;
   spawn?: typeof spawn;
   openTerminal?: (scriptPath: string) => ChildProcess;
-  processGroups?: ProcessGroupService;
+  processGroups?: ReturnType<typeof processGroupServiceWithWindowsSupport>;
   runnerPath?: string;
   nodePath?: string;
 }
@@ -130,7 +132,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
   const rootDir = opts.rootDir ?? daemonDir();
   const store = opts.store ?? new SetupJobStore(rootDir, { now });
   const processGroups =
-    opts.processGroups ?? new ProcessGroupService({ platform: opts.platform ?? process.platform });
+    opts.processGroups ?? processGroupServiceWithWindowsSupport(opts.platform ?? process.platform);
   const processing = new Map<string, Promise<void>>();
   const terminations = new Map<string, Promise<ControlSetupJob>>();
   const verificationControllers = new Map<string, AbortController>();
@@ -181,13 +183,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
   const iso = () => now().toISOString();
   const projectDeviceCode = (job: ControlSetupJob) =>
     projectSetupDeviceCode(job, store.paths(job.jobId).runnerDeviceCode);
-  function update(
-    jobId: string,
-    patch: Partial<ControlSetupJob>,
-    idempotency?: { key: string; client: string; request: unknown },
-  ): ControlSetupJob {
-    return store.update(jobId, patch, idempotency);
-  }
+  const update = CredentialWindow.observedUpdate(store, opts, logAfterMutation);
   const armDeviceCodeDisclosureWatcher = createDeviceCodeDisclosureWatcher({
     status: (jobId) => store.status(jobId),
     update: (jobId, patch) => void update(jobId, patch),
@@ -227,9 +223,10 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       message,
       ...(command ? { command } : {}),
     });
-    // The transient device-code disclosure is invalid once terminal — drop the
-    // sidecar so its one-time code stops being projected (INV-062 / D-17).
+    // Both transient sidecars die with the job: the device-code disclosure
+    // (INV-062 / D-17) and the one-shot sign-in input's pasted code.
     removeSetupDeviceCodeSidecar(store.paths(jobId).runnerDeviceCode);
+    rmSync(store.paths(jobId).runnerInput, { force: true });
     logAfterMutation(jobId, message);
     return done;
   }
@@ -256,12 +253,10 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       }
       return job;
     }
-    job = update(jobId, {
+    return update(jobId, {
       nativeCommand: receipt,
       message: `Persisted hash-bound ${job.harness} native command evidence before verification.`,
     });
-    if (receipt.commandStarted) opts.onCredentialStateMayHaveChanged?.(job.harness);
-    return job;
   }
 
   function probeNativeSession(
@@ -593,17 +588,21 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
 
   async function observeAndPermit(jobId: string, state: SetupLoginRunnerState): Promise<void> {
     let job = store.status(jobId);
+    const authorizationFailure = job.execution?.permitIssuedAt
+      ? "termination_unconfirmed"
+      : "launch_failed";
     const manifest = manifestFor(jobId);
     if (!manifest) {
       finish(
         jobId,
         "failed",
-        "termination_unconfirmed",
+        authorizationFailure,
         `${job.harness} login manifest became unavailable after worker observation.`,
       );
       return;
     }
     const handle = parseProcessGroupHandle(state.processGroup);
+    // The running vendor may self-update; physical bytes bind initial permission only.
     if (
       !job.authorization ||
       job.authorization.executionId !== state.executionId ||
@@ -613,12 +612,12 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       manifest.manifestDigest !== job.authorization.manifestDigest ||
       JSON.stringify(manifest.executable) !== JSON.stringify(job.authorization.executable) ||
       JSON.stringify(manifest.args) !== JSON.stringify(job.authorization.args) ||
-      !verifyExecutableEvidence(job.authorization.executable)
+      (!job.execution?.permitIssuedAt && !verifyExecutableEvidence(job.authorization.executable))
     ) {
       finish(
         jobId,
         "failed",
-        "termination_unconfirmed",
+        authorizationFailure,
         `${job.harness} login command authorization changed before execution permit.`,
       );
       return;
@@ -627,7 +626,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       finish(
         jobId,
         "failed",
-        "termination_unconfirmed",
+        "launch_failed",
         `${job.harness} login worker identity changed before execution was permitted.`,
       );
       return;
@@ -647,7 +646,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       finish(
         jobId,
         "failed",
-        "termination_unconfirmed",
+        authorizationFailure,
         `${job.harness} login worker contradicts durable process-group evidence.`,
       );
       return;
@@ -676,11 +675,12 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
     if (!ACTIVE_SETUP_STATES.has(job.state) || job.phase === "cancelling") return;
     if (result.permitIssuedAt !== null) {
       const state = matchingState(jobId);
+      // A bound pre-command refusal can precede the runner's running-state write.
       if (
         !job.execution?.permitIssuedAt ||
         job.execution.permitIssuedAt !== result.permitIssuedAt ||
         !state ||
-        state.stage !== "running" ||
+        (result.commandStarted && state.stage !== "running") ||
         !stateMatchesDurableExecution(job, state) ||
         Date.parse(result.finishedAt) < Date.parse(result.permitIssuedAt)
       ) {
@@ -702,26 +702,9 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       return;
     }
     job = persistNativeCommandOutcome(jobId, result);
-    if (!result.commandStarted) {
-      if (result.errorCode === "device_auth_unsupported") {
-        finish(
-          jobId,
-          "not_supported",
-          "not_supported",
-          `${job.harness} does not expose typed device-code auth over its app-server ` +
-            `(upgrade the codex CLI), or retry the legacy Terminal flow with ` +
-            "`claudexor auth login codex --browser-redirect`.",
-        );
-        return;
-      }
-      finish(
-        jobId,
-        "failed",
-        "launch_failed",
-        result.errorCode === "permit_timeout"
-          ? `${job.harness} login worker timed out before a durable execution permit was issued.`
-          : `${job.harness} login command could not be spawned after authorization.`,
-      );
+    const runnerFailure = setupRunnerFailureOutcome(job.harness, result, platform);
+    if (runnerFailure) {
+      finish(jobId, ...runnerFailure);
       return;
     }
     if (result.exitCode === 0 && result.signal === null) {
@@ -738,8 +721,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
     // flow, whose argv carries `app-server`).
     const deviceAuthRemedy =
       job.authorization?.args.includes("--device-auth") || isDeviceCodeSetupJob(job)
-        ? " If the sign-in page rejected your one-time code, enable ChatGPT → Settings → Security → " +
-          '"Allow device code login" and retry, or use `claudexor auth login codex --browser-redirect`.'
+        ? deviceCodeRejectionRemedy(platform)
         : "";
     finish(
       jobId,
@@ -826,7 +808,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
     for (;;) {
       const probe = processGroups.probeEmpty(handle);
       if (probe.status === "empty") return true;
-      if (probe.status === "unknown") return false;
+      // An exiting group may briefly deny probes; only empty proves death, within this grace.
       if (remaining <= 0) return false;
       const step = Math.min(100, remaining);
       await sleep(step);
@@ -859,9 +841,21 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       await consumeLoginResult(jobId, result);
       return;
     }
-    // Extend updates this journaled authority without rewriting the sealed
-    // client_pty manifest. Check it before any freshly observed runner can be
-    // permitted, not only after the monitor handles that runner.
+    // A durable group can prove client/runner death even if its sidecar vanished.
+    const group = processGroupFromJob(job);
+    if (group && processGroups.probeEmpty(group).status === "empty") {
+      const lateResult = matchingResult(jobId);
+      if (lateResult) await consumeLoginResult(jobId, lateResult);
+      else
+        finish(
+          jobId,
+          "failed",
+          "interrupted",
+          `${job.harness} login process group ended without a terminal receipt; start a new login.`,
+        );
+      return;
+    }
+    // Check the journal deadline before permission; Extend preserves the sealed manifest.
     if (loginDeadlineReached(job)) {
       await terminateLogin(jobId, "timed_out");
       return;
@@ -1035,6 +1029,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
     profileConfigDir?: string,
   ): ControlSetupJob {
     const deviceCode = spec.loginMode === "device_code";
+    const clientPty = job.transport === "client_pty";
     // Daemon-hosted modes never touch Terminal and run on any posix platform;
     // only the legacy Terminal handoff (codex browser_redirect) is macOS-only.
     const daemonHosted = deviceCode || isUrlDisclosureLoginMode(spec.loginMode);
@@ -1053,9 +1048,13 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       const executionId = randomUUID();
       const executable = captureExecutableEvidence(spec.binary);
       const authorizedCommandDigest = commandDigest(executable, spec.args);
+      // A vendor window shorter than ours governs: counting past the moment it
+      // gave up would promise a login that is already over — and it cannot be
+      // extended either, which the job says out loud so no surface offers to.
+      const vendorCapped = (spec.loginWindowMs ?? Infinity) < loginTimeoutMs;
       const { loginDeadlineAt, permitDeadlineAt, permitWaitMs } = setupLoginDeadlines(
         now(),
-        loginTimeoutMs,
+        Math.min(loginTimeoutMs, spec.loginWindowMs ?? loginTimeoutMs),
         launcherTimeoutMs,
         job.transport,
       );
@@ -1075,29 +1074,34 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         version: SETUP_LOGIN_PROTOCOL_VERSION,
         jobId: job.jobId,
         executionId,
-        harness: job.harness as "codex" | "claude" | "cursor",
+        harness: job.harness,
         jobDir: paths.dir,
         binary: executable.realpath,
         args: [...spec.args],
         cwd: paths.dir,
         ...(targetConfigDir ? { profileConfigDir: targetConfigDir } : {}),
-        // D-17 device-code (app-server) login: the runner hosts the app-server
-        // and writes the transient disclosure sidecar. Terminal-mode logins
-        // (claude/cursor, codex fallback) carry the SAME sidecar path so the
-        // runner can capture the vendor login's OAuth URL into it as an
-        // `oauth_url` disclosure — the no-Terminal "open this link" card.
-        // Pre-upgrade sealed manifests (no deviceCodePath) stay digest-valid.
-        deviceCodePath: paths.runnerDeviceCode,
-        ...(deviceCode
-          ? { loginMode: "device_code" as const, appServerFlow: spec.appServerFlow }
-          : isUrlDisclosureLoginMode(spec.loginMode)
-            ? {
-                loginMode: spec.loginMode,
-                ...(spec.loginMode === "url_disclosure_with_input"
-                  ? { inputPath: paths.runnerInput }
+        // These fields describe DAEMON-owned disclosure/control only. A
+        // client_pty manifest is an external-attach command contract: attach
+        // runs the vendor in the already attached terminal with inherited
+        // stdio, so it must not contain sidecars, login modes, or a PTY helper.
+        ...(!clientPty
+          ? {
+              deviceCodePath: paths.runnerDeviceCode,
+              ...(deviceCode
+                ? { loginMode: "device_code" as const, appServerFlow: spec.appServerFlow }
+                : isUrlDisclosureLoginMode(spec.loginMode)
+                  ? {
+                      loginMode: spec.loginMode,
+                      ...(spec.loginMode === "url_disclosure_with_input"
+                        ? {
+                            inputPath: paths.runnerInput,
+                            ...(spec.ptyStdin ? { ptyStdin: true } : {}),
+                          }
+                        : {}),
+                    }
                   : {}),
-              }
-            : {}),
+            }
+          : {}),
         statePath: paths.runnerState,
         resultPath: paths.runnerResult,
         permitPath: paths.runnerPermit,
@@ -1107,6 +1111,29 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         commandDigest: authorizedCommandDigest,
       });
       atomicPrivateJson(paths.manifest, manifest);
+      // External attach is a real transport, not a daemon-hosted login with a
+      // second terminal layered on top. Seal and wait before any runner spawn.
+      if (clientPty) {
+        const authorization = {
+          executionId,
+          executable,
+          args: [...spec.args],
+          commandDigest: authorizedCommandDigest,
+          manifestDigest: manifest.manifestDigest,
+        };
+        const waiting = update(
+          job.jobId,
+          clientPtyWaitingPatch({
+            job,
+            deadlineAt: loginDeadlineAt,
+            startedAt: iso(),
+            command: spec.displayCommand,
+            authorization,
+          }),
+        );
+        log(job.jobId, `client_pty attach prepared: ${paths.manifest}`);
+        return waiting;
+      }
       if (daemonHosted) {
         // D-17 primary flow: launch the app-server runner DETACHED (no Terminal,
         // no login.command script). The runner survives daemon restart exactly
@@ -1116,6 +1143,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
           state: "waiting_for_input",
           phase: "launching",
           deadlineAt: loginDeadlineAt,
+          ...(vendorCapped ? { deadlineFixed: true } : {}),
           startedAt: iso(),
           command: spec.displayCommand,
           authorization: {
@@ -1133,6 +1161,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         const runner = spawnProcess(nodePath, [runnerPath, paths.manifest], {
           detached: true,
           stdio: "ignore",
+          windowsHide: true, // "no Terminal" must also mean no console window
         });
         const failLaunch = (detail: string) => {
           if (!["idle", "healthy"].includes(supervisor.health().state)) return;
@@ -1155,27 +1184,6 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         runner.unref();
         return waiting;
       }
-      if (job.transport === "client_pty") {
-        const authorization = {
-          executionId,
-          executable,
-          args: [...spec.args],
-          commandDigest: authorizedCommandDigest,
-          manifestDigest: manifest.manifestDigest,
-        };
-        const waiting = update(
-          job.jobId,
-          clientPtyWaitingPatch({
-            job,
-            deadlineAt: loginDeadlineAt,
-            startedAt: iso(),
-            command: spec.displayCommand,
-            authorization,
-          }),
-        );
-        log(job.jobId, `client_pty attach prepared: ${paths.manifest}`);
-        return waiting;
-      }
       // External-risk disclosure (v3.0.3, Bible): a browser-based OpenAI
       // sign-in completed in a browser holding ANOTHER account's session can
       // revoke sibling sessions (incl. the ChatGPT desktop app) server-side.
@@ -1191,6 +1199,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         state: "waiting_for_input",
         phase: "launching",
         deadlineAt: loginDeadlineAt,
+        ...(vendorCapped ? { deadlineFixed: true } : {}),
         startedAt: iso(),
         command: spec.displayCommand,
         authorization: {
@@ -1282,21 +1291,25 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
     create(input: unknown, idempotency?: { key: string; client: string }): ControlSetupJob {
       const request = ControlSetupJobCreateRequest.parse(input);
       const { harness, action } = request;
-      const profileBinding = resolveProfileBinding(harness, request.profileId);
+      const profileBinding = resolveLoginProfileBinding(
+        harness,
+        action,
+        request.profileId,
+        platform,
+      );
+      assertDefaultLoginAllowed(harness, profileBinding !== null);
       const binding = idempotency ? { ...idempotency, request } : undefined;
       const prior = binding ? store.resolveCreate(binding) : null;
       if (prior) return prior;
       supervisor.assertCreateAllowed();
       const jobs = store.list({ harness });
       let active = jobs.findLast((job) => ACTIVE_SETUP_STATES.has(job.state));
-      // A client_pty job no client ever attached (no runner state on disk) is
-      // an ORPHAN — no living login to protect, only a stale reservation that
-      // conflict-refused retries for the whole login window when the UI lost
-      // the attach command (hit live 2026-08-04). A new create supersedes it;
-      // a job with observed runner state keeps the full conflict discipline.
+      // Replace an unattached reservation only before durable permission;
+      // a missing sidecar cannot prove that a permitted vendor stopped.
       if (
         active &&
         active.transport === "client_pty" &&
+        !active.execution?.permitIssuedAt &&
         readRunnerState(store.paths(active.jobId).runnerState) === null
       ) {
         finish(
@@ -1308,12 +1321,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         active = undefined;
       }
       if (active) {
-        // Same target store → idempotent reuse. A DIFFERENT target (default vs
-        // profile, or two profiles) must refuse loudly: returning the other job
-        // would hand the caller a login into the wrong store. A different
-        // LOGIN FLOW for the same target refuses the same way (wave-1): a
-        // --browser-redirect request must never be silently answered with the
-        // active device-auth job.
+        // Reuse only the same store and flow: another target would log into the wrong account.
         if ((active.profileId ?? null) === (profileBinding?.profileId ?? null)) {
           const transportConflict = setupTransportConflict(active, request.transport);
           if (transportConflict) {
@@ -1357,10 +1365,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
           { status: 409 },
         );
       }
-      const replacementFence = jobs.findLast(
-        (job) =>
-          job.outcome?.reason === "termination_unconfirmed" && !job.terminationReconciliation,
-      );
+      const replacementFence = jobs.findLast(hasUnconfirmedSetupTermination);
       if (replacementFence) {
         return binding ? store.bindCreate(replacementFence.jobId, binding) : replacementFence;
       }
@@ -1387,7 +1392,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
           command: null,
           guideUrl: profile.guideUrl,
           message: profileBinding
-            ? `${profile.note} This login targets the scoped Claudexor profile "${profileBinding.profileId}" (INV-135); the default vendor store is never touched.`
+            ? `${profile.note} ${setupProfileBindingMessage(harness, profileBinding)}`
             : `${profile.note} The required same-harness smoke may consume quota; incremental billing is unknown.`,
           createdAt: iso(),
           startedAt: null,
@@ -1493,13 +1498,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         if (prior) return prior;
       }
       const job = store.status(jobId);
-      if (
-        !ACTIVE_SETUP_STATES.has(job.state) ||
-        !["launching", "awaiting_user"].includes(job.phase ?? "") ||
-        !job.deadlineAt
-      ) {
-        throw Object.assign(new Error("setup job cannot be extended"), { status: 409 });
-      }
+      assertSetupJobExtendable(job);
       const extended = update(
         jobId,
         {
@@ -1511,6 +1510,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       armDeviceCodeDisclosureWatcher(jobId);
       return extended;
     },
+    credentialMutationOpen: (harness?: string) => CredentialWindow.open(store, harness),
     _store: store,
     _supervisorHealth: () => supervisor.health(),
   };

@@ -21,6 +21,8 @@ export async function serveBeltBridge(): Promise<number> {
         requireExistingDaemon: true,
         delegationParentRunId: policy.parentRunId,
         delegationRepoRoot: policy.repoRoot,
+        delegationProcessingPreference: policy.processingPreference,
+        delegationExecution: { workspaceKind: policy.workspaceKind, scopePaths: policy.scopePaths },
       }),
       policy,
     ),

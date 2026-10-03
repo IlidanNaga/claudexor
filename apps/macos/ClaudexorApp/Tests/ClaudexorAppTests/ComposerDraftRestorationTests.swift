@@ -20,6 +20,7 @@ import Testing
             councilMembers: 4,
             browser: false,
             reviewDraft: ComposerReviewDraft(reviewerText: "codex:high"),
+            reviewChanges: true,
             testCommandText: "pnpm test",
             composerModels: ["codex": "gpt"]
         )
@@ -27,6 +28,15 @@ import Testing
         current.text = ""
         current.attachments = []
         #expect(ComposerDraftRecovery.afterFailedSend(attempted: attempted, current: current) == attempted)
+    }
+
+    @Test func reviewChoiceResetsAfterSuccessWithoutOverwritingNextDraft() {
+        let on = ComposerDraftSnapshot(reviewChanges: true)
+        let off = ComposerDraftSnapshot(reviewChanges: false)
+        #expect(ComposerDraftRecovery.afterSuccessfulSend(attempted: on, current: on, defaults: off).reviewChanges == false)
+        #expect(ComposerDraftRecovery.afterSuccessfulSend(attempted: off, current: on, defaults: off).reviewChanges == true)
+        #expect(ComposerDraftRecovery.afterFailedSend(attempted: on, current: on).reviewChanges == true)
+        #expect(ComposerDraftRecovery.afterFailedSend(attempted: on, current: off).reviewChanges == false)
     }
 
     @Test func recoveryDoesNotOverwriteAUserWhoAlreadyTypedAgain() {

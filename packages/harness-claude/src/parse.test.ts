@@ -196,14 +196,17 @@ describe("parseClaudeEvent", () => {
     expect(out?.text?.length ?? 0).toBeLessThanOrEqual(520);
   });
 
-  it("a FAILED result is never a typed final (sol #1)", () => {
+  it("a FAILED result is never a typed final — its prose rides a status event, not a message (sol #1 + A3)", () => {
     const failed = parseClaudeEvent(
       { type: "result", subtype: "error_during_execution", result: "partial output" },
       "s1",
     ) as HarnessEvent[];
-    const msg = failed.find((e) => e.type === "message");
-    expect(msg?.text).toBe("partial output");
-    expect(msg?.final).toBeUndefined(); // NOT the authoritative answer
+    // A3 deliverable hygiene: no message at all — the answer assembly must
+    // never adopt a failed result's prose as answer material.
+    expect(failed.some((e) => e.type === "message")).toBe(false);
+    const status = failed.find((e) => e.payload?.["non_success_result"] === true);
+    expect(status?.type).toBe("status");
+    expect(status?.text).toBe("partial output");
     expect(failed.some((e) => e.type === "error")).toBe(true);
   });
 
@@ -309,6 +312,11 @@ describe("parseClaudeEvent", () => {
     expect(ok.map((e) => e.type)).toEqual(["usage", "message"]);
     expect(ok[0]?.usage?.cost_usd).toBe(0.25);
     expect(ok[0]?.usage?.cached_input_tokens).toBe(100);
+    expect(ok[0]?.usage?.input_token_usage).toEqual({
+      total_tokens: 110,
+      cache_read_tokens: 90,
+      cache_write_tokens: 10,
+    });
     expect(ok[1]?.text).toBe("[]");
     // The terminal result is claude's TYPED final answer (F2.5 W-C1).
     expect(ok[1]?.final).toBe(true);
@@ -597,7 +605,8 @@ describe("parseClaudeEvent", () => {
     });
     expect(claudeArgsForSpec(spec)).toEqual([
       "-p",
-      "review",
+      "--input-format",
+      "text",
       "--output-format",
       "stream-json",
       "--verbose",
@@ -615,7 +624,7 @@ describe("parseClaudeEvent", () => {
       "--max-turns",
       "12",
       "--tools",
-      "Read,Glob,Grep,WebSearch,WebFetch",
+      "Read,Glob,Grep,WebSearch,WebFetch,AskUserQuestion",
       "--allowedTools",
       "Read,Glob,Grep,WebSearch,WebFetch",
       "--disallowedTools",
@@ -641,12 +650,51 @@ describe("parseClaudeEvent", () => {
     const tools = args[args.indexOf("--tools") + 1];
     const allowed = args[args.indexOf("--allowedTools") + 1];
     const denied = args[args.indexOf("--disallowedTools") + 1];
-    expect(tools).toBe("Read,Grep");
+    expect(tools).toBe("Read,Grep,AskUserQuestion");
     expect(allowed).toBe("Read,Grep");
     expect(denied).toContain("Bash");
     expect(denied).toContain("Write");
     expect(denied).toContain("Agent");
     expect(denied).toContain("Glob");
+  });
+
+  it("asks for the stdin replay echo on the interactive argv only (the live-input receipt), never on a one-shot run", () => {
+    const spec = HarnessRunSpec.parse({
+      session_id: "ses-replay-flag",
+      intent: "implement",
+      prompt: "do it",
+      cwd: "/tmp",
+      access: "full",
+    });
+    const interactive = claudeArgsForSpec(spec, true);
+    expect(interactive).toContain("--replay-user-messages");
+    expect(interactive).toContain("--input-format");
+    // One-shot runs pipe no stdin frames, so there is nothing to echo.
+    const oneShot = claudeArgsForSpec(spec, false);
+    expect(oneShot).not.toContain("--replay-user-messages");
+    expect(oneShot).not.toContain("do it");
+    expect(oneShot[oneShot.indexOf("--input-format") + 1]).toBe("text");
+  });
+
+  it("keeps the readonly AskUserQuestion channel open without pre-approving it", () => {
+    const spec = HarnessRunSpec.parse({
+      session_id: "ses-readonly-ask",
+      intent: "review",
+      prompt: "review",
+      cwd: "/tmp",
+      access: "readonly",
+    });
+    const args = claudeArgsForSpec(spec, true);
+    const tools = (args[args.indexOf("--tools") + 1] ?? "").split(",");
+    const allowed = (args[args.indexOf("--allowedTools") + 1] ?? "").split(",");
+    const denied = (args[args.indexOf("--disallowedTools") + 1] ?? "").split(",");
+    // In --tools so the readonly interactive run can raise questions at all…
+    expect(tools).toContain("AskUserQuestion");
+    // …but NOT in --allowedTools: pre-approval would suppress the
+    // control_request the interaction bridge listens for.
+    expect(allowed).not.toContain("AskUserQuestion");
+    // The mutation surface stays denied.
+    for (const tool of ["Bash", "Write", "Edit"]) expect(denied).toContain(tool);
   });
 
   it("maps web policy off to comma-form disallowed tools and merges user deny lists", () => {
@@ -666,7 +714,95 @@ describe("parseClaudeEvent", () => {
     expect(denyValue).toContain("WebSearch");
     expect(denyValue).toContain("WebFetch");
     expect(denyValue).toContain("Bash(rm:*)");
-    expect(args).not.toContain("--allowedTools");
+    // workspace_write pre-approves bare Bash (the capability-loss fix); the
+    // caller's narrower deny PATTERN rides beside it and wins by precedence.
+    const allowValue = args[args.indexOf("--allowedTools") + 1] ?? "";
+    expect(allowValue).toContain("Bash");
+  });
+
+  it("workspace_write pre-approves Bash; readonly and an explicit deny do not", () => {
+    // Live-verified (claude 2.1.221): under acceptEdits the interaction
+    // bridge denies every non-edit-shaped command (python3/pytest/curl) and
+    // neither dontAsk nor auto helps — only the allowlist restores the
+    // declared workspace_write capability. Claude has no FS/network sandbox,
+    // so this is BROADER than codex's seatbelt: disclosed as the typed
+    // write_mechanism="tool_policy" capability, never a name branch.
+    const base = {
+      session_id: "ses-test",
+      intent: "implement" as const,
+      prompt: "x",
+      cwd: "/tmp",
+      external_context_policy: "live" as const,
+      tool_permission_policy: { web: "live" as const, allow: [], deny: [] },
+    };
+    const write = claudeArgsForSpec(HarnessRunSpec.parse({ ...base, access: "workspace_write" }));
+    const writeAllow = (write[write.indexOf("--allowedTools") + 1] ?? "").split(",");
+    expect(writeAllow).toContain("Bash");
+
+    const readonly = claudeArgsForSpec(HarnessRunSpec.parse({ ...base, access: "readonly" }));
+    const roAllow = (readonly[readonly.indexOf("--allowedTools") + 1] ?? "").split(",");
+    expect(roAllow).not.toContain("Bash");
+    const roDeny = (readonly[readonly.indexOf("--disallowedTools") + 1] ?? "").split(",");
+    expect(roDeny).toContain("Bash");
+
+    const denied = claudeArgsForSpec(
+      HarnessRunSpec.parse({
+        ...base,
+        access: "workspace_write",
+        tool_permission_policy: { web: "live" as const, allow: [], deny: ["Bash"] },
+      }),
+    );
+    const deniedAllow = (denied[denied.indexOf("--allowedTools") + 1] ?? "").split(",");
+    expect(deniedAllow).not.toContain("Bash");
+  });
+
+  it("Bash pre-approval never widens inherit_native or a caller-scoped shell", () => {
+    const base = {
+      session_id: "ses-test",
+      intent: "implement" as const,
+      prompt: "x",
+      cwd: "/tmp",
+      external_context_policy: "live" as const,
+    };
+    // inherit_native defers to the user's own claude settings — injecting
+    // --allowedTools Bash would silently override them.
+    const native = claudeArgsForSpec(
+      HarnessRunSpec.parse({
+        ...base,
+        access: "inherit_native",
+        tool_permission_policy: { web: "live" as const, allow: [], deny: [] },
+      }),
+    );
+    const nativeAllow = native.indexOf("--allowedTools");
+    expect(nativeAllow === -1 || !native[nativeAllow + 1]?.split(",").includes("Bash")).toBe(true);
+
+    // A caller who SCOPED the shell with a Bash(...) allow pattern made an
+    // explicit narrowing; bare Bash must not ride beside it.
+    const scoped = claudeArgsForSpec(
+      HarnessRunSpec.parse({
+        ...base,
+        access: "workspace_write",
+        tool_permission_policy: { web: "live" as const, allow: ["Bash(git *)"], deny: [] },
+      }),
+    );
+    const scopedAllow = (scoped[scoped.indexOf("--allowedTools") + 1] ?? "").split(",");
+    expect(scopedAllow).toContain("Bash(git *)");
+    expect(scopedAllow).not.toContain("Bash");
+  });
+
+  it("a caller deny of AskUserQuestion keeps it out of readonly --tools", () => {
+    const spec = HarnessRunSpec.parse({
+      session_id: "ses-test",
+      intent: "explain",
+      prompt: "x",
+      cwd: "/tmp",
+      access: "readonly",
+      external_context_policy: "live",
+      tool_permission_policy: { web: "live", allow: [], deny: ["AskUserQuestion"] },
+    });
+    const args = claudeArgsForSpec(spec, true);
+    const tools = (args[args.indexOf("--tools") + 1] ?? "").split(",");
+    expect(tools).not.toContain("AskUserQuestion");
   });
 
   it("translates a headless ExitPlanMode error result to a benign thinking event", () => {
@@ -762,10 +898,10 @@ describe("parseClaudeEvent", () => {
     expect(args[promptToolIdx + 1]).toBe("stdio");
     // The prompt must NOT travel as an argv prompt in interactive mode.
     expect(args).not.toContain("make a plan");
-    // One-shot mode keeps the prompt arg and no control-channel flags.
+    // One-shot mode owns text stdin without control-channel flags.
     const oneShot = claudeArgsForSpec(spec);
-    expect(oneShot).toContain("make a plan");
-    expect(oneShot).not.toContain("--input-format");
+    expect(oneShot).not.toContain("make a plan");
+    expect(oneShot[oneShot.indexOf("--input-format") + 1]).toBe("text");
     expect(oneShot).not.toContain("--permission-prompt-tool");
   });
 
@@ -879,5 +1015,171 @@ describe("structured output flag", () => {
       }),
     );
     expect(bare).not.toContain("--json-schema");
+  });
+});
+
+describe("claude normalized input measurement", () => {
+  function normalized(usage: Record<string, unknown>) {
+    return parseClaudeEvent({ type: "result", usage }, "counters")?.find(
+      (event) => event.type === "usage",
+    )?.usage?.input_token_usage;
+  }
+  it("keeps reads and writes separate, including measured zero", () => {
+    expect(
+      normalized({
+        input_tokens: 100,
+        cache_read_input_tokens: 80,
+        cache_creation_input_tokens: 10,
+      }),
+    ).toEqual({
+      total_tokens: 190,
+      cache_read_tokens: 80,
+      cache_write_tokens: 10,
+    });
+    expect(
+      normalized({ input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }),
+    ).toEqual({
+      total_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+    });
+  });
+  it.each([0, 1, 2])("preserves each independently missing component %s", (missing) => {
+    const fields = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"];
+    const native: Record<string, unknown> = Object.fromEntries(
+      fields.map((field, index) => [field, [100, 80, 10][index]]),
+    );
+    delete native[fields[missing]!];
+    expect(normalized(native)).toEqual({
+      total_tokens: null,
+      cache_read_tokens: missing === 1 ? null : 80,
+      cache_write_tokens: missing === 2 ? null : 10,
+    });
+  });
+  it.each([undefined, null, -1, 0.5, "10", Infinity, NaN])(
+    "preserves unknown write rather than treating %j as zero",
+    (value) => {
+      expect(
+        normalized({
+          input_tokens: 100,
+          cache_read_input_tokens: 80,
+          cache_creation_input_tokens: value,
+        }),
+      ).toEqual({
+        total_tokens: null,
+        cache_read_tokens: 80,
+        cache_write_tokens: null,
+      });
+    },
+  );
+});
+
+/**
+ * Native queue fold (live-input.ts): a live message that arrives during the
+ * final text runs as the NEXT native turn of the same process, so one run can
+ * carry two `system/init` and two `result` frames with a CUMULATIVE
+ * total_cost_usd. Recorded on 2.1.283 (fixtures/stream-json/).
+ */
+describe("claude parser: multi-turn session folding", () => {
+  const init = {
+    type: "system",
+    subtype: "init",
+    model: "claude-sonnet-5",
+    session_id: "native-1",
+  };
+  const resultWithCost = (total: number) => ({
+    type: "result",
+    subtype: "success",
+    total_cost_usd: total,
+    usage: { input_tokens: 10, output_tokens: 5 },
+    result: "ok",
+  });
+
+  it("emits ONE started across two inits; an init after a result is a typed native_turn_started status", () => {
+    const parse = createClaudeParser();
+    const first = parse(init, "s1") as HarnessEvent[];
+    expect(first.map((e) => e.type)).toEqual(["started"]);
+    // The recorded boundary: result#1 closes the first native turn, then the
+    // same process re-inits for the queued message (an init with NO result
+    // before it is still a fresh start — see the required-MCP re-init pins).
+    parse(resultWithCost(0.1), "s1");
+    const second = parse(init, "s1") as HarnessEvent[];
+    expect(second).toEqual([
+      expect.objectContaining({
+        type: "status",
+        payload: { code: "native_turn_started", turn: 2 },
+      }),
+    ]);
+    expect(second.some((e) => e.type === "started")).toBe(false);
+    for (const ev of [...first, ...second]) expect(() => HarnessEvent.parse(ev)).not.toThrow();
+  });
+
+  it("emits the first result's cost in full and every later result's cost as the delta of the cumulative total", () => {
+    const parse = createClaudeParser();
+    const first = parse(resultWithCost(0.0963518), "s1") as HarnessEvent[];
+    expect(first.find((e) => e.type === "usage")?.usage?.cost_usd).toBe(0.0963518);
+    const second = parse(resultWithCost(0.114749), "s1") as HarnessEvent[];
+    expect(second.find((e) => e.type === "usage")?.usage?.cost_usd).toBeCloseTo(0.0183972, 10);
+    expect(second.some((e) => e.type === "status")).toBe(false);
+    // Tokens stay per turn (never differenced).
+    expect(second.find((e) => e.type === "usage")?.usage?.input_tokens).toBe(10);
+    // A fresh parser (another run) starts from the full value again: the
+    // cumulative memory is per parser, never shared across runs.
+    const other = createClaudeParser()(resultWithCost(0.5), "s2") as HarnessEvent[];
+    expect(other.find((e) => e.type === "usage")?.usage?.cost_usd).toBe(0.5);
+    // A result without total_cost_usd leaves the cost unknown and the memory untouched.
+    const unknown = parse({ type: "result", subtype: "success", result: "ok" }, "s1");
+    expect(unknown?.find((e) => e.type === "usage")?.usage?.cost_usd).toBeUndefined();
+    const third = parse(resultWithCost(0.2), "s1") as HarnessEvent[];
+    expect(third.find((e) => e.type === "usage")?.usage?.cost_usd).toBeCloseTo(0.085251, 10);
+  });
+
+  it("clamps a negative delta to 0 and discloses it as a status event", () => {
+    const parse = createClaudeParser();
+    parse(resultWithCost(0.2), "s1");
+    const out = parse(resultWithCost(0.15), "s1") as HarnessEvent[];
+    expect(out.find((e) => e.type === "usage")?.usage?.cost_usd).toBe(0);
+    expect(out).toContainEqual(
+      expect.objectContaining({
+        type: "status",
+        payload: { code: "usage_cost_delta_negative", total_cost_usd: 0.15, previous: 0.2 },
+      }),
+    );
+  });
+
+  it("treats the --replay-user-messages echo and command_lifecycle frames as recognized plumbing (no events, never dropped)", () => {
+    const parse = createClaudeParser();
+    expect(
+      parse(
+        {
+          type: "user",
+          isReplay: true,
+          uuid: "u-1",
+          message: { role: "user", content: [{ type: "text", text: "Also say MANGO." }] },
+        },
+        "s1",
+      ),
+    ).toEqual([]);
+    expect(
+      parse({ type: "command_lifecycle", command_uuid: "u-1", state: "queued" }, "s1"),
+    ).toEqual([]);
+    // A non-replay user frame with a tool_result still parses as before.
+    parse(
+      {
+        type: "assistant",
+        message: {
+          content: [{ type: "tool_use", id: "toolu_r", name: "Bash", input: { command: "echo" } }],
+        },
+      },
+      "s1",
+    );
+    const out = parse(
+      {
+        type: "user",
+        message: { content: [{ type: "tool_result", tool_use_id: "toolu_r", content: "ok" }] },
+      },
+      "s1",
+    ) as HarnessEvent[];
+    expect(out.map((e) => e.type)).toEqual(["tool_result"]);
   });
 });

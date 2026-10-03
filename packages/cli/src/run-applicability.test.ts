@@ -28,7 +28,7 @@ describe("run Git applicability", () => {
         agent_other: { applicable: false, requiresGit: true },
       },
       isolated: {
-        read_only: { applicable: false, requiresGit: true },
+        read_only: { applicable: true, requiresGit: false },
         agent_convergence: { applicable: false, requiresGit: true },
         agent_other: { applicable: false, requiresGit: true },
       },
@@ -56,7 +56,7 @@ describe("run Git applicability", () => {
     });
     expect(matrix.isolated.read_only).toEqual({
       applicable: true,
-      requiresGit: true,
+      requiresGit: false,
       code: null,
       reason: null,
       remediation: null,

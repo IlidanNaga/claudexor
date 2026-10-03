@@ -2,7 +2,7 @@ import Testing
 @testable import ClaudexorApp
 
 @Suite struct ComposerPolicySelectionTests {
-    @Test func browserDerivesEffectiveValuesWithoutReplacingSelections() {
+    @Test func browserKeepsAccessAndWebOffWithoutReplacingSelections() {
         let policy = ComposerBrowserPolicy(
             selectedAccess: .workspaceWrite,
             selectedWebPolicy: "off",
@@ -10,8 +10,9 @@ import Testing
         )
         #expect(policy.selectedAccess == .workspaceWrite)
         #expect(policy.selectedWebPolicy == "off")
-        #expect(policy.effectiveAccess == .full)
-        #expect(policy.effectiveWebPolicy == "auto")
+        #expect(policy.effectiveAccess == .workspaceWrite)
+        #expect(policy.effectiveWebPolicy == "off")
+        #expect(policy.requestProjection == .init(access: nil, web: "off", browser: true))
 
         let disarmed = policy.disarmingBrowser()
         #expect(disarmed.effectiveAccess == .workspaceWrite)
@@ -48,7 +49,7 @@ import Testing
         #expect(!ComposerBrowserPolicy.browserArmed(true, afterAvailability: false))
     }
 
-    @Test func availableBrowserStillProjectsItsRequiredAccessAndWeb() {
+    @Test func availableBrowserKeepsRequestedAccessAndWebOnTheWire() {
         let policy = ComposerBrowserPolicy(
             selectedAccess: .workspaceWrite,
             selectedWebPolicy: "off",
@@ -57,8 +58,9 @@ import Testing
         )
 
         #expect(policy.effectiveBrowserArmed)
-        #expect(policy.effectiveAccess == .full)
-        #expect(policy.effectiveWebPolicy == "auto")
+        #expect(policy.effectiveAccess == .workspaceWrite)
+        #expect(policy.effectiveWebPolicy == "off")
+        #expect(policy.requestProjection == .init(access: nil, web: "off", browser: true))
         #expect(ComposerBrowserPolicy.browserArmed(true, afterAvailability: true))
     }
 }

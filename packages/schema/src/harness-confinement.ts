@@ -1,35 +1,9 @@
 import { z } from "zod/v3";
-import { ContentHash } from "./primitives.js";
+import { RecordedAccessProfile } from "./primitives.js";
 
-/**
- * An APPLIED filesystem boundary, not a request for one.
- *
- * `verified_denied_path` is the path the profile was executed against before
- * the harness ran: the read was refused on this host, for this attempt. A field
- * that only said "confined: true" would be the promise this whole mechanism
- * exists to replace — which is why the two fields are REQUIRED together and a
- * mechanism name without its proof is not representable in this type.
- */
-export const HarnessConfinement = z
-  .object({
-    mechanism: z
-      .string()
-      .min(1)
-      .describe(
-        "OPAQUE identifier of the OS mechanism that enforced the boundary. A reader must never branch on this value or on the host platform; the only question it may ask is whether a PROVEN boundary exists, which is this field AND verified_denied_path both present.",
-      ),
-    profile: z
-      .string()
-      .min(1)
-      .describe("The exact policy the process was started under, in the mechanism's own encoding."),
-    profile_digest: ContentHash.describe("Digest of the policy text, for the attempt record."),
-    verified_denied_path: z
-      .string()
-      .min(1)
-      .describe("Path proven unreadable under this policy before the harness was spawned."),
-  })
-  .describe("An applied OS-enforced filesystem boundary for one harness process.");
-export type HarnessConfinement = z.infer<typeof HarnessConfinement>;
+/** One schema-owned statement used by every new delegated mutating attempt. */
+export const DELIBERATE_NO_OUTER_BOUNDARY_REASON =
+  "Claudexor deliberately applies no additional outer OS filesystem boundary; the native harness access mode remains in effect.";
 
 /**
  * The confinement half of an attempt record, as every reader sees it.
@@ -47,6 +21,23 @@ export interface AppliedConfinementRecord {
   /** Why NO boundary was applied; present exactly when the boundary is absent. */
   confinement_unavailable_reason?: unknown;
 }
+
+/** Bounded decoder for the access/evidence block in historical attempt.yaml
+ * artifacts. New writers still accept active AccessProfile only. */
+export const RecordedAppliedAttemptFacts = z
+  .object({
+    harness_home_isolated: z.boolean().optional(),
+    harness_home_dir: z.string().nullable(),
+    access_applied: RecordedAccessProfile,
+    credential_profile_applied: z.string().nullable(),
+    confinement_mechanism: z.string().nullable(),
+    confinement_profile_digest: z.string().nullable(),
+    confinement_verified_denied_path: z.string().nullable(),
+    confinement_unavailable_reason: z.string().nullable(),
+  })
+  .passthrough()
+  .describe("Applied access and boundary evidence read from a historical attempt artifact.");
+export type RecordedAppliedAttemptFacts = z.infer<typeof RecordedAppliedAttemptFacts>;
 
 const nonEmpty = (value: unknown): boolean => typeof value === "string" && value.length > 0;
 
@@ -72,12 +63,13 @@ export const ContainmentKind = z
   .enum([
     "env_or_file_injection",
     "scoped_home_keychain_bridge",
+    "private_per_profile_keychain",
     "host_user_context",
     "process_sandbox",
     "container",
   ])
   .describe(
-    "Isolation containment level an adapter supports for run environments, from env/file injection through scoped-HOME keychain bridging to process sandboxes and containers.",
+    "Isolation containment level an adapter supports for run environments, from env/file injection through scoped-HOME keychain bridging or a private per-profile keychain to process sandboxes and containers.",
   );
 export type ContainmentKind = z.infer<typeof ContainmentKind>;
 

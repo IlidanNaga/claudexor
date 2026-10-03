@@ -38,19 +38,30 @@ struct TurnCard: View {
         turn.runId.flatMap { model.task($0, at: target.locationID) }
     }
 
-    private var planImplementAccess: AccessProfile {
-        model.effectiveThreadAccess.flatMap(AccessProfile.init(wire:))
-            ?? model.composerAccessDefault
+    private var planImplementAccessSelection: ComposerThreadAccessSelection {
+        .resolve(
+            recordedWire: model.effectiveThreadAccess,
+            defaultAccess: model.composerAccessDefault
+        )
+    }
+
+    private var planImplementAccess: AccessProfile? {
+        planImplementAccessSelection.activeAccess
+    }
+
+    private var planImplementAccessDescription: String {
+        planImplementAccess?.label.lowercased() ?? "an active access profile"
     }
 
     private var planImplementOptions: TurnOptions {
         var options = routingOptions
-        options.access = planImplementAccess.wire
+        options.access = planImplementAccess?.wire
         return options
     }
 
     private var planImplementBlocker: String? {
-        model.turnStartAdmission(
+        if let blocker = planImplementAccessSelection.migrationBlocker { return blocker }
+        return model.turnStartAdmission(
             target: target, mode: .agent, options: planImplementOptions).interactionBlocker
     }
 
@@ -306,10 +317,17 @@ struct TurnCard: View {
                 Label("\(result.blockers) blocker\(result.blockers == 1 ? "" : "s")", systemImage: "exclamationmark.triangle.fill")
                     .font(.caption).foregroundStyle(.orange)
             }
-            Label("Agent · \(planImplementAccess.label)", systemImage: planImplementAccess.glyph)
-                .font(.caption)
-                .foregroundStyle(Theme.status(.caution))
-                .help("Implement starts a write-capable Agent turn with \(planImplementAccess.label.lowercased()) access.")
+            if let planImplementAccess {
+                Label("Agent · \(planImplementAccess.label)", systemImage: planImplementAccess.glyph)
+                    .font(.caption)
+                    .foregroundStyle(Theme.status(.caution))
+                    .help("Implement starts a write-capable Agent turn with \(planImplementAccessDescription) access.")
+            } else {
+                Label("Choose access in composer", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(Theme.status(.caution))
+                    .help(planImplementBlocker ?? "Choose an active access profile before implementing.")
+            }
             Spacer()
             // D17: Implement follows the server plan-readiness gate. Open questions
             // ⇒ the primary path is the answer card; the only way past is the
@@ -322,7 +340,7 @@ struct TurnCard: View {
                             || model.isThreadBusy(target.threadID, at: target.locationID)
                             || planImplementBlocker != nil)
                     .help(planImplementBlocker
-                        ?? "Start an Agent turn with \(planImplementAccess.label.lowercased()) access and override the plan-readiness gate although questions remain")
+                        ?? "Start an Agent turn with \(planImplementAccessDescription) access and override the plan-readiness gate although questions remain")
             } else {
                 Button(implementingPlan ? "Implementing…" : "Implement plan") { implementPlan(override: false) }
                     .buttonStyle(.borderedProminent).controlSize(.small)
@@ -331,7 +349,7 @@ struct TurnCard: View {
                             || model.isThreadBusy(target.threadID, at: target.locationID)
                             || planImplementBlocker != nil)
                     .help(planImplementBlocker
-                        ?? "Start an Agent turn with \(planImplementAccess.label.lowercased()) access to implement this plan")
+                        ?? "Start an Agent turn with \(planImplementAccessDescription) access to implement this plan")
             }
         }
     }
@@ -478,7 +496,7 @@ struct TurnCard: View {
     /// OWNING thread. `override` sets `overridePlanReadiness` for the destructive
     /// path when open questions remain (the engine otherwise 409s).
     private func implementPlan(override: Bool) {
-        guard let runId = turn.runId else { return }
+        guard let runId = turn.runId, planImplementAccess != nil else { return }
         implementingPlan = true
         // Bind the request to the same write scope disclosed beside the button.
         var options = planImplementOptions

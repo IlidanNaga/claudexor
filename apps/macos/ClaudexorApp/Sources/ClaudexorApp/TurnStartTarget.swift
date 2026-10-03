@@ -223,8 +223,8 @@ extension AppModel {
 
     /// The one app-side turn-start admission boundary. It selects one cell from
     /// the server-authored Git matrix for the exact immutable target and the
-    /// exact repair fields that will ride the wire. All other readiness remains
-    /// owned by normal server preflight.
+    /// exact access/repair fields that will ride the wire. All other readiness
+    /// remains owned by normal server preflight.
     func turnStartAdmission(
         target: TurnStartTarget,
         mode: RunMode,
@@ -265,13 +265,16 @@ extension AppModel {
                 return .blocked("Checking whether this workspace strategy needs Git…")
             }
         }
+        let access = options.access.flatMap(AccessProfile.init(wire:)) ?? .workspaceWrite
         let repair = composerRepairWire(
             mode: mode,
+            access: access,
             requestedAttempts: options.maxAttempts,
             requestedUntilClean: options.untilClean)
         let cell = response.matrix.cell(
             workspace: target.workspace,
-            shape: composerRunApplicabilityShape(mode: mode, repair: repair))
+            shape: composerRunApplicabilityShape(
+                mode: mode, access: access, repair: repair))
         guard !cell.applicable else { return .allowed }
         let parts: [String?] = [cell.reason, cell.remediation]
         let message = parts

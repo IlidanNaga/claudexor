@@ -1,5 +1,4 @@
 import type { HarnessEvent, HarnessRunSpec } from "@claudexor/schema";
-import { confinedInvocation } from "./confinement.js";
 import { spawnProcess, type ChildStdin } from "./proc.js";
 import type { ProcessTreeTerminationOutcome, ReapProcessTreeOptions } from "./process-tree.js";
 
@@ -48,6 +47,8 @@ export interface CliRunLoopOptions {
   bin: string;
   args: string[];
   spec: HarnessRunSpec;
+  /** One-shot stdin payload. Mutually exclusive with the bidirectional session owner. */
+  input?: string;
   /**
    * Translate one parsed JSON stdout object into normalized events.
    * Return `null` for UNRECOGNIZED shapes (counted as dropped) and `[]` for
@@ -69,13 +70,23 @@ export interface CliRunLoopOptions {
    * frames matching `matches` are routed to `handle` (an async generator that
    * may yield normalized events and write control responses via the stdin
    * handle), and stdin is closed when `closeStdinOn` matches a frame —
-   * the cooperative end of a streaming session.
+   * the cooperative end of a streaming session. An adapter that must keep the
+   * session open past a native terminal frame (a queued live message the CLI
+   * runs as its next native turn, a run-owned background task) returns `false`
+   * there; the deadline, inactivity and cancel bounds stay the outer limits.
    */
   session?: {
     initialStdin?: string;
     matches: (obj: unknown) => boolean;
     handle: (obj: unknown, io: ChildStdin) => AsyncGenerator<HarnessEvent>;
     closeStdinOn?: (obj: unknown) => boolean;
+    /**
+     * Live stdin seam for an adapter's live-input owner: called with the handle
+     * right after spawn (once `initialStdin` is written) and with `null` exactly
+     * once when stdin closes — on the `closeStdinOn` path or in the loop's
+     * finally — so no live message is ever written into a closed session.
+     */
+    onIo?: (io: ChildStdin | null, sessionId: string) => void;
   };
   /** Injection seam for the whole-tree death proof (deterministic tests of the
    * termination_unconfirmed terminal fact). Forwarded to spawnProcess; production
@@ -84,6 +95,9 @@ export interface CliRunLoopOptions {
 }
 
 export async function* runCliHarness(opts: CliRunLoopOptions): AsyncGenerator<HarnessEvent> {
+  if (opts.input !== undefined && opts.session !== undefined) {
+    throw new Error("runCliHarness input and session are mutually exclusive stdin owners");
+  }
   const { spec } = opts;
   const label = opts.label ?? opts.bin;
   const redact = opts.redact ?? ((text: string): string => text);
@@ -92,6 +106,10 @@ export async function* runCliHarness(opts: CliRunLoopOptions): AsyncGenerator<Ha
   let droppedUnparsedLines = 0;
   let droppedUnrecognizedEvents = 0;
   let sawError = false;
+  // The harness's OWN stdout frames produced an `error` event (adapter parse or
+  // adapter session handler). Never set for a spawn failure, an unconfirmed
+  // termination, a stderr-only failure, or the loop's synthesized exit error.
+  let harnessReportedError = false;
   let spawnFailed = false;
   let exitCode: number | null = null;
   let exitSignal: NodeJS.Signals | null = null;
@@ -108,17 +126,21 @@ export async function* runCliHarness(opts: CliRunLoopOptions): AsyncGenerator<Ha
   // Box the stdin handle: it is assigned inside the onSpawn callback, which
   // TypeScript's control-flow narrowing cannot see through a plain let.
   const session: { io: ChildStdin | null } = { io: null };
-  // The OS boundary is applied HERE, at the one seam every local-CLI adapter
-  // already funnels through, rather than in each adapter's argv builder: an
-  // adapter that forgot to opt in would run a delegated child unconfined while
-  // the run record still said it asked for confinement.
-  const invocation = confinedInvocation(spec.confinement, opts.bin, opts.args);
+  // One owner for the close: stdin ends once and the adapter hears `null` once,
+  // whether the native terminal frame closed it or the loop's finally did.
+  const closeSessionStdin = (): void => {
+    if (!session.io) return;
+    session.io.end();
+    session.io = null;
+    opts.session?.onIo?.(null, spec.session_id);
+  };
   try {
-    for await (const ev of spawnProcess(invocation.bin, invocation.args, {
+    for await (const ev of spawnProcess(opts.bin, opts.args, {
       cwd: spec.cwd,
       env: opts.env,
       inheritEnv: spec.env_inheritance,
       abortSignal,
+      ...(opts.input !== undefined ? { input: opts.input } : {}),
       ...(opts.reap ? { reap: opts.reap } : {}),
       onTerminationUnconfirmed: (info) => {
         terminationUnconfirmed = { survivors: info.survivors, unresolved: info.unresolved };
@@ -130,6 +152,7 @@ export async function* runCliHarness(opts: CliRunLoopOptions): AsyncGenerator<Ha
             onSpawn: (io: ChildStdin) => {
               session.io = io;
               if (opts.session?.initialStdin) io.write(opts.session.initialStdin);
+              opts.session?.onIo?.(io, spec.session_id);
             },
           }
         : {}),
@@ -160,7 +183,7 @@ export async function* runCliHarness(opts: CliRunLoopOptions): AsyncGenerator<Ha
       }
       if (opts.session && session.io && opts.session.matches(obj)) {
         for await (const out of opts.session.handle(obj, session.io)) {
-          if (out.type === "error") sawError = true;
+          if (out.type === "error") sawError = harnessReportedError = true;
           yield out;
         }
         continue;
@@ -169,8 +192,7 @@ export async function* runCliHarness(opts: CliRunLoopOptions): AsyncGenerator<Ha
       if (opts.session && session.io && opts.session.closeStdinOn?.(obj)) {
         // The native terminal frame arrived; close stdin so the streaming
         // session ends cooperatively instead of waiting for more input.
-        session.io.end();
-        session.io = null;
+        closeSessionStdin();
       }
       if (events === null) {
         droppedUnrecognizedEvents += 1;
@@ -178,7 +200,7 @@ export async function* runCliHarness(opts: CliRunLoopOptions): AsyncGenerator<Ha
       }
       let stop = false;
       for (const out of events) {
-        if (out.type === "error") sawError = true;
+        if (out.type === "error") sawError = harnessReportedError = true;
         yield out;
         if (opts.stopAfterEvent?.(out)) {
           stop = true;
@@ -197,8 +219,7 @@ export async function* runCliHarness(opts: CliRunLoopOptions): AsyncGenerator<Ha
       error: `${label} failed to start: ${err instanceof Error ? err.message : String(err)}`,
     };
   } finally {
-    session.io?.end();
-    session.io = null;
+    closeSessionStdin();
   }
 
   const aborted = abortSignal?.aborted === true;
@@ -253,6 +274,11 @@ export async function* runCliHarness(opts: CliRunLoopOptions): AsyncGenerator<Ha
   // a process crash the orchestrator classifies without parsing prose.
   if (!aborted && exitSignal) payload["exit_signal"] = exitSignal;
   if (spawnFailed) payload["spawn_failed"] = true;
+  // Typed "the harness voiced its own error" fact: lets the orchestrator tell a
+  // CLI that reported a failed turn and exited non-zero from a crashed process,
+  // without parsing prose. Only this loop can tell a harness frame from its own
+  // synthesized exit error.
+  if (harnessReportedError) payload["harness_reported_error"] = true;
   // Raw stderr diagnostics ride EVERY terminal payload (GH #120) — zero-exit and
   // aborted runs previously discarded the ring. Bounded + redacted here, redacted
   // again by the orchestrator before persistence; surfaced only through the raw

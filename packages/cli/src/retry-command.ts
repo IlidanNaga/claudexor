@@ -56,6 +56,12 @@ export async function runAgainCommand(args: ParsedArgs, json: boolean): Promise<
     else {
       print(`editable Run Again draft from ${runId}:`);
       print(JSON.stringify(data["request"] ?? {}, null, 2));
+      const accessChoice = data["accessChoice"] as Record<string, unknown> | undefined;
+      if (accessChoice?.["required"] === true) {
+        print(
+          "  access choice required: choose workspace_write, or explicitly trust the repository and choose full before starting",
+        );
+      }
       const differences = Array.isArray(data["differences"]) ? data["differences"] : [];
       for (const difference of differences) {
         const row = difference as Record<string, unknown>;

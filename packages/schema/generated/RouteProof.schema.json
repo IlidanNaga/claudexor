@@ -33,6 +33,13 @@
               ],
               "default": null,
               "description": "Model requested for the route; null = harness default."
+            },
+            "credential_profile_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Credential profile requested/effective for the route; absent = account pool/default."
             }
           },
           "required": [
@@ -60,6 +67,13 @@
               ],
               "default": null,
               "description": "Model actually observed; null when no evidence."
+            },
+            "credential_profile_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Credential profile actually observed on the harness route; absent when undisclosed."
             },
             "evidence_source": {
               "type": "string",

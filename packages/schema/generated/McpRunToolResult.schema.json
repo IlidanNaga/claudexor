@@ -4,6 +4,190 @@
     "McpRunToolResult": {
       "type": "object",
       "properties": {
+        "attemptExecution": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "attemptId": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Non-empty identifier string."
+              },
+              "harnessId": {
+                "$ref": "#/definitions/McpRunToolResult/properties/attemptExecution/items/properties/attemptId"
+              },
+              "processing": {
+                "type": "object",
+                "properties": {
+                  "requested": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "standard",
+                          "fast",
+                          "economy"
+                        ],
+                        "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
+                  },
+                  "submitted": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/McpRunToolResult/properties/attemptExecution/items/properties/processing/properties/requested/anyOf/0"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
+                  },
+                  "submittedNative": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "\\S",
+                        "description": "User-supplied string that must contain visible content, not just whitespace."
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "User-supplied string that must contain visible content, not just whitespace."
+                  },
+                  "observed": {
+                    "type": "string",
+                    "enum": [
+                      "standard",
+                      "fast",
+                      "economy",
+                      "mixed",
+                      "unknown"
+                    ]
+                  },
+                  "observedNative": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/definitions/McpRunToolResult/properties/attemptExecution/items/properties/processing/properties/submittedNative/anyOf/0"
+                    }
+                  },
+                  "reason": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/McpRunToolResult/properties/attemptExecution/items/properties/processing/properties/submittedNative/anyOf/0"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "User-supplied string that must contain visible content, not just whitespace."
+                  },
+                  "source": {
+                    "$ref": "#/definitions/McpRunToolResult/properties/attemptExecution/items/properties/processing/properties/submittedNative/anyOf/0"
+                  }
+                },
+                "required": [
+                  "requested",
+                  "submitted",
+                  "submittedNative",
+                  "observed",
+                  "observedNative",
+                  "reason",
+                  "source"
+                ],
+                "additionalProperties": false,
+                "description": "Requested intent, submitted native control, and observed execution are independent facts. A submitted flag never proves observed service; mixed or missing session observations remain explicit."
+              },
+              "processingCostBasis": {
+                "type": "object",
+                "properties": {
+                  "nativeMode": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/McpRunToolResult/properties/attemptExecution/items/properties/processing/properties/submittedNative/anyOf/0"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "User-supplied string that must contain visible content, not just whitespace."
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "included",
+                      "paid_credits",
+                      "cash",
+                      "valuation",
+                      "unknown"
+                    ]
+                  },
+                  "source": {
+                    "$ref": "#/definitions/McpRunToolResult/properties/attemptExecution/items/properties/processing/properties/submittedNative/anyOf/0"
+                  }
+                },
+                "required": [
+                  "nativeMode",
+                  "kind",
+                  "source"
+                ],
+                "additionalProperties": false,
+                "description": "Mode-qualified billing evidence for an existing cost record. Authentication alone does not establish included premium service; credits, cash, and token valuation stay distinct."
+              },
+              "usageCost": {
+                "type": "object",
+                "properties": {
+                  "cashUsd": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "valuationUsd": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "unknownUsd": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "cashKnowledge": {
+                    "type": "string",
+                    "enum": [
+                      "exact",
+                      "estimated",
+                      "unknown"
+                    ],
+                    "description": "Quality of incremental-cash cost evidence for an operation."
+                  },
+                  "valuationKnowledge": {
+                    "$ref": "#/definitions/McpRunToolResult/properties/attemptExecution/items/properties/usageCost/properties/cashKnowledge"
+                  }
+                },
+                "required": [
+                  "cashUsd",
+                  "valuationUsd",
+                  "unknownUsd",
+                  "cashKnowledge",
+                  "valuationKnowledge"
+                ],
+                "additionalProperties": false,
+                "description": "Observed usage components. An amount of unknown meaning is not charged cash; separately proven included service can still establish exact zero incremental cash."
+              }
+            },
+            "required": [
+              "attemptId",
+              "harnessId"
+            ],
+            "additionalProperties": false,
+            "description": "Compact projection of existing attempt execution and amount evidence."
+          }
+        },
         "summary": {
           "type": "string",
           "description": "Human-readable outcome summary (same text as the tool's text content)."
@@ -29,160 +213,591 @@
           ],
           "description": "Terminal run LIFECYCLE (succeeded | failed | cancelled | interrupted)."
         },
-        "outcomeFacts": {
+        "runFacts": {
           "anyOf": [
             {
               "type": "object",
               "properties": {
-                "lifecycle": {
+                "schema_version": {
+                  "type": "number",
+                  "const": 2,
+                  "description": "Schema version of the artifact; bumped on breaking ABI changes."
+                },
+                "run_id": {
+                  "$ref": "#/definitions/McpRunToolResult/properties/attemptExecution/items/properties/attemptId"
+                },
+                "task_id": {
+                  "$ref": "#/definitions/McpRunToolResult/properties/attemptExecution/items/properties/attemptId"
+                },
+                "mode": {
                   "type": "string",
                   "enum": [
-                    "succeeded",
-                    "failed",
-                    "cancelled",
-                    "interrupted"
+                    "ask",
+                    "plan",
+                    "agent"
                   ],
-                  "description": "Terminal lifecycle of the run."
+                  "description": "Canonical run mode: ask and plan are read-only, agent writes. Strategy controls are separate schema-owned fields, never modes."
                 },
-                "noChanges": {
-                  "type": "boolean",
-                  "default": false,
-                  "description": "True when the run finished without changing any files (the ex no_op fact)."
-                },
-                "checks": {
-                  "type": "string",
-                  "enum": [
-                    "passed",
-                    "failed",
-                    "not_configured"
-                  ],
-                  "description": "Deterministic checks axis: configured project checks passed, failed, or none are configured (a named state, never a stand-in for review results).",
-                  "default": "not_configured"
-                },
-                "review": {
-                  "type": "string",
-                  "enum": [
-                    "approved",
-                    "blocked",
-                    "not_run"
-                  ],
-                  "description": "Review axis: approved (clean cross-family verified review), blocked (open accepted findings), or not_run.",
-                  "default": "not_run"
-                },
-                "reason": {
-                  "anyOf": [
-                    {
+                "outcome": {
+                  "type": "object",
+                  "properties": {
+                    "lifecycle": {
                       "type": "string",
                       "enum": [
-                        "harness_failed",
-                        "no_changes",
-                        "review_blocked",
-                        "checks_failed",
-                        "budget_exhausted",
-                        "budget_overshoot",
-                        "cost_unverifiable",
-                        "not_converged",
-                        "stuck_no_progress",
-                        "wall_clock_exceeded",
-                        "user_cancelled",
-                        "crash_interrupted",
-                        "workspace_unavailable",
-                        "input_required",
-                        "work_incomplete",
-                        "context_capacity_exhausted",
-                        "work_report_contract"
+                        "succeeded",
+                        "failed",
+                        "cancelled",
+                        "interrupted"
                       ],
-                      "description": "Typed reason qualifying a non-clean terminal; null on a clean success."
+                      "description": "Terminal lifecycle of the run."
                     },
-                    {
-                      "type": "null"
+                    "noChanges": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ],
+                      "default": false,
+                      "description": "True when the run finished without changing any files (the ex no_op fact)."
+                    },
+                    "checks": {
+                      "type": "string",
+                      "enum": [
+                        "passed",
+                        "failed",
+                        "not_configured"
+                      ],
+                      "description": "Deterministic checks axis: configured project checks passed, failed, or none are configured (a named state, never a stand-in for review results).",
+                      "default": "not_configured"
+                    },
+                    "review": {
+                      "type": "string",
+                      "enum": [
+                        "approved",
+                        "blocked",
+                        "not_run"
+                      ],
+                      "description": "Review axis: approved (clean cross-family verified review), blocked (open accepted findings), or not_run.",
+                      "default": "not_run"
+                    },
+                    "review_requested": {
+                      "type": "boolean",
+                      "description": "Frozen model-review intent. False permits an honestly unreviewed result; absent historical records retain the review requirement."
+                    },
+                    "reason": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "harness_failed",
+                            "no_changes",
+                            "review_blocked",
+                            "checks_failed",
+                            "budget_exhausted",
+                            "budget_overshoot",
+                            "cost_unverifiable",
+                            "not_converged",
+                            "stuck_no_progress",
+                            "wall_clock_exceeded",
+                            "user_cancelled",
+                            "host_cancelled",
+                            "owner_task_gone",
+                            "crash_interrupted",
+                            "workspace_unavailable",
+                            "input_required",
+                            "work_incomplete",
+                            "context_capacity_exhausted",
+                            "work_report_contract"
+                          ],
+                          "description": "Typed reason qualifying a non-clean terminal; null on a clean success."
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "Typed reason qualifying a non-clean terminal; null on a clean success.",
+                      "default": null
+                    },
+                    "work_state": {
+                      "type": "object",
+                      "properties": {
+                        "state": {
+                          "type": "string",
+                          "enum": [
+                            "completed",
+                            "needs_input",
+                            "incomplete",
+                            "unverified"
+                          ],
+                          "description": "Folded work state: the WorkReport state, or unverified when no report was obtainable (transport unsupported / lane gated)."
+                        },
+                        "source": {
+                          "type": "string",
+                          "enum": [
+                            "constrained",
+                            "validated",
+                            "absent"
+                          ],
+                          "description": "Provenance of a WorkReport: constrained (native schema transport), validated (instructed terminal metadata), or absent (no transport could carry one — a disclosed absence, not a failure)."
+                        },
+                        "required_inputs": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "kind": {
+                                "type": "string",
+                                "enum": [
+                                  "file",
+                                  "context",
+                                  "credential",
+                                  "permission",
+                                  "decision",
+                                  "external_dependency"
+                                ],
+                                "description": "Category of a missing input a needs_input/incomplete report lists: a file, additional context, a credential, a permission, a human decision, or an external dependency."
+                              },
+                              "locator": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "maxLength": 512
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "default": null,
+                                "description": "Concrete pointer to the missing thing (path/url/name); null when unnameable."
+                              },
+                              "description": {
+                                "type": "string",
+                                "maxLength": 1024,
+                                "description": "Human-readable description of what is needed and why."
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "description"
+                            ],
+                            "additionalProperties": false,
+                            "description": "One blocking input a needs_input/incomplete WorkReport lists."
+                          },
+                          "maxItems": 16,
+                          "description": "Carried through from a needs_input/incomplete WorkReport for honest disclosure."
+                        }
+                      },
+                      "required": [
+                        "state",
+                        "source"
+                      ],
+                      "additionalProperties": false,
+                      "description": "D-16 model-attested work outcome, orthogonal to lifecycle; a needs_input/incomplete state vetoes applyability and exit 0. Absent on runs with no work_report transport."
                     }
+                  },
+                  "required": [
+                    "lifecycle"
                   ],
-                  "description": "Typed reason qualifying a non-clean terminal; null on a clean success.",
-                  "default": null
+                  "additionalProperties": false,
+                  "description": "Independent terminal outcome axes of a run (D8/D18)."
                 },
-                "work_state": {
+                "deliverable": {
+                  "type": "object",
+                  "properties": {
+                    "present": {
+                      "type": "boolean",
+                      "description": "Whether the canonical primary deliverable exists."
+                    },
+                    "kind": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "answer",
+                            "report",
+                            "plan",
+                            "patch",
+                            "files",
+                            "structured_output"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "Kind of canonical primary deliverable; null when none exists."
+                    },
+                    "path": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Run-relative path of the canonical primary deliverable; null when absent."
+                    },
+                    "producer_attempt_id": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/definitions/McpRunToolResult/properties/attemptExecution/items/properties/attemptId"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "Attempt that produced the deliverable, when known.",
+                      "default": null
+                    }
+                  },
+                  "required": [
+                    "present",
+                    "kind",
+                    "path"
+                  ],
+                  "additionalProperties": false,
+                  "description": "Canonical primary-output presence and identity for a terminal run."
+                },
+                "presentation": {
                   "type": "object",
                   "properties": {
                     "state": {
                       "type": "string",
                       "enum": [
-                        "completed",
-                        "needs_input",
-                        "incomplete",
-                        "unverified"
+                        "ready",
+                        "diagnostic"
                       ],
-                      "description": "Folded work state: the WorkReport state, or unverified when no report was obtainable (transport unsupported / lane gated)."
+                      "description": "Terminal output readiness decided by the last valid output.ready receipt."
                     },
-                    "source": {
-                      "type": "string",
-                      "enum": [
-                        "constrained",
-                        "validated",
-                        "absent"
+                    "primary": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "enum": [
+                                "answer",
+                                "report",
+                                "plan",
+                                "patch",
+                                "files",
+                                "structured_output",
+                                "diagnostic"
+                              ],
+                              "description": "Presentation kind of the terminal primary artifact."
+                            },
+                            "path": {
+                              "type": "string",
+                              "minLength": 1,
+                              "description": "Normalized run-relative path of the terminal primary artifact."
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "path"
+                          ],
+                          "additionalProperties": false,
+                          "description": "Primary user-facing artifact selected once during terminal preparation."
+                        },
+                        {
+                          "type": "null"
+                        }
                       ],
-                      "description": "Provenance of a WorkReport: constrained (native schema transport), validated (instructed terminal metadata), or absent (no transport could carry one — a disclosed absence, not a failure)."
+                      "description": "Selected terminal primary artifact, or null when the receipt announces readiness without a primary deliverable."
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "primary"
+                  ],
+                  "additionalProperties": false,
+                  "description": "Immutable terminal output state and primary artifact. Absent only on legacy RunFacts receipts."
+                },
+                "participants": {
+                  "type": "object",
+                  "properties": {
+                    "planners": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Number of participants whose canonical role is planner."
                     },
-                    "required_inputs": {
+                    "attempts": {
                       "type": "array",
                       "items": {
                         "type": "object",
                         "properties": {
-                          "kind": {
-                            "type": "string",
-                            "enum": [
-                              "file",
-                              "context",
-                              "credential",
-                              "permission",
-                              "decision",
-                              "external_dependency"
-                            ],
-                            "description": "Category of a missing input a needs_input/incomplete report lists: a file, additional context, a credential, a permission, a human decision, or an external dependency."
-                          },
-                          "locator": {
+                          "attempt_id": {
                             "anyOf": [
                               {
-                                "type": "string",
-                                "maxLength": 512
+                                "$ref": "#/definitions/McpRunToolResult/properties/attemptExecution/items/properties/attemptId"
                               },
                               {
                                 "type": "null"
                               }
                             ],
-                            "default": null,
-                            "description": "Concrete pointer to the missing thing (path/url/name); null when unnameable."
+                            "description": "Attempt id when the participant owns an orchestrator attempt; null for reviewer-panel members."
                           },
-                          "description": {
+                          "harness_id": {
                             "type": "string",
-                            "maxLength": 1024,
-                            "description": "Human-readable description of what is needed and why."
+                            "minLength": 1,
+                            "description": "Harness that served this participant role."
+                          },
+                          "role": {
+                            "type": "string",
+                            "enum": [
+                              "planner",
+                              "merge",
+                              "candidate",
+                              "scout",
+                              "reducer",
+                              "reviewer"
+                            ],
+                            "description": "Canonical role of one participant in the terminal run graph."
+                          },
+                          "deliverable_present": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Whether this participant produced the deliverable its role requested."
+                          },
+                          "status": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "success",
+                                  "success_with_warnings",
+                                  "blocked",
+                                  "failed"
+                                ],
+                                "description": "Terminal outcome recorded for one run participant."
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "description": "Participant outcome when recorded; null for artifact-only reviewer membership.",
+                            "default": null
                           }
                         },
                         "required": [
-                          "kind",
-                          "description"
+                          "attempt_id",
+                          "harness_id",
+                          "role"
                         ],
                         "additionalProperties": false,
-                        "description": "One blocking input a needs_input/incomplete WorkReport lists."
+                        "description": "One role-labelled participant in the terminal run graph."
                       },
-                      "maxItems": 16,
-                      "description": "Carried through from a needs_input/incomplete WorkReport for honest disclosure."
+                      "default": [],
+                      "description": "Role-labelled participant roster."
+                    }
+                  },
+                  "required": [
+                    "planners"
+                  ],
+                  "additionalProperties": false,
+                  "description": "Terminal participant graph plus its planner-lane count."
+                },
+                "gates": {
+                  "type": "object",
+                  "properties": {
+                    "configured": {
+                      "type": "boolean",
+                      "description": "Whether the frozen task configured deterministic gates."
+                    },
+                    "required": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Number of configured required gates."
+                    },
+                    "total": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Total configured deterministic gates."
+                    },
+                    "executed": {
+                      "type": "boolean",
+                      "description": "Whether the terminal attempt executed the gate set."
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "not_configured",
+                        "passed",
+                        "failed",
+                        "skipped"
+                      ],
+                      "description": "Terminal state of the configured deterministic gate set."
+                    },
+                    "receipt_attempt_id": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/definitions/McpRunToolResult/properties/attemptExecution/items/properties/attemptId"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "Attempt whose gate receipt decides this projection; null when no gates executed.",
+                      "default": null
+                    }
+                  },
+                  "required": [
+                    "configured",
+                    "required",
+                    "total",
+                    "executed",
+                    "state"
+                  ],
+                  "additionalProperties": false,
+                  "description": "Canonical gate configuration and terminal receipt projection."
+                },
+                "review": {
+                  "type": "object",
+                  "properties": {
+                    "state": {
+                      "$ref": "#/definitions/McpRunToolResult/properties/runFacts/anyOf/0/properties/outcome/properties/review"
+                    },
+                    "blocker_ids": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/definitions/McpRunToolResult/properties/attemptExecution/items/properties/attemptId"
+                      },
+                      "default": [],
+                      "description": "Stable ids of accepted evidence-backed blocking findings."
+                    },
+                    "blockers": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Number of blocking findings."
                     }
                   },
                   "required": [
                     "state",
-                    "source"
+                    "blockers"
                   ],
                   "additionalProperties": false,
-                  "description": "D-16 model-attested work outcome, orthogonal to lifecycle; a needs_input/incomplete state vetoes applyability and exit 0. Absent on runs with no work_report transport."
+                  "description": "Canonical terminal review verdict and blocking-finding identity."
+                },
+                "apply": {
+                  "type": "object",
+                  "properties": {
+                    "eligibility": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "eligible": {
+                              "type": "boolean",
+                              "description": "True when the apply gate would accept this run's patch right now."
+                            },
+                            "state": {
+                              "type": [
+                                "string",
+                                "null"
+                              ],
+                              "description": "The gate's apply-eligibility classification (e.g. needs_review | not_verified | no_changes | ok) when known."
+                            },
+                            "reason": {
+                              "type": [
+                                "string",
+                                "null"
+                              ],
+                              "description": "The gate's refusal text when not eligible (null when eligible)."
+                            },
+                            "requiredAction": {
+                              "type": [
+                                "string",
+                                "null"
+                              ],
+                              "description": "Honest guidance for what actually unblocks apply (typed operator decision, add gates, re-run, or nothing to apply)."
+                            }
+                          },
+                          "required": [
+                            "eligible",
+                            "state",
+                            "reason",
+                            "requiredAction"
+                          ],
+                          "additionalProperties": false,
+                          "description": "Derived apply-gate verdict for a run's WorkProduct (single producer in the delivery gate)."
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "Delivery-gate eligibility at terminalization; null when nothing is applyable.",
+                      "default": null
+                    },
+                    "operator_decision_present": {
+                      "type": "boolean",
+                      "default": false,
+                      "description": "Whether a valid operator decision was present when the receipt was finalized."
+                    }
+                  },
+                  "additionalProperties": false,
+                  "description": "Terminal apply eligibility and operator-decision state."
+                },
+                "required_actions": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "enum": [
+                          "provide_required_input",
+                          "complete_incomplete_work",
+                          "resolve_review_block",
+                          "fix_failed_checks",
+                          "record_operator_decision"
+                        ],
+                        "description": "Stable machine id for a required operator action on a blocked terminal run."
+                      },
+                      "detail": {
+                        "type": "string",
+                        "description": "Human-readable guidance for this action (English-only, INV-141)."
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "detail"
+                    ],
+                    "additionalProperties": false,
+                    "description": "One typed required operator action derived from a run's terminal outcome facts."
+                  },
+                  "default": [],
+                  "description": "Typed actions required to unblock this terminal outcome."
+                },
+                "generated_at": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "When this immutable terminal receipt was finalized."
                 }
               },
               "required": [
-                "lifecycle"
+                "schema_version",
+                "run_id",
+                "task_id",
+                "mode",
+                "outcome",
+                "deliverable",
+                "participants",
+                "gates",
+                "review",
+                "apply",
+                "generated_at"
               ],
               "additionalProperties": false,
-              "description": "Independent terminal outcome axes of a run (D8/D18)."
+              "description": "Validated immutable terminal facts for one run."
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Validated canonical terminal RunFacts receipt; null while active, unavailable, or for legacy runs.",
+          "default": null
+        },
+        "outcomeFacts": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/McpRunToolResult/properties/runFacts/anyOf/0/properties/outcome"
             },
             {
               "type": "null"
@@ -196,6 +811,68 @@
             {
               "type": "object",
               "properties": {
+                "requestRefusal": {
+                  "type": "object",
+                  "properties": {
+                    "scope": {
+                      "type": "string",
+                      "const": "turn_text",
+                      "description": "All text input items in one native turn; separate instructions are excluded."
+                    },
+                    "unit": {
+                      "type": "string",
+                      "const": "unicode_scalars"
+                    },
+                    "limit": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "exclusiveMinimum": 0,
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "source": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "kind": {
+                      "type": "string",
+                      "const": "input_too_large"
+                    },
+                    "actual": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "native_code": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "scope",
+                    "unit",
+                    "limit",
+                    "source",
+                    "kind",
+                    "actual",
+                    "native_code"
+                  ],
+                  "additionalProperties": false,
+                  "description": "Vendor-typed physical input refusal; the same input cannot be repaired by changing this harness's account or model."
+                },
                 "phase": {
                   "type": "string",
                   "default": "unknown",
@@ -232,11 +909,15 @@
                         "cost_unverifiable",
                         "delegation_child_drain_timeout",
                         "subscription_window_exhausted",
+                        "credential_pool_exhausted",
+                        "input_too_large",
                         "delegated_home_unavailable",
                         "delegated_confinement_unavailable",
-                        "delegated_evidence_incomplete"
+                        "delegated_evidence_incomplete",
+                        "access_profile_incompatible",
+                        "retired_access_profile"
                       ],
-                      "description": "Machine-readable failure sub-code within a RunFailure category (budget-denial reasons, Delegate child-drain timeout, a spent subscription quota window whose reopen time is RunFailure.resetsAt, and the delegated-run confinement refusals: missing scoped home, no OS-enforced boundary on this host, incomplete applied evidence)."
+                      "description": "Machine-readable failure sub-code within a RunFailure category, including historical delegated-run failures and active access-profile refusals."
                     },
                     {
                       "type": "null"
@@ -310,6 +991,58 @@
                   "default": null,
                   "description": "When the refused window reopens (a spent subscription quota window), or null when the failure has no such time. Callers schedule a retry off this field, never off safeMessage."
                 },
+                "vendorFailure": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 128
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "description": "The vendor's own machine-readable failure code, verbatim; null when the vendor recorded an error without one."
+                        },
+                        "message": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 4000
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "description": "The vendor's own words from the same record, verbatim (redacted); null when absent."
+                        },
+                        "source": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 64,
+                          "description": "Evidence channel the code was read from (codex: `codex_rollout`). An open vocabulary: consumers display it, never branch on it."
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "source"
+                      ],
+                      "additionalProperties": false,
+                      "description": "Vendor-typed failure evidence read from a vendor-owned machine-readable record, never parsed from prose."
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "The vendor's own typed failure for the attempt this record speaks for, or null when no vendor-typed evidence exists (every harness without such a channel, and any unreadable record). Facts only: carries no remedy.",
+                  "default": null
+                },
                 "nextActions": {
                   "type": "array",
                   "items": {
@@ -335,42 +1068,7 @@
         "applyEligibility": {
           "anyOf": [
             {
-              "type": "object",
-              "properties": {
-                "eligible": {
-                  "type": "boolean",
-                  "description": "True when the apply gate would accept this run's patch right now."
-                },
-                "state": {
-                  "type": [
-                    "string",
-                    "null"
-                  ],
-                  "description": "The gate's apply-eligibility classification (e.g. needs_review | not_verified | no_changes | ok) when known."
-                },
-                "reason": {
-                  "type": [
-                    "string",
-                    "null"
-                  ],
-                  "description": "The gate's refusal text when not eligible (null when eligible)."
-                },
-                "requiredAction": {
-                  "type": [
-                    "string",
-                    "null"
-                  ],
-                  "description": "Honest guidance for what actually unblocks apply (typed operator decision, add gates, re-run, or nothing to apply)."
-                }
-              },
-              "required": [
-                "eligible",
-                "state",
-                "reason",
-                "requiredAction"
-              ],
-              "additionalProperties": false,
-              "description": "Derived apply-gate verdict for a run's WorkProduct (single producer in the delivery gate)."
+              "$ref": "#/definitions/McpRunToolResult/properties/runFacts/anyOf/0/properties/apply/properties/eligibility/anyOf/0"
             },
             {
               "type": "null"
@@ -466,17 +1164,17 @@
                 "requested": {
                   "type": "integer",
                   "exclusiveMinimum": 0,
-                  "description": "Requested member count (n; 2..4)."
+                  "description": "Requested member count (n; at least 2, up to the configured Council cap)."
                 },
                 "drafted": {
                   "type": "integer",
                   "minimum": 0,
-                  "description": "Members whose draft survived to the merge."
+                  "description": "Members with contract-accepted drafts; excludes retained unverified inputs and is not a work-completion or verification count."
                 },
                 "degraded": {
                   "type": "boolean",
                   "default": false,
-                  "description": "True when fewer members drafted than requested (failures disclosed per member)."
+                  "description": "True when fewer contract-accepted drafts than requested, including any retained unverified contribution; failures remain disclosed per member."
                 },
                 "mergedBy": {
                   "type": [
@@ -511,7 +1209,7 @@
                           "failed",
                           "merged"
                         ],
-                        "description": "drafted = draft landed; merged = this member produced the unified plan; failed."
+                        "description": "Draft outcome: drafted = contract-accepted input; merged = accepted draft and successful merge; failed stays failed even when its unverified text helped the merger."
                       },
                       "error": {
                         "type": [

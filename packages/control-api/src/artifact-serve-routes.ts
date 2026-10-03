@@ -17,6 +17,7 @@ import { containsSecretLikeToken, redactSecrets } from "@claudexor/util";
 import { isVanishedErrno, safeArtifactPath, safeArtifactRoot } from "./artifact-paths.js";
 import { readRunTombstone } from "./retention.js";
 import type { DaemonRunRecord } from "./daemon-server.js";
+import { streamFilesArtifact } from "./files-artifact-stream.js";
 
 const MAX_ARTIFACT_FETCH_BYTES = 4 * 1024 * 1024;
 const MAX_ARTIFACT_BINARY_FETCH_BYTES = 32 * 1024 * 1024;
@@ -104,6 +105,8 @@ export async function handleArtifactServeRoute(
     if (!rec?.runDir) return (ctx.json(res, 404, { error: "no such run" }), true);
     const tombstone = readRunTombstone(rec.runDir);
     if (tombstone) return (ctx.json(res, 410, expiredRunBody(tombstone)), true);
+    if (await streamFilesArtifact(rec, decodeURIComponent(artifactFetchMatch[2] as string), res))
+      return true;
     const target = safeArtifactPath(
       rec.runDir,
       decodeURIComponent(artifactFetchMatch[2] as string),

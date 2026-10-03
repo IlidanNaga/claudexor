@@ -1,0 +1,61 @@
+{
+  "$ref": "#/definitions/ControlModelSourcesAccountsResponse",
+  "definitions": {
+    "ControlModelSourcesAccountsResponse": {
+      "type": "object",
+      "properties": {
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Non-empty identifier string."
+              },
+              "label": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S",
+                "description": "User-supplied string that must contain visible content, not just whitespace."
+              },
+              "credentialHarness": {
+                "$ref": "#/definitions/ControlModelSourcesAccountsResponse/properties/sources/items/properties/id"
+              },
+              "processingPreferences": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "standard",
+                    "fast",
+                    "economy"
+                  ],
+                  "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
+                }
+              },
+              "accountCatalog": {
+                "type": "boolean",
+                "const": true
+              }
+            },
+            "required": [
+              "id",
+              "label",
+              "credentialHarness",
+              "processingPreferences",
+              "accountCatalog"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "sources"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

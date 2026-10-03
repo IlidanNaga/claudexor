@@ -17,7 +17,6 @@ extension AppModel {
     ) -> RunOutcomeFacts? {
         guard let raw = payload["facts"],
               let lifecycle = raw["lifecycle"]?.stringValue,
-              let noChanges = raw["noChanges"]?.boolValue,
               let checks = raw["checks"]?.stringValue,
               let review = raw["review"]?.stringValue,
               RunPhase(api: lifecycle).isTerminal,
@@ -31,7 +30,7 @@ extension AppModel {
         }
         return RunOutcomeFacts(
             lifecycle: lifecycle,
-            noChanges: noChanges,
+            noChanges: raw["noChanges"]?.boolValue,
             checks: checks,
             review: review,
             reason: reason)

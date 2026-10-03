@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { credentialProfileUnpinned } from "@claudexor/core";
 import type { CredentialProfile } from "@claudexor/schema";
 import {
-  defaultCredentialRoute,
   effectiveAuthPreference,
+  effectiveLimitAction,
+  limitSubjectRoute,
   nextEligibleProfile,
-  nextUpIdentity,
   planReactiveRotation,
   preflightDefaultSubject,
   probeCredentialProfileStatus,
@@ -107,6 +108,44 @@ describe("selectedProfileAvailability", () => {
     expect(presenceOnly).toBe("available");
   });
 
+  it("rejects a live credential ledger verdict before stale LKG admission or another probe", async () => {
+    let probes = 0;
+    const verdict = await selectedProfileAvailability({
+      registry: [work],
+      profileId: "work",
+      harnessId: "claude",
+      allowStale: true,
+      unusable: [
+        {
+          harness_id: "claude",
+          profile_id: "work",
+          model: null,
+          code: "auth_revoked",
+          source: "vendor_poller",
+          detail: "vendor rejected the profile",
+          observed_at: "2026-01-01T00:00:00.000Z",
+          expires_at: "2099-01-01T00:00:00.000Z",
+        },
+      ],
+      probe: async () => {
+        probes += 1;
+        return {
+          profile_id: "work",
+          harness_id: "claude",
+          availability: "unknown" as const,
+          verification: "not_run" as const,
+          verification_source: "local_store" as const,
+          stale: true,
+          stale_age_ms: 42,
+          detail: "last-known-good",
+          last_verified_at: null,
+        };
+      },
+    });
+    expect(verdict).toContain("credential is unusable (auth_revoked)");
+    expect(probes).toBe(0);
+  });
+
   it("fails closed and redacts both thrown and returned probe diagnostics", async () => {
     const token = `sk-${"a".repeat(48)}`;
     const thrown = await selectedProfileAvailability({
@@ -137,6 +176,37 @@ describe("selectedProfileAvailability", () => {
     expect(returned).toContain("credential rejected");
     expect(returned).not.toContain(token);
   });
+
+  it("admits stale readiness only when an already selected route opts in", async () => {
+    const stale = {
+      profile_id: "work",
+      harness_id: "claude",
+      availability: "unknown" as const,
+      verification: "not_run" as const,
+      verification_source: "local_store" as const,
+      stale: true,
+      stale_age_ms: 42,
+      detail: "auth-status probe is stale",
+      last_verified_at: null,
+    };
+    await expect(
+      selectedProfileAvailability({
+        registry: [work],
+        profileId: "work",
+        harnessId: "claude",
+        probe: async () => stale,
+      }),
+    ).resolves.toBe("auth-status probe is stale");
+    await expect(
+      selectedProfileAvailability({
+        registry: [work],
+        profileId: "work",
+        harnessId: "claude",
+        allowStale: true,
+        probe: async () => stale,
+      }),
+    ).resolves.toBe("available");
+  });
 });
 
 describe("profileStatusAdmits", () => {
@@ -156,6 +226,61 @@ describe("profileStatusAdmits", () => {
     expect(profileStatusAdmits(work, { availability: "unknown", verification: "not_run" })).toBe(
       false,
     );
+    expect(
+      profileStatusAdmits(work, {
+        availability: "unknown",
+        verification: "not_run",
+        stale: true,
+      }),
+    ).toBe(false);
+    expect(
+      profileStatusAdmits(
+        work,
+        { availability: "unknown", verification: "not_run", stale: true },
+        { allowStale: true },
+      ),
+    ).toBe(true);
+    expect(
+      profileStatusAdmits(
+        { credential_kind: "api_key" },
+        { availability: "unknown", verification: "not_run", stale: true },
+        { allowStale: true },
+      ),
+    ).toBe(false);
+  });
+
+  it("admits a last positive after a timeout for an unpinned choice only, never a pin (#363)", () => {
+    const lastPositive = {
+      availability: "unknown",
+      verification: "not_run",
+      stale: true,
+      stale_basis: "last_positive_after_timeout",
+    };
+    const lkg = { availability: "unknown", verification: "not_run", stale: true };
+    // Pool/rotation/next_up (unpinned) may consume the Cursor basis ...
+    expect(profileStatusAdmits(work, lastPositive, { unpinned: true })).toBe(true);
+    // ... a durable binding too (selected AND unpinned) ...
+    expect(profileStatusAdmits(work, lastPositive, { allowStale: true, unpinned: true })).toBe(
+      true,
+    );
+    // ... but an explicit pin keeps its strict verdict, and so does a default caller.
+    expect(profileStatusAdmits(work, lastPositive, { allowStale: true })).toBe(false);
+    expect(profileStatusAdmits(work, lastPositive)).toBe(false);
+    // The generic last-known-good grace is unchanged: selected routes only,
+    // so an unpinned pool never consumes it.
+    expect(profileStatusAdmits(work, lkg, { unpinned: true })).toBe(false);
+    expect(profileStatusAdmits(work, lkg, { allowStale: true })).toBe(true);
+    // Unknown without a stale positive admits nobody; api_key rows never ride it.
+    expect(
+      profileStatusAdmits(
+        work,
+        { availability: "unknown", verification: "not_run" },
+        { allowStale: true, unpinned: true },
+      ),
+    ).toBe(false);
+    expect(
+      profileStatusAdmits({ credential_kind: "api_key" }, lastPositive, { unpinned: true }),
+    ).toBe(false);
   });
 
   it("turns a throwing profile probe into fail-closed readiness", async () => {
@@ -168,71 +293,7 @@ describe("profileStatusAdmits", () => {
   });
 });
 
-describe("defaultCredentialRoute", () => {
-  const base = {
-    status: "ok" as const,
-    routableIntents: ["implement"],
-  };
-
-  it("projects a doctor-routable API-key-only default subject", () => {
-    expect(
-      defaultCredentialRoute(
-        {
-          ...base,
-          authSources: [
-            { source: "api_key_env", availability: "available", verification: "not_run" },
-          ],
-        },
-        "auto",
-      ),
-    ).toBe("api_key");
-  });
-
-  it("follows canonical preference and API-key fallback instead of native-source presence", () => {
-    const mixed = {
-      ...base,
-      authSources: [
-        {
-          source: "native_session" as const,
-          availability: "unavailable" as const,
-          verification: "failed" as const,
-        },
-        {
-          source: "api_key_env" as const,
-          availability: "available" as const,
-          verification: "passed" as const,
-        },
-      ],
-    };
-    expect(defaultCredentialRoute(mixed, "auto")).toBe("api_key");
-    expect(defaultCredentialRoute(mixed, "api_key")).toBe("api_key");
-    expect(defaultCredentialRoute(mixed, "subscription")).toBeNull();
-
-    expect(
-      defaultCredentialRoute(
-        {
-          ...base,
-          authSources: [
-            { source: "native_session", availability: "available", verification: "passed" },
-          ],
-        },
-        "auto",
-      ),
-    ).toBe("local_session");
-  });
-
-  it("never promotes an aggregate degraded or unroutable status", () => {
-    expect(
-      defaultCredentialRoute(
-        { status: "degraded", routableIntents: ["implement"], authSources: [] },
-        "auto",
-      ),
-    ).toBeNull();
-    expect(
-      defaultCredentialRoute({ ...base, routableIntents: [], authSources: [] }, "auto"),
-    ).toBeNull();
-  });
-
+describe("effectiveAuthPreference", () => {
   it("shares run-admission preference precedence", () => {
     expect(effectiveAuthPreference("auto", "api_key", "subscription")).toBe("api_key");
     expect(effectiveAuthPreference(undefined, "auto", "subscription")).toBe("subscription");
@@ -265,7 +326,37 @@ function snap(profileId: string | null, usedRatio: number | null): QuotaSnapshot
 }
 
 const policy = { limit_action: "rotate" as const, rotation_eligible: [], headroom_threshold: 0.9 };
+/** The A6 stored default: what an ABSENT profile_policy parses to. */
+const autoPolicy = {
+  limit_action: "auto" as const,
+  rotation_eligible: [],
+  headroom_threshold: 0.9,
+};
 const ready = (...ids: string[]): ReadonlySet<string> => new Set(ids);
+
+describe("effectiveLimitAction (A6 kind-aware auto — ONE resolver)", () => {
+  it("auto resolves by the subject's credential kind: subscription rotates, metered/unknown fail", () => {
+    expect(effectiveLimitAction({ limit_action: "auto" }, "local_session")).toBe("rotate");
+    expect(effectiveLimitAction({ limit_action: "auto" }, "api_key")).toBe("fail");
+    expect(effectiveLimitAction({ limit_action: "auto" }, null)).toBe("fail");
+  });
+
+  it("explicit persisted values pass through untouched on EVERY route (3=A: only ABSENT changed meaning)", () => {
+    for (const route of ["local_session", "api_key", null] as const) {
+      expect(effectiveLimitAction({ limit_action: "fail" }, route)).toBe("fail");
+      expect(effectiveLimitAction({ limit_action: "ask" }, route)).toBe("ask");
+      expect(effectiveLimitAction({ limit_action: "rotate" }, route)).toBe("rotate");
+    }
+  });
+
+  it("limitSubjectRoute: a pinned profile decides by its own kind, the default subject by the caller's estimate", () => {
+    expect(limitSubjectRoute(work)).toBe("local_session");
+    expect(limitSubjectRoute({ credential_kind: "api_key" })).toBe("api_key");
+    expect(limitSubjectRoute({ credential_kind: "oauth_token" })).toBe("local_session");
+    expect(limitSubjectRoute(null, "api_key")).toBe("api_key");
+    expect(limitSubjectRoute(null)).toBe(null);
+  });
+});
 
 describe("profileHeadroomBreach (W5.4 preflight)", () => {
   it("flags a window at/over the threshold with typed evidence", () => {
@@ -405,6 +496,57 @@ describe("rotationRetryEligible (sol #30 predicate)", () => {
     expect(rotationRetryEligible({ sawTypedLimit: false, deliverableEmpty: true })).toBe(false);
     expect(rotationRetryEligible({ sawTypedLimit: true, deliverableEmpty: false })).toBe(false);
   });
+
+  it("A2 structural branch: a terminal non-transient pre-progress death is eligible; absent fields stay conservative", () => {
+    // The full structural shape fires without any typed limit (owner 7=A).
+    expect(
+      rotationRetryEligible({
+        sawTypedLimit: false,
+        deliverableEmpty: true,
+        mutationObserved: false,
+        terminalNonTransientDeath: true,
+        sawAgentProgress: false,
+      }),
+    ).toBe(true);
+    // Any agent progress under the current credential blocks it (sol amendment:
+    // a tool_call may have external side effects — never silently replay).
+    expect(
+      rotationRetryEligible({
+        sawTypedLimit: false,
+        deliverableEmpty: true,
+        terminalNonTransientDeath: true,
+        sawAgentProgress: true,
+      }),
+    ).toBe(false);
+    // An observed mutation blocks BOTH branches — typed fast path included.
+    expect(
+      rotationRetryEligible({
+        sawTypedLimit: true,
+        deliverableEmpty: true,
+        mutationObserved: true,
+      }),
+    ).toBe(false);
+    // A transient-retryable death is NOT a structural death (same-profile
+    // retry machinery owns it): the builder encodes that as
+    // terminalNonTransientDeath=false, which never fires.
+    expect(
+      rotationRetryEligible({
+        sawTypedLimit: false,
+        deliverableEmpty: true,
+        terminalNonTransientDeath: false,
+        sawAgentProgress: false,
+      }),
+    ).toBe(false);
+    // The typed fast path is NOT hardened against progress (W5.4 canon:
+    // no-deliverable/no-mutation, not no-progress).
+    expect(
+      rotationRetryEligible({
+        sawTypedLimit: true,
+        deliverableEmpty: true,
+        sawAgentProgress: true,
+      }),
+    ).toBe(true);
+  });
 });
 
 describe("default-subject auto-balance (INV-135 owner scope)", () => {
@@ -488,7 +630,42 @@ describe("default-subject auto-balance (INV-135 owner scope)", () => {
     });
   });
 
-  it("preflightDefaultSubject is strictly opt-in: fail/ask keep the default user untouched (no events, no selection)", () => {
+  it("the A6 auto default rotates the SUBSCRIPTION default subject exactly like explicit rotate — no configuration needed", () => {
+    const events: Array<[string, Record<string, unknown>]> = [];
+    const next = preflightDefaultSubject({
+      harnessId: "claude",
+      policy: autoPolicy,
+      registry: [a, b],
+      snapshots: [snap(null, 0.95)],
+      readyProfileIds: ready("a", "b"),
+      defaultRoute: "local_session",
+      emit: (type, payload) => events.push([type, payload]),
+    });
+    expect(next?.profile_id).toBe("a");
+    expect(events.map(([t]) => t)).toEqual([
+      "route.profile.headroom_exceeded",
+      "route.profile.rotated",
+    ]);
+  });
+
+  it("the A6 auto default keeps a METERED (api_key / unknown-route) default subject untouched — a metered limit is a budget fact", () => {
+    for (const defaultRoute of ["api_key", null] as const) {
+      const events: string[] = [];
+      const next = preflightDefaultSubject({
+        harnessId: "claude",
+        policy: autoPolicy,
+        registry: [a],
+        snapshots: [snap(null, 0.99)],
+        readyProfileIds: ready("a"),
+        defaultRoute,
+        emit: (type) => events.push(type),
+      });
+      expect(next).toBeNull();
+      expect(events).toEqual([]);
+    }
+  });
+
+  it("EXPLICIT fail/ask keep the default user untouched (no events, no selection) — persisted opt-outs survive A6 (3=A)", () => {
     for (const limit_action of ["fail", "ask"] as const) {
       const events: string[] = [];
       const next = preflightDefaultSubject({
@@ -549,8 +726,13 @@ describe("default-subject auto-balance (INV-135 owner scope)", () => {
       snapshots: [],
       readyProfileIds: ready("a"),
       triedProfiles: new Set<string>(),
-      sawTypedLimit: true,
-      deliverableEmpty: true,
+      evidence: {
+        sawTypedLimit: true,
+        deliverableEmpty: true,
+        mutationObserved: false,
+        terminalNonTransientDeath: false,
+        sawAgentProgress: false,
+      },
       lastLimit: null,
       emit: () => {},
     };
@@ -567,7 +749,7 @@ describe("default-subject auto-balance (INV-135 owner scope)", () => {
     expect(events[0]?.[1]).toMatchObject({ from_profile_id: null, to_profile_id: "a" });
   });
 
-  it("rotateSpecOnTypedLimit rebuilds a profile-less spec onto the rotation target with a fresh session", () => {
+  it("rotateSpecOnTypedLimit rebuilds a profile-less spec onto the rotation target with a fresh session", async () => {
     const spec = HarnessRunSpecSchema.parse({
       session_id: "se-1",
       intent: "implement",
@@ -575,117 +757,96 @@ describe("default-subject auto-balance (INV-135 owner scope)", () => {
       cwd: "/repo",
       resume_session_id: "native-123",
     });
-    const rotated = rotateSpecOnTypedLimit({
+    const base = {
       spec,
       harnessId: "claude",
       attemptId: "a01",
       policy,
       registry: [a],
       snapshots: [],
-      readyProfileIds: ready("a"),
-      triedProfiles: new Set<string>(),
+      probeReadyProfiles: async () => ready("a"),
+      markers: { sawAgentProgress: false, fileChanges: 0 },
       sawTypedLimit: true,
+      sawRetryable: true,
+      attemptErrored: true,
+      deliverableEmpty: true,
+      lastLimit: null,
+      emit: () => {},
+      newSessionId: () => "se-2",
+    };
+    const rotated = await rotateSpecOnTypedLimit({
+      ...base,
+      triedProfiles: new Set<string>(),
+      defaultRouteWasVendorNative: true,
+    });
+    const spec2 = rotated && !("poolExhausted" in rotated) ? rotated : null;
+    expect(spec2?.credential_profile?.profile_id).toBe("a");
+    expect(spec2?.session_id).toBe("se-2");
+    expect(spec2?.resume_session_id).toBeNull();
+    // A rotation is an unpinned choice: its spawn may ride a bounded last positive (#363).
+    expect(spec2 && credentialProfileUnpinned(spec2)).toBe(true);
+    // Without the route proof the profile-less spec must fail as-is.
+    await expect(
+      rotateSpecOnTypedLimit({ ...base, triedProfiles: new Set<string>() }),
+    ).resolves.toBeNull();
+  });
+
+  it("rotateSpecOnTypedLimit probes readiness for a STRUCTURAL pre-progress death too (A2 pre-gate)", async () => {
+    const spec = HarnessRunSpecSchema.parse({
+      session_id: "se-1",
+      intent: "implement",
+      prompt: "go",
+      cwd: "/repo",
+    });
+    let probed = 0;
+    const base = {
+      spec,
+      harnessId: "claude",
+      attemptId: "a01",
+      policy,
+      registry: [a],
+      snapshots: [],
+      probeReadyProfiles: async () => {
+        probed += 1;
+        return ready("a");
+      },
+      markers: { sawAgentProgress: false, fileChanges: 0 },
+      sawTypedLimit: false,
+      sawRetryable: false,
+      attemptErrored: true,
       deliverableEmpty: true,
       lastLimit: null,
       emit: () => {},
       newSessionId: () => "se-2",
       defaultRouteWasVendorNative: true,
+    };
+    // Untyped terminal non-transient death, no progress, no mutation → the
+    // probe fires and the rotation lands on the ready candidate.
+    const rotated = await rotateSpecOnTypedLimit({ ...base, triedProfiles: new Set<string>() });
+    expect(probed).toBe(1);
+    const rotatedSpec = rotated && !("poolExhausted" in rotated) ? rotated : null;
+    expect(rotatedSpec?.credential_profile?.profile_id).toBe("a");
+    // Progress under the current credential blocks the structural branch AND
+    // the probe (readiness is never spent on an ineligible try).
+    const blocked = await rotateSpecOnTypedLimit({
+      ...base,
+      markers: { sawAgentProgress: true, fileChanges: 0 },
+      triedProfiles: new Set<string>(),
     });
-    expect(rotated?.credential_profile?.profile_id).toBe("a");
-    expect(rotated?.session_id).toBe("se-2");
-    expect(rotated?.resume_session_id).toBeNull();
-    // Without the route proof the profile-less spec must fail as-is.
-    expect(
+    expect(blocked).toBeNull();
+    expect(probed).toBe(1);
+    // A retryable transient death belongs to the same-profile retry machinery.
+    await expect(
+      rotateSpecOnTypedLimit({ ...base, sawRetryable: true, triedProfiles: new Set<string>() }),
+    ).resolves.toBeNull();
+    // An observed file_change is a mutation even with an empty workspace diff.
+    await expect(
       rotateSpecOnTypedLimit({
-        spec,
-        harnessId: "claude",
-        attemptId: "a01",
-        policy,
-        registry: [a],
-        snapshots: [],
-        readyProfileIds: ready("a"),
+        ...base,
+        markers: { sawAgentProgress: false, fileChanges: 1 },
         triedProfiles: new Set<string>(),
-        sawTypedLimit: true,
-        deliverableEmpty: true,
-        lastLimit: null,
-        emit: () => {},
-        newSessionId: () => "se-2",
       }),
-    ).toBeNull();
-  });
-});
-
-describe("nextUpIdentity readiness parity", () => {
-  const a = { ...work, profile_id: "a" };
-  const b = { ...work, profile_id: "b" };
-
-  it("never names an enabled but unavailable default subject", () => {
-    expect(
-      nextUpIdentity({
-        registry: [a],
-        harnessId: "claude",
-        policy,
-        snapshots: [],
-        defaultEnabled: true,
-        defaultReady: false,
-        defaultRoute: null,
-        readyProfileIds: new Set(["a"]),
-      }),
-    ).toMatchObject({ kind: "none" });
-  });
-
-  it("uses the same complete snapshot when quota rotation selects a profile", () => {
-    expect(
-      nextUpIdentity({
-        registry: [a, b],
-        harnessId: "claude",
-        policy,
-        snapshots: [snap(null, 0.95)],
-        defaultEnabled: true,
-        defaultReady: true,
-        defaultRoute: "local_session",
-        readyProfileIds: new Set(["b"]),
-      }),
-    ).toEqual({ kind: "profile", profileId: "b" });
-  });
-
-  it("keeps the ready default when every configured rotation target is unavailable", () => {
-    expect(
-      nextUpIdentity({
-        registry: [a, b],
-        harnessId: "claude",
-        policy,
-        snapshots: [snap(null, 0.95)],
-        defaultEnabled: true,
-        defaultReady: true,
-        defaultRoute: "api_key",
-        readyProfileIds: new Set(),
-      }),
-    ).toEqual({ kind: "native", route: "api_key" });
-  });
-
-  it("does not rotate a native-default route solely because another model family is exhausted", () => {
-    const scoped = snap(null, 1);
-    scoped.constraints[0] = {
-      ...scoped.constraints[0]!,
-      id: "weekly_scoped:Fable",
-      applies_to_models: ["fable", "claude-fable-5", "best"],
-    };
-    const input = {
-      registry: [a],
-      harnessId: "claude",
-      policy,
-      snapshots: [scoped],
-      defaultEnabled: true,
-      defaultReady: true,
-      defaultRoute: "local_session" as const,
-      readyProfileIds: new Set(["a"]),
-    };
-    expect(nextUpIdentity({ ...input, model: null })).toEqual({
-      kind: "native",
-      route: "local_session",
-    });
-    expect(nextUpIdentity(input)).toEqual({ kind: "profile", profileId: "a" });
+    ).resolves.toBeNull();
   });
 });
 
@@ -710,6 +871,12 @@ describe("vendor credential observation (honest profile verification)", () => {
     reason: "auth_revoked",
     detail: "oauth/usage responded 401",
     observed_at: "2026-07-17T12:00:00Z",
+  } as const;
+
+  const awaitingVendorRefresh = {
+    ...revoked,
+    reason: "refresh_failed",
+    detail: "OAuth access token expired; Claude Code must refresh it on a real run",
   } as const;
 
   it("reads a successful authenticated poll as the vendor honoring the credential", () => {
@@ -786,6 +953,18 @@ describe("vendor credential observation (honest profile verification)", () => {
 
   it("leaves the status untouched when the poller has no verdict", () => {
     expect(withVendorCredentialObservation(local, null)).toEqual(local);
+  });
+
+  it("keeps an expired-refreshable profile locally passed and admissible", () => {
+    const observation = vendorCredentialObservation(
+      { snapshots: [], absences: [awaitingVendorRefresh] },
+      "claude",
+      "work",
+    );
+    expect(observation).toBeNull();
+    const status = withVendorCredentialObservation(local, observation);
+    expect(status).toEqual(local);
+    expect(profileStatusAdmits({ credential_kind: "config_dir_login" }, status)).toBe(true);
   });
 
   it("lets a rejection outrank a cached success, and refuses the profile", () => {
@@ -866,5 +1045,190 @@ describe("run admission reads the vendor's verdict, not just the local store", (
         quota: { snapshots: [], absences: [] },
       }),
     ).toBe("available");
+  });
+
+  it("still admits a locally-passing profile whose idle token awaits vendor refresh", async () => {
+    const awaitingVendorRefresh = {
+      ...revoked,
+      reason: "refresh_failed" as const,
+      detail: "OAuth access token expired; Claude Code must refresh it on a real run",
+    };
+    expect(
+      await selectedProfileAvailability({
+        registry: [work],
+        profileId: "work",
+        harnessId: "claude",
+        probe: locallyPassing,
+        quota: { snapshots: [], absences: [awaitingVendorRefresh] },
+      }),
+    ).toBe("available");
+  });
+});
+
+describe("A7 differential probe wiring in rotateSpecOnTypedLimit", () => {
+  const a = { ...work, profile_id: "a" };
+  const b = { ...work, profile_id: "b", isolation_locator: "/tmp/p/b" };
+  const spec = HarnessRunSpecSchema.parse({
+    session_id: "se-1",
+    intent: "implement",
+    prompt: "go",
+    cwd: "/repo",
+    credential_profile: a,
+  });
+  const unusableA = {
+    harness_id: "claude",
+    profile_id: "a",
+    model: null,
+    code: "auth_revoked" as const,
+    source: "attempt_stream" as const,
+    detail: null,
+    observed_at: new Date().toISOString(),
+    expires_at: new Date(Date.now() + 60_000).toISOString(),
+  };
+  const base = {
+    spec,
+    harnessId: "claude",
+    attemptId: "a01",
+    policy,
+    registry: [a, b],
+    snapshots: [],
+    markers: { sawAgentProgress: false, fileChanges: 0 },
+    sawTypedLimit: true,
+    sawRetryable: true,
+    attemptErrored: true,
+    deliverableEmpty: true,
+    lastLimit: null,
+    emit: () => {},
+    newSessionId: () => "se-2",
+  };
+
+  it("the sibling probe fires ONLY on rotation-eligible failures — an ordinary error never probes", async () => {
+    let probes = 0;
+    const probeCurrentSubject = async () => {
+      probes += 1;
+      return null;
+    };
+    // Ordinary transient-retryable death without a typed limit: not eligible.
+    await rotateSpecOnTypedLimit({
+      ...base,
+      sawTypedLimit: false,
+      probeReadyProfiles: async () => ready("b"),
+      probeCurrentSubject,
+      triedProfiles: new Set<string>(),
+    });
+    // A delivered attempt: not eligible either.
+    await rotateSpecOnTypedLimit({
+      ...base,
+      deliverableEmpty: false,
+      probeReadyProfiles: async () => ready("b"),
+      probeCurrentSubject,
+      triedProfiles: new Set<string>(),
+    });
+    expect(probes).toBe(0);
+    // A typed vendor limit IS eligible: the sibling probe fires exactly once.
+    const rotated = await rotateSpecOnTypedLimit({
+      ...base,
+      probeReadyProfiles: async () => ready("b"),
+      probeCurrentSubject,
+      triedProfiles: new Set<string>(),
+    });
+    expect(probes).toBe(1);
+    expect(
+      rotated && !("poolExhausted" in rotated) ? rotated.credential_profile?.profile_id : null,
+    ).toBe("b");
+  });
+
+  it("a typed verdict is emitted as route.profile.credential_unusable with the attempt stamped", async () => {
+    const events: Array<[string, Record<string, unknown>]> = [];
+    await rotateSpecOnTypedLimit({
+      ...base,
+      probeReadyProfiles: async () => ready("b"),
+      probeCurrentSubject: async () => unusableA,
+      triedProfiles: new Set<string>(),
+      emit: (type, payload) => events.push([type, payload]),
+    });
+    const emitted = events.find(([t]) => t === "route.profile.credential_unusable");
+    expect(emitted?.[1]).toMatchObject({
+      harness_id: "claude",
+      profile_id: "a",
+      code: "auth_revoked",
+      source: "attempt_stream",
+      attempt_id: "a01",
+    });
+  });
+
+  it("pool terminal carries the dead-credential provenance, and a condemned candidate is refused TYPED", async () => {
+    const unusableB = { ...unusableA, profile_id: "b" };
+    const events: Array<[string, Record<string, unknown>]> = [];
+    const out = await rotateSpecOnTypedLimit({
+      ...base,
+      // The overlay refused b upstream (readyProfileIdsForRotation); the row
+      // must say WHY, typed, instead of hiding behind not_ready.
+      probeReadyProfiles: async () => ready(),
+      probeCurrentSubject: async () => unusableA,
+      liveUnusable: [unusableB],
+      triedProfiles: new Set<string>(),
+      emit: (type, payload) => events.push([type, payload]),
+    });
+    expect(out && "poolExhausted" in out).toBe(true);
+    const failure = out && "poolExhausted" in out ? out.poolExhausted : null;
+    expect(failure?.message).toContain("observed unusable (auth_revoked)");
+    expect(failure).toMatchObject({ code: "credential_pool_exhausted" });
+    const exhausted = events.find(([t]) => t === "route.profile.rotation_exhausted");
+    const rows = (exhausted?.[1]?.candidates ?? []) as Array<Record<string, unknown>>;
+    expect(rows.find((r) => r.profile_id === "b")).toMatchObject({
+      rejected: "credential_unusable",
+      unusable: { code: "auth_revoked", source: "attempt_stream" },
+    });
+  });
+
+  it.each([false, true])(
+    "grounds structural pool exhaustion in the current profile registry row (%s)",
+    async (currentBlocked) => {
+      const reset = new Date(Date.now() + 60_000).toISOString();
+      const current = snap("a", currentBlocked ? 1 : 0);
+      const sibling = snap("b", 1);
+      for (const snapshot of [current, sibling]) snapshot.constraints[0]!.resets_at = reset;
+      const out = await rotateSpecOnTypedLimit({
+        ...base,
+        sawTypedLimit: false,
+        sawRetryable: false,
+        snapshots: [current, sibling],
+        probeReadyProfiles: async () => ready("a", "b"),
+        triedProfiles: new Set<string>(),
+      });
+      if (currentBlocked) {
+        expect(out && "poolExhausted" in out).toBe(true);
+        expect(out && "poolExhausted" in out ? out.poolExhausted : null).toMatchObject({
+          code: "credential_pool_exhausted",
+          resetsAt: reset,
+        });
+      } else {
+        expect(out).toBeNull();
+      }
+    },
+  );
+
+  it("the DEAD subject's typed-limit reset never becomes the pool's reopen promise", async () => {
+    // Pool of one: the dead, limited subject itself. Its typed stream limit
+    // names a reset — but a dead credential's window reopening will never
+    // help, so the terminal's resetsAt stays honestly null instead of
+    // promising the dead subject's own reset.
+    const out = await rotateSpecOnTypedLimit({
+      ...base,
+      registry: [a],
+      probeReadyProfiles: async () => ready(),
+      probeCurrentSubject: async () => unusableA,
+      liveUnusable: [unusableA],
+      triedProfiles: new Set<string>(),
+      lastLimit: { retryDelayMs: null, resetsAt: "2026-09-12T00:00:00.000Z" },
+    });
+    expect(out && "poolExhausted" in out).toBe(true);
+    const failure =
+      out && "poolExhausted" in out
+        ? (out.poolExhausted as Error & { resetsAt?: string | null })
+        : null;
+    expect(failure?.resetsAt).toBeNull();
+    expect(failure?.message).toContain("observed unusable (auth_revoked)");
   });
 });

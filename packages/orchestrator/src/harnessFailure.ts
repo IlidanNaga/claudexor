@@ -7,7 +7,7 @@
  * guidance appears ONLY on `auth_failed`, exactly as budget guidance appears
  * only on a real budget refusal.
  */
-import type { HarnessFailureCategory } from "@claudexor/schema";
+import type { HarnessFailureCategory, VendorFailureEvidence } from "@claudexor/schema";
 import type { TransientFailureObservation } from "./transientClassify.js";
 
 /**
@@ -72,4 +72,22 @@ export function harnessFailureNextActions(category: HarnessFailureCategory | nul
     case null:
       return ["Open diagnostics", "Retry the run"];
   }
+}
+
+/**
+ * The vendor's own typed failure for the attempt a terminal failure record
+ * speaks for: the named attempt, else the last one, and only its LAST
+ * observation — an earlier try's evidence (before a profile rotation) must never
+ * sit beside a later try's message. null = honestly unknown. Opaque evidence
+ * only — nothing here or downstream branches on its `code`.
+ */
+export function attemptVendorFailure(
+  attempts: {
+    attemptId: string;
+    telemetry: { transientFailures: TransientFailureObservation[] };
+  }[],
+  attemptId: string | null | undefined,
+): VendorFailureEvidence | null {
+  const owner = attempts.find((a) => a.attemptId === attemptId) ?? attempts.at(-1);
+  return owner?.telemetry.transientFailures.at(-1)?.vendorFailure ?? null;
 }

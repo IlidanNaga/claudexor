@@ -112,6 +112,28 @@ describe("parseCodexEvent", () => {
     });
   });
 
+  it("classifies a stderr-shaped vendor rate limit into the typed rate_limit signal (A1 parity)", () => {
+    // Before A1 parseCodexStderrFailure typed ONLY the MCP-startup fatal: a
+    // vendor limit that reached stderr (instead of a JSON error frame) stayed
+    // a generic exit disclosure with no rate_limit signal, so reactive
+    // credential rotation could never fire on it.
+    const out = parseCodexStderrFailure(
+      "stream error: 429 Too Many Requests; Please try again later",
+      "s-stderr-limit",
+      undefined,
+    );
+    expect(out).toMatchObject({
+      type: "error",
+      rate_limit: { resets_at: null, retry_delay_ms: null },
+    });
+  });
+
+  it("still returns null for unclassified stderr so the generic exit disclosure stays authoritative", () => {
+    expect(
+      parseCodexStderrFailure("segmentation fault (core dumped)", "s-x", undefined),
+    ).toBeNull();
+  });
+
   it("does not relabel unrelated Codex errors as required MCP failures", () => {
     const state: CodexParseState = { requiredMcpServers: ["claudexor"] };
     const out = parseCodexEvent(
@@ -182,6 +204,11 @@ describe("parseCodexEvent", () => {
 
     const usage = events.find((e) => e.type === "usage");
     expect(usage?.usage?.input_tokens).toBe(100);
+    expect(usage?.usage?.input_token_usage).toEqual({
+      total_tokens: 100,
+      cache_read_tokens: 80,
+      cache_write_tokens: null,
+    });
 
     const msg = events.find((e) => e.type === "message");
     expect(msg?.text).toBe("Done.");
@@ -245,6 +272,28 @@ describe("parseCodexEvent", () => {
     expect(out?.[0]?.tool?.exit_code).toBe(1);
     expect(out?.[0]?.tool?.error_summary).toContain("2 tests failed");
     expect(() => HarnessEvent.parse(out?.[0])).not.toThrow();
+  });
+
+  it("maps declined app-server commands to error tool_results", () => {
+    const out = parseCodexEvent(
+      {
+        type: "item.completed",
+        item: {
+          id: "i-declined",
+          type: "command_execution",
+          command: "printf fixture-ok",
+          exit_code: null,
+          status: "declined",
+        },
+      },
+      "s1",
+    );
+    expect(out).toMatchObject([
+      {
+        type: "tool_result",
+        tool: { status: "error", error_summary: "command execution failed" },
+      },
+    ]);
   });
 
   it("preserves a failed MCP belt call as exact error evidence", () => {
@@ -483,6 +532,34 @@ describe("parseCodexEvent", () => {
     }
   });
 
+  it("keeps recorded SSE idle-timeout retries nonterminal until the stream fails", () => {
+    const reason = "stream disconnected before completion: idle timeout waiting for SSE";
+    const state = {};
+    const retries = [1, 2, 3, 4, 5].flatMap(
+      (attempt) =>
+        parseCodexEvent(
+          { type: "error", message: `Reconnecting... ${attempt}/5 (${reason})` },
+          "s-sse-timeout",
+          state,
+        ) ?? [],
+    );
+    expect(retries.map((event) => event.type)).toEqual(Array(5).fill("status"));
+    expect(retries.map((event) => event.status?.attempt)).toEqual([1, 2, 3, 4, 5]);
+    for (const event of retries) {
+      expect(event.status).toMatchObject({ kind: "api_retry", error_category: "timeout" });
+      expect(event.transient?.kind).toBe("timeout");
+      expect(event.error).toBeUndefined();
+      expect(() => HarnessEvent.parse(event)).not.toThrow();
+    }
+    const failed = parseCodexEvent(
+      { type: "turn.failed", error: { message: reason } },
+      "s-sse-timeout",
+      state,
+    )?.[0];
+    expect(failed?.type).toBe("error");
+    expect(failed?.transient?.kind).toBe("stream_disconnect");
+  });
+
   it("keeps a real post-reconnect exhaustion as an error", () => {
     const exhausted = parseCodexEvent(
       { type: "error", message: "request timed out" },
@@ -685,4 +762,52 @@ describe("structured output flag", () => {
     const none = codexExecArgs({ ...base, resume_session_id: null } as never, {});
     expect(none.join(" ")).not.toContain("--output-schema");
   });
+});
+
+describe("codex normalized input measurement", () => {
+  function normalized(usage: Record<string, unknown>) {
+    return parseCodexEvent({ type: "turn.completed", usage }, "counters")?.find(
+      (event) => event.type === "usage",
+    )?.usage?.input_token_usage;
+  }
+  it("keeps reads and writes separate, including measured zero", () => {
+    expect(
+      normalized({ input_tokens: 100, cached_input_tokens: 80, cache_write_input_tokens: 10 }),
+    ).toEqual({
+      total_tokens: 100,
+      cache_read_tokens: 80,
+      cache_write_tokens: 10,
+    });
+    expect(
+      normalized({ input_tokens: 0, cached_input_tokens: 0, cache_write_input_tokens: 0 }),
+    ).toEqual({
+      total_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+    });
+  });
+  it.each([0, 1, 2])("preserves each independently missing component %s", (missing) => {
+    const fields = ["input_tokens", "cached_input_tokens", "cache_write_input_tokens"];
+    const native: Record<string, unknown> = Object.fromEntries(
+      fields.map((field, index) => [field, [100, 80, 10][index]]),
+    );
+    delete native[fields[missing]!];
+    expect(normalized(native)).toEqual({
+      total_tokens: missing === 0 ? null : 100,
+      cache_read_tokens: missing === 1 ? null : 80,
+      cache_write_tokens: missing === 2 ? null : 10,
+    });
+  });
+  it.each([undefined, null, -1, 0.5, "10", Infinity, NaN])(
+    "preserves unknown write rather than treating %j as zero",
+    (value) => {
+      expect(
+        normalized({ input_tokens: 100, cached_input_tokens: 80, cache_write_input_tokens: value }),
+      ).toEqual({
+        total_tokens: 100,
+        cache_read_tokens: 80,
+        cache_write_tokens: null,
+      });
+    },
+  );
 });

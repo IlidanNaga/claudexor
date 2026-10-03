@@ -14,7 +14,10 @@ import { renderCliFailure } from "./cli-error.js";
 import { buildRegistry } from "./registry.js";
 
 function panelFlags(args: ParsedArgs): ControlReviewerPanelEntry[] | undefined {
-  return parseReviewerPanelFlags(flagValues(args, "reviewer-panel"));
+  return parseReviewerPanelFlags(
+    flagValues(args, "reviewer-panel"),
+    flagValues(args, "reviewer-panel-json"),
+  );
 }
 
 /** `--delta-scope <baseSha>`: the contract's sol lane reviews the packet's
@@ -50,8 +53,8 @@ export async function reviewCommand(args: ParsedArgs, json: boolean): Promise<nu
   ];
   const frozenRequested = frozenValues.some((value) => value !== undefined);
   const usage =
-    'usage: claudexor review --diff <file> [--intent "<text>"] [--tests "<evidence>"] [--reviewer-panel <list>] [--json]\n' +
-    "   or: claudexor review --evidence-dir <path> --artifacts-dir <external-path> --candidate-sha <sha> --candidate-tree <tree> --packet-manifest-digest <sha256> [--reviewer-panel <list>] [--delta-scope <baseSha>] [--json]";
+    'usage: claudexor review --diff <file> [--intent "<text>"] [--tests "<evidence>"] [--reviewer-panel <list> | --reviewer-panel-json <json-array>] [--json]\n' +
+    "   or: claudexor review --evidence-dir <path> --artifacts-dir <external-path> --candidate-sha <sha> --candidate-tree <tree> --packet-manifest-digest <sha256> [--reviewer-panel <list> | --reviewer-panel-json <json-array>] [--delta-scope <baseSha>] [--json]";
   if ((!diffPath && !frozenRequested) || (frozenRequested && frozenValues.some((v) => !v))) {
     return printUsageError(json, usage);
   }
@@ -135,6 +138,7 @@ export async function reviewCommand(args: ParsedArgs, json: boolean): Promise<nu
         providers: result.distinctProviders,
         blockers: blockers.length,
         findings: result.findings,
+        ignoredSettings: result.ignoredSettings,
         reviewSpendUsd: result.reviewSpendUsd,
         artifactsDir: result.artifactsDir,
       });
@@ -143,6 +147,7 @@ export async function reviewCommand(args: ParsedArgs, json: boolean): Promise<nu
         `reviewers: ${result.distinctProviders.join(", ") || "none"} (cross-family verified: ${result.crossFamilyVerified})`,
       );
       for (const f of result.findings) print(`  [${f.severity}] ${f.claim}`);
+      for (const detail of result.ignoredSettings) print(`  [ignored] ${detail}`);
       print(
         ok
           ? "review: PASS"

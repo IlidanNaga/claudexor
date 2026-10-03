@@ -53,9 +53,13 @@ export function winnerNeedsHuman(
 /** Typed terminal evidence for a fresh-verified race whose live delivery was
  * refused (D8): the process succeeded but the deterministic delivery gate
  * refused — checks=failed, a needs-decision block that fires run.blocked. */
-export function deliveryRefusalDecisionFields(evidenceFacts: string[], reason: string) {
+export function deliveryRefusalDecisionFields(
+  evidenceFacts: string[],
+  reason: string,
+  prior?: RunOutcomeFacts,
+) {
   return {
-    facts: makeOutcomeFacts("succeeded", { checks: "failed", reason: "checks_failed" }),
+    facts: makeOutcomeFacts("succeeded", { ...prior, checks: "failed", reason: "checks_failed" }),
     apply_recommendation: "inspect" as const,
     evidence_facts: [...evidenceFacts, `delivery refused: ${redactSecrets(reason)}`],
   };
@@ -91,7 +95,11 @@ export function writeRaceDeliveryDecision(
   store.writeYaml(path, {
     ...input.decision,
     ...(input.deliveryFailureReason
-      ? deliveryRefusalDecisionFields(input.decision.evidence_facts, input.deliveryFailureReason)
+      ? deliveryRefusalDecisionFields(
+          input.decision.evidence_facts,
+          input.deliveryFailureReason,
+          input.facts,
+        )
       : needsDecision
         ? blockedDecisionOverride(input.decision.evidence_facts, input.facts, input.finalVerify)
         : { facts: input.facts }),
@@ -271,10 +279,7 @@ export function harnessEventPayload(
     (safe.usage
       ? `usage: ${safe.usage.input_tokens ?? 0} in / ${safe.usage.output_tokens ?? 0} out`
       : safe.type);
-  // INV-105 from INSIDE the adapter (an effort the run's resolved catalog
-  // refused after preflight passed it): hoist the adapter's `ignored_settings`
-  // to the projection's top level, where the timeline/live disclosure channel
-  // already reads it for harness.started (QA-070) — same warning either way.
+  // Hoist adapter ignored_settings onto the existing timeline disclosure (INV-105).
   const ignored = (safe.payload as Record<string, unknown> | undefined)?.["ignored_settings"];
   return {
     ...(Array.isArray(ignored) ? { ignored_settings: ignored } : {}),
@@ -291,6 +296,7 @@ export function harnessEventPayload(
     credential_route: safe.credential_route,
     quota: safe.quota,
     rate_limit: safe.rate_limit,
+    request_refusal: safe.request_refusal,
     tool: safe.tool,
     interaction: safe.interaction,
     // Typed finality/status MUST survive this projection (W-C1/W-C2): the

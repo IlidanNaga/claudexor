@@ -72,6 +72,9 @@
                         }
                       ]
                     },
+                    "applies_to_unspecified_model": {
+                      "type": "boolean"
+                    },
                     "used_ratio": {
                       "anyOf": [
                         {
@@ -137,7 +140,9 @@
                   "codex_rollout",
                   "claude_statusline",
                   "claude_api_retry",
-                  "claude_oauth_usage"
+                  "claude_oauth_usage",
+                  "agy_command_usage",
+                  "cursor_rate_limit"
                 ],
                 "description": "Machine-readable source of quota evidence, classified by schema-owned traits."
               },
@@ -218,7 +223,7 @@
                         "resets_at"
                       ],
                       "additionalProperties": false,
-                      "description": "A spent or cooling window that applies only to the named models. Without a requested model it never sets the whole subject exhausted; when the request names a model it covers, it blocks that request too (and is then also listed in blocking_constraints). resets_at is its earliest known release instant (null = unknown)."
+                      "description": "A spent or cooling window that applies only to the named models. Without a requested model only a window that DECLARES it governs the unspecified-model route can exhaust the subject; when the request names a model it covers, it blocks that request too (and is then also listed in blocking_constraints). resets_at is its earliest known release instant (null = unknown)."
                     },
                     "description": "Every spent/cooling model-scoped window, listed regardless of state so consumers see partial exhaustion without re-deriving constraint scope."
                   }
@@ -260,9 +265,13 @@
                   "platform_unsupported",
                   "refresh_failed",
                   "no_source",
-                  "auth_revoked"
+                  "auth_revoked",
+                  "rate_limited",
+                  "probe_skipped_rate_limited",
+                  "poll_paced",
+                  "credential_profile_ambiguous"
                 ],
-                "description": "Why a registered subject has no quota snapshot, in the source's own vocabulary."
+                "description": "Why a registered subject has no fresh quota snapshot, in the source's own vocabulary."
               },
               "detail": {
                 "type": [
@@ -274,6 +283,10 @@
               "observed_at": {
                 "type": "string",
                 "format": "date-time"
+              },
+              "retry_after_ms": {
+                "type": "integer",
+                "minimum": 0
               }
             },
             "required": [
@@ -282,10 +295,10 @@
               "observed_at"
             ],
             "additionalProperties": false,
-            "description": "A registered subject's typed missing-snapshot — absence is stated, never inferred."
+            "description": "A registered subject's typed quota observation gap; may accompany stale last-known data."
           },
           "default": [],
-          "description": "Every registered subject reports either a snapshot or a typed absence — absence is never silent emptiness (zen: absence ≠ empty)."
+          "description": "Every registered subject reports a snapshot or a typed absence; a refresh gap may coexist with a stale last-known snapshot."
         },
         "refreshed_at": {
           "anyOf": [
@@ -297,6 +310,27 @@
               "type": "null"
             }
           ]
+        },
+        "refresh_skipped": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "vendor": {
+                "$ref": "#/definitions/ControlQuotaResponse/properties/snapshots/items/properties/subject/properties/harness"
+              },
+              "not_before": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "vendor",
+              "not_before"
+            ],
+            "additionalProperties": false,
+            "description": "One vendor lane a refresh cycle did not re-fetch because its poll rate-limit cooldown is active; its snapshots/absences in the same response are last-known registry data."
+          }
         }
       },
       "required": [

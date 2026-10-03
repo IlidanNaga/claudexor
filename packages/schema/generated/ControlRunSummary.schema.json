@@ -122,6 +122,68 @@
             {
               "type": "object",
               "properties": {
+                "requestRefusal": {
+                  "type": "object",
+                  "properties": {
+                    "scope": {
+                      "type": "string",
+                      "const": "turn_text",
+                      "description": "All text input items in one native turn; separate instructions are excluded."
+                    },
+                    "unit": {
+                      "type": "string",
+                      "const": "unicode_scalars"
+                    },
+                    "limit": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "exclusiveMinimum": 0,
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "source": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "kind": {
+                      "type": "string",
+                      "const": "input_too_large"
+                    },
+                    "actual": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "native_code": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "scope",
+                    "unit",
+                    "limit",
+                    "source",
+                    "kind",
+                    "actual",
+                    "native_code"
+                  ],
+                  "additionalProperties": false,
+                  "description": "Vendor-typed physical input refusal; the same input cannot be repaired by changing this harness's account or model."
+                },
                 "phase": {
                   "type": "string",
                   "default": "unknown",
@@ -158,11 +220,15 @@
                         "cost_unverifiable",
                         "delegation_child_drain_timeout",
                         "subscription_window_exhausted",
+                        "credential_pool_exhausted",
+                        "input_too_large",
                         "delegated_home_unavailable",
                         "delegated_confinement_unavailable",
-                        "delegated_evidence_incomplete"
+                        "delegated_evidence_incomplete",
+                        "access_profile_incompatible",
+                        "retired_access_profile"
                       ],
-                      "description": "Machine-readable failure sub-code within a RunFailure category (budget-denial reasons, Delegate child-drain timeout, a spent subscription quota window whose reopen time is RunFailure.resetsAt, and the delegated-run confinement refusals: missing scoped home, no OS-enforced boundary on this host, incomplete applied evidence)."
+                      "description": "Machine-readable failure sub-code within a RunFailure category, including historical delegated-run failures and active access-profile refusals."
                     },
                     {
                       "type": "null"
@@ -235,6 +301,58 @@
                   ],
                   "default": null,
                   "description": "When the refused window reopens (a spent subscription quota window), or null when the failure has no such time. Callers schedule a retry off this field, never off safeMessage."
+                },
+                "vendorFailure": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 128
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "description": "The vendor's own machine-readable failure code, verbatim; null when the vendor recorded an error without one."
+                        },
+                        "message": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 4000
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "description": "The vendor's own words from the same record, verbatim (redacted); null when absent."
+                        },
+                        "source": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 64,
+                          "description": "Evidence channel the code was read from (codex: `codex_rollout`). An open vocabulary: consumers display it, never branch on it."
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "source"
+                      ],
+                      "additionalProperties": false,
+                      "description": "Vendor-typed failure evidence read from a vendor-owned machine-readable record, never parsed from prose."
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "The vendor's own typed failure for the attempt this record speaks for, or null when no vendor-typed evidence exists (every harness without such a channel, and any unreadable record). Facts only: carries no remedy.",
+                  "default": null
                 },
                 "nextActions": {
                   "type": "array",
@@ -355,6 +473,10 @@
           "type": "string",
           "description": "Scalar model requested for the run."
         },
+        "review": {
+          "type": "boolean",
+          "description": "Resolved model-review intent; absent on historical runs that retain review-required semantics."
+        },
         "reviewerPanel": {
           "type": "array",
           "items": {
@@ -378,13 +500,26 @@
                 "maxLength": 32,
                 "pattern": "^[a-z0-9]+(?:[_-][a-z0-9]+)*$",
                 "description": "Per-reviewer effort hint, passed to that harness only."
+              },
+              "credentialProfileId": {
+                "$ref": "#/definitions/ControlRunSummary/properties/reviewerPanel/items/properties/model",
+                "description": "Per-reviewer credential profile id; explicit pins are strict and never fall back."
+              },
+              "processingPreference": {
+                "type": "string",
+                "enum": [
+                  "standard",
+                  "fast",
+                  "economy"
+                ],
+                "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
               }
             },
             "required": [
               "harness"
             ],
             "additionalProperties": false,
-            "description": "One reviewer of an explicit reviewer panel — a harness plus optional model and effort. The CLI spells one entry `harness=model:effort` (e.g. `claude=claude-opus-4-8:max`)."
+            "description": "One reviewer of an explicit reviewer panel — a harness plus optional model, effort, and strict credentialProfileId. Compact entries are unpinned; structured JSON carries pins."
           },
           "description": "Explicit reviewer panel used for the run."
         },
@@ -498,6 +633,51 @@
             }
           ],
           "description": "Cached input tokens summed across all attempts; null when no harness reported them."
+        },
+        "inputTokenUsage": {
+          "type": "object",
+          "properties": {
+            "total_tokens": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "cache_read_tokens": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "cache_write_tokens": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "total_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens"
+          ],
+          "additionalProperties": false,
+          "description": "Normalized input measurement projected from run telemetry; absent on older runs."
         },
         "outputConformance": {
           "anyOf": [
@@ -644,8 +824,8 @@
             "readonly",
             "workspace_write",
             "full",
-            "external_sandbox_full",
-            "inherit_native"
+            "inherit_native",
+            "external_sandbox_full"
           ],
           "description": "Access profile of the run: the effective profile when known, else the requested one (prefer requestedAccess/effectiveAccess)."
         },
@@ -669,7 +849,7 @@
         },
         "webRequired": {
           "type": "boolean",
-          "description": "Whether the run required web evidence."
+          "description": "Explicit stored web requirement."
         },
         "webMode": {
           "$ref": "#/definitions/ControlRunSummary/properties/externalContextPolicy",
@@ -681,7 +861,7 @@
             "required": {
               "type": "boolean",
               "default": false,
-              "description": "Whether the run required web evidence."
+              "description": "Explicit stored web requirement."
             },
             "mode": {
               "$ref": "#/definitions/ControlRunSummary/properties/externalContextPolicy",
@@ -701,7 +881,7 @@
             "satisfied": {
               "type": "boolean",
               "default": false,
-              "description": "Whether the web-evidence requirement was satisfied."
+              "description": "Completed without a typed failure; retrieved content is not necessarily proven."
             },
             "status": {
               "type": "string",
@@ -713,7 +893,7 @@
                 "unverified"
               ],
               "default": "none",
-              "description": "Web-evidence verdict for the run."
+              "description": "Observed web status; satisfied does not prove retrieved content was verified."
             },
             "tool": {
               "type": [
@@ -846,13 +1026,14 @@
               "type": "string",
               "enum": [
                 "patch",
+                "files",
                 "answer",
                 "plan",
                 "report",
                 "none"
               ],
               "default": "none",
-              "description": "What the turn actually produced: a patch, an answer, a plan (no files changed), a report, or nothing."
+              "description": "What the turn actually produced: a Git patch, directory files, an answer, a plan, a report, or nothing."
             },
             "diffStat": {
               "anyOf": [
@@ -909,9 +1090,10 @@
                 "not_applied",
                 "applied",
                 "applied_review_blocked",
-                "reverted"
+                "reverted",
+                "discarded"
               ],
-              "description": "Honest application state of a run's changes: not_applied (no in-place mutation), applied (applied and review clean), applied_review_blocked (applied but review blocked/unconverged), or reverted.",
+              "description": "Honest application state: not_applied (delivery pending), applied, applied_review_blocked, reverted, or discarded (remaining copied output deliberately not applied).",
               "default": "not_applied"
             },
             "preTurnSha": {
@@ -964,7 +1146,10 @@
                   "description": "Terminal lifecycle of the run."
                 },
                 "noChanges": {
-                  "type": "boolean",
+                  "type": [
+                    "boolean",
+                    "null"
+                  ],
                   "default": false,
                   "description": "True when the run finished without changing any files (the ex no_op fact)."
                 },
@@ -988,6 +1173,10 @@
                   "description": "Review axis: approved (clean cross-family verified review), blocked (open accepted findings), or not_run.",
                   "default": "not_run"
                 },
+                "review_requested": {
+                  "type": "boolean",
+                  "description": "Frozen model-review intent. False permits an honestly unreviewed result; absent historical records retain the review requirement."
+                },
                 "reason": {
                   "anyOf": [
                     {
@@ -1004,6 +1193,8 @@
                         "stuck_no_progress",
                         "wall_clock_exceeded",
                         "user_cancelled",
+                        "host_cancelled",
+                        "owner_task_gone",
                         "crash_interrupted",
                         "workspace_unavailable",
                         "input_required",

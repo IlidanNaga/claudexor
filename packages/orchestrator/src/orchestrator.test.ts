@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { repoHash } from "@claudexor/config";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -31,8 +32,10 @@ import { createFakeHarness } from "@claudexor/harness-fake";
 import type {
   AccessProfile,
   ControlReviewerPanelEntry,
+  HarnessEvent,
   HarnessRunSpec,
   ProviderFamily,
+  QuotaSnapshot,
 } from "@claudexor/schema";
 import { ConformanceReport, HarnessManifest, RunFacts, makeOutcomeFacts } from "@claudexor/schema";
 import { hashJson, noProjectRepoRoot, projectRuntimeDir, sha256 } from "@claudexor/util";
@@ -109,6 +112,24 @@ async function initRepo(): Promise<string> {
     "init",
   ]);
   return repo;
+}
+
+/** Authorize an explicitly requested Full fixture without touching real trust state. */
+function grantFullAccess(repo: string): void {
+  const configDir = process.env.CLAUDEXOR_CONFIG_DIR;
+  if (!configDir) throw new Error("test requires a scoped CLAUDEXOR_CONFIG_DIR");
+  mkdirSync(join(configDir, "trust"), { recursive: true });
+  writeFileSync(join(configDir, "trust", `${repoHash(repo)}.yaml`), "allow_full_access: true\n");
+}
+
+function setAccessDefault(repo: string, access: AccessProfile): void {
+  const configDir = process.env.CLAUDEXOR_CONFIG_DIR;
+  if (!configDir) throw new Error("test requires a scoped CLAUDEXOR_CONFIG_DIR");
+  mkdirSync(join(configDir, "trust"), { recursive: true });
+  writeFileSync(
+    join(configDir, "trust", `${repoHash(repo)}.yaml`),
+    `access_default: ${access}\nallow_full_access: false\n`,
+  );
 }
 
 function treeContainsBytes(root: string, needle: string): boolean {
@@ -335,7 +356,7 @@ function diffImplementer(
         // Implement-only: it must NOT also qualify as a reviewer (else it would
         // review its own candidate and crowd out a real cross-family reviewer).
         capabilities: { implement: true, browser_tool: browserTool },
-        access_profiles_supported: ["workspace_write", "external_sandbox_full"],
+        access_profiles_supported: ["workspace_write", "full"],
       });
     },
     async doctor() {
@@ -377,6 +398,28 @@ function diffImplementer(
       yield { type: "completed", session_id: spec.session_id, ts };
     },
   };
+}
+
+function nativeEstimatedImplementer(id: string): HarnessAdapter {
+  const base = diffImplementer(id);
+  return {
+    ...base,
+    async *run(spec) {
+      for await (const event of base.run(spec)) {
+        yield {
+          ...event,
+          credential_route: "vendor_native" as const,
+          ...(event.usage ? { usage: { ...event.usage, estimated: true } } : {}),
+        };
+      }
+    },
+  };
+}
+
+function assertExactCashDecision(runDir: string): void {
+  const decision = readFileSync(join(runDir, "arbitration", "decision.yaml"), "utf8");
+  expect(decision).toMatch(/estimated: false/);
+  expect(decision).toMatch(/valuation_knowledge: estimated/);
 }
 
 function blockAttemptPatchPersistence(repo: string, attemptId: string): void {
@@ -690,6 +733,87 @@ function askAdapter(
   };
 }
 
+function writeDuplicateProfileConfig(configDir: string, profileId: string): void {
+  writeFileSync(
+    join(configDir, "config.yaml"),
+    [
+      "credential_profiles:",
+      `  - profile_id: ${profileId}`,
+      "    harness_id: codex",
+      "    display_name: Codex shared",
+      "    credential_kind: config_dir_login",
+      `    isolation_locator: '${join(configDir, "codex-home")}'`,
+      `  - profile_id: ${profileId}`,
+      "    harness_id: claude",
+      "    display_name: Claude shared",
+      "    credential_kind: config_dir_login",
+      `    isolation_locator: '${join(configDir, "claude-home")}'`,
+      "",
+    ].join("\n"),
+  );
+}
+
+function spentProfileSnapshot(
+  harness: "claude" | "codex",
+  profileId: string,
+  resetsAt: string,
+): QuotaSnapshot {
+  return {
+    subject: {
+      harness,
+      credential_route: "vendor_native",
+      plan_label: null,
+      subject_id: profileId,
+    },
+    constraints: [
+      {
+        id: "five_hour",
+        label: "5 hour",
+        used_ratio: 1,
+        window_seconds: 18_000,
+        resets_at: resetsAt,
+        cooldown_until: null,
+      },
+    ],
+    source: harness === "claude" ? "claude_oauth_usage" : "codex_app_server",
+    observed_at: new Date().toISOString(),
+    freshness: "fresh",
+  };
+}
+
+function duplicateProfileAskAdapter(
+  id: "claude" | "codex",
+  launches: Array<{ harness: string; model: string | null }>,
+): HarnessAdapter {
+  const adapter = askAdapter(
+    id,
+    function* (sessionId) {
+      const ts = new Date().toISOString();
+      yield { type: "started", session_id: sessionId, ts, credential_route: "vendor_native" };
+      yield { type: "message", session_id: sessionId, ts, text: `from ${id}` };
+      yield { type: "completed", session_id: sessionId, ts };
+    },
+    id === "claude" ? "anthropic" : "openai",
+  );
+  const discover = adapter.discover.bind(adapter);
+  adapter.discover = async () => {
+    const manifest = await discover();
+    return HarnessManifest.parse({
+      ...manifest,
+      capabilities: {
+        ...manifest.capabilities,
+        known_models: id === "claude" ? ["claude-opus-5"] : ["gpt-5.6-sol"],
+      },
+    });
+  };
+  const run = adapter.run.bind(adapter);
+  adapter.run = (spec) => {
+    launches.push({ harness: id, model: spec.model_hint ?? null });
+    return run(spec);
+  };
+  return adapter;
+}
+
 function nativeAskAdapter(id: string, observe: (spec: HarnessRunSpec) => void): HarnessAdapter {
   return {
     id,
@@ -859,31 +983,33 @@ describe("Orchestrator", () => {
     expect(existsSync(join(res.runDir, "final", "work_product.yaml"))).toBe(true);
   });
 
-  it("takes decision cash certainty from the ledger on race, convergence, and no-work paths", async () => {
-    const nativeEstimated = (id: string): HarnessAdapter => {
-      const base = diffImplementer(id);
-      return {
-        ...base,
-        async *run(spec) {
-          for await (const event of base.run(spec)) {
-            yield {
-              ...event,
-              credential_route: "vendor_native" as const,
-              ...(event.usage ? { usage: { ...event.usage, estimated: true } } : {}),
-            };
-          }
-        },
-      };
-    };
-    const assertExactCashDecision = (runDir: string) => {
-      const decision = readFileSync(join(runDir, "arbitration", "decision.yaml"), "utf8");
-      expect(decision).toMatch(/estimated: false/);
-      expect(decision).toMatch(/valuation_knowledge: estimated/);
-    };
+  it("allows a live-policy Agent run to finish without web activity", async () => {
+    const repo = await initRepo();
+    const registry = new Map<string, HarnessAdapter>([
+      ["fake-success", createFakeHarness("fake-success")],
+    ]);
+    const res = await new Orchestrator({ registry, reviewers: reviewers() }).run({
+      repoRoot: repo,
+      prompt: "do it from the repository context",
+      mode: "agent",
+      harnesses: ["fake-success"],
+      web: "live",
+      n: 1,
+    });
 
+    expect(res.facts.lifecycle).toBe("succeeded");
+    expect(readFileSync(join(res.runDir, "context", "task.yaml"), "utf8")).toContain(
+      "web_required: false",
+    );
+    expect(readFileSync(join(res.runDir, "final", "telemetry.yaml"), "utf8")).toContain(
+      "web_required_unsatisfied: false",
+    );
+  });
+
+  it("takes race decision cash certainty from the ledger", async () => {
     const raceRepo = await initRepo();
     const race = await new Orchestrator({
-      registry: new Map([["native", nativeEstimated("native")]]),
+      registry: new Map([["native", nativeEstimatedImplementer("native")]]),
       reviewers: reviewers(),
     }).run({
       repoRoot: raceRepo,
@@ -893,10 +1019,12 @@ describe("Orchestrator", () => {
       n: 2,
     });
     assertExactCashDecision(race.runDir);
+  });
 
+  it("takes convergence decision cash certainty from the ledger", async () => {
     const convergenceRepo = await initRepo();
     const convergence = await new Orchestrator({
-      registry: new Map([["native", nativeEstimated("native")]]),
+      registry: new Map([["native", nativeEstimatedImplementer("native")]]),
       reviewers: reviewers(),
     }).run({
       repoRoot: convergenceRepo,
@@ -906,7 +1034,9 @@ describe("Orchestrator", () => {
       attempts: 2,
     });
     assertExactCashDecision(convergence.runDir);
+  });
 
+  it("takes no-work decision cash certainty from the ledger", async () => {
     const failedPaid: HarnessAdapter = {
       ...realLikeAdapter("paid-failure"),
       async *run(spec) {
@@ -940,7 +1070,7 @@ describe("Orchestrator", () => {
     expect(readFileSync(join(noWork.runDir, "arbitration", "decision.yaml"), "utf8")).toMatch(
       /estimated: true/,
     );
-  }, 30_000);
+  });
 
   it("preserves mixed-route settlement when convergence persistence fails", async () => {
     const repo = await initRepo();
@@ -3361,6 +3491,7 @@ describe("Orchestrator", () => {
     process.env.CLAUDEXOR_CONFIG_DIR = configDir;
     const mkAsker = () => {
       const seen: unknown[] = [];
+      const prefs: string[] = [];
       const asker = askAdapter("asker", function* (sessionId) {
         const ts = new Date().toISOString();
         yield { type: "started", session_id: sessionId, ts };
@@ -3370,13 +3501,15 @@ describe("Orchestrator", () => {
       const inner = asker.run.bind(asker);
       asker.run = (spec) => {
         seen.push(spec.credential_profile);
+        prefs.push(spec.auth_preference ?? "auto");
         return inner(spec);
       };
-      return { asker, seen };
+      return { asker, seen, prefs };
     };
     try {
-      // Native disabled, no pin → nothing routable, refuse LOUDLY naming the
-      // setting; never silently fall back into the login.
+      // Native disabled, no rows, no pin, SUBSCRIPTION-only preference →
+      // nothing routable, refuse LOUDLY naming the setting; never silently
+      // fall back into the login (INV-135).
       writeFileSync(
         join(configDir, "config.yaml"),
         ["harnesses:", "  asker:", "    native_credentials_enabled: false", ""].join("\n"),
@@ -3385,10 +3518,54 @@ describe("Orchestrator", () => {
       const refused = await new Orchestrator({
         registry: new Map([["asker", off.asker]]),
         reviewers: [],
-      }).run({ repoRoot: repo, prompt: "2+2?", mode: "ask", harnesses: ["asker"] });
+      }).run({
+        repoRoot: repo,
+        prompt: "2+2?",
+        mode: "ask",
+        harnesses: ["asker"],
+        authPreference: "subscription",
+      });
       expect(legacyOutcome(refused)).toBe("failed");
       expect(refused.summary).toMatch(/native_credentials_enabled=false/);
       expect(off.seen).toHaveLength(0);
+
+      // Same exclusion under the default `auto` preference (Q3=A): auto never
+      // silently takes the paid route — the run refuses typed instead of
+      // spawning, and nothing ever falls back INTO the disabled login.
+      const autoOff = mkAsker();
+      const autoRefused = await new Orchestrator({
+        registry: new Map([["asker", autoOff.asker]]),
+        reviewers: [],
+      }).run({
+        repoRoot: repo,
+        prompt: "2+2?",
+        mode: "ask",
+        harnesses: ["asker"],
+      });
+      expect(legacyOutcome(autoRefused)).toBe("failed");
+      expect(autoOff.seen).toHaveLength(0);
+
+      // Only the EXPLICIT api_key preference opts the run onto the typed
+      // PAID route (INV-061) — the spec carries auth_preference=api_key so
+      // the adapter can never spawn back INTO the disabled login, and the
+      // fallback is disclosed.
+      const paid = mkAsker();
+      const paidEvents: string[] = [];
+      const paidRes = await new Orchestrator({
+        registry: new Map([["asker", paid.asker]]),
+        reviewers: [],
+      }).run({
+        repoRoot: repo,
+        prompt: "2+2?",
+        mode: "ask",
+        harnesses: ["asker"],
+        authPreference: "api_key",
+        onEvent: (event) => paidEvents.push(event.type),
+      });
+      expect(legacyOutcome(paidRes)).toBe("success");
+      expect(paid.seen).toEqual([null]);
+      expect(paid.prefs).toEqual(["api_key"]);
+      expect(paidEvents).toContain("route.account.pool_exhausted");
 
       // Native disabled but an explicit --profile pin is given → the pin routes.
       writeFileSync(
@@ -3425,7 +3602,7 @@ describe("Orchestrator", () => {
     }
   });
 
-  it("reactively rotates on a TYPED vendor limit — new session, new profile, provenance (W5.4)", async () => {
+  it("reactively rotates an UNPINNED pool row on a TYPED vendor limit — new session, new profile, provenance (W5.4, unified model)", async () => {
     const repo = await initRepo();
     const configDir = reapMk(join(tmpdir(), "claudexor-reactive-config-"));
     const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
@@ -3437,8 +3614,8 @@ describe("Orchestrator", () => {
         "  - profile_id: a",
         "    harness_id: limited",
         "    display_name: A",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:a'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "profile-a")}'`,
         "  - profile_id: b",
         "    harness_id: limited",
         "    display_name: B",
@@ -3447,18 +3624,12 @@ describe("Orchestrator", () => {
         "  - profile_id: c",
         "    harness_id: limited",
         "    display_name: C",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:c'",
-        "  - profile_id: d",
-        "    harness_id: limited",
-        "    display_name: D",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:d'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "profile-c")}'`,
         "harnesses:",
         "  limited:",
         "    profile_policy:",
         "      limit_action: rotate",
-        "      rotation_eligible: [b, c]",
         "",
       ].join("\n"),
     );
@@ -3545,15 +3716,18 @@ describe("Orchestrator", () => {
         mode: "agent",
         harnesses: ["limited"],
         n: 1,
-        credentialProfileId: "a",
         onEvent: (event) => events.push(event.type),
       });
       expect(legacyOutcome(res)).not.toBe("failed");
+      // The UNPINNED pool selects "a" (deterministic id tie-break among
+      // unknown-quota rows); the typed vendor limit rotates to the next READY
+      // pool sibling — b's expired login is skipped, c spawns fresh.
       expect(spawns.map((s) => s.profile)).toEqual(["a", "c"]);
-      // Admission probes the explicit current identity; rotation probes only
-      // the statically-selectable same-kind candidate. Cross-kind b is never
-      // activated merely to discover that policy cannot select it.
-      expect(probedProfiles).toEqual(["a", "c"]);
+      // A7's SIBLING differential probe of the CURRENT subject fires on the
+      // rotation-eligible failure — a doctor probe, never a spawned attempt
+      // (the spawn pin above stays two runs).
+      expect(probedProfiles).toContain("a");
+      expect(probedProfiles).toContain("c");
       // Failover is a NEW vendor session under the new credential.
       expect(new Set(spawns.map((s) => s.session)).size).toBe(2);
       expect(events).toContain("route.profile.rotated");
@@ -3571,6 +3745,204 @@ describe("Orchestrator", () => {
         credential_profile_applied?: string | null;
       }>(join(res.runDir, "attempts", "a01", "attempt.yaml"));
       expect(attempt?.credential_profile_applied).toBe("c");
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it("an UNPINNED thread turn stays on its bound account; an unusable binding switches with a DISCLOSED lane switch (D-U1 order 2, Q1=A)", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-binding-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(
+      join(configDir, "config.yaml"),
+      [
+        "credential_profiles:",
+        "  - profile_id: a",
+        "    harness_id: asker",
+        "    display_name: A",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "profile-a")}'`,
+        "  - profile_id: b",
+        "    harness_id: asker",
+        "    display_name: B",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "profile-b")}'`,
+        "",
+      ].join("\n"),
+    );
+    try {
+      const mk = (unreadyId: string | null) => {
+        const seen: Array<string | null> = [];
+        const asker = askAdapter("asker", function* (sessionId) {
+          const ts = new Date().toISOString();
+          yield { type: "started", session_id: sessionId, ts };
+          yield { type: "message", session_id: sessionId, ts, text: "4" };
+          yield { type: "completed", session_id: sessionId, ts };
+        });
+        asker.probeCredentialProfile = async (profile) => ({
+          profile_id: profile.profile_id,
+          harness_id: "asker",
+          availability: profile.profile_id === unreadyId ? "unavailable" : "available",
+          verification: profile.profile_id === unreadyId ? "failed" : "passed",
+          verification_source: "local_store",
+          detail: profile.profile_id === unreadyId ? "login expired" : "fixture verified",
+          last_verified_at: new Date().toISOString(),
+        });
+        const inner = asker.run.bind(asker);
+        asker.run = (spec) => {
+          seen.push(spec.credential_profile?.profile_id ?? null);
+          return inner(spec);
+        };
+        return { asker, seen };
+      };
+      // Healthy binding: the thread stays on "b" even though the pool's
+      // deterministic tie-break would pick "a" — stickiness beats ranking.
+      const sticky = mk(null);
+      const stickyEvents: string[] = [];
+      const stickyRes = await new Orchestrator({
+        registry: new Map([["asker", sticky.asker]]),
+        reviewers: [],
+      }).run({
+        repoRoot: repo,
+        prompt: "2+2?",
+        mode: "ask",
+        harnesses: ["asker"],
+        threadAccountBindings: { asker: "b" },
+        onEvent: (event) => stickyEvents.push(event.type),
+      });
+      expect(legacyOutcome(stickyRes)).toBe("success");
+      expect(sticky.seen).toEqual(["b"]);
+      expect(stickyEvents).not.toContain("route.account.lane_switch");
+
+      // The bound account became unusable: the run switches to the pool
+      // sibling and DISCLOSES the lane switch — never silent (Q1=A).
+      const switched = mk("b");
+      const switchedEvents: string[] = [];
+      const switchedRes = await new Orchestrator({
+        registry: new Map([["asker", switched.asker]]),
+        reviewers: [],
+      }).run({
+        repoRoot: repo,
+        prompt: "2+2?",
+        mode: "ask",
+        harnesses: ["asker"],
+        threadAccountBindings: { asker: "b" },
+        onEvent: (event) => switchedEvents.push(event.type),
+      });
+      expect(legacyOutcome(switchedRes)).toBe("success");
+      expect(switched.seen).toEqual(["a"]);
+      expect(switchedEvents).toContain("route.account.lane_switch");
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it("an EXPLICIT pin never rotates on a typed vendor limit — strict, the attempt fails with its evidence (D-U6)", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-pin-strict-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(
+      join(configDir, "config.yaml"),
+      [
+        "credential_profiles:",
+        "  - profile_id: a",
+        "    harness_id: limited",
+        "    display_name: A",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "profile-a")}'`,
+        "  - profile_id: c",
+        "    harness_id: limited",
+        "    display_name: C",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "profile-c")}'`,
+        "harnesses:",
+        "  limited:",
+        "    profile_policy:",
+        "      limit_action: rotate",
+        "",
+      ].join("\n"),
+    );
+    try {
+      const spawns: Array<string | null> = [];
+      const adapter: HarnessAdapter = {
+        id: "limited",
+        async discover() {
+          return HarnessManifest.parse({
+            id: "limited",
+            display_name: "limited",
+            kind: "local_cli",
+            provider_family: "local",
+            capabilities: { implement: true },
+            access_profiles_supported: ["workspace_write"],
+          });
+        },
+        async doctor() {
+          return ConformanceReport.parse({
+            harness_id: "limited",
+            status: "ok",
+            enabled_intents: ["implement"],
+          });
+        },
+        async probeCredentialProfile(profile) {
+          return {
+            profile_id: profile.profile_id,
+            harness_id: "limited",
+            availability: "available",
+            verification: "passed",
+            verification_source: "local_store",
+            detail: "fixture profile verified",
+            last_verified_at: new Date().toISOString(),
+          };
+        },
+        async *run(spec) {
+          const ts = new Date().toISOString();
+          spawns.push(spec.credential_profile?.profile_id ?? null);
+          yield { type: "started", session_id: spec.session_id, ts };
+          yield {
+            type: "status",
+            session_id: spec.session_id,
+            ts,
+            text: "api_retry: rate limited",
+            status: { kind: "api_retry", error_category: "rate_limit" },
+            rate_limit: { resets_at: null, retry_delay_ms: 60_000 },
+          };
+          yield { type: "error", session_id: spec.session_id, ts, error: "vendor rate limit" };
+          yield { type: "completed", session_id: spec.session_id, ts };
+        },
+      };
+      const events: string[] = [];
+      const res = await new Orchestrator({
+        registry: new Map([["limited", adapter]]),
+        reviewers: [],
+      }).run({
+        repoRoot: repo,
+        prompt: "do it",
+        mode: "agent",
+        harnesses: ["limited"],
+        n: 1,
+        credentialProfileId: "a",
+        onEvent: (event) => events.push(event.type),
+      });
+      // The pinned account hit its vendor limit: no silent rotation onto "c",
+      // and the attempt terminalizes TYPED (`subscription_window_exhausted`)
+      // instead of burning same-profile transient retries on the refused
+      // subject (D-U6 strict pin + the A5 ordering, preserved for pins).
+      expect(legacyOutcome(res)).toBe("failed");
+      expect(spawns).toEqual(["a"]);
+      expect(events).not.toContain("route.profile.rotated");
+      expect(events).not.toContain("route.transient.retry_scheduled");
+      const failure = new ArtifactStore(repo).readYaml<Record<string, unknown>>(
+        join(res.runDir, "final", "failure.yaml"),
+      );
+      expect(failure).toMatchObject({
+        category: "harness_unavailable",
+        code: "subscription_window_exhausted",
+      });
     } finally {
       if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
       else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
@@ -3816,6 +4188,337 @@ describe("Orchestrator", () => {
     }
   });
 
+  it.each([
+    { exhausted: "codex" as const, survivor: "claude" as const },
+    { exhausted: "claude" as const, survivor: "codex" as const },
+  ])(
+    "an implicit duplicate profile drops an exhausted $exhausted lane and runs $survivor",
+    async ({ exhausted, survivor }) => {
+      const repo = await initRepo();
+      const configDir = reapMk(join(tmpdir(), "claudexor-duplicate-profile-auto-"));
+      const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+      process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+      writeDuplicateProfileConfig(configDir, "shared");
+      try {
+        const launches: Array<{ harness: string; model: string | null }> = [];
+        const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+        const result = await new Orchestrator({
+          registry: new Map([
+            ["codex", duplicateProfileAskAdapter("codex", launches)],
+            ["claude", duplicateProfileAskAdapter("claude", launches)],
+          ]),
+          reviewers: [],
+          quotaSnapshots: () => [
+            spentProfileSnapshot(exhausted, "shared", "2099-08-24T01:00:00.000Z"),
+          ],
+        }).run({
+          repoRoot: repo,
+          prompt: "inspect the repository",
+          mode: "ask",
+          primaryHarness: "claude",
+          model: "claude-opus-5",
+          credentialProfileId: "shared",
+          onEvent: (event) => events.push(event),
+        });
+
+        expect(legacyOutcome(result), result.summary).toBe("success");
+        expect(launches).toEqual([
+          { harness: survivor, model: survivor === "claude" ? "claude-opus-5" : null },
+        ]);
+        const degraded = events.find((event) => event.type === "route.pool.degraded");
+        expect(degraded?.payload).toMatchObject({
+          effective_harnesses: [survivor],
+          dropped_lanes: [expect.objectContaining({ harness_id: exhausted, stage: "credential" })],
+        });
+        const task = new ArtifactStore(repo).readYaml<{ routing_models: Record<string, string> }>(
+          join(result.runDir, "context", "task.yaml"),
+        );
+        expect(task?.routing_models).toEqual({ claude: "claude-opus-5" });
+        const divergence = events.find((event) => event.type === "route.primary.diverged");
+        if (exhausted === "claude") {
+          expect(divergence?.payload).toMatchObject({
+            requested: "claude",
+            effective: "codex",
+            reason: "quota_exhausted",
+          });
+        } else {
+          expect(divergence).toBeUndefined();
+        }
+      } finally {
+        if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+        else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+      }
+    },
+  );
+
+  it("an implicit duplicate profile preserves the primary typed refusal when every lane is exhausted", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-duplicate-profile-empty-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeDuplicateProfileConfig(configDir, "shared");
+    try {
+      const launches: Array<{ harness: string; model: string | null }> = [];
+      const claudeReset = "2099-08-24T02:00:00.000Z";
+      const result = await new Orchestrator({
+        registry: new Map([
+          ["codex", duplicateProfileAskAdapter("codex", launches)],
+          ["claude", duplicateProfileAskAdapter("claude", launches)],
+        ]),
+        reviewers: [],
+        quotaSnapshots: () => [
+          spentProfileSnapshot("codex", "shared", "2099-08-24T01:00:00.000Z"),
+          spentProfileSnapshot("claude", "shared", claudeReset),
+        ],
+      }).run({
+        repoRoot: repo,
+        prompt: "inspect the repository",
+        mode: "ask",
+        primaryHarness: "claude",
+        model: "claude-opus-5",
+        credentialProfileId: "shared",
+      });
+
+      expect(legacyOutcome(result)).toBe("failed");
+      expect(launches).toEqual([]);
+      const failure = new ArtifactStore(repo).readYaml<Record<string, unknown>>(
+        join(result.runDir, "final", "failure.yaml"),
+      );
+      expect(failure).toMatchObject({
+        category: "harness_unavailable",
+        code: "subscription_window_exhausted",
+        resetsAt: claudeReset,
+      });
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it("preserves the primary quota refusal when fallback policy removes the last sibling", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-duplicate-profile-policy-empty-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(
+      join(configDir, "config.yaml"),
+      [
+        "routing:",
+        "  paid_fallback: never",
+        "credential_profiles:",
+        "  - profile_id: shared",
+        "    harness_id: codex",
+        "    display_name: Codex shared",
+        "    credential_kind: api_key",
+        "    secret_ref: 'openai:shared'",
+        "  - profile_id: shared",
+        "    harness_id: claude",
+        "    display_name: Claude shared",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "claude-home")}'`,
+        "",
+      ].join("\n"),
+    );
+    try {
+      const launches: Array<{ harness: string; model: string | null }> = [];
+      const resetsAt = "2099-08-24T02:30:00.000Z";
+      const result = await new Orchestrator({
+        registry: new Map([
+          ["codex", duplicateProfileAskAdapter("codex", launches)],
+          ["claude", duplicateProfileAskAdapter("claude", launches)],
+        ]),
+        reviewers: [],
+        quotaSnapshots: () => [spentProfileSnapshot("claude", "shared", resetsAt)],
+      }).run({
+        repoRoot: repo,
+        prompt: "inspect the repository",
+        mode: "ask",
+        primaryHarness: "claude",
+        model: "claude-opus-5",
+        credentialProfileId: "shared",
+      });
+
+      expect(legacyOutcome(result)).toBe("failed");
+      expect(launches).toEqual([]);
+      const failure = new ArtifactStore(repo).readYaml<Record<string, unknown>>(
+        join(result.runDir, "final", "failure.yaml"),
+      );
+      expect(failure).toMatchObject({
+        category: "harness_unavailable",
+        code: "subscription_window_exhausted",
+        resetsAt,
+      });
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it.each([
+    {
+      label: "unexpected",
+      error: new Error("unexpected credential preflight failure"),
+    },
+    {
+      label: "configuration",
+      error: Object.assign(new Error("bad credential routing configuration"), {
+        category: "config_error",
+      }),
+    },
+  ])("does not degrade a $label preflight error in an implicit pool", async ({ error }) => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-duplicate-profile-error-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeDuplicateProfileConfig(configDir, "shared");
+    try {
+      const launches: Array<{ harness: string; model: string | null }> = [];
+      const orchestrator = new Orchestrator({
+        registry: new Map([
+          ["codex", duplicateProfileAskAdapter("codex", launches)],
+          ["claude", duplicateProfileAskAdapter("claude", launches)],
+        ]),
+        reviewers: [],
+      });
+      const target = orchestrator as unknown as {
+        credentials: {
+          preflightProfile: (...args: unknown[]) => Promise<unknown>;
+        };
+      };
+      const original = target.credentials.preflightProfile.bind(target.credentials);
+      target.credentials.preflightProfile = async (...args: unknown[]) => {
+        if (args[1] === "codex") throw error;
+        return original(...args);
+      };
+
+      const result = await orchestrator.run({
+        repoRoot: repo,
+        prompt: "inspect the repository",
+        mode: "ask",
+        primaryHarness: "claude",
+        model: "claude-opus-5",
+        credentialProfileId: "shared",
+      });
+
+      expect(legacyOutcome(result)).toBe("failed");
+      expect(launches).toEqual([]);
+      expect(readFileSync(join(result.runDir, "final", "failure.yaml"), "utf8")).toContain(
+        error.message,
+      );
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it("an explicit duplicate-profile pool remains strict when one selected lane is exhausted", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-duplicate-profile-explicit-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeDuplicateProfileConfig(configDir, "shared");
+    try {
+      const launches: Array<{ harness: string; model: string | null }> = [];
+      const resetsAt = "2099-08-24T03:00:00.000Z";
+      const result = await new Orchestrator({
+        registry: new Map([
+          ["codex", duplicateProfileAskAdapter("codex", launches)],
+          ["claude", duplicateProfileAskAdapter("claude", launches)],
+        ]),
+        reviewers: [],
+        quotaSnapshots: () => [spentProfileSnapshot("codex", "shared", resetsAt)],
+      }).run({
+        repoRoot: repo,
+        prompt: "inspect the repository",
+        mode: "ask",
+        harnesses: ["claude", "codex"],
+        primaryHarness: "claude",
+        model: "claude-opus-5",
+        credentialProfileId: "shared",
+      });
+
+      expect(legacyOutcome(result)).toBe("failed");
+      expect(launches).toEqual([]);
+      const failure = new ArtifactStore(repo).readYaml<Record<string, unknown>>(
+        join(result.runDir, "final", "failure.yaml"),
+      );
+      expect(failure).toMatchObject({
+        category: "harness_unavailable",
+        code: "subscription_window_exhausted",
+        resetsAt,
+      });
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it("an UNPINNED run routes through an enabled account row when the default doctor is unavailable (row-aware admission)", async () => {
+    // After the cursor host-Keychain retirement the cursor default doctor can
+    // never be OK from rows alone (and a named-rows-only claude/codex install
+    // has a logged-out default store) — admission must overlay row readiness
+    // into the harness status for UNPINNED runs exactly the way explicit pins
+    // already do, for both the auto pool and an explicit --harness lane.
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-row-admission-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    const rowDir = join(configDir, "profiles", "asker-default");
+    mkdirSync(rowDir, { recursive: true });
+    writeFileSync(
+      join(configDir, "config.yaml"),
+      [
+        "credential_profiles:",
+        "  - profile_id: asker-default",
+        "    harness_id: asker",
+        "    display_name: Default row",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${rowDir}'`,
+        "",
+      ].join("\n"),
+    );
+    try {
+      const answered: string[] = [];
+      const mkAsker = () => {
+        const adapter = askAdapter("asker", function* (sessionId) {
+          const ts = new Date().toISOString();
+          answered.push("asker");
+          yield { type: "started", session_id: sessionId, ts };
+          yield { type: "message", session_id: sessionId, ts, text: "4" };
+          yield { type: "completed", session_id: sessionId, ts };
+        });
+        // The DEFAULT store is unavailable (host logins are not used); the
+        // enabled registry row is signed in and probeable (askAdapter's
+        // probeCredentialProfile answers available/passed).
+        adapter.doctor = async () =>
+          ConformanceReport.parse({
+            harness_id: "asker",
+            status: "unavailable",
+            enabled_intents: [],
+            reasons: ["host CLI logins are not used (unified account model)"],
+          });
+        return adapter;
+      };
+      // Auto pool: no --harness, no pin — the row-bearing harness must join.
+      const auto = await new Orchestrator({
+        registry: new Map([["asker", mkAsker()]]),
+        reviewers: [],
+      }).run({ repoRoot: repo, prompt: "2+2?", mode: "ask" });
+      expect(legacyOutcome(auto), auto.summary).toBe("success");
+      // Explicit --harness, still unpinned: the unavailable default status
+      // must not refuse while an enabled row can serve the lane.
+      const explicit = await new Orchestrator({
+        registry: new Map([["asker", mkAsker()]]),
+        reviewers: [],
+      }).run({ repoRoot: repo, prompt: "2+2?", mode: "ask", harnesses: ["asker"] });
+      expect(legacyOutcome(explicit), explicit.summary).toBe("success");
+      expect(answered).toEqual(["asker", "asker"]);
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
   it("never rotates INTO a profile the vendor already rejected (auth_revoked)", async () => {
     const repo = await initRepo();
     const configDir = reapMk(join(tmpdir(), "claudexor-revoked-rotation-config-"));
@@ -3828,13 +4531,13 @@ describe("Orchestrator", () => {
         "  - profile_id: a",
         "    harness_id: limited",
         "    display_name: A",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:a'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: ${JSON.stringify(join(configDir, "profiles", "limited-a"))}`,
         "  - profile_id: c",
         "    harness_id: limited",
         "    display_name: C",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:c'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: ${JSON.stringify(join(configDir, "profiles", "limited-c"))}`,
         "harnesses:",
         "  limited:",
         "    profile_policy:",
@@ -3912,7 +4615,7 @@ describe("Orchestrator", () => {
           {
             subject: {
               harness: "limited",
-              credential_route: "managed_api_key",
+              credential_route: "vendor_native",
               plan_label: null,
               subject_id: "c",
             },
@@ -3927,7 +4630,6 @@ describe("Orchestrator", () => {
         mode: "agent",
         harnesses: ["limited"],
         n: 1,
-        credentialProfileId: "a",
         onEvent: (event) => events.push(event.type),
       });
       // Rotating into a known-dead credential would spend a whole attempt to
@@ -4141,6 +4843,141 @@ describe("Orchestrator", () => {
     }
   });
 
+  it("keeps an explicitly selected config-dir profile through bounded stale readiness", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-stale-profile-preflight-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(
+      join(configDir, "config.yaml"),
+      [
+        "credential_profiles:",
+        "  - profile_id: work",
+        "    harness_id: asker",
+        "    display_name: Work",
+        "    credential_kind: config_dir_login",
+        "    isolation_locator: /tmp/p/work",
+        "",
+      ].join("\n"),
+    );
+    try {
+      const asker = askAdapter("asker", function* (sessionId) {
+        const ts = new Date().toISOString();
+        yield { type: "started", session_id: sessionId, ts };
+        yield { type: "message", session_id: sessionId, ts, text: "4" };
+        yield { type: "completed", session_id: sessionId, ts };
+      });
+      asker.doctor = async () =>
+        ConformanceReport.parse({
+          harness_id: "asker",
+          status: "unavailable",
+          enabled_intents: [],
+          reasons: ["default store probe failed"],
+        });
+      asker.probeCredentialProfile = async (profile) => ({
+        profile_id: profile.profile_id,
+        harness_id: profile.harness_id,
+        availability: "unknown",
+        verification: "not_run",
+        verification_source: "local_store",
+        stale: true,
+        stale_age_ms: 42,
+        detail: "auth-status probe is stale",
+        last_verified_at: null,
+      });
+      const res = await new Orchestrator({
+        registry: new Map([["asker", asker]]),
+        reviewers: [],
+      }).run({
+        repoRoot: repo,
+        prompt: "2+2?",
+        mode: "ask",
+        harnesses: ["asker"],
+        credentialProfileId: "work",
+      });
+      expect(legacyOutcome(res), res.summary).toBe("success");
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it("does not dispatch a stale explicit pin whose credential ledger is condemned", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-stale-revoked-profile-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(
+      join(configDir, "config.yaml"),
+      [
+        "credential_profiles:",
+        "  - profile_id: work",
+        "    harness_id: asker",
+        "    display_name: Work",
+        "    credential_kind: config_dir_login",
+        "    isolation_locator: /tmp/p/work",
+        "",
+      ].join("\n"),
+    );
+    try {
+      let starts = 0;
+      const asker = askAdapter("asker", function* (sessionId) {
+        starts += 1;
+        const ts = new Date().toISOString();
+        yield { type: "started", session_id: sessionId, ts };
+        yield { type: "message", session_id: sessionId, ts, text: "4" };
+        yield { type: "completed", session_id: sessionId, ts };
+      });
+      asker.doctor = async () =>
+        ConformanceReport.parse({
+          harness_id: "asker",
+          status: "unavailable",
+          enabled_intents: [],
+          reasons: ["default auth-status probe failed"],
+        });
+      asker.probeCredentialProfile = async (profile) => ({
+        profile_id: profile.profile_id,
+        harness_id: profile.harness_id,
+        availability: "unknown",
+        verification: "not_run",
+        verification_source: "local_store",
+        stale: true,
+        stale_age_ms: 42,
+        detail: "auth-status probe is stale",
+        last_verified_at: null,
+      });
+      const res = await new Orchestrator({
+        registry: new Map([["asker", asker]]),
+        reviewers: [],
+        credentialUnusable: () => [
+          {
+            harness_id: "asker",
+            profile_id: "work",
+            model: null,
+            code: "auth_revoked",
+            source: "attempt_stream",
+            detail: "the prior attempt was rejected by the vendor",
+            observed_at: "2026-01-01T00:00:00.000Z",
+            expires_at: "2099-01-01T00:00:00.000Z",
+          },
+        ],
+      }).run({
+        repoRoot: repo,
+        prompt: "2+2?",
+        mode: "ask",
+        harnesses: ["asker"],
+        credentialProfileId: "work",
+      });
+      expect(legacyOutcome(res)).toBe("failed");
+      expect(res.summary).toContain("credential is unusable");
+      expect(res.summary).toContain("auth_revoked");
+      expect(starts).toBe(0);
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
   it("a doctor-OK harness still refuses an unready selected profile before spawn", async () => {
     const repo = await initRepo();
     const configDir = reapMk(join(tmpdir(), "claudexor-profile-preflight-"));
@@ -4193,7 +5030,7 @@ describe("Orchestrator", () => {
     }
   });
 
-  it("reactively rotates in the READ-ONLY lane too (release wave round-13)", async () => {
+  it("reactively rotates in the READ-ONLY lane too (release wave round-13; unpinned pool)", async () => {
     const repo = await initRepo();
     const configDir = reapMk(join(tmpdir(), "claudexor-ro-rotate-config-"));
     const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
@@ -4205,23 +5042,17 @@ describe("Orchestrator", () => {
         "  - profile_id: a",
         "    harness_id: asker",
         "    display_name: A",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:a'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "profile-a")}'`,
         "  - profile_id: b",
         "    harness_id: asker",
         "    display_name: B",
         "    credential_kind: config_dir_login",
         `    isolation_locator: '${join(configDir, "profile-b")}'`,
-        "  - profile_id: c",
-        "    harness_id: asker",
-        "    display_name: C",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:c'",
         "harnesses:",
         "  asker:",
         "    profile_policy:",
         "      limit_action: rotate",
-        "      rotation_eligible: [b, c]",
         "",
       ].join("\n"),
     );
@@ -4273,13 +5104,130 @@ describe("Orchestrator", () => {
         prompt: "2+2?",
         mode: "ask",
         harnesses: ["asker"],
-        credentialProfileId: "a",
         onEvent: (event) => events.push(event.type),
       });
       expect(legacyOutcome(res)).toBe("success");
-      expect(profilesSeen).toEqual(["a", "c"]);
-      expect(probedProfiles).toEqual(["a", "c"]);
+      // Unpinned pool selects "a" (id tie-break); the typed limit rotates the
+      // read-only lane onto the next ready pool sibling. A7's sibling
+      // differential probe of the current subject rides the same decision
+      // (doctor probe only — profilesSeen proves no third attempt ran).
+      expect(profilesSeen).toEqual(["a", "b"]);
+      expect(probedProfiles).toContain("a");
+      expect(probedProfiles).toContain("b");
       expect(events).toContain("route.profile.rotated");
+      expect(events).toContain("route.account.pool_selected");
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it("mid-turn rotation re-keys the LANE home to the rotated row and the next turn resumes its session (INV-137)", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-rot-lane-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(
+      join(configDir, "config.yaml"),
+      [
+        "credential_profiles:",
+        "  - profile_id: a",
+        "    harness_id: asker",
+        "    display_name: A",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "profile-a")}'`,
+        "  - profile_id: b",
+        "    harness_id: asker",
+        "    display_name: B",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "profile-b")}'`,
+        "harnesses:",
+        "  asker:",
+        "    profile_policy:",
+        "      limit_action: rotate",
+        "",
+      ].join("\n"),
+    );
+    try {
+      const spawns: Array<{ profile: string | null; home?: string; resume: string | null }> = [];
+      const asker = askAdapter("asker", function* () {
+        /* replaced below */
+      });
+      asker.run = async function* (spec) {
+        const ts = new Date().toISOString();
+        const profile = spec.credential_profile?.profile_id ?? null;
+        spawns.push({ profile, home: spec.env?.["HOME"], resume: spec.resume_session_id ?? null });
+        if (spawns.length === 1) {
+          yield { type: "started", session_id: spec.session_id, ts } as never;
+          yield {
+            type: "status",
+            session_id: spec.session_id,
+            ts,
+            text: "api_retry: rate limited",
+            status: { kind: "api_retry", error_category: "rate_limit" },
+            rate_limit: { resets_at: null, retry_delay_ms: 60_000 },
+          } as never;
+          yield {
+            type: "error",
+            session_id: spec.session_id,
+            ts,
+            error: "vendor rate limit exhausted",
+          } as never;
+          yield { type: "completed", session_id: spec.session_id, ts } as never;
+          return;
+        }
+        yield {
+          type: "started",
+          session_id: spec.session_id,
+          ts,
+          credential_profile_id: profile,
+          payload: { native_session_id: "nat-rot-1" },
+        } as never;
+        yield { type: "message", session_id: spec.session_id, ts, text: "4" } as never;
+        yield { type: "completed", session_id: spec.session_id, ts } as never;
+      };
+      const store: Record<string, { sessionId: string; profileId: string | null }> = {};
+      const onSessionObserved = (
+        harnessId: string,
+        nativeSessionId: string,
+        _model?: string | null,
+        profileId?: string | null,
+      ) => {
+        store[harnessId] = { sessionId: nativeSessionId, profileId: profileId ?? null };
+      };
+      const orch = () => new Orchestrator({ registry: new Map([["asker", asker]]), reviewers: [] });
+      // Turn 1: the pool selects "a"; its typed vendor limit rotates the turn
+      // onto "b" MID-ATTEMPT.
+      await orch().run({
+        repoRoot: repo,
+        prompt: "q1",
+        mode: "ask",
+        harnesses: ["asker"],
+        threadId: "th-rot",
+        resumeSessions: {},
+        onSessionObserved,
+      });
+      const laneHomeA = join(projectRuntimeDir(repo), "lanes", "th-rot", "asker-a", "home");
+      const laneHomeB = join(projectRuntimeDir(repo), "lanes", "th-rot", "asker-b", "home");
+      expect(spawns[0]).toMatchObject({ profile: "a", home: laneHomeA });
+      // INV-137 (the fix): the rotated attempt spawns in the ROTATED row's
+      // OWN lane home — its recorded native session lands exactly where the
+      // next "b" turn will look, never in the previous row's lane store.
+      expect(spawns[1]).toMatchObject({ profile: "b", home: laneHomeB });
+      expect(store["asker"]).toEqual({ sessionId: "nat-rot-1", profileId: "b" });
+      // Turn 2 (daemon-shaped: binding + resume map point at the rotated
+      // row): the SAME lane home, and --resume reaches the recorded session.
+      await orch().run({
+        repoRoot: repo,
+        prompt: "q2",
+        mode: "ask",
+        harnesses: ["asker"],
+        threadId: "th-rot",
+        threadAccountBindings: { asker: "b" },
+        resumeSessions: { asker: store["asker"] },
+        onSessionObserved,
+      });
+      expect(spawns[2]).toMatchObject({ profile: "b", home: laneHomeB, resume: "nat-rot-1" });
     } finally {
       if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
       else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
@@ -4298,13 +5246,13 @@ describe("Orchestrator", () => {
         "  - profile_id: a",
         "    harness_id: limited",
         "    display_name: A",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:a'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: ${JSON.stringify(join(configDir, "profiles", "limited-a"))}`,
         "  - profile_id: b",
         "    harness_id: limited",
         "    display_name: B",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:b'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: ${JSON.stringify(join(configDir, "profiles", "limited-b"))}`,
         "harnesses:",
         "  limited:",
         "    profile_policy:",
@@ -4376,7 +5324,6 @@ describe("Orchestrator", () => {
         mode: "agent",
         harnesses: ["limited"],
         n: 1,
-        credentialProfileId: "a",
         onEvent: (event) => events.push(event.type),
       });
       expect(legacyOutcome(res)).not.toBe("failed");
@@ -4389,7 +5336,990 @@ describe("Orchestrator", () => {
     }
   });
 
-  it("preflight rotation skips an unready target and spawns the next ready profile", async () => {
+  it("rotates STRUCTURALLY on an untyped pre-progress terminal death (A2, owner 7=A)", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-structural-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(
+      join(configDir, "config.yaml"),
+      [
+        "credential_profiles:",
+        "  - profile_id: a",
+        "    harness_id: limited",
+        "    display_name: A",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: ${JSON.stringify(join(configDir, "profiles", "limited-a"))}`,
+        "  - profile_id: b",
+        "    harness_id: limited",
+        "    display_name: B",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: ${JSON.stringify(join(configDir, "profiles", "limited-b"))}`,
+        "harnesses:",
+        "  limited:",
+        "    profile_policy:",
+        "      limit_action: rotate",
+        "",
+      ].join("\n"),
+    );
+    try {
+      const profilesSeen: Array<string | null> = [];
+      const adapter: HarnessAdapter = {
+        id: "limited",
+        async discover() {
+          return HarnessManifest.parse({
+            id: "limited",
+            display_name: "limited",
+            kind: "local_cli",
+            provider_family: "local",
+            capabilities: { implement: true },
+            access_profiles_supported: ["workspace_write"],
+          });
+        },
+        async doctor() {
+          return ConformanceReport.parse({
+            harness_id: "limited",
+            status: "ok",
+            enabled_intents: ["implement"],
+          });
+        },
+        async probeCredentialProfile(profile) {
+          return {
+            profile_id: profile.profile_id,
+            harness_id: "limited",
+            availability: "available",
+            verification: "passed",
+            verification_source: "local_store",
+            detail: "fixture profile verified",
+            last_verified_at: new Date().toISOString(),
+          };
+        },
+        async *run(spec) {
+          const ts = new Date().toISOString();
+          profilesSeen.push(spec.credential_profile?.profile_id ?? null);
+          yield { type: "started", session_id: spec.session_id, ts };
+          if (profilesSeen.length === 1) {
+            // UNTYPED terminal death before ANY agent output: no rate_limit,
+            // no transient signal — the incident shape (an unclassifiable
+            // vendor refusal / invalid flag / missing binary). Owner 7=A: any
+            // such pre-progress non-transient death tries the pool.
+            yield {
+              type: "error",
+              session_id: spec.session_id,
+              ts,
+              error: "ActionRequiredError: unclassifiable vendor refusal",
+            };
+            yield { type: "completed", session_id: spec.session_id, ts };
+            return;
+          }
+          writeFileSync(join(spec.cwd, "CHANGED.txt"), "made it\n");
+          yield { type: "message", session_id: spec.session_id, ts, text: "Implemented." };
+          yield { type: "completed", session_id: spec.session_id, ts };
+        },
+      };
+      const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+      const res = await new Orchestrator({
+        registry: new Map([["limited", adapter]]),
+        reviewers: [],
+      }).run({
+        repoRoot: repo,
+        prompt: "do it",
+        mode: "agent",
+        harnesses: ["limited"],
+        n: 1,
+        onEvent: (event) =>
+          events.push({ type: event.type, payload: event.payload as Record<string, unknown> }),
+      });
+      expect(legacyOutcome(res)).not.toBe("failed");
+      expect(profilesSeen).toEqual(["a", "b"]);
+      // Honest provenance: the rotation names the STRUCTURAL reason — no
+      // typed vendor limit was observed, so vendor_limit_rejected would lie.
+      const rotated = events.find((e) => e.type === "route.profile.rotated");
+      expect(rotated?.payload["reason"]).toBe("structural_pre_progress_failure");
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it("a tool_call before the death blocks the structural branch (sol amendment: side effects)", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-structural-progress-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(
+      join(configDir, "config.yaml"),
+      [
+        "credential_profiles:",
+        "  - profile_id: a",
+        "    harness_id: limited",
+        "    display_name: A",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: ${JSON.stringify(join(configDir, "profiles", "limited-a"))}`,
+        "  - profile_id: b",
+        "    harness_id: limited",
+        "    display_name: B",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: ${JSON.stringify(join(configDir, "profiles", "limited-b"))}`,
+        "harnesses:",
+        "  limited:",
+        "    profile_policy:",
+        "      limit_action: rotate",
+        "",
+      ].join("\n"),
+    );
+    try {
+      const profilesSeen: Array<string | null> = [];
+      const adapter: HarnessAdapter = {
+        id: "limited",
+        async discover() {
+          return HarnessManifest.parse({
+            id: "limited",
+            display_name: "limited",
+            kind: "local_cli",
+            provider_family: "local",
+            capabilities: { implement: true },
+            access_profiles_supported: ["workspace_write"],
+          });
+        },
+        async doctor() {
+          return ConformanceReport.parse({
+            harness_id: "limited",
+            status: "ok",
+            enabled_intents: ["implement"],
+          });
+        },
+        async probeCredentialProfile(profile) {
+          return {
+            profile_id: profile.profile_id,
+            harness_id: "limited",
+            availability: "available",
+            verification: "passed",
+            verification_source: "local_store",
+            detail: "fixture profile verified",
+            last_verified_at: new Date().toISOString(),
+          };
+        },
+        async *run(spec) {
+          const ts = new Date().toISOString();
+          profilesSeen.push(spec.credential_profile?.profile_id ?? null);
+          yield { type: "started", session_id: spec.session_id, ts };
+          // The agent demonstrably started working (a tool call may already
+          // have external side effects) — then died untyped. The structural
+          // branch must NOT silently replay this under another credential.
+          yield {
+            type: "tool_call",
+            session_id: spec.session_id,
+            ts,
+            tool: { name: "bash", kind: "command" },
+          };
+          yield { type: "error", session_id: spec.session_id, ts, error: "untyped death" };
+          yield { type: "completed", session_id: spec.session_id, ts };
+        },
+      };
+      const events: string[] = [];
+      const res = await new Orchestrator({
+        registry: new Map([["limited", adapter]]),
+        reviewers: [],
+      }).run({
+        repoRoot: repo,
+        prompt: "do it",
+        mode: "agent",
+        harnesses: ["limited"],
+        n: 1,
+        onEvent: (event) => events.push(event.type),
+      });
+      expect(legacyOutcome(res)).toBe("failed");
+      expect(profilesSeen).toEqual(["a"]);
+      expect(events).not.toContain("route.profile.rotated");
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it("REGRESSION (final-review fix): the claude org-disabled incident — message-first prose — rotates STRUCTURALLY to a sibling subscription profile; answer.md never carries the prose", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-org-disabled-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(
+      join(configDir, "config.yaml"),
+      [
+        "credential_profiles:",
+        "  - profile_id: a",
+        "    harness_id: limited",
+        "    display_name: A",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "profile-a")}'`,
+        "  - profile_id: b",
+        "    harness_id: limited",
+        "    display_name: B",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "profile-b")}'`,
+        "harnesses:",
+        "  limited:",
+        "    profile_policy:",
+        "      limit_action: rotate",
+        "",
+      ].join("\n"),
+    );
+    // Replay the COMMITTED incident fixture (live 2026-08-17, run-ea06645118d7):
+    // the entitlement prose arrives as a mid-stream ASSISTANT MESSAGE, again on
+    // the is_error result, then exit 1 — no api_retry frame, no typed
+    // rate_limit. Frames map onto the claude parser's pinned contract
+    // (harness-claude signals.test.ts): init → started; the assistant message
+    // KEEPS flowing as a `message` event (it is model output); the non-success
+    // result rides STATUS events (typed oauth_org_not_allowed + the prose as
+    // non_success_result, never a message); the shared runloop folds exit 1
+    // into a terminal error event.
+    const fixtureFrames = readFileSync(
+      fileURLToPath(
+        new URL(
+          "../../harness-claude/fixtures/signals/org-disabled-subscription.jsonl",
+          import.meta.url,
+        ),
+      ),
+      "utf8",
+    )
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const orgDisabledEvents = (sessionId: string): Array<Record<string, unknown>> => {
+      const ts = new Date().toISOString();
+      const out: Array<Record<string, unknown>> = [];
+      for (const frame of fixtureFrames) {
+        if (frame["type"] === "system") out.push({ type: "started", session_id: sessionId, ts });
+        if (frame["type"] === "assistant") {
+          const content = (frame["message"] as { content: Array<{ text?: string }> }).content;
+          out.push({ type: "message", session_id: sessionId, ts, text: content[0]?.text ?? "" });
+        }
+        if (frame["type"] === "result") {
+          const prose = String(frame["result"] ?? "");
+          out.push({
+            type: "status",
+            session_id: sessionId,
+            ts,
+            text: `entitlement: ${prose}`,
+            status: { kind: "api_retry", error_category: "oauth_org_not_allowed" },
+            payload: { entitlement_denied: true },
+          });
+          out.push({
+            type: "status",
+            session_id: sessionId,
+            ts,
+            text: prose,
+            payload: { non_success_result: true },
+          });
+        }
+      }
+      out.push({ type: "error", session_id: sessionId, ts, error: "claude exited with code 1" });
+      return out;
+    };
+    // Guard against fixture drift: the replay must still be the incident shape.
+    expect(fixtureFrames.some((f) => f["type"] === "assistant")).toBe(true);
+    try {
+      const profilesSeen: Array<string | null> = [];
+      const adapter: HarnessAdapter = {
+        id: "limited",
+        async discover() {
+          return HarnessManifest.parse({
+            id: "limited",
+            display_name: "limited",
+            kind: "local_cli",
+            provider_family: "local",
+            capabilities: { implement: true },
+            access_profiles_supported: ["workspace_write"],
+          });
+        },
+        async doctor() {
+          return ConformanceReport.parse({
+            harness_id: "limited",
+            status: "ok",
+            enabled_intents: ["implement"],
+          });
+        },
+        async probeCredentialProfile(profile) {
+          return {
+            profile_id: profile.profile_id,
+            harness_id: "limited",
+            availability: "available",
+            verification: "passed",
+            verification_source: "local_store",
+            detail: "fixture profile verified",
+            last_verified_at: new Date().toISOString(),
+          };
+        },
+        async *run(spec) {
+          const ts = new Date().toISOString();
+          profilesSeen.push(spec.credential_profile?.profile_id ?? null);
+          if (profilesSeen.length === 1) {
+            for (const ev of orgDisabledEvents(spec.session_id)) yield ev as HarnessEvent;
+            yield { type: "completed", session_id: spec.session_id, ts };
+            return;
+          }
+          yield { type: "started", session_id: spec.session_id, ts };
+          writeFileSync(join(spec.cwd, "CHANGED.txt"), "made it\n");
+          yield { type: "message", session_id: spec.session_id, ts, text: "Implemented." };
+          yield { type: "completed", session_id: spec.session_id, ts };
+        },
+      };
+      const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+      const res = await new Orchestrator({
+        registry: new Map([["limited", adapter]]),
+        reviewers: [],
+      }).run({
+        repoRoot: repo,
+        prompt: "do it",
+        mode: "agent",
+        harnesses: ["limited"],
+        n: 1,
+        // UNPINNED (unified account model, D-U6: an explicit pin never
+        // rotates): the quota-aware pool deterministically selects "a" first
+        // (tie-break ascending), and the reactive lane owns the failover.
+        onEvent: (event) =>
+          events.push({ type: event.type, payload: event.payload as Record<string, unknown> }),
+      });
+      // The incident class is CLOSED only when the sibling actually spawns:
+      // before this fix the mid-stream prose filled the assembly, the raw
+      // in-loop emptiness read "deliverable present", and the structural
+      // branch never fired.
+      expect(legacyOutcome(res)).not.toBe("failed");
+      expect(profilesSeen).toEqual(["a", "b"]);
+      const rotated = events.find((e) => e.type === "route.profile.rotated");
+      expect(rotated?.payload["reason"]).toBe("structural_pre_progress_failure");
+      const answer = readFileSync(join(res.runDir, "final", "answer.md"), "utf8");
+      expect(answer).toContain("Implemented.");
+      expect(answer).not.toContain("organization has disabled");
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it("per-try markers (final-review fix): try-A progress never suppresses try-B's structural rotation", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-per-try-markers-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(
+      join(configDir, "config.yaml"),
+      [
+        "credential_profiles:",
+        // SUBSCRIPTION rows (unified account model): the quota-aware pool
+        // holds subscription kinds only — an api_key row is a paid route,
+        // never silently rotated — and pool tie-break starts on "a".
+        ...["a", "b", "c"].flatMap((id) => [
+          `  - profile_id: ${id}`,
+          "    harness_id: limited",
+          `    display_name: ${id.toUpperCase()}`,
+          "    credential_kind: config_dir_login",
+          `    isolation_locator: ${JSON.stringify(join(configDir, "profiles", `limited-${id}`))}`,
+        ]),
+        "harnesses:",
+        "  limited:",
+        "    profile_policy:",
+        "      limit_action: rotate",
+        "",
+      ].join("\n"),
+    );
+    try {
+      const profilesSeen: Array<string | null> = [];
+      const adapter: HarnessAdapter = {
+        id: "limited",
+        async discover() {
+          return HarnessManifest.parse({
+            id: "limited",
+            display_name: "limited",
+            kind: "local_cli",
+            provider_family: "local",
+            capabilities: { implement: true },
+            access_profiles_supported: ["workspace_write"],
+          });
+        },
+        async doctor() {
+          return ConformanceReport.parse({
+            harness_id: "limited",
+            status: "ok",
+            enabled_intents: ["implement"],
+          });
+        },
+        async probeCredentialProfile(profile) {
+          return {
+            profile_id: profile.profile_id,
+            harness_id: "limited",
+            availability: "available",
+            verification: "passed",
+            verification_source: "local_store",
+            detail: "fixture profile verified",
+            last_verified_at: new Date().toISOString(),
+          };
+        },
+        async *run(spec) {
+          const ts = new Date().toISOString();
+          profilesSeen.push(spec.credential_profile?.profile_id ?? null);
+          yield { type: "started", session_id: spec.session_id, ts };
+          if (profilesSeen.length === 1) {
+            // Try A: the agent demonstrably THINKS, then hits a TYPED limit —
+            // the typed branch rotates regardless of progress (W5.4 canon).
+            yield { type: "thinking", session_id: spec.session_id, ts, text: "assessing repo" };
+            yield {
+              type: "status",
+              session_id: spec.session_id,
+              ts,
+              text: "api_retry: rate limited",
+              status: { kind: "api_retry", error_category: "rate_limit" },
+              rate_limit: { resets_at: null, retry_delay_ms: 60_000 },
+            };
+            yield {
+              type: "error",
+              session_id: spec.session_id,
+              ts,
+              error: "vendor rate limit exhausted",
+            };
+            yield { type: "completed", session_id: spec.session_id, ts };
+            return;
+          }
+          if (profilesSeen.length === 2) {
+            // Try B: untyped pre-progress terminal death. Cumulative markers
+            // would still carry try-A's thinking and suppress the structural
+            // branch — per-try markers must let B rotate to C.
+            yield { type: "error", session_id: spec.session_id, ts, error: "untyped death" };
+            yield { type: "completed", session_id: spec.session_id, ts };
+            return;
+          }
+          writeFileSync(join(spec.cwd, "CHANGED.txt"), "made it\n");
+          yield { type: "message", session_id: spec.session_id, ts, text: "Implemented." };
+          yield { type: "completed", session_id: spec.session_id, ts };
+        },
+      };
+      const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+      const res = await new Orchestrator({
+        registry: new Map([["limited", adapter]]),
+        reviewers: [],
+      }).run({
+        repoRoot: repo,
+        prompt: "do it",
+        mode: "agent",
+        harnesses: ["limited"],
+        n: 1,
+        // UNPINNED (D-U6: an explicit pin never rotates): the pool starts on
+        // "a" by deterministic tie-break; reactive rotation walks b then c.
+        onEvent: (event) =>
+          events.push({ type: event.type, payload: event.payload as Record<string, unknown> }),
+      });
+      expect(legacyOutcome(res)).not.toBe("failed");
+      expect(profilesSeen).toEqual(["a", "b", "c"]);
+      expect(
+        events.filter((e) => e.type === "route.profile.rotated").map((e) => e.payload["reason"]),
+      ).toEqual(["vendor_limit_rejected", "structural_pre_progress_failure"]);
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it("a typed limit whose vendor prose rides a STATUS event still rotates, and the prose never lands in answer.md (A3+A2)", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-limit-prose-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(
+      join(configDir, "config.yaml"),
+      [
+        "credential_profiles:",
+        "  - profile_id: a",
+        "    harness_id: asker",
+        "    display_name: A",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: ${JSON.stringify(join(configDir, "profiles", "asker-a"))}`,
+        "  - profile_id: b",
+        "    harness_id: asker",
+        "    display_name: B",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: ${JSON.stringify(join(configDir, "profiles", "asker-b"))}`,
+        "harnesses:",
+        "  asker:",
+        "    profile_policy:",
+        "      limit_action: rotate",
+        "",
+      ].join("\n"),
+    );
+    try {
+      const profilesSeen: Array<string | null> = [];
+      // The post-A3 adapter shape for a limit-killed run: the vendor prose is
+      // a STATUS event (never a message), the limit is a TYPED rate_limit on
+      // the terminal error. Rotation must fire — before A3 the same prose
+      // arrived as a message, became "the deliverable", and blocked it.
+      const asker = askAdapter("asker", function* (sessionId) {
+        const ts = new Date().toISOString();
+        yield { type: "started", session_id: sessionId, ts };
+        if (profilesSeen.length === 1) {
+          yield {
+            type: "status",
+            session_id: sessionId,
+            ts,
+            text: "You've hit your usage limit. Your usage limits will reset on 9/12/2026.",
+            payload: { non_success_result: true },
+          };
+          yield {
+            type: "error",
+            session_id: sessionId,
+            ts,
+            error: "result subtype: error",
+            status: { kind: "api_retry", error_category: "rate_limit" },
+            rate_limit: { resets_at: null, retry_delay_ms: 60_000 },
+          };
+          yield { type: "completed", session_id: sessionId, ts };
+          return;
+        }
+        yield { type: "message", session_id: sessionId, ts, text: "4" };
+        yield { type: "completed", session_id: sessionId, ts };
+      });
+      const askerRun = asker.run.bind(asker);
+      asker.run = (spec) => {
+        profilesSeen.push(spec.credential_profile?.profile_id ?? null);
+        return askerRun(spec);
+      };
+      const events: string[] = [];
+      const res = await new Orchestrator({
+        registry: new Map([["asker", asker]]),
+        reviewers: [],
+      }).run({
+        repoRoot: repo,
+        prompt: "2+2?",
+        mode: "ask",
+        harnesses: ["asker"],
+        onEvent: (event) => events.push(event.type),
+      });
+      expect(legacyOutcome(res)).toBe("success");
+      expect(profilesSeen).toEqual(["a", "b"]);
+      expect(events).toContain("route.profile.rotated");
+      const answer = readFileSync(join(res.runDir, "final", "answer.md"), "utf8");
+      expect(answer).toContain("4");
+      expect(answer).not.toContain("usage limit");
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it("rotates STRUCTURALLY in the READ-ONLY lane too (A2 lane parity)", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-ro-structural-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(
+      join(configDir, "config.yaml"),
+      [
+        "credential_profiles:",
+        "  - profile_id: a",
+        "    harness_id: asker",
+        "    display_name: A",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: ${JSON.stringify(join(configDir, "profiles", "asker-a"))}`,
+        "  - profile_id: b",
+        "    harness_id: asker",
+        "    display_name: B",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: ${JSON.stringify(join(configDir, "profiles", "asker-b"))}`,
+        "harnesses:",
+        "  asker:",
+        "    profile_policy:",
+        "      limit_action: rotate",
+        "",
+      ].join("\n"),
+    );
+    try {
+      const profilesSeen: Array<string | null> = [];
+      const asker = askAdapter("asker", function* (sessionId) {
+        const ts = new Date().toISOString();
+        yield { type: "started", session_id: sessionId, ts };
+        if (profilesSeen.length === 1) {
+          // Untyped pre-progress terminal death, read-only lane.
+          yield { type: "error", session_id: sessionId, ts, error: "untyped vendor refusal" };
+          yield { type: "completed", session_id: sessionId, ts };
+          return;
+        }
+        yield { type: "message", session_id: sessionId, ts, text: "4" };
+        yield { type: "completed", session_id: sessionId, ts };
+      });
+      const askerRun = asker.run.bind(asker);
+      asker.run = (spec) => {
+        profilesSeen.push(spec.credential_profile?.profile_id ?? null);
+        return askerRun(spec);
+      };
+      const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+      const res = await new Orchestrator({
+        registry: new Map([["asker", asker]]),
+        reviewers: [],
+      }).run({
+        repoRoot: repo,
+        prompt: "2+2?",
+        mode: "ask",
+        harnesses: ["asker"],
+        onEvent: (event) =>
+          events.push({ type: event.type, payload: event.payload as Record<string, unknown> }),
+      });
+      expect(legacyOutcome(res)).toBe("success");
+      expect(profilesSeen).toEqual(["a", "b"]);
+      const rotated = events.find((e) => e.type === "route.profile.rotated");
+      expect(rotated?.payload["reason"]).toBe("structural_pre_progress_failure");
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  // A5: one config shape shared by the pool-exhausted terminal tests — a
+  // single rotate-policy profile, so any rotation-eligible failure exhausts
+  // the pool immediately.
+  const soloRotateConfig = (harness: string) =>
+    [
+      "credential_profiles:",
+      "  - profile_id: solo",
+      `    harness_id: ${harness}`,
+      "    display_name: Solo",
+      "    credential_kind: config_dir_login",
+      `    isolation_locator: ${JSON.stringify(join(tmpdir(), "claudexor-solo-locator", harness))}`,
+      "harnesses:",
+      `  ${harness}:`,
+      "    profile_policy:",
+      "      limit_action: rotate",
+      "",
+    ].join("\n");
+
+  const A5_RESETS = "2099-01-01T00:00:00.000Z";
+
+  /** Implement-capable adapter that hits a typed (or untyped) terminal limit
+   * on EVERY spawn — a transient retry or a rotation would grow `spawns`. */
+  const limitedSoloAdapter = (spawns: Array<string | null>, typed: boolean): HarnessAdapter => ({
+    id: "limited",
+    async discover() {
+      return HarnessManifest.parse({
+        id: "limited",
+        display_name: "limited",
+        kind: "local_cli",
+        provider_family: "local",
+        capabilities: { implement: true },
+        access_profiles_supported: ["workspace_write"],
+      });
+    },
+    async doctor() {
+      return ConformanceReport.parse({
+        harness_id: "limited",
+        status: "ok",
+        enabled_intents: ["implement"],
+      });
+    },
+    async probeCredentialProfile(profile) {
+      return {
+        profile_id: profile.profile_id,
+        harness_id: "limited",
+        availability: "available",
+        verification: "passed",
+        verification_source: "local_store",
+        detail: "fixture profile verified",
+        last_verified_at: new Date().toISOString(),
+      };
+    },
+    async *run(spec) {
+      const ts = new Date().toISOString();
+      spawns.push(spec.credential_profile?.profile_id ?? null);
+      yield { type: "started", session_id: spec.session_id, ts };
+      yield {
+        type: "error",
+        session_id: spec.session_id,
+        ts,
+        error: typed ? "vendor rate limit exhausted" : "untyped vendor refusal",
+        ...(typed
+          ? {
+              status: { kind: "api_retry", error_category: "rate_limit" },
+              rate_limit: { resets_at: A5_RESETS, retry_delay_ms: 60_000 },
+            }
+          : {}),
+      };
+      yield { type: "completed", session_id: spec.session_id, ts };
+    },
+  });
+
+  it("a typed limit with an EXHAUSTED pool terminalizes TYPED before any transient retry (A5)", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-pool-exhausted-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(join(configDir, "config.yaml"), soloRotateConfig("limited"));
+    try {
+      const spawns: Array<string | null> = [];
+      const events: string[] = [];
+      const res = await new Orchestrator({
+        registry: new Map([["limited", limitedSoloAdapter(spawns, true)]]),
+        reviewers: [],
+      }).run({
+        repoRoot: repo,
+        prompt: "do it",
+        mode: "agent",
+        harnesses: ["limited"],
+        n: 1,
+        onEvent: (event) => events.push(event.type),
+      });
+      // The typed limit is retryable-transient by class — without the A5
+      // ordering the gate would burn maxRetries same-profile spawns on the
+      // subject the vendor just refused.
+      expect(spawns).toEqual(["solo"]);
+      expect(events).toContain("route.profile.rotation_exhausted");
+      expect(events).not.toContain("route.transient.retry_scheduled");
+      expect(events).not.toContain("route.transient.exhausted");
+      expect(legacyOutcome(res)).toBe("failed");
+      const failure = new ArtifactStore(repo).readYaml<Record<string, unknown>>(
+        join(res.runDir, "final", "failure.yaml"),
+      );
+      expect(failure).toMatchObject({
+        category: "harness_unavailable",
+        code: "credential_pool_exhausted",
+        // The stream's own typed reset is the subject's evidence in the fold.
+        resetsAt: A5_RESETS,
+      });
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it("a STRUCTURAL death over an EVIDENCE-FREE pool keeps its TRUE failure (evidence-gated terminal)", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-pool-structural-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(join(configDir, "config.yaml"), soloRotateConfig("limited"));
+    try {
+      const spawns: Array<string | null> = [];
+      const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+      const res = await new Orchestrator({
+        registry: new Map([["limited", limitedSoloAdapter(spawns, false)]]),
+        reviewers: [],
+      }).run({
+        repoRoot: repo,
+        prompt: "do it",
+        mode: "agent",
+        harnesses: ["limited"],
+        n: 1,
+        onEvent: (event) =>
+          events.push({ type: event.type, payload: event.payload as Record<string, unknown> }),
+      });
+      expect(spawns).toEqual(["solo"]);
+      // Rotation WAS consulted and had nowhere to go — the provenance event
+      // stays...
+      const exhausted = events.find((e) => e.type === "route.profile.rotation_exhausted");
+      expect(exhausted?.payload["reason"]).toBe("structural_pre_progress_failure");
+      expect(legacyOutcome(res)).toBe("failed");
+      const failure = new ArtifactStore(repo).readYaml<Record<string, unknown>>(
+        join(res.runDir, "final", "failure.yaml"),
+      );
+      // ...but the TERMINAL is evidence-gated: neither the untyped death nor
+      // any candidate row carries limit/unusable evidence, so claiming
+      // "credential pool exhausted" would relabel an ordinary structural
+      // failure as a credential refusal. The true failure survives instead.
+      expect(failure?.["code"]).not.toBe("credential_pool_exhausted");
+      expect(String(failure?.["safeMessage"] ?? "")).toContain("untyped vendor refusal");
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it("a VANILLA user's untyped pre-progress death is never pool-coded (empty registry, auto default)", async () => {
+    const repo = await initRepo();
+    // NO config at all: empty profile registry, absent limit_action (= auto).
+    const configDir = reapMk(join(tmpdir(), "claudexor-pool-vanilla-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    try {
+      const spawns: Array<string | null> = [];
+      const adapter = limitedSoloAdapter(spawns, false);
+      // A subscription-shaped default route (native session available): the
+      // A6 auto default resolves to `rotate`, so the rotation decision RUNS —
+      // and must still fail as-is over the empty, evidence-free pool.
+      adapter.doctor = async () =>
+        ConformanceReport.parse({
+          harness_id: "limited",
+          status: "ok",
+          enabled_intents: ["implement"],
+          auth_sources: [
+            { source: "native_session", availability: "available", verification: "passed" },
+          ],
+        });
+      const events: string[] = [];
+      const res = await new Orchestrator({
+        registry: new Map([["limited", adapter]]),
+        reviewers: [],
+      }).run({
+        repoRoot: repo,
+        prompt: "do it",
+        mode: "agent",
+        harnesses: ["limited"],
+        n: 1,
+        onEvent: (event) => events.push(event.type),
+      });
+      expect(spawns).toEqual([null]);
+      // The rotation decision DID run and found the pool empty — the gate we
+      // are pinning is past that point, not an earlier ineligibility exit.
+      expect(events).toContain("route.profile.rotation_exhausted");
+      expect(legacyOutcome(res)).toBe("failed");
+      const failure = new ArtifactStore(repo).readYaml<Record<string, unknown>>(
+        join(res.runDir, "final", "failure.yaml"),
+      );
+      expect(failure?.["code"]).not.toBe("credential_pool_exhausted");
+      expect(String(failure?.["safeMessage"] ?? "")).toContain("untyped vendor refusal");
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it("the READ-ONLY lane's pool-exhausted terminal is typed too (A5 lane parity)", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-ro-pool-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(join(configDir, "config.yaml"), soloRotateConfig("asker"));
+    try {
+      const profilesSeen: Array<string | null> = [];
+      const asker = askAdapter("asker", function* (sessionId) {
+        const ts = new Date().toISOString();
+        yield { type: "started", session_id: sessionId, ts };
+        yield {
+          type: "error",
+          session_id: sessionId,
+          ts,
+          error: "vendor rate limit exhausted",
+          status: { kind: "api_retry", error_category: "rate_limit" },
+          rate_limit: { resets_at: A5_RESETS, retry_delay_ms: 60_000 },
+        };
+        yield { type: "completed", session_id: sessionId, ts };
+      });
+      const askerRun = asker.run.bind(asker);
+      asker.run = (spec) => {
+        profilesSeen.push(spec.credential_profile?.profile_id ?? null);
+        return askerRun(spec);
+      };
+      const res = await new Orchestrator({
+        registry: new Map([["asker", asker]]),
+        reviewers: [],
+      }).run({
+        repoRoot: repo,
+        prompt: "2+2?",
+        mode: "ask",
+        harnesses: ["asker"],
+      });
+      expect(profilesSeen).toEqual(["solo"]);
+      expect(legacyOutcome(res)).toBe("failed");
+      const failure = new ArtifactStore(repo).readYaml<Record<string, unknown>>(
+        join(res.runDir, "final", "failure.yaml"),
+      );
+      expect(failure).toMatchObject({
+        category: "harness_unavailable",
+        code: "credential_pool_exhausted",
+        resetsAt: A5_RESETS,
+      });
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it("the CONVERGENCE last-result terminal lifts the typed pool refusal (A5)", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-conv-pool-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(join(configDir, "config.yaml"), soloRotateConfig("limited"));
+    try {
+      const spawns: Array<string | null> = [];
+      const res = await new Orchestrator({
+        registry: new Map([["limited", limitedSoloAdapter(spawns, true)]]),
+        reviewers: reviewers(),
+      }).run({
+        repoRoot: repo,
+        prompt: "do it",
+        mode: "agent",
+        harnesses: ["limited"],
+        attempts: 2,
+      });
+      // One spawn per convergence attempt — never transient same-profile burns.
+      expect(spawns).toEqual(["solo", "solo"]);
+      expect(res.lifecycle).toBe("failed");
+      const failure = new ArtifactStore(repo).readYaml<Record<string, unknown>>(
+        join(res.runDir, "final", "failure.yaml"),
+      );
+      expect(failure).toMatchObject({
+        category: "harness_unavailable",
+        code: "credential_pool_exhausted",
+        resetsAt: A5_RESETS,
+      });
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it("A6 auto default: with NO profile_policy configured, a SUBSCRIPTION subject rotates and the A5 pool terminal is reachable by default users", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-auto-default-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    // The config has NO harnesses/profile_policy section at all — the stored
+    // default is `auto` — and the pinned subject is a subscription
+    // (config_dir_login) identity, so auto resolves to rotate.
+    writeFileSync(
+      join(configDir, "config.yaml"),
+      [
+        "credential_profiles:",
+        "  - profile_id: solo",
+        "    harness_id: limited",
+        "    display_name: Solo",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: ${JSON.stringify(join(configDir, "profiles", "limited-solo"))}`,
+        "",
+      ].join("\n"),
+    );
+    try {
+      const spawns: Array<string | null> = [];
+      const events: string[] = [];
+      const res = await new Orchestrator({
+        registry: new Map([["limited", limitedSoloAdapter(spawns, true)]]),
+        reviewers: [],
+      }).run({
+        repoRoot: repo,
+        prompt: "do it",
+        mode: "agent",
+        harnesses: ["limited"],
+        n: 1,
+        onEvent: (event) => events.push(event.type),
+      });
+      // Rotation engaged WITHOUT any configuration: the typed limit on the
+      // solo subscription pool terminalizes typed instead of burning
+      // same-profile transient retries — the default-user path.
+      expect(spawns).toEqual(["solo"]);
+      expect(events).toContain("route.profile.rotation_exhausted");
+      expect(events).not.toContain("route.transient.retry_scheduled");
+      expect(events).not.toContain("route.transient.exhausted");
+      expect(legacyOutcome(res)).toBe("failed");
+      const failure = new ArtifactStore(repo).readYaml<Record<string, unknown>>(
+        join(res.runDir, "final", "failure.yaml"),
+      );
+      expect(failure).toMatchObject({
+        category: "harness_unavailable",
+        code: "credential_pool_exhausted",
+        resetsAt: A5_RESETS,
+      });
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it("the unpinned pool skips exhausted and unready rows and spawns the best ready sibling; a PIN refuses typed (D-U1/D-U6)", async () => {
     const repo = await initRepo();
     const configDir = reapMk(join(tmpdir(), "claudexor-rotate-config-"));
     const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
@@ -4401,28 +6331,27 @@ describe("Orchestrator", () => {
         "  - profile_id: a",
         "    harness_id: asker",
         "    display_name: A",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:a'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "profile-a")}'`,
         "  - profile_id: b",
         "    harness_id: asker",
         "    display_name: B",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:b'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "profile-b")}'`,
         "  - profile_id: c",
         "    harness_id: asker",
         "    display_name: C",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:c'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "profile-c")}'`,
         "  - profile_id: d",
         "    harness_id: asker",
         "    display_name: D",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:d'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "profile-d")}'`,
         "harnesses:",
         "  asker:",
         "    profile_policy:",
         "      limit_action: rotate",
-        "      rotation_eligible: [b, c]",
         "",
       ].join("\n"),
     );
@@ -4452,46 +6381,72 @@ describe("Orchestrator", () => {
         seen.push(spec.credential_profile?.profile_id ?? "(none)");
         return askerRun(spec);
       };
+      const saturatedA = () => [
+        {
+          subject: {
+            harness: "asker",
+            credential_route: "vendor_native" as const,
+            plan_label: null,
+            subject_id: "a",
+          },
+          constraints: [
+            {
+              id: "five_hour",
+              label: "5 hour",
+              used_ratio: 1,
+              window_seconds: 18000,
+              resets_at: null,
+              cooldown_until: null,
+            },
+          ],
+          source: "claude_oauth_usage" as const,
+          observed_at: new Date().toISOString(),
+          freshness: "fresh" as const,
+        },
+      ];
       const events: string[] = [];
       const res = await new Orchestrator({
         registry: new Map([["asker", asker]]),
         reviewers: [],
-        quotaSnapshots: () => [
-          {
-            subject: {
-              harness: "asker",
-              credential_route: "managed_api_key",
-              plan_label: null,
-              subject_id: "a",
-            },
-            constraints: [
-              {
-                id: "five_hour",
-                label: "5 hour",
-                used_ratio: 0.97,
-                window_seconds: 18000,
-                resets_at: null,
-                cooldown_until: null,
-              },
-            ],
-            source: "claude_oauth_usage",
-            observed_at: new Date().toISOString(),
-            freshness: "fresh",
-          },
-        ],
+        quotaSnapshots: saturatedA,
+      }).run({
+        repoRoot: repo,
+        prompt: "2+2?",
+        mode: "ask",
+        harnesses: ["asker"],
+        onEvent: (event) => events.push(event.type),
+      });
+      expect(legacyOutcome(res)).toBe("success");
+      // The unpinned pool skips exhausted "a" (fresh breach) and unready "b"
+      // (expired login) and lands on the best ready sibling deterministically.
+      expect(seen).toEqual(["c"]);
+      expect(probedProfiles).toContain("a");
+      expect(probedProfiles).toContain("b");
+      expect(probedProfiles).toContain("c");
+      expect(events).toContain("route.account.pool_selected");
+      expect(events).not.toContain("route.profile.rotated");
+
+      // An EXPLICIT pin on the exhausted "a" refuses TYPED before any spawn
+      // (D-U6) — never a silent rotation onto the ready siblings.
+      seen.length = 0;
+      const pinnedEvents: string[] = [];
+      const pinned = await new Orchestrator({
+        registry: new Map([["asker", asker]]),
+        reviewers: [],
+        quotaSnapshots: saturatedA,
       }).run({
         repoRoot: repo,
         prompt: "2+2?",
         mode: "ask",
         harnesses: ["asker"],
         credentialProfileId: "a",
-        onEvent: (event) => events.push(event.type),
+        onEvent: (event) => pinnedEvents.push(event.type),
       });
-      expect(legacyOutcome(res)).toBe("success");
-      expect(seen).toEqual(["c"]);
-      expect(probedProfiles).toEqual(["a", "b", "c"]);
-      expect(events).toContain("route.profile.headroom_exceeded");
-      expect(events).toContain("route.profile.rotated");
+      expect(legacyOutcome(pinned)).toBe("failed");
+      expect(pinned.summary).toMatch(/over its headroom threshold/);
+      expect(seen).toEqual([]);
+      expect(pinnedEvents).toContain("route.profile.headroom_exceeded");
+      expect(pinnedEvents).not.toContain("route.profile.rotated");
     } finally {
       if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
       else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
@@ -4549,7 +6504,7 @@ describe("Orchestrator", () => {
               {
                 id: "five_hour",
                 label: "5 hour",
-                used_ratio: 0.97,
+                used_ratio: 1,
                 window_seconds: 18000,
                 resets_at: null,
                 cooldown_until: null,
@@ -4568,8 +6523,8 @@ describe("Orchestrator", () => {
         credentialProfileId: "a",
         onEvent: (event) => events.push(event.type),
       });
-      // Default policy = fail FAILS (release wave tier1 #4): a FRESH breach
-      // refuses before spawn with typed evidence; no adapter ever launches.
+      // The default threshold refuses a fresh, fully spent window before
+      // spawn with typed evidence; no adapter ever launches.
       expect(legacyOutcome(res)).toBe("failed");
       expect(seen).toEqual([]);
       expect(events).toContain("route.profile.headroom_exceeded");
@@ -4632,9 +6587,9 @@ describe("Orchestrator", () => {
 
   it.each([
     { action: "rotate" as const, expectedProfile: "release-sol", expectedStarts: 1 },
-    { action: "fail" as const, expectedProfile: null, expectedStarts: 0 },
+    { action: "fail" as const, expectedProfile: "release-sol", expectedStarts: 1 },
   ])(
-    "resolves a saturated default account before pool filtering when policy is $action",
+    "an unpinned run routes to the ready pool row regardless of limit_action=$action (unified model: the saturated legacy default subject is not a row)",
     async ({ action, expectedProfile, expectedStarts }) => {
       const repo = await initRepo();
       const configDir = reapMk(join(tmpdir(), `claudexor-default-${action}-quota-`));
@@ -4696,17 +6651,13 @@ describe("Orchestrator", () => {
           onEvent: (event) => events.push(event.type),
         });
         expect(profilesSeen).toHaveLength(expectedStarts);
-        if (expectedStarts > 0) {
-          expect(legacyOutcome(result)).toBe("success");
-          expect(profilesSeen).toEqual([expectedProfile]);
-          expect(events.filter((type) => type === "route.profile.headroom_exceeded")).toHaveLength(
-            1,
-          );
-          expect(events.filter((type) => type === "route.profile.rotated")).toHaveLength(1);
-        } else {
-          expect(legacyOutcome(result)).toBe("failed");
-          expect(events).not.toContain("route.profile.rotated");
-        }
+        // The registered row IS the pool; the saturated null-subject snapshot
+        // belongs to the legacy default subject (not a row) and cannot demote
+        // the ready row — no rotation event fires, the pool simply selects.
+        expect(legacyOutcome(result)).toBe("success");
+        expect(profilesSeen).toEqual([expectedProfile]);
+        expect(events).toContain("route.account.pool_selected");
+        expect(events).not.toContain("route.profile.rotated");
       } finally {
         if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
         else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
@@ -5178,7 +7129,7 @@ describe("Orchestrator", () => {
               {
                 id: "weekly_scoped:Fable",
                 label: "7 day (Fable)",
-                used_ratio: 0.97,
+                used_ratio: 1,
                 window_seconds: 604800,
                 resets_at: resetsAt,
                 cooldown_until: null,
@@ -5434,7 +7385,7 @@ describe("Orchestrator", () => {
     });
   });
 
-  it("blocks ask success when an attempted WebSearch tool_result errors without recovery", async () => {
+  it("keeps an optional WebSearch error as warning evidence without blocking the answer", async () => {
     const repo = await initRepo();
     const adapter = askAdapter("web-bad", function* (sessionId) {
       const ts = new Date().toISOString();
@@ -5476,23 +7427,21 @@ describe("Orchestrator", () => {
       web: "auto",
       n: 1,
     });
-    expect(legacyOutcome(res)).toBe("blocked");
-    expect(readFileSync(join(res.runDir, "final", "failure.yaml"), "utf8")).toContain(
-      "web evidence unsatisfied",
-    );
+    expect(legacyOutcome(res)).toBe("success");
     expect(readFileSync(join(res.runDir, "final", "answer.md"), "utf8")).toContain(
-      "Unverified partial output",
+      "Memory answer only.",
     );
     const eventLog = readFileSync(join(res.runDir, "events.jsonl"), "utf8");
-    expect(eventLog).toContain("route.fallback.exhausted");
-    expect(eventLog).toContain("run.blocked");
+    expect(eventLog).not.toContain("route.fallback.started");
+    expect(eventLog).toContain("run.completed");
     // single-owner telemetry artifact records the web evidence
     const telemetry = readFileSync(join(res.runDir, "final", "telemetry.yaml"), "utf8");
     expect(telemetry).toContain("status: failed");
     expect(telemetry).toContain("permission denied");
+    expect(telemetry).toContain("status: success_with_warnings");
   });
 
-  it("blocks a web-required run that never attempted web (required && !satisfied)", async () => {
+  it("does not require a live-policy run to attempt web", async () => {
     const repo = await initRepo();
     const adapter = askAdapter("no-web", function* (sessionId) {
       const ts = new Date().toISOString();
@@ -5514,9 +7463,12 @@ describe("Orchestrator", () => {
       web: "live",
       n: 1,
     });
-    expect(legacyOutcome(res)).toBe("blocked");
-    expect(readFileSync(join(res.runDir, "final", "failure.yaml"), "utf8")).toContain(
-      "never attempted",
+    expect(legacyOutcome(res)).toBe("success");
+    expect(readFileSync(join(res.runDir, "final", "answer.md"), "utf8")).toContain(
+      "Answer from memory",
+    );
+    expect(readFileSync(join(res.runDir, "context", "task.yaml"), "utf8")).toContain(
+      "web_required: false",
     );
   });
 
@@ -5930,9 +7882,8 @@ describe("Orchestrator", () => {
 
   it("discloses a requested effort on a harness with no declared ladder via ignored_settings (INV-105)", async () => {
     const repo = await initRepo();
-    // realLikeAdapter declares NO effort_levels — a configured per-harness
-    // effort must be DISCLOSED as ignored on harness.started, never silently
-    // dropped (and never forwarded to a CLI that has no such flag).
+    // A carrier-less adapter must disclose omission and retain the preference
+    // in final typed telemetry, without injecting assistant conversation text.
     const registry = new Map<string, HarnessAdapter>([
       ["codex", realLikeAdapter("codex", "openai")],
     ]);
@@ -5952,7 +7903,18 @@ describe("Orchestrator", () => {
       const events = readFileSync(join(res.runDir, "events.jsonl"), "utf8");
       expect(events).toContain("ignored_settings");
       expect(events).toContain("effort=high");
-      expect(events).toContain("effort_levels is empty");
+      const telemetry = new ArtifactStore(repo).readYaml<{
+        attempts: Array<{ effort_resolution: unknown }>;
+      }>(join(res.runDir, "final", "telemetry.yaml"));
+      expect(telemetry?.attempts[0]?.effort_resolution).toEqual({
+        requested: "high",
+        submitted: null,
+        resolution: "omitted",
+        source: "adapter",
+        parameter: null,
+        observed: null,
+        observedSource: null,
+      });
     } finally {
       if (prev === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
       else process.env.CLAUDEXOR_CONFIG_DIR = prev;
@@ -6104,7 +8066,7 @@ describe("Orchestrator", () => {
     expectBudgetSplit(res.runDir, 0.08005475, 0);
   });
 
-  it("falls back to another ask harness when web evidence is unsatisfied", async () => {
+  it("does not start a fallback solely because optional web failed", async () => {
     const repo = await initRepo();
     const bad = askAdapter("web-bad", function* (sessionId) {
       const ts = new Date().toISOString();
@@ -6182,11 +8144,11 @@ describe("Orchestrator", () => {
     });
     expect(legacyOutcome(res)).toBe("success");
     expect(readFileSync(join(res.runDir, "final", "answer.md"), "utf8")).toContain(
-      "Web-backed answer.",
+      "Memory answer only.",
     );
     const eventLog = readFileSync(join(res.runDir, "events.jsonl"), "utf8");
-    expect(eventLog).toContain("route.fallback.started");
-    expect(eventLog).toContain("route.fallback.completed");
+    expect(eventLog).not.toContain("route.fallback.started");
+    expect(eventLog).not.toContain("route.fallback.completed");
   });
 
   it("stores no-project Ask artifacts in the user config store, not the synthetic repo root", async () => {
@@ -7279,6 +9241,7 @@ describe("Orchestrator", () => {
       repoRoot: repo,
       prompt: "x",
       mode: "agent",
+      review: true,
       harnesses: ["fake-impl"],
       authPreference: "subscription",
       n: 1,
@@ -7335,6 +9298,7 @@ describe("Orchestrator", () => {
         repoRoot: repo,
         prompt: "x",
         mode: "agent",
+        review: true,
         harnesses: ["fake-impl"],
         n: 1,
       });
@@ -8269,7 +10233,7 @@ describe("Orchestrator", () => {
     };
   }
 
-  function terminalPlanAdapter(id: string, terminal: "blocked" | "interrupted"): HarnessAdapter {
+  function terminalPlanAdapter(id: string, terminal: "usable" | "interrupted"): HarnessAdapter {
     return {
       id,
       async discover() {
@@ -8292,7 +10256,7 @@ describe("Orchestrator", () => {
       async *run(spec) {
         const ts = new Date().toISOString();
         yield { type: "started", session_id: spec.session_id, ts };
-        if (terminal === "blocked") {
+        if (terminal === "usable") {
           yield { type: "message", session_id: spec.session_id, ts, text: TOOL_ERROR_PLAN };
         } else {
           yield {
@@ -8303,7 +10267,7 @@ describe("Orchestrator", () => {
               name: "WebSearch",
               kind: "web",
               status: "ok",
-              target: "required evidence",
+              target: "optional evidence",
             },
           };
           yield {
@@ -8324,20 +10288,19 @@ describe("Orchestrator", () => {
     };
   }
 
-  function expectMixedPlanFailure(res: OrchestratorResult): void {
+  function expectMixedPlanSuccess(res: OrchestratorResult): void {
     expect(res.facts).toMatchObject({
-      lifecycle: "failed",
+      lifecycle: "succeeded",
       review: "not_run",
-      reason: "harness_failed",
+      reason: null,
     });
-    expect(existsSync(join(res.runDir, "final", "plan.md"))).toBe(false);
-    expect(readFileSync(join(res.runDir, "final", "failure.yaml"), "utf8")).toContain(
-      "category: policy",
+    expect(readFileSync(join(res.runDir, "final", "plan.md"), "utf8")).toContain(
+      "# Plan despite the failed check",
     );
     const terminals = readRunEvents(res.runDir).filter((event) =>
       ["run.completed", "run.blocked", "run.failed"].includes(event.type),
     );
-    expect(terminals.map((event) => event.type)).toEqual(["run.failed"]);
+    expect(terminals.map((event) => event.type)).toEqual(["run.completed"]);
   }
 
   async function runToolErrorPlan(
@@ -8393,11 +10356,7 @@ describe("Orchestrator", () => {
     });
   });
 
-  it("fails a Plan when required web evidence rejects its raw text before delivery", async () => {
-    // The planner emits text but never attempts REQUIRED web evidence. That
-    // policy gate discards the raw response, so no canonical final/plan.md
-    // exists and the read-only run must fail rather than say Needs review.
-    // (web_policy "tools" makes the harness eligible for --web live.)
+  it("delivers a Plan under live policy even when optional web was unused", async () => {
     const planner: HarnessAdapter = {
       ...toolErrorPlannerAdapter("planner", { finalText: TOOL_ERROR_PLAN, toolError: false }),
       async discover() {
@@ -8412,43 +10371,38 @@ describe("Orchestrator", () => {
       },
     };
     const { res, outcome } = await runToolErrorPlan(planner, { web: "live" });
-    expect(legacyOutcome(res)).toBe("failed");
-    expect(res.facts).toMatchObject({
-      lifecycle: "failed",
-      review: "not_run",
-      reason: "harness_failed",
-    });
-    expect(existsSync(join(res.runDir, "final", "plan.md"))).toBe(false);
-    expect(readFileSync(join(res.runDir, "final", "failure.yaml"), "utf8")).toContain(
-      "never attempted",
+    expect(legacyOutcome(res)).toBe("success");
+    expect(res.facts.lifecycle).toBe("succeeded");
+    expect(readFileSync(join(res.runDir, "final", "plan.md"), "utf8")).toContain(
+      "# Plan despite the failed check",
     );
     const terminalEvents = readRunEvents(res.runDir).filter((event) =>
       ["run.completed", "run.blocked", "run.failed"].includes(event.type),
     );
-    expect(terminalEvents.map((event) => event.type)).toEqual(["run.failed"]);
+    expect(terminalEvents.map((event) => event.type)).toEqual(["run.completed"]);
     expect(outcome).toMatchObject({
-      web_required_unsatisfied: true,
-      status: "blocked",
+      web_required_unsatisfied: false,
+      status: "success",
     });
   });
 
-  it("keeps a blocked solo planner above an interrupted fallback in terminal precedence", async () => {
+  it("keeps a useful no-web plan instead of falling through to an interrupted route", async () => {
     const repo = await initRepo();
     const orch = new Orchestrator({
       registry: new Map<string, HarnessAdapter>([
-        ["blocked", terminalPlanAdapter("blocked", "blocked")],
+        ["usable", terminalPlanAdapter("usable", "usable")],
         ["interrupted", terminalPlanAdapter("interrupted", "interrupted")],
       ]),
       reviewers: [],
     });
     const res = await orch.run({
       repoRoot: repo,
-      prompt: "plan with required evidence",
+      prompt: "plan without mandatory web",
       mode: "plan",
       web: "live",
-      harnesses: ["blocked", "interrupted"],
+      harnesses: ["usable", "interrupted"],
     });
-    expectMixedPlanFailure(res);
+    expectMixedPlanSuccess(res);
   });
 
   it("a needs_input work_report veto still rides a delivered plan with a tool error", async () => {
@@ -8953,25 +10907,25 @@ describe("Orchestrator", () => {
     expect(readFileSync(join(res.runDir, "final", "summary.md"), "utf8")).not.toContain(token);
   });
 
-  it("keeps a blocked Council member above an interrupted peer in terminal precedence", async () => {
+  it("keeps a useful no-web Council plan when its peer is interrupted", async () => {
     const repo = await initRepo();
     const orch = new Orchestrator({
       registry: new Map<string, HarnessAdapter>([
-        ["blocked", terminalPlanAdapter("blocked", "blocked")],
+        ["usable", terminalPlanAdapter("usable", "usable")],
         ["interrupted", terminalPlanAdapter("interrupted", "interrupted")],
       ]),
       reviewers: [],
     });
     const res = await orch.run({
       repoRoot: repo,
-      prompt: "merge plans with required evidence",
+      prompt: "merge plans without mandatory web",
       mode: "plan",
       council: true,
       n: 2,
       web: "live",
-      harnesses: ["blocked", "interrupted"],
+      harnesses: ["usable", "interrupted"],
     });
-    expectMixedPlanFailure(res);
+    expectMixedPlanSuccess(res);
   });
 
   it("QA-047: an EXPLICIT council with an unavailable (no-manifest) member fails loudly, naming it", async () => {
@@ -9050,7 +11004,7 @@ describe("Orchestrator", () => {
       mode: "plan",
       council: true,
       harnesses: ["cursor"],
-      n: 1,
+      n: 2, // Requested minimum; one available lane is disclosed as degraded.
     });
     expect(legacyOutcome(res)).toBe("success");
     expect(homesByIntent["plan"]).toBeTruthy();
@@ -9095,7 +11049,7 @@ describe("Orchestrator", () => {
       mode: "plan",
       council: true,
       harnesses: ["cursor"],
-      n: 1,
+      n: 2, // Requested minimum; one available lane is disclosed as degraded.
     });
     expect(legacyOutcome(res)).toBe("failed");
     // Root cause 3: the proven-success p01 draft is NEVER labeled failed.
@@ -9449,7 +11403,7 @@ describe("Orchestrator", () => {
           kind: "local_cli",
           provider_family: "local",
           capabilities: { implement: true, json_schema_output: true },
-          access_profiles_supported: ["workspace_write", "external_sandbox_full"],
+          access_profiles_supported: ["workspace_write", "full"],
         });
       },
       async doctor() {
@@ -9528,7 +11482,7 @@ describe("Orchestrator", () => {
           kind: "local_cli",
           provider_family: "local",
           capabilities: { implement: true, json_schema_output: true },
-          access_profiles_supported: ["workspace_write", "external_sandbox_full"],
+          access_profiles_supported: ["workspace_write", "full"],
         });
       },
       async doctor() {
@@ -9589,7 +11543,7 @@ describe("Orchestrator", () => {
           kind: "local_cli",
           provider_family: "local",
           capabilities: { implement: true, json_schema_output: true },
-          access_profiles_supported: ["workspace_write", "external_sandbox_full"],
+          access_profiles_supported: ["workspace_write", "full"],
         });
       },
       async doctor() {
@@ -9606,15 +11560,15 @@ describe("Orchestrator", () => {
         yield { type: "completed", session_id: spec.session_id, ts };
       },
     });
-    // `note` is OPTIONAL string in the CALLER's schema. Strictify would make it
-    // `string|null` required, so `{"note":null}` would falsely PASS the vendor
-    // form. Validated against the ORIGINAL, null is not a string → failed.
+    // `note` is OPTIONAL string in the CALLER's schema. Strictify makes it
+    // `string|null` required on the vendor wire; the engine restores that
+    // adapter-created null to omission before validating the ORIGINAL schema.
     const schema = {
       type: "object",
       properties: { note: { type: "string" } },
       required: [],
     };
-    const bad = await new Orchestrator({
+    const restored = await new Orchestrator({
       registry: new Map([["schema-capable", makeAdapter(JSON.stringify({ note: null }))]]),
       reviewers: [],
     }).run({
@@ -9625,9 +11579,31 @@ describe("Orchestrator", () => {
       n: 1,
       outputSchema: schema,
     });
-    expect(readFileSync(join(bad.runDir, "final", "structured_output.yaml"), "utf8")).toContain(
-      "status: failed",
+    expect(
+      readFileSync(join(restored.runDir, "final", "structured_output.yaml"), "utf8"),
+    ).toContain("status: passed");
+    expect(
+      readFileSync(join(restored.runDir, "final", "structured_output.yaml"), "utf8"),
+    ).toContain("normalized_optional_nulls: 1");
+    expect(JSON.parse(readFileSync(join(restored.runDir, "final", "output.json"), "utf8"))).toEqual(
+      {},
     );
+
+    const required = { ...schema, required: ["note"] };
+    const rejected = await new Orchestrator({
+      registry: new Map([["schema-capable", makeAdapter(JSON.stringify({ note: null }))]]),
+      reviewers: [],
+    }).run({
+      repoRoot: repo,
+      prompt: "x",
+      mode: "agent",
+      harnesses: ["schema-capable"],
+      n: 1,
+      outputSchema: required,
+    });
+    expect(
+      readFileSync(join(rejected.runDir, "final", "structured_output.yaml"), "utf8"),
+    ).toContain("status: failed");
     // The same schema with the field ABSENT (its optionality) is conformant.
     const ok = await new Orchestrator({
       registry: new Map([["schema-capable", makeAdapter(JSON.stringify({}))]]),
@@ -9644,6 +11620,64 @@ describe("Orchestrator", () => {
       "status: passed",
     );
     expect(existsSync(join(ok.runDir, "final", "output.json"))).toBe(true);
+  });
+
+  it("outputSchema rides an interactive-capable lane with a live channel (DT2.1-16 lifted)", async () => {
+    // --json-schema x stream-json is live-verified (claude 2.1.221): a schema
+    // run keeps its interaction channel. The old refusal denied claude every
+    // daemon/CLI structured-output run, because the daemon always arms one.
+    const repo = await initRepo();
+    let seenSchema: unknown;
+    const adapter: HarnessAdapter = {
+      id: "schema-interactive",
+      async discover() {
+        return HarnessManifest.parse({
+          id: "schema-interactive",
+          display_name: "schema-interactive",
+          kind: "local_cli",
+          provider_family: "local",
+          capabilities: { implement: true, json_schema_output: true, interactive: true },
+          access_profiles_supported: ["workspace_write", "full"],
+        });
+      },
+      async doctor() {
+        return ConformanceReport.parse({
+          harness_id: "schema-interactive",
+          status: "ok",
+          enabled_intents: ["implement"],
+        });
+      },
+      async *run(spec) {
+        const ts = new Date().toISOString();
+        seenSchema = spec.output_schema;
+        yield { type: "started", session_id: spec.session_id, ts };
+        yield {
+          type: "message",
+          session_id: spec.session_id,
+          ts,
+          text: JSON.stringify({ verdict: "ok" }),
+        };
+        yield { type: "completed", session_id: spec.session_id, ts };
+      },
+    };
+    const orch = new Orchestrator({
+      registry: new Map([[adapter.id, adapter]]),
+      reviewers: [],
+    });
+    const res = await orch.run({
+      repoRoot: repo,
+      prompt: "x",
+      mode: "agent",
+      harnesses: [adapter.id],
+      n: 1,
+      outputSchema: { type: "object", properties: { verdict: { type: "string" } } },
+      onInteraction: async () => ({ kind: "free_text", text: "" }) as never,
+    });
+    // Not refused; the caller schema reached the lane.
+    expect(res.summary).not.toContain("interactive-transport");
+    expect(seenSchema).toMatchObject({ type: "object" });
+    const receipt = readFileSync(join(res.runDir, "final", "structured_output.yaml"), "utf8");
+    expect(receipt).toContain("status: passed");
   });
 
   it("refuses outputSchema at preflight when a selected lane cannot constrain natively (W8)", async () => {
@@ -9787,7 +11821,7 @@ describe("Orchestrator", () => {
           kind: "local_cli",
           provider_family: "local",
           capabilities: { implement: true, known_models: ["model-x"] },
-          access_profiles_supported: ["workspace_write", "external_sandbox_full"],
+          access_profiles_supported: ["workspace_write", "full"],
         });
       },
       async *run(spec) {
@@ -9834,7 +11868,7 @@ describe("Orchestrator", () => {
             implement: true,
             known_models: [{ id: "sub-model", routes: ["local_session"] }],
           },
-          access_profiles_supported: ["workspace_write", "external_sandbox_full"],
+          access_profiles_supported: ["workspace_write", "full"],
         });
       },
     };
@@ -9866,7 +11900,7 @@ describe("Orchestrator", () => {
           kind: "local_cli",
           provider_family: "local",
           capabilities: { implement: true, max_turns: true },
-          access_profiles_supported: ["workspace_write", "external_sandbox_full"],
+          access_profiles_supported: ["workspace_write", "full"],
         });
       },
       async *run(spec) {
@@ -10328,12 +12362,64 @@ describe("Orchestrator", () => {
           access: "full",
         }),
       ).rejects.toThrow(/allow_full_access/);
+      // The refusal is TYPED: surfaces key the one-time-grant remedy on the
+      // code + 403, never on substring-matching the human message.
+      await expect(
+        orch.run({
+          repoRoot: repo,
+          prompt: "x",
+          mode: "agent",
+          harnesses: ["fake-success"],
+          n: 1,
+          access: "full",
+        }),
+      ).rejects.toMatchObject({ code: "trust_full_access_required", status: 403 });
     } finally {
       delete process.env.CLAUDEXOR_CONFIG_DIR;
     }
   });
 
-  it("web off routes a no-web harness but excludes an uncontrolled-web harness loudly", async () => {
+  it("admits a delegated access=full run with no trust record and records the full profile", async () => {
+    // The trust allow is a consent ceremony for the operator at a surface. A run
+    // marked execution.delegated has no such operator: an external orchestrator
+    // owns the workspace and carries its own authority, so it needs no trust
+    // record. The effective profile must still be recorded honestly as full, so
+    // admitting the run never becomes a silent downgrade to workspace_write.
+    const dir = reapMk(join(tmpdir(), "claudexor-orch-delegated-full-"));
+    writeFileSync(join(dir, "task.txt"), "do the thing\n");
+    // Scoped config dir with NO trust file, so the run proves the skip rather
+    // than inheriting an allow from the developer's real home.
+    const configDir = reapMk(join(tmpdir(), "claudexor-orch-delegated-notrust-"));
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    try {
+      const registry = new Map<string, HarnessAdapter>([
+        ["fake-success", createFakeHarness("fake-success")],
+      ]);
+      const orch = new Orchestrator({ registry, reviewers: reviewers() });
+      const res = await orch.run({
+        repoRoot: dir,
+        executionRoot: dir,
+        prompt: "x",
+        mode: "agent",
+        harnesses: ["fake-success"],
+        attempts: 2,
+        inPlace: true,
+        access: "full",
+        delegated: true,
+      });
+      expect(res.lifecycle).toBe("succeeded");
+      expect(readFileSync(join(res.runDir, "context", "task.yaml"), "utf8")).toContain(
+        "effective_profile: full",
+      );
+      expect(readFileSync(join(res.runDir, "final", "telemetry.yaml"), "utf8")).toContain(
+        "effective_access: full",
+      );
+    } finally {
+      delete process.env.CLAUDEXOR_CONFIG_DIR;
+    }
+  });
+
+  it("keeps every non-off policy optional and refuses only off on an uncontrolled harness", async () => {
     const repo = await initRepo();
     const answer = (sessionId: string) => [
       { type: "started", session_id: sessionId, ts: new Date().toISOString() },
@@ -10349,14 +12435,19 @@ describe("Orchestrator", () => {
     const noWeb = new Map<string, HarnessAdapter>([
       ["no-web", askAdapter("no-web", answer, "openai", "none")],
     ]);
-    const ok = await new Orchestrator({ registry: noWeb, reviewers: [] }).run({
-      repoRoot: repo,
-      prompt: "q",
-      mode: "ask",
-      harnesses: ["no-web"],
-      web: "off",
-    });
-    expect(legacyOutcome(ok)).toBe("success");
+    for (const web of ["off", "auto", "cached", "live"] as const) {
+      const ok = await new Orchestrator({ registry: noWeb, reviewers: [] }).run({
+        repoRoot: repo,
+        prompt: "q",
+        mode: "ask",
+        harnesses: ["no-web"],
+        web,
+      });
+      expect(legacyOutcome(ok), web).toBe("success");
+      expect(readFileSync(join(ok.runDir, "context", "task.yaml"), "utf8")).toContain(
+        "web_required: false",
+      );
+    }
     // `uncontrolled` (web exists, no switch) cannot enforce off: explicit selection fails loudly.
     const uncontrolled = new Map<string, HarnessAdapter>([
       ["wild-web", askAdapter("wild-web", answer, "openai", "uncontrolled")],
@@ -10369,8 +12460,26 @@ describe("Orchestrator", () => {
       web: "off",
     });
     expect(legacyOutcome(blocked)).toBe("failed");
-    expect(blocked.summary).toContain("cannot enforce web policy 'off'");
-    expect(blocked.summary).toContain("choose a web-capable/enforceable harness");
+    expect(blocked.summary).toContain("cannot guarantee web is disabled");
+    expect(blocked.summary).toContain("rerun with --web auto, --web cached, or --web live");
+    expect(blocked.summary).toContain("select a harness that can enforce --web off");
+    expect(readRunEvents(blocked.runDir).some((event) => event.type === "harness.started")).toBe(
+      false,
+    );
+    expect(readFileSync(join(blocked.runDir, "final", "failure.yaml"), "utf8")).toContain(
+      "category: harness_unavailable",
+    );
+
+    for (const web of ["auto", "cached", "live"] as const) {
+      const optional = await new Orchestrator({ registry: uncontrolled, reviewers: [] }).run({
+        repoRoot: repo,
+        prompt: "q",
+        mode: "ask",
+        harnesses: ["wild-web"],
+        web,
+      });
+      expect(legacyOutcome(optional), web).toBe("success");
+    }
   });
 
   it("applies the configured global paid_budget_per_run as the default run cap", async () => {
@@ -10568,6 +12677,242 @@ describe("Orchestrator v0.8 honesty & streaming", () => {
     const tracked = await runCapture("git", ["-C", dir, "ls-files"]);
     expect(tracked.stdout).toContain("notes.txt");
     expect(tracked.stdout).not.toContain(".claudexor/runs");
+  });
+
+  it("runs delegated readonly agents without Git, bridge, capture, or synthesis prep", async () => {
+    const dir = reapMk(join(tmpdir(), "claudexor-readonly-nongit-"));
+    writeFileSync(join(dir, "notes.txt"), "source stays untouched\n");
+    writeFileSync(join(dir, "AGENTS.md"), "# project instructions\n");
+    let calls = 0;
+    const readonlyAdapter = (id: string): HarnessAdapter => ({
+      ...realLikeAdapter(id),
+      async *run(spec) {
+        calls += 1;
+        const ts = new Date().toISOString();
+        yield { type: "started", session_id: spec.session_id, ts };
+        yield { type: "message", session_id: spec.session_id, ts, text: `answer from ${id}` };
+        yield { type: "completed", session_id: spec.session_id, ts };
+      },
+    });
+    const res = await new Orchestrator({
+      registry: new Map([
+        ["reader-a", readonlyAdapter("reader-a")],
+        ["reader-b", readonlyAdapter("reader-b")],
+      ]),
+      reviewers: [],
+    }).run({
+      repoRoot: dir,
+      executionRoot: dir,
+      prompt: "inspect only",
+      mode: "agent",
+      harnesses: ["reader-a", "reader-b"],
+      n: 2,
+      synthesis: "always",
+      access: "readonly",
+      inPlace: true,
+      delegated: true,
+    });
+
+    expect(res.lifecycle).toBe("succeeded");
+    expect(calls).toBe(2);
+    expect(existsSync(join(dir, ".git"))).toBe(false);
+    expect(existsSync(join(dir, "CLAUDE.md"))).toBe(false);
+    expect(readFileSync(join(dir, "notes.txt"), "utf8")).toBe("source stays untouched\n");
+    const events = readRunEvents(res.runDir);
+    expect(events.some((event) => event.type === "project.git.initialized")).toBe(false);
+    expect(events.some((event) => event.type === "project.claude_bridge.created")).toBe(false);
+    expect(events.filter((event) => event.type === "harness.started")).toHaveLength(2);
+    expect(existsSync(join(res.runDir, "final", "answer.md"))).toBe(true);
+    expect(existsSync(join(res.runDir, "final", "summary.md"))).toBe(true);
+    expect(existsSync(join(res.runDir, "final", "patch.diff"))).toBe(false);
+    expect(existsSync(join(res.runDir, "final", "work_product.yaml"))).toBe(false);
+    expect(existsSync(join(res.runDir, "final", "delivery_receipt.yaml"))).toBe(false);
+    expect(events.some((event) => event.type === "work_product.emitted")).toBe(false);
+    expect(events.some((event) => event.type === "work_product.adopted")).toBe(false);
+    for (const attemptId of ["a01", "a02"]) {
+      expect(existsSync(join(res.runDir, "attempts", attemptId, "patch.diff"))).toBe(false);
+      const attempt = new ArtifactStore(dir).readYaml<Record<string, unknown>>(
+        join(res.runDir, "attempts", attemptId, "attempt.yaml"),
+      );
+      expect(attempt).not.toHaveProperty("diffstat");
+    }
+    const synthesis = readFileSync(join(res.runDir, "arbitration", "synthesis.yaml"), "utf8");
+    expect(synthesis).toContain("synthesize: false");
+    expect(synthesis).toContain("readonly access has no write-backed synthesis lifecycle");
+  });
+
+  it("keeps readonly artifact-security failures diagnostic-only", async () => {
+    const dir = reapMk(join(tmpdir(), "claudexor-readonly-artifact-failure-"));
+    const secret = `sk-${"r".repeat(24)}`;
+    writeFileSync(join(dir, "secret.png"), Buffer.concat([Buffer.from([0]), Buffer.from(secret)]));
+    const adapter: HarnessAdapter = {
+      ...realLikeAdapter("reader"),
+      async *run(spec) {
+        const ts = new Date().toISOString();
+        yield { type: "started", session_id: spec.session_id, ts };
+        yield {
+          type: "message",
+          session_id: spec.session_id,
+          ts,
+          text: "![secret](secret.png)",
+        };
+        yield { type: "completed", session_id: spec.session_id, ts };
+      },
+    };
+    const res = await new Orchestrator({
+      registry: new Map([[adapter.id, adapter]]),
+      reviewers: [],
+    }).run({
+      repoRoot: dir,
+      executionRoot: dir,
+      prompt: "inspect only",
+      mode: "agent",
+      harnesses: [adapter.id],
+      access: "readonly",
+      inPlace: true,
+      delegated: true,
+    });
+
+    expect(res.lifecycle).toBe("failed");
+    expect(existsSync(join(res.runDir, "final", "patch.diff"))).toBe(false);
+    expect(existsSync(join(res.runDir, "final", "work_product.yaml"))).toBe(false);
+    expect(existsSync(join(res.runDir, "final", "delivery_receipt.yaml"))).toBe(false);
+    expect(existsSync(join(res.runDir, "final", "summary.md"))).toBe(true);
+    expect(existsSync(join(res.runDir, "final", "telemetry.yaml"))).toBe(true);
+    const events = readRunEvents(res.runDir);
+    expect(events.some((event) => event.type === "work_product.emitted")).toBe(false);
+    expect(events.some((event) => event.type === "work_product.adopted")).toBe(false);
+  });
+
+  it("refuses fresh delegated live writes without a caller-owned execution tree", async () => {
+    const dir = reapMk(join(tmpdir(), "claudexor-delegated-workspace-required-"));
+    writeFileSync(join(dir, "source.txt"), "unchanged\n");
+    let harnessCalls = 0;
+    const adapter: HarnessAdapter = {
+      ...realLikeAdapter("writer"),
+      async *run(): AsyncIterable<never> {
+        harnessCalls += 1;
+        throw new Error("missing execution workspace must refuse before spawn");
+      },
+    };
+    const orchestrator = new Orchestrator({
+      registry: new Map([[adapter.id, adapter]]),
+      reviewers: [],
+    });
+
+    await expect(
+      orchestrator.run({
+        repoRoot: dir,
+        prompt: "edit",
+        mode: "agent",
+        harnesses: [adapter.id],
+        access: "workspace_write",
+        inPlace: true,
+        delegated: true,
+      }),
+    ).rejects.toMatchObject({ code: "execution_workspace_required", status: 400 });
+    expect(harnessCalls).toBe(0);
+    expect(existsSync(join(dir, ".git"))).toBe(false);
+    expect(readFileSync(join(dir, "source.txt"), "utf8")).toBe("unchanged\n");
+  });
+
+  it("refuses readonly convergence before Git, run artifacts, or harness work", async () => {
+    const explicitRoot = reapMk(join(tmpdir(), "claudexor-readonly-convergence-explicit-"));
+    const defaultRoot = reapMk(join(tmpdir(), "claudexor-readonly-convergence-default-"));
+    writeFileSync(join(explicitRoot, "source.txt"), "unchanged\n");
+    writeFileSync(join(defaultRoot, "source.txt"), "unchanged\n");
+    setAccessDefault(defaultRoot, "readonly");
+    let harnessCalls = 0;
+    const adapter: HarnessAdapter = {
+      ...realLikeAdapter("impl"),
+      async *run(): AsyncIterable<never> {
+        harnessCalls += 1;
+        throw new Error("readonly convergence must refuse before spawn");
+      },
+    };
+    const orchestrator = new Orchestrator({
+      registry: new Map([[adapter.id, adapter]]),
+      reviewers: [],
+    });
+
+    for (const input of [
+      { repoRoot: explicitRoot, access: "readonly" as const, attempts: 2 },
+      { repoRoot: defaultRoot, untilClean: true },
+      {
+        repoRoot: explicitRoot,
+        access: "readonly" as const,
+        tests: [shellGate("printf ran > gate-ran.txt")],
+      },
+      {
+        repoRoot: defaultRoot,
+        tests: [shellGate("printf ran > gate-ran.txt")],
+      },
+    ]) {
+      await expect(
+        orchestrator.run({
+          ...input,
+          prompt: "repair without write access",
+          mode: "agent",
+          harnesses: [adapter.id],
+          inPlace: true,
+        }),
+      ).rejects.toMatchObject({
+        status: 400,
+        code: "strategy_access_incompatible",
+        retryable: false,
+      });
+    }
+
+    expect(harnessCalls).toBe(0);
+    for (const root of [explicitRoot, defaultRoot]) {
+      expect(existsSync(join(root, ".git"))).toBe(false);
+      expect(existsSync(join(root, "CLAUDE.md"))).toBe(false);
+      expect(existsSync(join(root, "gate-ran.txt"))).toBe(false);
+      expect(readFileSync(join(root, "source.txt"), "utf8")).toBe("unchanged\n");
+    }
+  });
+
+  it("leaves dirty Git metadata byte-stable for a delegated readonly agent", async () => {
+    const repo = await initRepo();
+    writeFileSync(join(repo, "dirty.txt"), "pre-existing user work\n");
+    writeFileSync(join(repo, "AGENTS.md"), "# project instructions\n");
+    const indexPath = join(repo, ".git", "index");
+    const indexBefore = readFileSync(indexPath);
+    const objectsBefore = (await runCapture("git", ["-C", repo, "count-objects", "-v"])).stdout;
+    const headBefore = (await runCapture("git", ["-C", repo, "rev-parse", "HEAD"])).stdout;
+    const reader: HarnessAdapter = {
+      ...realLikeAdapter("reader"),
+      async *run(spec) {
+        const ts = new Date().toISOString();
+        yield { type: "started", session_id: spec.session_id, ts };
+        yield { type: "message", session_id: spec.session_id, ts, text: "read-only answer" };
+        yield { type: "completed", session_id: spec.session_id, ts };
+      },
+    };
+
+    const res = await new Orchestrator({
+      registry: new Map([["reader", reader]]),
+      reviewers: [],
+    }).run({
+      repoRoot: repo,
+      executionRoot: repo,
+      prompt: "inspect only",
+      mode: "agent",
+      harnesses: ["reader"],
+      n: 1,
+      access: "readonly",
+      inPlace: true,
+      delegated: true,
+    });
+
+    expect(res.lifecycle).toBe("succeeded");
+    expect(readFileSync(indexPath).equals(indexBefore)).toBe(true);
+    expect((await runCapture("git", ["-C", repo, "count-objects", "-v"])).stdout).toBe(
+      objectsBefore,
+    );
+    expect((await runCapture("git", ["-C", repo, "rev-parse", "HEAD"])).stdout).toBe(headBefore);
+    expect(existsSync(join(repo, "CLAUDE.md"))).toBe(false);
+    expect(readFileSync(join(repo, "dirty.txt"), "utf8")).toBe("pre-existing user work\n");
   });
 
   it("announces project initialization prepared for an isolated read-only turn", async () => {
@@ -11448,6 +13793,48 @@ describe("convergence preflight remediation text (#133c)", () => {
 });
 
 describe("web evidence recovery keying (INV-043)", () => {
+  it("records optional denied web as a non-blocking warning", async () => {
+    const {
+      createAttemptTelemetry,
+      observeAttemptTelemetry,
+      setAttemptOutcome,
+      toolWarnings,
+      webUnsatisfied,
+    } = await import("./attemptTelemetry.js");
+    const t = createAttemptTelemetry("live", false);
+    observeAttemptTelemetry(t, {
+      type: "tool_result",
+      session_id: "s",
+      ts: new Date().toISOString(),
+      tool: {
+        name: "WebFetch",
+        kind: "web",
+        status: "denied",
+        target: "https://example.com",
+        content_summary: "User Rejected",
+      },
+    } as never);
+
+    expect(t.web).toMatchObject({ attempted: true, failed: true, satisfied: false });
+    expect(webUnsatisfied(t)).toBe(false);
+    expect(toolWarnings(t)).toMatchObject([
+      {
+        tool: "WebFetch",
+        kind: "web",
+        target: "https://example.com",
+        summary: "User Rejected",
+        recovered: false,
+      },
+    ]);
+    setAttemptOutcome(t, {
+      deliverablePresent: true,
+      gatesPassed: null,
+      harnessErrored: false,
+      webRequiredUnsatisfied: webUnsatisfied(t),
+    });
+    expect(t.outcome).toMatchObject({ status: "success_with_warnings", toolWarningsCount: 1 });
+  });
+
   it("keeps the failure DISCLOSED when an unrelated-target web success satisfies the evidence gate", async () => {
     const { createAttemptTelemetry, observeAttemptTelemetry, webUnsatisfied } =
       await import("./attemptTelemetry.js");
@@ -11540,7 +13927,7 @@ describe("web evidence recovery keying (INV-043)", () => {
     expect(t.toolErrors.filter((e) => !e.recovered).length).toBe(1); // web error NOT laundered
   });
 
-  it("web_required with only failures stays blocking regardless", async () => {
+  it("an explicitly persisted web_required contract with only failures stays blocking", async () => {
     const { createAttemptTelemetry, observeAttemptTelemetry, webUnsatisfied } =
       await import("./attemptTelemetry.js");
     const t = createAttemptTelemetry("live", true);
@@ -11696,6 +14083,7 @@ describe("browser preflight truth (INV-066 / P1-09)", () => {
 
   it("keeps mixed lanes participating and records requested/effective browser asymmetry", async () => {
     const repo = await initRepo();
+    grantFullAccess(repo);
     const seen = new Map<string, unknown>();
     const capable = observeBrowserSpec(diffImplementer("capable", "local", true), (browser) =>
       seen.set("capable", browser),
@@ -11717,7 +14105,7 @@ describe("browser preflight truth (INV-066 / P1-09)", () => {
       mode: "agent",
       harnesses: ["capable", "incapable"],
       n: 2,
-      access: "external_sandbox_full",
+      access: "full",
       browser: true,
       tests: [shellGate("true")],
     });
@@ -11734,6 +14122,7 @@ describe("browser preflight truth (INV-066 / P1-09)", () => {
 
   it("refuses a zero-effective browser pool before invoking a harness", async () => {
     const repo = await initRepo();
+    grantFullAccess(repo);
     let calls = 0;
     const incapable = observeBrowserSpec(diffImplementer("incapable", "local"), () => {
       calls += 1;
@@ -11749,7 +14138,7 @@ describe("browser preflight truth (INV-066 / P1-09)", () => {
       mode: "agent",
       harnesses: ["incapable"],
       n: 1,
-      access: "external_sandbox_full",
+      access: "full",
       browser: true,
     });
 
@@ -11824,7 +14213,7 @@ describe("delegation belt injection (D32)", () => {
             mcp_injection: mcpInjection,
             mcp_injection_requires_full_access: requiresFullAccess,
           },
-          access_profiles_supported: ["workspace_write", "external_sandbox_full"],
+          access_profiles_supported: ["workspace_write", "full"],
         });
       },
       async doctor() {
@@ -12112,6 +14501,9 @@ describe("delegation belt injection (D32)", () => {
       delegationBelt: belt,
       runId: "run-current-delegate",
       parentRunId: "run-prior-thread-turn",
+      processingPreference: "standard",
+      workspaceKind: "directory",
+      scopePaths: ["README.md"],
     });
     // The engine rebinds the belt's parent-budget env to the resolved run
     // budget (default = unlimited here), preserving the descriptor's other env.
@@ -12124,6 +14516,9 @@ describe("delegation belt injection (D32)", () => {
     // parent envelope and never a raw path proposed by the harness.
     expect(list[0]!.env.CLAUDEXOR_DELEGATION_REPO_ROOT).toBe(repo);
     expect(JSON.parse(list[0]!.env.CLAUDEXOR_DELEGATION_BUDGET)).toEqual({ kind: "unlimited" });
+    expect(list[0]!.env.CLAUDEXOR_DELEGATION_PROCESSING_PREFERENCE).toBe("standard");
+    expect(list[0]!.env.CLAUDEXOR_DELEGATION_WORKSPACE_KIND).toBe("directory");
+    expect(JSON.parse(list[0]!.env.CLAUDEXOR_DELEGATION_SCOPE_PATHS)).toEqual(["README.md"]);
   });
 
   it("rebinds the belt budget to the configured global cap when the request supplied none (config-cap inheritance)", async () => {
@@ -12212,6 +14607,7 @@ describe("delegation belt injection (D32)", () => {
 
   it("injects the belt on a full-access-requiring harness WHEN the lane runs at full access", async () => {
     const repo = await initRepo();
+    grantFullAccess(repo);
     let injected: unknown;
     const orch = new Orchestrator({
       registry: new Map([
@@ -12228,7 +14624,7 @@ describe("delegation belt injection (D32)", () => {
       prompt: "do the thing",
       mode: "agent",
       harnesses: ["fullonly"],
-      access: "external_sandbox_full",
+      access: "full",
       delegate: true,
       delegationBelt: belt,
     });
@@ -12868,6 +15264,7 @@ describe("delegation belt injection (D32)", () => {
     "refuses secret-bearing raster output from an $source",
     async (source) => {
       const repo = await initRepo();
+      grantFullAccess(repo);
       if (source === "ignored markdown link") {
         writeFileSync(join(repo, ".gitignore"), "preview.png\n");
         execFileSync("git", ["-C", repo, "add", ".gitignore"]);
@@ -12914,7 +15311,7 @@ describe("delegation belt injection (D32)", () => {
         prompt: "x",
         mode: "agent",
         harnesses: ["deleg"],
-        access: "external_sandbox_full",
+        access: "full",
         browser: true,
       });
 
@@ -12980,6 +15377,7 @@ describe("delegation belt injection (D32)", () => {
     async (state) => {
       const repo = reapMk(join(tmpdir(), `claudexor-raster-${state}-`));
       writeFileSync(join(repo, "README.md"), "# test\n");
+      grantFullAccess(repo);
       let raster: string | null = null;
       const adapter = delegatingAdapter(
         "raster",
@@ -13016,7 +15414,7 @@ describe("delegation belt injection (D32)", () => {
         harnesses: ["raster"],
         attempts: 2,
         inPlace: true,
-        access: "external_sandbox_full",
+        access: "full",
         browser: true,
       });
 

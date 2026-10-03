@@ -2,9 +2,10 @@
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { createInterface } from "node:readline";
-import { dirname, resolve, sep } from "node:path";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ProcessGroupService, defaultProcessGroupService } from "@claudexor/core";
+import { processGroupServiceWithWindowsSupport } from "@claudexor/core";
+import { isAgyProfileKeychainUnsafe, prepareAgyProfileKeychain } from "@claudexor/harness-agy";
 import {
   startCodexDeviceLogin,
   type CodexAppServerConnection,
@@ -14,13 +15,21 @@ import { terminateAppServerChild } from "./setup-login-child-lifecycle.js";
 export { terminateAppServerChild } from "./setup-login-child-lifecycle.js";
 import { nativeLoginEnv } from "./native-login.js";
 import {
-  C0_CONTROL_RE,
-  TERM_ESCAPE_RE,
-  boundedTail,
-  createTailBuffer,
-  watchLoginInput,
-} from "./setup-login-io.js";
+  createConptyControlParser,
+  resolvePtyWrappedCommand,
+  type TerminalTransportResolution,
+} from "./setup-login-pty.js";
+import { createOAuthUrlDetector } from "./setup-login-url.js";
+export { createOAuthUrlDetector, extractOAuthUrl } from "./setup-login-url.js";
+import { boundedTail, createTailBuffer, watchLoginInput } from "./setup-login-io.js";
 import { waitForSetupLoginPermit } from "./setup-login-permit.js";
+import {
+  persistRunnerCommandFailure as persistCommandFailure,
+  persistRunnerFailure as persistFailure,
+  persistRunnerResult as persistResult,
+  runnerBootstrapEnv,
+  waitForRunnerExit as waitForExit,
+} from "./setup-login-runner-support.js";
 import {
   SETUP_LOGIN_PROTOCOL_VERSION,
   atomicPrivateJson,
@@ -28,7 +37,6 @@ import {
   verifyExecutableEvidence,
   type SetupLoginManifest,
   type SetupLoginPermit,
-  type SetupLoginRunnerResult,
   type SetupLoginRunnerState,
 } from "./setup-login-protocol.js";
 
@@ -36,9 +44,11 @@ export interface SetupLoginRunnerOptions {
   now?: () => Date;
   sleep?: (ms: number) => Promise<void>;
   spawnProcess?: typeof spawn;
-  processGroupService?: ProcessGroupService;
+  processGroupService?: ReturnType<typeof processGroupServiceWithWindowsSupport>;
   selfPid?: number;
   runnerPath?: string;
+  resolvePtyCommand?: typeof resolvePtyWrappedCommand;
+  prepareAgyProfileKeychain?: (home: string) => void;
 }
 
 /**
@@ -50,12 +60,16 @@ export async function runSetupLogin(
   manifestPath: string,
   options: SetupLoginRunnerOptions = {},
 ): Promise<number> {
-  const manifest = validateManifest(manifestPath);
+  const manifest = readLoginManifest(manifestPath);
   const spawnProcess = options.spawnProcess ?? spawn;
   const runnerPath = options.runnerPath ?? fileURLToPath(import.meta.url);
   const worker = spawnProcess(process.execPath, [runnerPath, "--worker", resolve(manifestPath)], {
     cwd: manifest.cwd,
     env: runnerBootstrapEnv(),
+    // libuv maps detached:true to DETACHED_PROCESS on Windows, so this
+    // durable custody leader starts without an attached console. Keep the
+    // window suppression explicit for the direct executable launch too.
+    windowsHide: true,
     detached: true,
     stdio: "inherit",
   });
@@ -68,11 +82,12 @@ export async function runSetupLoginWorker(
   manifestPath: string,
   options: SetupLoginRunnerOptions = {},
 ): Promise<number> {
-  const manifest = validateManifest(manifestPath);
+  const manifest = readLoginManifest(manifestPath);
   const now = options.now ?? (() => new Date());
   const sleep = options.sleep ?? ((ms) => new Promise<void>((done) => setTimeout(done, ms)));
   const spawnProcess = options.spawnProcess ?? spawn;
-  const processGroups = options.processGroupService ?? defaultProcessGroupService;
+  const resolvePtyCommand = options.resolvePtyCommand ?? resolvePtyWrappedCommand;
+  const processGroups = options.processGroupService ?? processGroupServiceWithWindowsSupport();
   const captured = processGroups.captureLeader(options.selfPid ?? process.pid);
   if (captured.status !== "known") {
     throw new Error(
@@ -104,6 +119,27 @@ export async function runSetupLoginWorker(
   if (!verifyExecutableEvidence(manifest.executable)) {
     persistFailure(manifest, now, permit.issuedAt, "spawn_failed");
     return 1;
+  }
+
+  if (manifest.harness === "agy" && manifest.profileConfigDir) {
+    try {
+      (options.prepareAgyProfileKeychain ?? ((home: string) => prepareAgyProfileKeychain(home)))(
+        manifest.profileConfigDir,
+      );
+    } catch (error) {
+      if (isAgyProfileKeychainUnsafe(error)) {
+        persistFailure(
+          manifest,
+          now,
+          permit.issuedAt,
+          "spawn_failed",
+          error instanceof Error ? error.message : String(error),
+        );
+        return 1;
+      }
+      // A custom operational seam may model a recoverable security-tool
+      // miss; path and identity failures remain unsafe above.
+    }
   }
 
   atomicPrivateJson(manifest.statePath, { ...awaitingPermit, stage: "running" });
@@ -141,8 +177,6 @@ export async function runSetupLoginWorker(
   // and escalate stubborn descendants with KILL; the vendor child receives
   // the same group signal directly.
   const holdLeaderForEscalation = () => undefined;
-  process.on("SIGTERM", holdLeaderForEscalation);
-  process.on("SIGINT", holdLeaderForEscalation);
   // Daemon-hosted no-Terminal modes (owner directive 2026-08-04): the runner
   // is detached, so nothing may inherit a TTY. with_input additionally pipes
   // stdin so the daemon-delivered one-shot input can reach the vendor CLI.
@@ -178,57 +212,138 @@ export async function runSetupLoginWorker(
       // The disclosure is best-effort context; it must never kill the login.
     }
   };
-  // A spawn throw and a wait rejection wrote the SAME receipt, so they share
-  // one catch; de-registering the hold handlers is every exit's finally.
-  let result: { code: number | null; signal: NodeJS.Signals | null };
+  // A vendor that reads its code only from a terminal is wrapped here; the
+  // wrapper is transport, so the evidence verified above still covers the
+  // VENDOR binary and its sealed argv (setup-login-pty.ts).
+  // Install the custody hold before the resolver can spawn its bounded probe.
+  // A daemon cancellation during that await must leave this captured leader
+  // alive for the existing PID-rooted tree escalation.
+  process.on("SIGTERM", holdLeaderForEscalation);
+  process.on("SIGINT", holdLeaderForEscalation);
   let stopInputWatch: (() => void) | undefined;
   try {
-    const spawnOptions: SpawnOptions = {
-      cwd: manifest.cwd,
-      // A sealed profileConfigDir (INV-135) scopes the vendor login to the
-      // profile's own store; absent = the default vendor store as before.
-      env: nativeLoginEnv(manifest.harness, process.env, manifest.profileConfigDir),
-      detached: false,
-      stdio: urlDisclosure
-        ? [withInput ? "pipe" : "ignore", "pipe", "pipe"]
-        : teeOutput
-          ? ["inherit", "pipe", "pipe"]
-          : "inherit",
-    };
-    const child = spawnProcess(manifest.binary, manifest.args, spawnOptions);
-    if (teeOutput) {
-      const tee = (sink: NodeJS.WriteStream) => (chunk: Buffer) => {
-        sink.write(chunk);
-        tail.push(chunk);
-        discloseOAuthUrl(chunk);
+    let terminal: Extract<TerminalTransportResolution, { status: "ready" }> | null = null;
+    if (manifest.ptyStdin) {
+      let resolution: TerminalTransportResolution;
+      try {
+        resolution = await resolvePtyCommand(manifest.binary, manifest.args);
+      } catch {
+        persistFailure(
+          manifest,
+          now,
+          permit.issuedAt,
+          "terminal_transport_probe_failed",
+          "terminal transport capability probe failed",
+        );
+        return 1;
+      }
+      if (resolution.status !== "ready") {
+        persistFailure(manifest, now, permit.issuedAt, resolution.errorCode, resolution.detail);
+        return 1;
+      }
+      terminal = resolution;
+    }
+    const command = terminal?.command ?? { binary: manifest.binary, args: manifest.args };
+
+    // A spawn throw and a wait rejection write the SAME receipt, so they share
+    // one catch. The outer finally releases both input and signal handlers on
+    // resolver, spawn, wait, and result-classification exits.
+    let result: { code: number | null; signal: NodeJS.Signals | null };
+    const helperControl = terminal?.helperControlStderr ? createConptyControlParser() : null;
+    try {
+      const spawnOptions: SpawnOptions = {
+        cwd: manifest.cwd,
+        // A sealed profileConfigDir (INV-135) scopes the vendor login to the
+        // binding's exact environment/state root. Credential custody remains
+        // platform-defined; absent = the harness default route as before.
+        env: nativeLoginEnv(manifest.harness, process.env, manifest.profileConfigDir),
+        ...(terminal?.backend === "windows_conpty" ? { windowsHide: true } : {}),
+        detached: false,
+        stdio: urlDisclosure
+          ? [withInput ? "pipe" : "ignore", "pipe", "pipe"]
+          : terminal?.helperControlStderr
+            ? [withInput ? "pipe" : "inherit", "inherit", "pipe"]
+            : teeOutput
+              ? ["inherit", "pipe", "pipe"]
+              : "inherit",
       };
-      child.stdout?.on("data", tee(process.stdout));
-      child.stderr?.on("data", tee(process.stderr));
+      const child = spawnProcess(command.binary, command.args, spawnOptions);
+      if (teeOutput) {
+        const tee = (sink: NodeJS.WriteStream) => (chunk: Buffer) => {
+          sink.write(chunk);
+          tail.push(chunk);
+          discloseOAuthUrl(chunk);
+        };
+        child.stdout?.on("data", tee(process.stdout));
+        if (!helperControl) child.stderr?.on("data", tee(process.stderr));
+      }
+      if (helperControl) child.stderr?.on("data", (chunk: Buffer) => helperControl.push(chunk));
+      if (withInput && manifest.inputPath) {
+        // A tty echoes what we write, so the code would otherwise ride the tail.
+        stopInputWatch = watchLoginInput(manifest, child, now, {
+          onDelivered: (value) => tail.forget(value),
+          windowsConpty: terminal?.backend === "windows_conpty",
+        });
+      }
+      result = await waitForExit(child);
+    } catch {
+      if (!terminal) {
+        persistFailure(manifest, now, permit.issuedAt, "spawn_failed");
+        return 1;
+      }
+      const control = helperControl?.finish();
+      if (control?.started) {
+        persistCommandFailure(manifest, now, permit.issuedAt, "terminal_transport_failed", true);
+        return 1;
+      }
+      let refreshed: TerminalTransportResolution | null = null;
+      try {
+        refreshed = await resolvePtyCommand(manifest.binary, manifest.args);
+      } catch {
+        // A resolver must normally return a typed result. If its own I/O fails,
+        // the already-probed transport still has the narrow post-probe code.
+      }
+      if (refreshed && refreshed.status !== "ready") {
+        persistFailure(manifest, now, permit.issuedAt, refreshed.errorCode, refreshed.detail);
+      } else {
+        persistCommandFailure(manifest, now, permit.issuedAt, "terminal_transport_failed", false);
+      }
+      return 1;
     }
-    if (withInput && manifest.inputPath) {
-      stopInputWatch = watchLoginInput(manifest, child, now);
+    if (helperControl) {
+      const control = helperControl.finish();
+      if (!control.malformed && !control.started && control.error?.phase === 6) {
+        persistFailure(manifest, now, permit.issuedAt, "spawn_failed");
+        return 1;
+      }
+      if (control.malformed || control.error !== null || !control.started) {
+        persistCommandFailure(
+          manifest,
+          now,
+          permit.issuedAt,
+          "terminal_transport_failed",
+          control.started,
+        );
+        return 1;
+      }
     }
-    result = await waitForExit(child);
-  } catch {
-    persistFailure(manifest, now, permit.issuedAt, "spawn_failed");
-    return 1;
+    const capturedTail = tail.text();
+    persistResult(manifest, {
+      permitIssuedAt: permit.issuedAt,
+      commandStarted: true,
+      exitCode: result.code,
+      signal: result.signal,
+      finishedAt: now().toISOString(),
+      ...(capturedTail && (result.code !== 0 || result.signal !== null)
+        ? { outputTail: capturedTail }
+        : {}),
+    });
+    return result.code === 0 && result.signal === null ? 0 : 1;
   } finally {
     stopInputWatch?.();
     process.off("SIGTERM", holdLeaderForEscalation);
     process.off("SIGINT", holdLeaderForEscalation);
   }
-  const capturedTail = tail.text();
-  persistResult(manifest, {
-    permitIssuedAt: permit.issuedAt,
-    commandStarted: true,
-    exitCode: result.code,
-    signal: result.signal,
-    finishedAt: now().toISOString(),
-    ...(capturedTail && (result.code !== 0 || result.signal !== null)
-      ? { outputTail: capturedTail }
-      : {}),
-  });
-  return result.code === 0 && result.signal === null ? 0 : 1;
 }
 
 /**
@@ -362,55 +477,6 @@ function appServerConnection(child: ChildProcess): CodexAppServerConnection {
   };
 }
 
-const OAUTH_URL_SIGNATURE_RE =
-  /(oauth|authori[sz]e|login|sign[-_]?in|device|sso|verification|callback)/i;
-
-/**
- * First sign-in-shaped URL in vendor CLI output, or null. Terminal escapes are
- * stripped first; trailing prose punctuation is trimmed; a docs link in a
- * banner never qualifies.
- */
-const OAUTH_URL_SCAN_WINDOW = 8_192;
-
-export function extractOAuthUrl(text: string): string | null {
-  const plain = text.replace(TERM_ESCAPE_RE, "").replace(C0_CONTROL_RE, "");
-  for (const match of plain.matchAll(/https:\/\/[^\s"'<>()[\]]+/g)) {
-    const url = match[0].replace(/[.,;:!?]+$/, "");
-    if (OAUTH_URL_SIGNATURE_RE.test(url)) return url;
-  }
-  return null;
-}
-
-/**
- * Per-login detector. A match ending at the window's very end may be cut by a
- * chunk boundary (wave finding): it is published PROVISIONALLY, superseded by
- * a longer capture, and FINAL only once output continues past its end.
- */
-export function createOAuthUrlDetector(): { push(chunk: Buffer): string | null } {
-  let window = "";
-  let published: string | null = null;
-  let finalized = false;
-  return {
-    push(chunk) {
-      if (finalized) return null;
-      window = (window + chunk.toString("utf8")).slice(-OAUTH_URL_SCAN_WINDOW);
-      const plain = window.replace(TERM_ESCAPE_RE, "").replace(C0_CONTROL_RE, "");
-      const match = [...plain.matchAll(/https:\/\/[^\s"'<>()[\]]+/g)].find((m) =>
-        OAUTH_URL_SIGNATURE_RE.test(m[0]),
-      );
-      if (!match) return null;
-      const url = match[0].replace(/[.,;:!?]+$/, "");
-      if ((match.index ?? 0) + match[0].length < plain.length) {
-        finalized = true;
-        return url === published ? null : url;
-      }
-      if (published !== null && url.length <= published.length) return null;
-      published = url;
-      return url;
-    },
-  };
-}
-
 /** Run `<binary> login --help` captured, bounded to 10s. Fails OPEN: only a
  * COMPLETED probe whose help text lacks the flag reports unsupported. */
 function probeLoginHelp(
@@ -465,99 +531,6 @@ function probeLoginHelp(
     }, 10_000);
     timer.unref?.();
   });
-}
-
-function validateManifest(manifestPath: string): SetupLoginManifest {
-  const manifest = readLoginManifest(manifestPath);
-  const base = resolve(dirname(manifestPath));
-  for (const output of [manifest.statePath, manifest.resultPath, manifest.permitPath]) {
-    const absolute = resolve(output);
-    if (!absolute.startsWith(base + sep))
-      throw new Error("setup-login sidecar escapes its job directory");
-  }
-  return manifest;
-}
-
-function persistResult(
-  manifest: SetupLoginManifest,
-  result: Omit<
-    SetupLoginRunnerResult,
-    "version" | "jobId" | "executionId" | "commandDigest" | "manifestDigest"
-  >,
-): void {
-  atomicPrivateJson(manifest.resultPath, {
-    version: SETUP_LOGIN_PROTOCOL_VERSION,
-    jobId: manifest.jobId,
-    executionId: manifest.executionId,
-    commandDigest: manifest.commandDigest,
-    manifestDigest: manifest.manifestDigest,
-    ...result,
-  } satisfies SetupLoginRunnerResult);
-}
-
-/** Every not-started outcome writes the same receipt: no exit code, no signal.
- * Eight call sites spelled it out; one shape means the next field lands once. */
-function persistFailure(
-  manifest: SetupLoginManifest,
-  now: () => Date,
-  permitIssuedAt: string | null,
-  errorCode: NonNullable<SetupLoginRunnerResult["errorCode"]>,
-  outputTail?: string,
-): void {
-  persistResult(manifest, {
-    permitIssuedAt,
-    commandStarted: false,
-    errorCode,
-    exitCode: null,
-    signal: null,
-    finishedAt: now().toISOString(),
-    ...(outputTail === undefined ? {} : { outputTail }),
-  });
-}
-
-function waitForExit(
-  child: ReturnType<typeof spawn>,
-): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
-  // `close` fires after the stdio streams drain (wave-1 finding: `exit` can
-  // race the final piped data chunks, truncating the captured tail); children
-  // with fully-inherited stdio emit `close` immediately after `exit` too.
-  return new Promise((resolveExit, reject) => {
-    child.once("error", reject);
-    child.once("close", (code, signal) => resolveExit({ code, signal }));
-  });
-}
-
-/** The bootstrap itself never needs model/provider credentials. */
-function runnerBootstrapEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
-  for (const key of [
-    "PATH",
-    "HOME",
-    "TMPDIR",
-    "LANG",
-    "LC_ALL",
-    "USER",
-    "LOGNAME",
-    // Without the daemon's config root the worker re-roots onto the GLOBAL default (2026-08-04).
-    "CLAUDEXOR_CONFIG_DIR",
-    "CLAUDEXOR_CODEX_NATIVE_HOME",
-    "CLAUDEXOR_CLAUDE_NATIVE_DIR",
-    // Proxy/CA pass-through: without it a corporate-proxy machine cannot
-    // reach the vendor and the device-code login dies opaquely. Never set.
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "NO_PROXY",
-    "ALL_PROXY",
-    "http_proxy",
-    "https_proxy",
-    "no_proxy",
-    "SSL_CERT_FILE",
-    "SSL_CERT_DIR",
-    "NODE_EXTRA_CA_CERTS",
-  ] as const) {
-    if (source[key] !== undefined) env[key] = source[key];
-  }
-  return env;
 }
 
 function isDirectEntrypoint(): boolean {

@@ -4,11 +4,14 @@ import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
   ControlRunAgainDraft,
+  RecordedControlRunStartRequest,
   ControlRunRetryResponse,
   ControlRunStartRequest,
+  RETIRED_EXTERNAL_SANDBOX_FULL,
   TaskContract,
+  restoreRecordedRunReviewRequest,
 } from "@claudexor/schema";
-import type { EffortHint } from "@claudexor/schema";
+import type { EffortHint, ProcessingPreference } from "@claudexor/schema";
 import type {
   DaemonControlApiOptions,
   DaemonFacadeClient,
@@ -80,14 +83,16 @@ async function exactRetry(
     return ctx.json(res, 409, { error: `run is still ${source.state}` });
   }
   let idempotencyKey: string;
-  let params: ControlRunStartRequest;
+  let recordedParams: RecordedControlRunStartRequest;
   let sourceTurnProvenance: SourceTurnProvenance = {};
   try {
     idempotencyKey = runStart.requiredIdempotencyKey(req);
     const replay = await sourceReplayInput(ctx, source);
     sourceTurnProvenance = replay.turn;
-    const parsed = ControlRunStartRequest.parse(replay.params);
-    const { turnId: _turnId, retryOf: _retryOf, ...original } = parsed;
+    const recorded = restoreRecordedRunReviewRequest(
+      RecordedControlRunStartRequest.parse(replay.params),
+    );
+    const { turnId: _turnId, retryOf: _retryOf, ...original } = recorded;
     // QA-035: Exact Retry replays the IMMUTABLE original request. The stored
     // params omit any model/effort the caller left to settings, so re-reading
     // current settings would silently change the route after a settings edit.
@@ -95,13 +100,16 @@ async function exactRetry(
     // (routing_models / routing_efforts) — a value the caller stated explicitly
     // still wins.
     const frozen = readFrozenRouting(source);
-    params = runStart.normalizeRunStart({
+    recordedParams = RecordedControlRunStartRequest.parse({
       ...original,
       ...(frozen.models ? { models: { ...frozen.models, ...(original.models ?? {}) } } : {}),
       // QA-035 completeness: replay the FROZEN per-lane efforts map so a
       // non-primary lane keeps its own effort (the old scalar collapse dropped
       // it). Frozen entries merge UNDER anything the caller stated explicitly.
       ...(frozen.efforts ? { efforts: { ...frozen.efforts, ...(original.efforts ?? {}) } } : {}),
+      ...(original.processingPreference === undefined && frozen.processingPreference !== undefined
+        ? { processingPreference: frozen.processingPreference }
+        : {}),
       parentRunId: source.runId ?? source.id,
       retryOf: source.runId ?? source.id,
     });
@@ -109,16 +117,19 @@ async function exactRetry(
     return ctx.requestError(res, error);
   }
   const sourceRunId = source.runId ?? source.id;
-  const threadId = typeof params.threadId === "string" ? params.threadId : null;
+  const threadId = typeof recordedParams.threadId === "string" ? recordedParams.threadId : null;
   const idempotencyRequest = { retryOf: sourceRunId };
-  // A durable daemon command is the canonical replay owner. Probe it before
-  // any mutable resource/Git/harness preflight so a later environment change
-  // cannot replace an already-accepted handle with a new admission error.
+  let params: ControlRunStartRequest | undefined;
+  // A durable daemon command is the canonical replay owner. Probe the
+  // historical projection before active parsing, including the retirement
+  // check, so an unknown old POST outcome cannot strand a live accepted run.
+  // Only an absent lookup (plus the race-closing second miss) may turn the
+  // retired body into a definitive refusal.
   let preflightStarted = false;
   try {
     const prior = await runStart.findAcceptedAroundPreflight(
       () =>
-        ctx.daemon.findAccepted?.(params, {
+        ctx.daemon.findAccepted?.(recordedParams, {
           idempotencyKey,
           clientId: "control-api",
           operation: "run.retry",
@@ -126,6 +137,22 @@ async function exactRetry(
         }) ?? Promise.resolve(null),
       async () => {
         preflightStarted = true;
+        if (recordedParams.access === RETIRED_EXTERNAL_SANDBOX_FULL) {
+          throw Object.assign(
+            new Error(
+              "Exact Retry cannot reproduce the retired external_sandbox_full access guarantee; use Run Again and choose an active access profile",
+            ),
+            {
+              status: 409,
+              code: "retired_access_profile",
+              retryable: false,
+              requiredActions: [
+                "Use Run Again and choose workspace_write, or explicitly trust the repository and choose full.",
+              ],
+            },
+          );
+        }
+        params = runStart.normalizeRunStart(ControlRunStartRequest.parse(recordedParams));
         await ctx.services?.validateResources?.(params.attachments ?? []);
         await ctx.services?.preflightRunRequirements?.(params);
       },
@@ -139,6 +166,16 @@ async function exactRetry(
   } catch (error) {
     return ctx.requestError(res, error, preflightStarted ? undefined : 500);
   }
+  if (!params) {
+    return ctx.requestError(
+      res,
+      Object.assign(new Error("retry admission did not produce an active request"), {
+        status: 500,
+      }),
+      500,
+    );
+  }
+  const activeParams = params;
   const retry = async (): Promise<void> => {
     let retryTurnId: string | undefined;
     if (threadId) {
@@ -147,14 +184,14 @@ async function exactRetry(
         ctx.services,
         source,
         threadId,
-        params.prompt,
+        activeParams.prompt,
         {
           kind: "followup",
           parentRunId: sourceRunId,
-          planRunId: params.planRunId ?? null,
+          planRunId: activeParams.planRunId ?? null,
           planHash: sourceTurnProvenance.planHash ?? null,
           planOverridden: sourceTurnProvenance.planOverridden === true,
-          attachments: params.attachments,
+          attachments: activeParams.attachments,
         },
         {
           key: idempotencyKey,
@@ -163,7 +200,7 @@ async function exactRetry(
         },
         (turnId) =>
           ctx.daemon.findAccepted?.(
-            { ...params, turnId },
+            { ...activeParams, turnId },
             {
               idempotencyKey,
               clientId: "control-api",
@@ -174,7 +211,7 @@ async function exactRetry(
       );
       retryTurnId = turn.id;
     }
-    const request = { ...params, ...(retryTurnId ? { turnId: retryTurnId } : {}) };
+    const request = { ...activeParams, ...(retryTurnId ? { turnId: retryTurnId } : {}) };
     let job: { id: string };
     try {
       job = await ctx.daemon.enqueue(request, {
@@ -259,7 +296,14 @@ async function runAgain(ctx: RunRetryRouteContext, id: string, res: ServerRespon
   const source = await ctx.findRun(id);
   if (!source) return ctx.json(res, 404, { error: "no such run" });
   try {
-    const parsed = ControlRunStartRequest.parse((await sourceReplayInput(ctx, source)).params);
+    const recorded = restoreRecordedRunReviewRequest(
+      RecordedControlRunStartRequest.parse((await sourceReplayInput(ctx, source)).params),
+    );
+    const retiredAccess = recorded.access === RETIRED_EXTERNAL_SANDBOX_FULL;
+    const { access: recordedAccess, ...withoutRecordedAccess } = recorded;
+    const parsed = ControlRunStartRequest.parse(
+      retiredAccess ? withoutRecordedAccess : { ...withoutRecordedAccess, access: recordedAccess },
+    );
     // Strip EVERY server-owned binding, with disclosure: the draft is an
     // editable POST /runs request, and POST /runs 400s threadId/planRef (they
     // belong to the turn pipeline) — surviving here would make the draft
@@ -309,11 +353,26 @@ async function runAgain(ctx: RunRetryRouteContext, id: string, res: ServerRespon
             },
           ]
         : []),
+      ...(retiredAccess
+        ? [
+            {
+              field: "access",
+              change: "omitted" as const,
+              reason:
+                "external_sandbox_full is retired; choose workspace_write or explicitly trusted full",
+            },
+          ]
+        : []),
     ];
     ctx.json(
       res,
       200,
-      ControlRunAgainDraft.parse({ sourceRunId: source.runId ?? source.id, request, differences }),
+      ControlRunAgainDraft.parse({
+        sourceRunId: source.runId ?? source.id,
+        request,
+        accessChoice: { required: retiredAccess },
+        differences,
+      }),
     );
   } catch (error) {
     ctx.requestError(res, error);
@@ -335,6 +394,7 @@ function paramsRecord(rec: DaemonRunRecord): Record<string, unknown> {
 function readFrozenRouting(source: DaemonRunRecord): {
   models?: Record<string, string>;
   efforts?: Record<string, EffortHint>;
+  processingPreference?: ProcessingPreference;
 } {
   if (!source.runDir) return {};
   let contract: TaskContract;
@@ -351,7 +411,13 @@ function readFrozenRouting(source: DaemonRunRecord): {
     Object.keys(contract.routing_efforts).length > 0
       ? (contract.routing_efforts as Record<string, EffortHint>)
       : undefined;
-  return { ...(models ? { models } : {}), ...(efforts ? { efforts } : {}) };
+  return {
+    ...(models ? { models } : {}),
+    ...(efforts ? { efforts } : {}),
+    ...(contract.processing_preference !== undefined
+      ? { processingPreference: contract.processing_preference }
+      : {}),
+  };
 }
 
 interface SourceTurnProvenance {

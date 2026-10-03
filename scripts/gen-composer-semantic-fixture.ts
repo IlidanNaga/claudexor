@@ -9,7 +9,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Attachment, AttachmentInputClass, ModeKind } from "@claudexor/schema";
 import { format } from "prettier";
-import { runControlApplicability } from "../packages/schema/src/run-strategy.js";
+import {
+  runControlApplicability,
+  resolveRunReviewRequested,
+} from "../packages/schema/src/run-strategy.js";
 import { RequestRequirementsResolver } from "../packages/orchestrator/src/requestRequirements.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -179,7 +182,37 @@ const attachmentPoolInputs = [
 ];
 
 const fixture = {
-  generatedBy: ["runControlApplicability", "RequestRequirementsResolver"],
+  generatedBy: [
+    "runControlApplicability",
+    "resolveRunReviewRequested",
+    "RequestRequirementsResolver",
+  ],
+  reviewCases: [
+    {
+      name: "single-default",
+      swiftMode: "agent",
+      mode: "agent" as const,
+      review: false,
+      attempts: 3,
+    },
+    {
+      name: "single-auto-review",
+      swiftMode: "agent",
+      mode: "agent" as const,
+      review: true,
+      attempts: 3,
+    },
+    {
+      name: "single-explicit-panel",
+      swiftMode: "agent",
+      mode: "agent" as const,
+      reviewerPanel: [{ harness: "codex" }],
+    },
+    { name: "best-of", swiftMode: "bestOfN", mode: "agent" as const, n: 2 },
+    { name: "until-clean", swiftMode: "agent", mode: "agent" as const, untilClean: true },
+    { name: "explicit-attempts", swiftMode: "maxAttempts", mode: "agent" as const, attempts: 3 },
+    { name: "create-default", swiftMode: "create", mode: "agent" as const, review: false },
+  ].map((input) => ({ ...input, requested: resolveRunReviewRequested(input) })),
   runControls: runControlInputs.map((input) => ({
     ...input,
     reviewers: runControlApplicability({ mode: input.schemaMode }).reviewerPanel,

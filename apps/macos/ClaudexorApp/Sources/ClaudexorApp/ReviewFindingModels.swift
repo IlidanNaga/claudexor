@@ -132,7 +132,7 @@ enum ReviewVerdict: String, Hashable {
 
     var label: String {
         switch self {
-        case .notRun: return "Not run"
+        case .notRun: return "Not reviewed"
         case .running: return "Running"
         case .clean: return "Clean"
         case .findings: return "Findings"

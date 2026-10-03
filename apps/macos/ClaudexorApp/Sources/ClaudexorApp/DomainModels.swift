@@ -51,24 +51,24 @@ struct HarnessFamily: RawRepresentable, Identifiable, Hashable {
     static let claude = Self(rawValue: "claude")
     static let cursor = Self(rawValue: "cursor")
     static let opencode = Self(rawValue: "opencode")
+    static let agy = Self(rawValue: "agy")
     static let raw = Self(rawValue: "raw-api")
     /// The openrouter raw-API instance (registry.ts `createRawApiAdapter({ id:
     /// "openrouter" })`): a second api-key meta-host, not a built-in family row —
     /// it renders only when its key is configured and the daemon lists it live.
     static let openrouter = Self(rawValue: "openrouter")
     static let fake = Self(rawValue: "fake")
-    static let builtIns: [Self] = [.codex, .claude, .cursor, .opencode, .raw]
+    static let builtIns: [Self] = [.codex, .claude, .cursor, .opencode, .agy, .raw]
     var id: String { rawValue }
 
+    /// Human-facing family names; anything else title-cases its rawValue. The
+    /// vendor brands the PRODUCT "Antigravity" — `agy` is only its binary.
+    private static let labels = [
+        "codex": "Codex", "claude": "Claude", "cursor": "Cursor", "opencode": "OpenCode",
+        "agy": "Antigravity", "raw-api": "Raw API", "openrouter": "OpenRouter", "fake": "Fake",
+    ]
     var label: String {
-        if self == .codex { return "Codex" }
-        if self == .claude { return "Claude" }
-        if self == .cursor { return "Cursor" }
-        if self == .opencode { return "OpenCode" }
-        if self == .raw { return "Raw API" }
-        if self == .openrouter { return "OpenRouter" }
-        if self == .fake { return "Fake" }
-        return rawValue.split(separator: "-").map { $0.capitalized }.joined(separator: " ")
+        Self.labels[rawValue] ?? rawValue.split(separator: "-").map { $0.capitalized }.joined(separator: " ")
     }
     // Vendor iconography is owned solely by `HarnessIcon` (M9-UX item 5): a real
     // brand mark where we ship one, else ONE shared generic glyph. No per-family
@@ -329,17 +329,19 @@ struct TurnOptions: Equatable {
     /// Plan council (D31); plan-only. Sent as `council`; `councilN` sets width.
     var council: Bool = false
     var councilN: Int? = nil
-    var browser: Bool = false          // arm the agent-driven browser (full access)
+    var browser: Bool = false          // arm the agent-driven browser; access stays independent
     /// Harness-scoped per-turn models (harness id -> model id). Built by the
     /// composer's per-harness pickers; empty entries are dropped before send.
     var models: [String: String] = [:]
+    /// Ordinary Agent skips internal model review; explicit strategies/panels enable it.
+    var review: Bool = false
     var reviewerPanel: [ReviewerPanelEntry]? = nil
     var protectedPathApprovals: [ProtectedPathApproval]? = nil
     /// QA-010: optional deterministic gate command(s) the operator authorizes for
     /// THIS turn (Create especially — the project's test script does not exist
     /// until the run scaffolds it). Rides the run-start request's typed `tests`
     /// field so it becomes a post-candidate acceptance gate, never inferred from
-    /// prompt text. Empty = review-only acceptance.
+    /// prompt text. Empty = no deterministic checks configured.
     var tests: [TestCommandInvocation] = []
     /// Per-turn auth route REQUEST ("subscription" | "api_key"); nil = auto /
     /// inherit the thread preference. The effective route is a post-run receipt.
@@ -562,6 +564,8 @@ struct TaskRun: Identifiable, Hashable {
     var externalContextPolicy: String?
     /** Deterministic gate commands attached to this run, for honest Retry parity. */
     var tests: [TestCommandInvocation] = []
+    /// Frozen intent from the server; absent on legacy runs, never inferred from defaults.
+    var reviewRequested: Bool?
     var reviewerPanel: [ReviewerPanelEntry]?
     var protectedPathApprovals: [ProtectedPathApproval]?
     /// Model identity the harness stream actually reported (route evidence).

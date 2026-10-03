@@ -10,10 +10,11 @@
  *     other docs may mention endpoints but every mention must be real.
  *  2. Canonical mode ids in the schema vs README.md / CLI help.
  *  3. CLI flags accepted by cli.ts (KNOWN_FLAGS) vs flags shown in its help.
- *  4. Version parity across the generated constant and every manifest.
+ *  4. Version parity across the README status, generated constant, and every
+ *     manifest.
  *  5. macOS debug-route parity (AppModel.swift vs apps/macos/README.md).
  *  6. Deleted-screen guard (chat-first collapse must not silently revert).
- *  7. Retired-contract guard for small, owner-approved phrases whose return
+ *  7. Retired-contract guard for small, operator-approved phrases whose return
  *     would contradict current schema/runtime truth.
  *  8. Dead-symbol check: code-shaped backticked identifiers in public docs
  *     must exist in the source tree (catches NavigationSplitView/glowHi-class
@@ -238,7 +239,8 @@ if (!modeMatch) {
 }
 
 // --------------------------------------------------------------------------
-// 4. Version parity: generated constant, root package.json, every manifest.
+// 4. Version parity: README status, generated constant, root package.json,
+//    every manifest.
 // --------------------------------------------------------------------------
 
 const versionTs = readFileSync("packages/util/src/version.ts", "utf8");
@@ -250,6 +252,16 @@ if (!constMatch) {
 } else {
   const constant = constMatch[1];
   const rootVersion = JSON.parse(readFileSync("package.json", "utf8")).version;
+  const readmeStatus = /^Current status: \*\*v(\d+\.\d+\.\d+)\*\*\./m.exec(
+    readFileSync("README.md", "utf8"),
+  )?.[1];
+  if (!readmeStatus) {
+    failures.push("README.md is missing the canonical 'Current status: **vX.Y.Z**.' claim");
+  } else if (readmeStatus !== rootVersion) {
+    failures.push(
+      `README.md current status (${readmeStatus}) != root package.json version (${rootVersion})`,
+    );
+  }
   if (constant !== rootVersion) {
     failures.push(
       `CLAUDEXOR_VERSION (${constant}) != root package.json version (${rootVersion}); run \`pnpm gen:version\``,
@@ -331,7 +343,7 @@ for (const docPath of ["docs/DESIGN_SYSTEM.md", "docs/ARCHITECTURE.md"]) {
 
 // --------------------------------------------------------------------------
 // 6. Retired contracts: these literal claims each contradicted an executable
-//    owner. Normalize whitespace only so wrapped Markdown cannot evade the
+//    runtime contract. Normalize whitespace only so wrapped Markdown cannot evade the
 //    guard; this is deliberately a small inventory, not prose-regex policy.
 // --------------------------------------------------------------------------
 
@@ -367,6 +379,27 @@ const RETIRED_CONTRACT_CLAIMS = [
   ],
   ["scripts/real-harness-battery.mjs", 'const plansDir = join(detail.runDir, "plans")'],
 ];
+
+// The active access vocabulary is schema-owned. Historical decoders may keep
+// retired literals, but a docs/build regression must never promote one back to
+// active ingress or omit a live value from the canonical architecture map.
+try {
+  const { AccessProfile } = await import("../packages/schema/dist/index.js");
+  const options = AccessProfile.options;
+  if (options.includes("external_sandbox_full")) {
+    failures.push("AccessProfile re-advertises retired external_sandbox_full");
+  }
+  const architecture = readFileSync("docs/ARCHITECTURE.md", "utf8");
+  for (const option of options) {
+    if (!architecture.includes(`\`${option}\``)) {
+      failures.push(`docs/ARCHITECTURE.md omits active access profile '${option}'`);
+    }
+  }
+} catch (error) {
+  failures.push(
+    `cannot verify schema-owned active access vocabulary: ${error instanceof Error ? error.message : String(error)}`,
+  );
+}
 
 for (const [targetPath, claim] of RETIRED_CONTRACT_CLAIMS) {
   const normalized = readFileSync(targetPath, "utf8").replace(/\s+/g, " ");

@@ -5,12 +5,16 @@ import type {
   ConformanceReport,
   CredentialProfile,
   CredentialProfileStatus,
+  HarnessCapabilityProfile,
   HarnessEvent,
   HarnessManifest,
   HarnessModel,
   HarnessRunSpec,
   InteractionAnswerSet,
   InteractionRequest,
+  ProcessingPreference,
+  ProcessingReceipt,
+  ProcessingCostBasis,
 } from "@claudexor/schema";
 
 /** Accounts-only doctor receipt. Identity never widens generic HarnessStatus. */
@@ -39,6 +43,53 @@ export interface DoctorSpec {
   abortSignal?: AbortSignal;
 }
 
+/** Model-inventory query bound to the credential identity that would run.
+ * Kept separate from DoctorSpec so profile identity never enters the shared
+ * doctor cache contract. */
+export interface HarnessModelSpec extends DoctorSpec {
+  credentialProfile?: CredentialProfile | null;
+}
+
+export interface HarnessProcessingSpec extends HarnessModelSpec {
+  preference?: ProcessingPreference;
+  model: string | null;
+  effort: string | null;
+  /** Existing monetary policy; false requests ordinary fallback before paid work. */
+  allowPaid?: boolean;
+}
+
+export interface PreparedHarnessProcessing {
+  model: string | null;
+  receipt: ProcessingReceipt;
+  costBasis: ProcessingCostBasis;
+}
+
+/**
+ * Why a live message did not reach the model, filled from adapter/registry
+ * state only — never from vendor error prose (INV-049). The ONE vocabulary is
+ * the schema's `LiveMessageReason` (control-run-message.ts); core re-exports
+ * it so harness packages keep a single import path.
+ */
+import type { LiveMessageReason } from "@claudexor/schema";
+export type { LiveMessageReason };
+
+/**
+ * Typed answer of `HarnessAdapter.message`. `accepted`: the harness's
+ * documented acceptance boundary was observed (consumption unproved).
+ * `delivered`: a correlated native consumption event was observed (obedience
+ * unproved). `rejected`: an explicit refusal of THIS submission on a still
+ * active turn. `not_active`: no eligible target existed before dispatch.
+ * `unsupported`: this session has no live-input channel. `delivery_unknown`:
+ * the message may have landed (transport loss, malformed reply, timeout) —
+ * never "safe to resend under a new key".
+ */
+export interface LiveMessageResult {
+  outcome:
+    "accepted" | "delivered" | "rejected" | "not_active" | "unsupported" | "delivery_unknown";
+  reason?: LiveMessageReason;
+  nativeTurnId?: string;
+}
+
 /**
  * The contract every harness adapter implements. Adapters translate a native
  * harness's I/O into typed Claudexor events — they never contain orchestration
@@ -46,6 +97,17 @@ export interface DoctorSpec {
  */
 export interface HarnessAdapter {
   readonly id: string;
+  /** Separate native effort carrier; the adapter resolves it at the final route. */
+  readonly effortParameter?: string;
+
+  /**
+   * Static capability declaration available without spawning the vendor CLI.
+   * Policy/admission consumers use this exact object before any live probe;
+   * discover() may only overlay runtime facts such as the preferred auth
+   * source. Keeping the declaration on the adapter prevents a profile-policy
+   * conflict from spending a vendor call merely to learn that it must refuse.
+   */
+  readonly capabilityProfile?: HarnessCapabilityProfile;
 
   /** Detect installation/version/auth and declare capabilities. */
   discover(): Promise<HarnessManifest>;
@@ -72,10 +134,26 @@ export interface HarnessAdapter {
    * native-CLI adapters that cannot enumerate simply omit it. Must fail soft
    * (return [] on network/auth error) — never throw into a picker/consumer.
    */
-  models?(spec?: DoctorSpec): Promise<HarnessModel[]>;
+  models?(spec?: HarnessModelSpec): Promise<HarnessModel[]>;
+
+  /** Translate service intent using this account's inventory before ranking or
+   * reserving spend. Discovery only; never starts a generation or changes auth. */
+  prepareProcessing?(spec: HarnessProcessingSpec): Promise<PreparedHarnessProcessing>;
 
   /** Optional cancellation. */
   cancel?(sessionId: string): Promise<void>;
+
+  /**
+   * Optional live input into an ALREADY RUNNING session (the
+   * `POST /v2/runs/:id/messages` capability). Only adapters whose
+   * `capabilityProfile.live_input` is not `none` implement it; the daemon
+   * answers `unsupported` when the method is absent. The adapter never
+   * cancels or fails the run because of a message: every outcome is typed.
+   */
+  message?(
+    sessionId: string,
+    input: { messageId: string; text: string },
+  ): Promise<LiveMessageResult>;
 
   /**
    * Optional per-profile readiness probe (INV-135): the doctor projection for

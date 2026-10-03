@@ -1,110 +1,15 @@
 import {
   CONTROL_PROTOCOL_MAJOR,
-  ControlHandshakeRequest,
-  ControlHandshakeResponse,
   ControlOperationCatalog,
-  ControlProblem,
   ControlRunState,
   type ControlOperationDescriptor,
+  ControlHarnessSetupHarness,
 } from "@claudexor/schema";
-import { engineBuildIdentity } from "@claudexor/util";
-import { pathnameDecodes, queryParam, resumeHeader } from "./operation-parameters.js";
+import { queryParam, resumeHeader } from "./operation-parameters.js";
 import { REMOTE_OPERATION_DRAFTS } from "./remote-operation-descriptors.js";
+import { MODEL_OPERATION_DRAFTS } from "./model-routes.js";
 import type { OperationDraft } from "./operation-draft.js";
 import { OPERATION_SUMMARIES } from "./operation-summaries.js";
-
-export type ControlProtocolBoundary =
-  | { kind: "route"; path: string }
-  | { kind: "response"; status: number; body: unknown; contentType: string };
-
-const protocolProblem = (code: string, message: string, requiredActions: string[] = []) =>
-  ControlProblem.parse({
-    code,
-    message,
-    retryable: false,
-    fieldErrors: {},
-    requiredActions,
-    evidenceRefs: [],
-  });
-
-/** Stateless v2 negotiation boundary; product handlers only see unversioned internal paths. */
-export async function resolveControlProtocol(input: {
-  method: string;
-  requestPath: string;
-  requestedMajor: string | string[] | undefined;
-  readBody: () => Promise<unknown>;
-}): Promise<ControlProtocolBoundary> {
-  if (input.method === "POST" && input.requestPath === "/v2/handshake") {
-    const request = ControlHandshakeRequest.parse(await input.readBody());
-    if (request.protocolMajor !== CONTROL_PROTOCOL_MAJOR) {
-      return {
-        kind: "response",
-        status: 426,
-        contentType: "application/problem+json",
-        body: protocolProblem(
-          "incompatible_protocol_major",
-          `control protocol major ${request.protocolMajor} is incompatible; server requires ${CONTROL_PROTOCOL_MAJOR}`,
-          [`use control protocol major ${CONTROL_PROTOCOL_MAJOR}`],
-        ),
-      };
-    }
-    return {
-      kind: "response",
-      status: 200,
-      contentType: "application/json",
-      body: ControlHandshakeResponse.parse({
-        protocolMajor: CONTROL_PROTOCOL_MAJOR,
-        compatible: true,
-        operationsPath: "/v2/operations",
-        engine: engineBuildIdentity(),
-      }),
-    };
-  }
-  if (!input.requestPath.startsWith("/v2/")) {
-    return {
-      kind: "response",
-      status: 404,
-      contentType: "application/problem+json",
-      body: protocolProblem("route_not_found", "product routes require the /v2 prefix"),
-    };
-  }
-  if (input.requestedMajor !== String(CONTROL_PROTOCOL_MAJOR)) {
-    return {
-      kind: "response",
-      status: 426,
-      contentType: "application/problem+json",
-      body: protocolProblem(
-        "handshake_required",
-        "a successful v2 handshake is required before product calls",
-        ["POST /v2/handshake", `send X-Claudexor-Protocol-Major: ${CONTROL_PROTOCOL_MAJOR}`],
-      ),
-    };
-  }
-  if (input.method === "GET" && input.requestPath === "/v2/operations") {
-    return {
-      kind: "response",
-      status: 200,
-      contentType: "application/json",
-      body: OPERATION_CATALOG,
-    };
-  }
-  // QA-066: malformed percent-encoding in the path is a CLIENT syntax error —
-  // validate the whole encoded pathname decodes ONCE, centrally, before route
-  // dispatch (typed 400, not a per-route URIError into the 500 handler).
-  // Routes still match on the ENCODED path; `%2F`/`%2e%2e` semantics unchanged.
-  if (!pathnameDecodes(input.requestPath)) {
-    return {
-      kind: "response",
-      status: 400,
-      contentType: "application/problem+json",
-      body: protocolProblem(
-        "malformed_request_path",
-        "request path contains malformed percent-encoding",
-      ),
-    };
-  }
-  return { kind: "route", path: input.requestPath.slice(3) };
-}
 
 function descriptor(input: OperationDraft): ControlOperationDescriptor {
   // Resource-family classification (QA-054): an operation is grouped under the
@@ -163,6 +68,7 @@ const j = (
   });
 
 const operations: ControlOperationDescriptor[] = [
+  ...MODEL_OPERATION_DRAFTS.map(descriptor),
   j("POST", "/v2/uploads", "mutating", "ControlUploadCreateRequest", "ControlUploadStatus", {
     idempotency: "key_required",
   }),
@@ -203,6 +109,10 @@ const operations: ControlOperationDescriptor[] = [
     ],
   }),
   j("GET", "/v2/quota", "read_only", null, "ControlQuotaResponse"),
+  // Unified account model (INV-135 rewrite): the pool-authority read. Its
+  // catalog presence is also the feature marker clients detect (absent from
+  // 3.5.0 engines), per INV-138 a generated capability, never hand-declared.
+  j("GET", "/v2/account-pools", "read_only", null, "ControlAccountPoolsResponse"),
   j("GET", "/v2/credential-profiles", "read_only", null, "ControlCredentialProfilesQueryResponse", {
     parameters: [
       queryParam({
@@ -234,6 +144,17 @@ const operations: ControlOperationDescriptor[] = [
     "mutating",
     null,
     "ControlCredentialProfileDeleteResponse",
+    { idempotency: "natural" },
+  ),
+  // The supported downgrade path of the unified-accounts startup migration:
+  // run BEFORE installing an engine whose canonicalizers refuse the migrated
+  // row's native locator. Naturally idempotent (a second call finds no record).
+  j(
+    "POST",
+    "/v2/accounts-migration/rollback",
+    "mutating",
+    "ControlAccountsMigrationRollbackRequest",
+    "ControlAccountsMigrationRollbackResponse",
     { idempotency: "natural" },
   ),
   j("POST", "/v2/quota", "mutating", "ControlQuotaRefreshRequest", "ControlQuotaResponse", {
@@ -292,8 +213,19 @@ const operations: ControlOperationDescriptor[] = [
     mutability: "read_only",
     responseKind: "binary",
   }),
-  j("GET", "/v2/harnesses/:id/models", "read_only", null, "ControlHarnessModelsResponse", {
+  j("GET", "/v2/harnesses/:id/models", "read_only", null, "ControlHarnessModelsQueryResponse", {
     parameters: [
+      queryParam({
+        name: "view",
+        enum: ["accounts"],
+        description:
+          "Opt in to all enabled account catalogs with separate availability and provenance; omission preserves the legacy response.",
+      }),
+      queryParam({
+        name: "credentialProfileId",
+        schemaRef: "Id",
+        description: "Restrict the accounts view to this exact enabled credential profile.",
+      }),
       queryParam({
         name: "route",
         enum: ["local_session", "api_key"],
@@ -398,6 +330,16 @@ const operations: ControlOperationDescriptor[] = [
     "ControlInteractionAnswerResponse",
     { idempotency: "natural" },
   ),
+  j(
+    "POST",
+    "/v2/runs/:id/messages",
+    "mutating",
+    "ControlRunMessageRequest",
+    "ControlRunMessageResponse",
+    // key_required (not natural): a replayed message would be delivered twice;
+    // the Idempotency-Key is the message id and the stored receipt is replayed.
+    { idempotency: "key_required" },
+  ),
   j("GET", "/v2/runs/:id/produced", "read_only", null, "ControlArtifactListResponse"),
   descriptor({
     method: "GET",
@@ -472,7 +414,7 @@ const operations: ControlOperationDescriptor[] = [
     parameters: [
       queryParam({
         name: "harness",
-        enum: ["codex", "claude", "cursor"],
+        enum: [...ControlHarnessSetupHarness.options],
         schemaRef: "ControlSetupJobListFilter#/properties/harness",
         description: "Filter setup jobs to one harness.",
       }),

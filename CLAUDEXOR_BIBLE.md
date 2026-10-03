@@ -18,17 +18,17 @@ process below. Never paper over the conflict.
   wish, not an invariant.
 - Changing this file is constitutional: the commit message MUST carry a
   `CONCEPT-CHANGE(INV-NNN[, INV-MMM…])` marker naming every invariant added,
-  edited, or retired, and the marker is added only when the owner explicitly
+  edited, or retired, and the marker is added only when the operator explicitly
   approved that change (CI enforces the marker; `scripts/concept-gate.mjs`).
 - Change is not deletion. Wording may be clarified, but if removing the new
   wording leaves the original principle unrecognizable, that is a deletion in
-  disguise — forbidden without an explicit owner-approved retirement. An
+  disguise — forbidden without an explicit operator-approved retirement. An
   invariant whose content moves elsewhere keeps its id as an absorbed pointer.
 - Canary golden stories (`packages/canary`) pin a growing subset of these
   invariants as executable user stories tagged `[INV-NNN:…]`. When a canary
   fails, the product regressed: fix the product, never the story, unless the
-  owner approved a `CONCEPT-CHANGE` for that invariant.
-- Some invariants below encode locked owner decisions; their `verify:` notes
+  operator approved a `CONCEPT-CHANGE` for that invariant.
+- Some invariants below encode locked operator decisions; their `verify:` notes
   name the enforcement. They are constitution first, implementation second —
   code converges to them, never the reverse.
 - Documentation is a hierarchy with one home per fact: this Bible
@@ -39,7 +39,7 @@ process below. Never paper over the conflict.
   (process gates; the sole home of the release protocol) →
   `docs/DEVELOPMENT.md` (contributor commands; links instead of restating) →
   `docs/INTEGRATIONS.md` (external surfaces) → `docs/FEATURES.md`
-  (non-solid ledger) → `docs/BACKLOG.md` (deferred with owner decision) →
+  (non-solid ledger) → `docs/BACKLOG.md` (deferred with operator decision) →
   `docs/AGENT_ONBOARDING.md` (agent orientation). A fact lives in exactly ONE
   of these; every other mention is a link. Mantras worth repeating live only
   here. Two prose docs describing the same behavior differently is a
@@ -50,7 +50,7 @@ process below. Never paper over the conflict.
 Orientation for every contributor and reviewer. The numbered invariants are
 the enforceable law; this list is the spirit they serve. When a proposed
 change pulls against one of these lines, stop and find the governing
-invariant or owner decision before proceeding.
+invariant or operator decision before proceeding.
 
 1. Simple beats complex; compact beats exhaustive. (INV-120)
 2. Explicit beats implicit; self-explanatory beats clever.
@@ -87,11 +87,13 @@ invariant or owner decision before proceeding.
   system (gates, canaries, reviews) is designed to constrain those external
   agents' sessions, not a self. verify: review question on any
   agency-flavored feature proposal.
+  A raw model operation is a separate engine capability, not another agent or
+  conversation mode: its caller owns the system prompt, history and tools.
 
 ## 2. Harnesses Are Not Roles
 
-- **INV-010** Codex, Claude Code, Cursor, OpenCode, raw APIs, and future
-  adapters are harnesses. Roles are intents (`explain`, `plan`, `spec`,
+- **INV-010** Codex, Claude Code, Cursor, OpenCode, Antigravity CLI, raw APIs,
+  and future adapters are harnesses. Roles are intents (`explain`, `plan`, `spec`,
   `implement`, `create_from_scratch`, `repair`, `review`, `verify`,
   `synthesize`, `audit` — the canonical `Intent` enum in
   `packages/schema`). No harness is privileged and no semantic role is
@@ -119,6 +121,17 @@ invariant or owner decision before proceeding.
   deep-scan, delegation). No control that selects an account may narrow the
   harness pool; no strategy knob may pin an account. verify: composer and
   accounts UI review; schema separation of routing vs strategy fields.
+- **INV-014** A model operation performs at most one provider generation.
+  Adapters may prepare managed authorization and discover the exact account's
+  model catalog beforehand, but never retry generation, switch the model,
+  compact the conversation or execute tools. The existing command journal,
+  idempotency, cancellation and shutdown own its lifecycle; no second scheduler
+  or attempt journal is introduced. Status and result reads recover that same
+  operation, and an unknown dispatch outcome is never a never-sent/free claim.
+  Native continuation is retained exactly and bound to its actual account and
+  model. Context metadata comes from that route, not CLI compaction policy;
+  absent limits and costs remain unknown. verify: model-operations,
+  model-routes and harness-codex model/responses tests.
 
 ## 3. Schema Is The Contract
 
@@ -153,11 +166,15 @@ invariant or owner decision before proceeding.
   per parent (default 8), and one live daemon-owned paid-budget authority shared
   by the parent and every child. The flag grants permission; the parent may finish without creating
   a child. Only adapters declaring `capability_profile.mcp_injection` (claude,
-  codex) can host the belt, and the engine projects belt readiness instead of a
+  codex, cursor) can host the belt, and the engine projects belt readiness instead of a
   surface guessing it. A known failure BEFORE injection may continue as an
   ordinary Agent run only with durable requested/effective/used/reason/remediation
   facts and a visible warning. Once the belt descriptor was injected, an
-  explicit startup failure is terminal. An unrecovered non-ok result from an
+  explicit startup failure is terminal on adapters with a startup receipt
+  (claude, codex); cursor hosting is pre-spawn config injection with NO
+  startup receipt yet — a pre-spawn injection failure refuses typed, while
+  the live E2E and a mapped vendor startup-status surface are its recorded
+  acceptance conditions in `docs/FEATURES.md`. An unrecovered non-ok result from an
   exact injected belt operation is also terminal for the Agent outcome: this is
   the required-capability exception to INV-043. An envelope deliverable stays
   available only as diagnostic evidence and cannot succeed or be auto-adopted.
@@ -191,7 +208,7 @@ invariant or owner decision before proceeding.
   own: best-of-N (`--n`), capped repair (`--attempts`), repair-to-clean
   (`--until-clean`), research sweep (`ask --deep-scan`), create-from-scratch
   (`agent --create`), delegation belt (`agent --delegate`), council planning
-  (`plan --council`, with `--n 2..4` legal only under council). verify: CLI
+  (`plan --council`, with `--n` of at least two, bounded by the operator-configured Council capacity, legal only under council). verify: CLI
   help + docs-truth flag check.
 - **INV-032** Old mode ids are not compatibility aliases; they hard-error at
   every wire boundary unless explicitly reintroduced in schema and docs.
@@ -237,8 +254,11 @@ invariant or owner decision before proceeding.
   line, event, doctor report, run artifact, or source reference. Model
   prose is context, not proof. verify: review protocol; reviewer evidence
   preflight in reviewEngine.
-- **INV-041** Diffs come from git in the isolated worktree or live in-place
-  target, never from model edit narration. Captured diffs must round-trip:
+- **INV-041** Git diffs come from git in the isolated worktree or live in-place
+  target, never from model edit narration. Directory work products record observed
+  file bytes in a digest-bound manifest; a text diff is only a preview. Copied
+  file results retain the selected baseline and complete output bytes for exact
+  delivery, while direct effects disclose any unknown preimages. Captured diffs must round-trip:
   what the engine records as the work product must `git apply` cleanly to
   the base it was captured against (no silent corruption — CRLF, quoted
   paths, binary — between capture and delivery). verify: workspace diff
@@ -253,6 +273,12 @@ invariant or owner decision before proceeding.
   the shared sensitive-resource boundary, are the candidate plane; the
   sealed/redacted evidence packet is a separate explicit plane. Gitignored
   local state that is absent from the diff never crosses the reviewer boundary.
+  For an explicit directory result, the complete selected file manifest supplies
+  the candidate inventory instead of Git membership. Retained unchanged inputs
+  and observed output bytes remain available, with baseline/output evidence in
+  the explicit packet and the same sensitive-resource boundary. A selected file
+  is not excluded merely because its directory name usually denotes generated
+  output; unselected source siblings are never implicitly copied.
   verify: reviewEngine route-proof,
   candidate-inventory, and ignored-sibling tests; per-reviewer artifact
   checklist.
@@ -265,8 +291,10 @@ invariant or owner decision before proceeding.
   the tuple remains the compatibility fallback for legacy adapter evidence.
   verify: attemptTelemetry recovery-keying tests.
 - **INV-044** The engine separates terminal state from tool hygiene: a
-  completed answer/report/patch may succeed with warnings, while failed web
-  evidence, terminal harness errors, failed apply/verify steps, or required
+  completed answer/report/patch may succeed with warnings. Optional web that
+  is unused, denied, unavailable, or errors remains evidence/warning telemetry
+  and never decides terminal success; terminal harness errors, failed
+  apply/verify steps, explicitly persisted required-web contracts, and required
   gates still block. verify: outcome-dimension telemetry tests.
 - **INV-045** Web answers are web-backed only when `WebSearch`/`WebFetch` or
   equivalent evidence was observed; a memory answer after a failed web tool
@@ -315,9 +343,18 @@ invariant or owner decision before proceeding.
   receipt proves credential transport, not plan tier, entitlement, quota, or
   zero cost. verify: auth-capability verifier; setup restart/route/challenge
   tests; doctor route checks.
-- **INV-061** Explicit `subscription` never falls back to an API key. `auto` is
-  native-first for Codex, Claude, and Cursor; a paid route is eligible only under
-  the typed paid-fallback policy. Requested/effective credential route and
+- **INV-061** Explicit `subscription` never falls back to an API key. `auto`
+  is subscription-first for Codex, Claude, and Cursor: the enabled account
+  rows' native sessions (the INV-135 pool) are preferred, and a paid route is
+  eligible only under the typed paid-fallback policy. A registered pool that
+  is exhausted (or wholly disabled) is NOT a silent paid-fallback trigger:
+  the run terminalizes typed (`credential_pool_exhausted` + earliest reset,
+  INV-135) and the paid route serves it only under the EXPLICIT `api_key`
+  preference — taken explicitly and disclosed, never spawned back into an
+  exhausted or excluded login, never silently under `auto` (the same
+  principle as the kind-aware `limit_action: auto`, which resolves a metered
+  subject to `fail`: `auto` never silently spends money).
+  Requested/effective credential route and
   source plus the selection reason are preserved as evidence. Codex subscription
   auth uses a Claudexor-owned `CODEX_HOME` with file-only credential storage,
   never the operator's ordinary `~/.codex` or OS Keychain. Native/subscription is
@@ -330,6 +367,12 @@ invariant or owner decision before proceeding.
   run may still use a verified API route. verify: adapter auth
   isolation tests; setup capability receipts; routing paid-fallback tests;
   onboarding native-first + composer route-disclosure review question.
+  Raw model calls and Agent runs use the same managed profile. The official
+  CLI owns authorization refresh and persistence; the model adapter reads only
+  current transient access material from that profile. No ambient host login,
+  copied auth store or independent refresh mechanism is introduced. Model
+  account Auto keeps a suitable preferred profile then uses the existing pool;
+  pin never rotates or falls back to an API credential.
 - **INV-062** Raw secrets must not appear in run params, the command journal, task
   contracts, events, summaries, patches, PR text, logs, or docs. The PROMPT
   is included: a secret-like value inside the prompt text is hard-blocked at
@@ -338,6 +381,12 @@ invariant or owner decision before proceeding.
   prompts are durable artifacts and there is deliberately NO bypass flag.
   verify: secret-scan CI step; redaction tests; inline-secret rejection
   tests; canary `[INV-062:prompt-secret-block]`.
+  Model-purpose request/response resources are the narrow content boundary:
+  caller-supplied conversation bytes pass without secret-like-text filtering,
+  just as on a model API. They cannot be used as ordinary Agent attachments.
+  This is not a general bypass flag. Engine OAuth and control credentials are
+  never injected into that content, and the journal retains only compact
+  identities, digests, state, usage and cost evidence, never the conversation.
 - **INV-063** Scoped harness homes/config dirs stay outside every mutation
   worktree, in the external per-project runtime namespace, so `git add -A`
   can never capture auth files, plugin downloads, sqlite logs, or transcripts
@@ -347,6 +396,12 @@ invariant or owner decision before proceeding.
   authority. Upload streams to a temporary file, finalize fsyncs and atomically
   publishes digest-bound immutable bytes, and run/turn requests accept only the
   returned resource IDs. verify: resource-store and control-api upload tests.
+  Model resources use the same upload/blob owner with atomic, replayable
+  finalization. Request bytes are released when the operation terminates;
+  response bytes after explicit digest-bound acknowledgement, or 30 days from
+  readiness if unacknowledged. The compact command receipt survives cleanup:
+  repeat retrieval cannot turn into another generation. Existing maintenance
+  reclaims crash residue; the caller retains conversation history.
 - **INV-065** Every selected lane must declare finite MIME, byte/count and
   transport support for every mandatory attachment. Mixed pools fail before
   enqueue when any selected lane cannot receive the same bytes; adapters verify
@@ -368,7 +423,10 @@ invariant or owner decision before proceeding.
 - **INV-067** Credential transports are ENV-PORTABLE or honestly refused:
   every claimed auth route must actually authenticate in the exact scoped
   environment (cwd + env, including a scoped/throwaway HOME) its run will
-  spawn with — host-environment readiness never stands in for it. Where a
+  spawn with — host-environment readiness never stands in for it. Credential
+  transport, identity scope, relocation, profile cardinality, and cleanup are
+  effective host-platform facts, not properties inferred from a profile HOME.
+  Where a
   vendor's primary credential store is outside a generic scoped HOME, the
   adapter may expose only a declared MINIMAL vendor-specific bridge (Claude
   on macOS: a disposable Claude-only child HOME whose sole host bridge is
@@ -376,7 +434,24 @@ invariant or owner decision before proceeding.
   default or profile-specific Keychain item). Ordinary `~/.claude` is never
   read, written, or used for Claudexor native setup/runs. Other harnesses never
   receive that bridge, and all writable vendor state stays scoped. Codex remains portable through
-  its file-only `CODEX_HOME` seed. The doctor names the real cause and the
+  its file-only `CODEX_HOME` seed. Cursor accounts are portable through the
+  vendor's own FILE credential store inside each row's Claudexor-owned HOME;
+  the host OS-Keychain login is retired as a transport (INV-135) — it is
+  never probed, bridged, or claimed as a route. Antigravity profile HOME is a
+  relocatable credential store only where the vendor actually stores the
+  credential there. On Darwin, Claudexor may create the empty profile-local
+  `Library/Keychains/login.keychain-db` container before agy starts. The
+  vendor writes and reads its own fixed item, the host Keychain is never
+  bridged. An unsafe profile path refuses the child before SecurityAgent; an
+  operational setup miss leaves the vendor's file fallback available. The
+  empty DB is bootstrapped under a neutral filename before adoption as
+  `login.keychain-db`, avoiding the user search-list side effect of a direct
+  login-keychain create. On
+  Windows its login credential is an OS-user-scoped
+  vendor Keychain item: HOME still scopes mutable vendor state, but it does
+  not create independent Google identities, so the effective policy permits
+  only one enabled binding and deletion leaves the vendor credential unchanged
+  with an explicit disposition. The doctor names the real cause and the
   Claudexor-owned in-app Native setup remedy (never a bare vendor login command
   that targets the ordinary store, never a bare "not authenticated"), and reviews of auth/
   readiness changes check every lane class — read-only scoped HOME, isolated
@@ -413,32 +488,42 @@ invariant or owner decision before proceeding.
 - **INV-072** Ordinary project runs (and Best-of candidates) execute in
   isolated envelopes under the external per-project runtime namespace
   (`~/.claudexor/v3/projects/<project-sha256>/workspaces/.../tree`), with the
-  harness cwd at the envelope worktree. The repository's `.claudexor/`
+  harness cwd at the envelope worktree. Explicit directory execution uses either
+  the selected live folder or an isolated copy of the caller-selected footprint,
+  without initializing Git. Stable project identity and execution address remain
+  separate facts. The repository's `.claudexor/`
   remains user-owned versioned config. verify: workspace manager tests.
 - **INV-073** Chat thread WRITE turns run IN-PLACE in the thread's
   explicit execution tree — the live project for an `in_place` thread, or
   the thread's persistent worktree for an `isolated` thread — and the
-  surface must disclose which applies. verify: thread schema defaults;
-  in-place orchestrator tests.
+  surface must disclose which applies. A read-only turn reuses an existing
+  isolated worktree, but before the first write turn it reads the stable
+  project directly and does not materialize Git state. verify: thread schema
+  defaults; in-place and lazy isolated-workspace tests.
 - **INV-074** Absolute host paths such as `/tmp/...` are not project diffs
   and do not prove project success. Project tmp requests default to
   project-local `tmp/...` or run artifacts unless the user explicitly
   selects a verified host-side-effect mode. verify: tmp-semantics telemetry
   tests.
-- **INV-075** Git-backed run shapes need a Git boundary. A non-git project
-  folder is initialized automatically (`git init` + a deterministic baseline
-  commit) when the user selects an isolated Ask, Plan, or Agent workspace, or
-  another Git-backed envelope path. The mutation is announced via a typed
+- **INV-075** Git-backed mutating run shapes need a Git boundary. A non-git
+  project folder is initialized automatically (`git init` + a deterministic
+  baseline commit) when the first mutating isolated turn or another Git-backed
+  write envelope needs it. Selecting an isolated workspace does not itself
+  authorize mutation: read-only Ask, Plan, and Agent turns reuse an existing
+  worktree or read the stable project without creating one. Initialization is
+  announced via a typed
   `project.git.initialized` event — never silent. Exception: a root equal to
   the user home directory or a filesystem root — or one that cannot be
   classified (no safe home resolves, or the root itself does not physically
   resolve) — is refused with a typed error naming the remediation BEFORE any
   mutation, instead of being initialized; a home that is already a healthy
   repository is respected untouched.
-  Supported in-place paths that do not cross a Git boundary remain available
-  without initialization. Claudexor never creates or edits the project's
+  Explicit directory workspaces, live or copied, need no Git boundary and never
+  initialize the original folder or change the requested run strategy. Supported
+  in-place paths that do not cross a Git boundary remain available without
+  initialization. Claudexor never creates or edits the project's
   `.gitignore`; repo `.claudexor/` is user-owned state and runtime stays
-  external. verify: git-init, boundary-root refusal, isolated-thread,
+  external. verify: git-init, boundary-root refusal, lazy isolated-thread,
   run-applicability, and gitignore non-interference workspace tests.
 
 ## 8. Plan-Driven Work Is First-Class
@@ -529,25 +614,58 @@ invariant or owner decision before proceeding.
   primary — never to the pool (ambiguous scalars are rejected). verify:
   schema (no `routing.default_model`); canaries
   `[INV-103:scalar-model-primary-only]` and `[INV-103:no-global-model]`;
-  routing tests. Locked owner decision.
-- **INV-104** A model outside the harness's model truth source (live
-  inventory or manifest known-good list) is refused at settings-write, run
-  preflight (typed failure WITH artifacts before any CLI spawns), and both
-  reviewer-resolution paths — never forwarded to the vendor CLI to die as an
-  opaque native error. Refusals name the harness, the model, and the truth
-  source; model truth is surfaced to UIs (`source: api | manifest`), and
-  known-model hints carry a `verifiedAgainst` freshness note checked by the
-  model-hints-freshness gate. verify: canaries
+  routing tests. Locked operator decision.
+- **INV-104** A model list is evidence of PRESENCE at one runtime identity,
+  account and time. Whether an absence from it is evidence too is the
+  HARNESS's own declaration (`model_inventory_absence`), honoured wherever its
+  lists are read — the live inventory and the manifest known-good list alike,
+  at settings-write, run preflight (typed failure WITH artifacts before any
+  CLI spawns), doctor readiness and the explicit reviewer-resolution path,
+  while `claudexor models` shows each list's source and hint marks and
+  automatic reviewer selection keeps the zero-cost skip stated below.
+  `authoritative` (the declaration a silent manifest gets) keeps the
+  strict rule: a model outside the list is refused with the harness, the model
+  and the truth source named, never forwarded to the vendor CLI to die as an
+  opaque native error, and a harness with no list refuses every explicit model.
+  `advisory` (claude: the picker is an alias menu of one binary version plus the
+  account's bootstrap rows; codex: a `model/list` reply carries no provenance
+  and the CLI serves a bundled default list when its remote fetch times out;
+  cursor: `--list-models` is a fail-soft menu blind to routing variants) means
+  presence still admits while absence decides nothing: the EXPLICIT model is
+  forwarded byte-identical, the vendor accepts or refuses it, and the consumer
+  that admitted it says so once — the settings read-back carries `notes`, the
+  readiness row carries the note in its detail, the per-spawn gate discloses a
+  status event. Hint ids count as present. No list is ever substituted for
+  another to admit a model; model truth is surfaced to UIs (`source: api |
+  manifest`); known-model hints carry a `verifiedAgainst` freshness note
+  checked by the model-hints-freshness gate; automatic reviewer selection still
+  skips an unlisted family at zero cost; HTTP model operations stay strict
+  against the account catalog read at a named client version; raw-api, agy and
+  opencode stay authoritative by declaration, not by proof of completeness.
+  Residuals, disclosed: the explicit reviewer panel forwards without the
+  run-event disclosure (its spawn does not pass the per-spawn gate); on the CLI
+  run path a vendor model refusal arrives as an untyped error carrying the
+  vendor's text; a mistyped explicit model on an advisory harness costs one
+  spawn, and bounded account failover may spend one start per account before a
+  typed account-independent stop exists. verify: canaries
   `[INV-104:model-truth-refusal]`, `[INV-104:models-manifest-fallback]`,
-  `[INV-104:settings-write-strict]`; settings-service tests;
-  modelGovernance preflight tests. Locked owner decision: strict
-  everywhere.
+  `[INV-104:settings-write-strict]`, `[INV-104:settings-write-advisory]`;
+  settings-service tests; modelGovernance preflight tests;
+  `packages/core/src/model.test.ts`; `packages/cli/src/model-truth.test.ts`;
+  `packages/orchestrator/src/reviewerPanel.test.ts`;
+  `packages/harness-codex/src/astra.test.ts`. Operator decisions 2026-09-21
+  (strict wherever a truth source can prove absence) and 2026-09-24 (absence is
+  the harness's declaration; claude, codex and cursor declare advisory).
 - **INV-105** Per-harness knobs a manifest does not support are disclosed as
   `ignored_settings` on `harness.started` — never silently dropped. This
   covers max_turns, tool lists, and effort (an empty declared ladder); an
-  explicit MODEL never reaches an unsupporting route at all — the strict
-  truth-source preflight refuses it first (INV-104). verify: knob
-  disclosure tests incl. the INV-105 effort-disclosure test.
+  explicit MODEL reaches a route only where its truth source could not refuse
+  it (INV-104), and then the run says so: the per-spawn gate discloses the
+  unverified model, and the effort a model absent from the probed list resolves
+  against the sibling ladders is sent verbatim, clamped-and-disclosed, or
+  dropped-and-disclosed — never silently changed. verify: knob
+  disclosure tests incl. the INV-105 effort-disclosure test;
+  `packages/harness-codex/src/astra.test.ts` stale-list effort resolution.
 
 ## 11. Delivery Is Server-Owned
 
@@ -558,23 +676,41 @@ invariant or owner decision before proceeding.
   negotiated major, while unversioned product aliases are refused. verify:
   control-api handshake/catalog tests; docs-truth catalog parity; UI review.
 - **INV-111** Apply is allowed only for successful runs with a successful
-  decision record and a patch WorkProduct for the original verified repo
+  decision record and a digest-bound patch or copied-files WorkProduct for the original verified repo
   root — with one typed, server-owned exception: an operator decision
   (`POST /v2/runs/:id/decision`, `accept_risk`/`override_needs_human`)
   persists an auditable, patch-hash-bound record that unblocks apply for a
   `blocked` run; a mutated patch invalidates the override. The human
-  decision is never client-faked state. verify: apply-gate tests; canary
+  decision is never client-faked state. Direct file effects are already in place
+  and do not offer a second apply or an unproved full rollback. Explicit discard
+  ends pending copy delivery without applying or reverting files; existing
+  retention owns the retained result. Partial application preserves custody of
+  unselected changes. verify: apply-gate tests; canary
   `[INV-112:apply-needs-verified-review]`.
-- **INV-112** A clean CROSS-FAMILY VERIFIED review is sufficient
-  verification even without a deterministic test gate;
-  `DecisionRecord.verification_basis` discloses what backed an applyable
-  outcome, so a no-test run adopted on review evidence never reads as
-  "tests passed". Gates alone do not make a patch applyable. verify:
-  arbitration verification_basis tests.
+- **INV-112** Ordinary Agent work defaults to no internal model review,
+  independently of how its executor was selected. Explicit review controls
+  request review; Best-of and until-clean retain it, while capped repair
+  defaults to review unless explicitly disabled. The resolved intent is
+  persisted separately from the observed result. Only a recorded opt-out
+  permits successful unreviewed work to be applied normally, with honest
+  `not_run` review facts and no extra risk-acceptance step for that absence.
+  Required checks, independent policy findings, work-completion requirements,
+  and fresh patch-integrity verification remain enforced. Historical records
+  without the intent field retain the previous review-required meaning.
+  Requested review must actually pass; it is never fabricated as approved.
+  A clean cross-family verified review is sufficient verification even
+  without a deterministic test gate. `DecisionRecord.verification_basis`
+  records actual evidence, including deterministic checks or none for an
+  unreviewed result; an opt-out is not verification evidence. verify:
+  arbitration verification_basis tests; `packages/orchestrator/src/review-policy.test.ts`;
+  `packages/canary/src/review-policy.story.ts`; historical replay and delivery tests.
 - **INV-113** Every path that can mutate the live project tree is
   enumerated in ARCHITECTURE with its fence, and each has one: envelope
   delivery, manual apply, race adoption, and thread apply
   go through the delivery-owned fresh verifier immediately before mutation;
+  copied directory files use the same delivery owner with per-file preimages and
+  complete content artifacts, while direct directory execution records observed
+  effects without pretending they await application;
   (the retired `orchestrate-apply` path is gone — delegation sub-runs carry
   no apply tool, so the parent integrates their results through the ordinary
   apply path, CONCEPT-CHANGE(INV-113));
@@ -597,7 +733,7 @@ invariant or owner decision before proceeding.
   unlisted mutation path is a release blocker. verify: mutation-path
   inventory in ARCHITECTURE; delivered-prefix and active-turn thread-apply
   tests; claude-bridge exclusive-create/no-follow/race/idempotency tests +
-  envelope-bridge patch-cleanliness test (locked owner decision).
+  envelope-bridge patch-cleanliness test (locked operator decision).
 - **INV-114** Apply/adoption captures and rechecks the exact target preimage
   immediately around the mutation; stale or conflicting targets are refused
   without destructive rollback. `adopted:false`/`not_applied` means the tree
@@ -608,7 +744,9 @@ invariant or owner decision before proceeding.
   manual apply, race winner, thread delivery, or convergence result — it is
   re-verified by the delivery owner in a fresh
   envelope (`git apply` to a clean base + configured deterministic gates
-  there) immediately before the target preimage check; the result is recorded
+  there) immediately before the target preimage check; a copied directory result
+  instead verifies its manifest, full content hashes, and reproduction on the
+  retained selected baseline through that same verifier owner. The result is recorded
   in the decision/receipt, and a missing, stale, or failed verifier
   infrastructure error blocks fail-closed exactly like a proven failure.
   A patch that cannot survive a clean base does not touch the live tree.
@@ -617,7 +755,7 @@ invariant or owner decision before proceeding.
   green work. Deterministic gates must be hermetic to the checkout for the
   verify re-run to be meaningful.
   verify: FinalVerifier tests + the final_verify apply-gate consumer tests
-  (locked owner decision).
+  (locked operator decision).
 - **INV-116** CONCEPT-CHANGE(INV-116): the run's TERMINAL truth is the D8
   independent axes — a lifecycle (`succeeded|failed|cancelled|interrupted`)
   that says how far the PROCESS got, plus the orthogonal outcome FACTS
@@ -653,19 +791,29 @@ invariant or owner decision before proceeding.
   abstractions. Add an abstraction only when it removes real duplication or
   captures an established boundary. Avoid overengineering, hidden state,
   silent fallback, and broad refactors unrelated to the user-visible
-  problem. verify: review protocol scope checks.
+  problem. A new restriction bears the burden of proof: identify the
+  demonstrated marginal danger and common path it affects, then prove the
+  promised capability still works in a production-shaped positive E2E. A
+  denial-only or policy-shape test cannot certify a restriction; capability
+  loss blocks it. verify: review protocol scope checks; affected-path battery.
 - **INV-121** Meta-solutions over patches: data-drive from declared
   capabilities, single producers with translational consumers, typed
   contracts over hardcoded enums-in-logic — so future
   values/harnesses/modes work without re-patching. Before closing any bug,
   ask the class question: "if this fix had existed earlier, could the same
   failure class have reached us through another surface?" If yes, fix the
-  class. verify: review protocol; reference example: the effort-ladder
-  normalizer.
+  class. Generalize only from multiple reachable surfaces or a broken
+  contract/SSOT boundary; a theoretical adjacent edge case is not evidence
+  for a broader mechanism. verify: review protocol; reference example: the
+  effort-ladder normalizer.
 - **INV-122** SSOT/DRY/SOLID as pragmatic constraints: one owner per
   contract, no duplicated business rules across surfaces, no config path
-  that lets a project self-grant sensitive powers. verify: review; trust
-  gating tests.
+  that lets a project self-grant sensitive powers. Existing trust, provenance,
+  review, custody, rescue, and rollback controls count when judging marginal
+  risk; do not duplicate them with a weaker second boundary. Prefer the broad
+  capability plus explicit residual disclosure unless evidence shows those
+  controls are insufficient. verify: review; trust gating tests; positive
+  capability-preservation tests.
 - **INV-123** Dead code is deleted, not allowlisted (justified, dated
   baseline entries tied to a locked decision are the only exception). Docs
   claims about endpoints, mode ids, and CLI flags are checked against
@@ -678,68 +826,25 @@ invariant or owner decision before proceeding.
   hand edit). Known failure class this guards: god-files absorbing every
   fix because appending is cheapest. verify:
   `scripts/complexity-ratchet.mjs` in CI.
-- **INV-125** Release tags additionally pass the owner-review gate: ONE
-  parallel full-context wave on the frozen candidate SHA with EXACTLY two
-  required reviewers — the fable slot on one slug from the owner-approved
-  tier set {`claude-fable-5-thinking-max`, `claude-fable-5-thinking-medium`,
-  `claude-fable-5-thinking-high`}
-  and the sol slot on one slug from {`gpt-5.6-sol-xhigh`,
-  `gpt-5.6-sol-max`, `gpt-5.6-sol-medium`},
-  both executed as the Cursor operator's
-  own subagents (protocol `cursor-operator-fable-sol-v1`). Decision trail:
-  owner decision 2026-08-04, verbatim: «зачем тебе кодекс? Ревьюй курсором и
-  клод кодом» — the sol slot moved from the codex harness to cursor. Second
-  owner decision 2026-08-04 (session transcript
-  5349be54-a1d2-46bb-a6ef-52a2e43b91ee.jsonl line 1824) allowed the native
-  sol lane to review the sealed delta after a completed full-context pass.
-  Owner decision 2026-08-06 (takeover session), verbatim: «не надо вообще
-  codex использовать, я же сказал. Используй своих субагентов, ты же можешь
-  у себя разные модели вызывать так как ты cursor» — the whole panel moved
-  from vendor-native harness sessions to Cursor operator subagents; the
-  native-lane mechanics (route/effort observation, the sol delta scope)
-  retired with that transport, and both slots now review the full context.
-  Operator decision 2026-08-06 ~08:29 MSK, under the owner authorization of
-  08:04 MSK the same day («меня удовлетворяют модели fable-5 и gpt-5.6-sol»,
-  given after the sol max tier disappeared from the subagent model catalog):
-  the panel moved from one hard-pinned slug per slot to the owner-approved
-  tier sets above. Motive: two subagent-model catalog flaps within one hour
-  (sol max, then fable max); a hard single-tier pin would have blocked the
-  formal pair on the frozen SHA, and a new SHA re-runs every gate. The
-  actually used slug is recorded in the reviewer metadata and the signed
-  review entry; a slug outside the slot's set refuses fail-closed.
-  Operator addendum 2026-08-07: the same-family `xhigh` Sol tier is admitted
-  after the live subagent catalog exposed only that tier; it restores the
-  original high-assurance Sol level without permitting another model family.
-  Operator addendum 2026-08-10, owner-ratified the same day: the same-family
-  `high` Fable tier is admitted after the live subagent catalog exposed only
-  that Fable tier; the ratification is recorded verbatim in the CHECKLISTS
-  protocol decision trail and the 3.3.15 release evidence.
-  Slot artifacts are the reviewer's complete report plus exact-shape metadata
-  — model slug, ISO start/finish intervals, verdict, the mandatory
-  `review_scope: "full"`, report SHA-256 — sealed against the packet; real
-  execution overlap stays mandatory; the two reports must be distinct.
-  Each reviewer receives the same complete Git-visible candidate,
-  complete diff, sealed evidence, user dialogue and owner decisions, test and
-  gate receipts, and internet access;
-  packet splitting and substitute models cannot satisfy the gate. Then: ONE adjudication under INV-139; ONE batched
-  correction commit; ONE parallel confirmation wave in the same full context,
-  focused on the correction delta. Any tracked mutation re-freezes the
-  candidate. A blocking, missing, malformed, or incomplete
-  required verdict cannot be sealed. Rounds beyond confirmation require an
-  explicit owner decision. The signed schema-v6 owner-review attestation binds
-  the candidate SHA/tree/version, exact full-gate receipt, sealed evidence
-  manifest, diff and wave, and both reviewers' model slugs, execution
-  intervals, review scopes, report and metadata digests, and non-blocking
-  verdicts. Extra
-  critics are advisory and never satisfy either required slot. Schema v2-v5
-  attestations remain
-  cryptographically verifiable only as historical records and are rejected as
-  current publish input.
-  A whole-tree immune scan (docs-vs-code, dead surface,
-  invariants-vs-tree) is a mandatory pre-release checklist step.
-  verify: `scripts/seal-owner-review-attestation.mjs` (panel + round
-  constraints); `verify-release-input.mjs`; CHECKLISTS Release + Review
-  Protocol sections.
+- **INV-125** Repository releases require a complete independent adversarial
+  review of the exact candidate and a disposition of every finding. The
+  responsible maintainer, including an explicitly authorized coding agent,
+  reads the report, verifies accepted findings, and confirms release readiness.
+  Any independent human or AI reviewer may provide the report; no model brand,
+  family pair, concurrent execution interval, or signed review attestation is
+  required. Review covers the complete candidate and accepted intent, not only
+  isolated snippets. Corrections receive focused tests and delta review; another
+  full wave needs a material architectural or authority change, and a third full
+  wave needs an explicit owner checkpoint. Reviewer preference never overrides
+  INV-139. The ordinary PR or CI evidence contains the report and disposition;
+  private user dialogue stays in the private review packet. Publication binds
+  the confirmed candidate to successful CI and promotes those exact artifact
+  bytes. Platform checks belong in CI; local macOS and Cursor sessions are not
+  contributor prerequisites. Historical signed reviews remain verifiable as
+  archives, not current publication authority. Runtime-update signatures,
+  archive identity/checksums, and Apple signing/notarization remain enforced.
+  verify: `scripts/verify-release-input.mjs`; `scripts/release-workflow-check.mjs`;
+  CHECKLISTS Release + Review Protocol sections.
 - **INV-138** Derived surfaces are generated, never hand-maintained:
   operation catalogs, endpoint docs, capability/parity matrices,
   per-subject refresher lists, and similar projections are produced from a
@@ -748,12 +853,12 @@ invariant or owner decision before proceeding.
   defect class as a staged field. verify: generated-catalog diff gates;
   review question "what declaration produces this list?".
 - **INV-139** Review finds defects; it does not author concept. A blocking
-  finding must cite a violated invariant or owner-accepted criterion, carry
+  finding must cite a violated invariant or operator-approved criterion, carry
   reproducible evidence, and be reachable in the default configuration;
   reviewer `proposed_fix` text is advisory; consensus without evidence
   blocks nothing; later waves cannot open blockers on unchanged code
-  without new evidence. Owner decisions and this Bible outrank reviewer
-  preference — a finding that re-litigates a recorded owner decision is
+  without new evidence. Operator decisions and this Bible outrank reviewer
+  preference — a finding that re-litigates a recorded operator decision is
   adjudicated out-of-scope and ledgered, never silently fixed. verify:
   review packet template (BLOCKER_FILTER, DECLINED_FINDINGS); adjudication
   ledger; CHECKLISTS Review Protocol.
@@ -790,41 +895,104 @@ invariant or owner decision before proceeding.
   only through an explicit DESIGN_SYSTEM section; layouts use fixed
   grids/anchors — an element's position and size never drift with the
   length of its text. verify: DESIGN_SYSTEM §1.1; review.
-- **INV-135** Credential profiles: a profile is a durable NON-SECRET registry
-  entry {profile_id, harness_id, display_name, credential_kind,
-  isolation_locator|secret_ref, enabled} — secret material lives only in the
-  vendor-owned dir or the namespaced secret store, readiness only in the
-  doctor's projection. Profiles are ADDITIVE identities: the default vendor
-  stores (~/.claude, the native codex home) are never a profile target and are
-  never mutated by profile operations. There is NO user-settable "Active"
-  account: enabling/disabling a profile (the toggle) is the only routing
-  control. ONE resolve owner (the orchestrator) resolves the per-harness
-  EFFECTIVE account by an owner-locked ladder: an explicit per-run/per-thread
-  profile pin wins; else POOL AUTO — the unprofiled/default subject. That
-  subject may use a verified native/CLI login or the policy-governed API-key
-  fallback from INV-061. The fallback route is not a credential profile or an
-  account identity: it never creates a synthetic Accounts row or increments an
-  account count, and its effective `next_up`/route disclosure remains visible.
-  Enabled profiles route ONLY by explicit pin or as quota-rotation targets,
-  never as a silent auto-default. Unknown, disabled, or harness-mismatched
-  explicit ids refuse — an explicit profile never silently becomes the default
-  credential ladder — and an adapter given an unsupported transport refuses
-  typed. When the native/CLI login is excluded (`native_credentials_enabled:
-  false`) and no pin exists, an unpinned run has nothing routable: it refuses
-  (explicit) or drops (auto) and never silently falls back INTO the disabled
-  login. Accounts are SYMMETRIC across real identities: every account is a row
-  with an Enabled toggle (the only routing control), the native login is a
-  "CLI login" row with the same toggle semantics minus Delete, and ONE server
-  projection owns the informational `next_up` identity — who an unpinned run
-  would route to next, computed by the routing owner from enabled profiles +
-  default-route readiness + quota — so no surface re-derives it.
-  Native-session resume never crosses profiles. Selecting a named profile makes
-  its harness/pool coherent and every
-  selected lane probes the profile before spawn; deletion clears durable pins
-  (any harness's `rotation_eligible` entry), matching native-session caches, and
-  quota subjects so an id cannot dangle or resurrect stale auth. verify: schema
-  credential-profile.ts; orchestrator credential-profiles.ts; adapter profile
-  tests; threads resume-isolation test.
+- **INV-135** UNIFIED ACCOUNTS: every credential identity of a harness is a
+  named registry row — a durable NON-SECRET entry {profile_id, harness_id,
+  display_name, credential_kind, isolation_locator|secret_ref, enabled}.
+  Secret material lives only in the row's Claudexor-owned store dir or the
+  namespaced secret store; readiness lives only in the doctor's projection.
+  There is NO separate "default" / "CLI login" account type: a DETECTED
+  legacy default-store login (claude/codex) auto-registers at daemon start
+  as an ordinary `<harness>-default` row (bytes never move; progress is a
+  crash-recoverable per-harness phase file OUTSIDE config.yaml, and an
+  incomplete migration refuses that harness's runs typed while others keep
+  working), and `auth login <harness>` is bootstrap sugar into that row —
+  the bootstrap row has no routing privilege. The vendor's ordinary host
+  stores (~/.claude, ~/.codex, the host Cursor Keychain login) are never
+  read, probed, or mutated; cursor accounts live only in isolated
+  file-store rows (operator decision D-U3: host CLI logins disappeared).
+  **CONCEPT-CHANGE(INV-067, INV-135):** registry rows remain the one account
+  model, while their effective identity isolation and cleanup policy is
+  platform-declared. A platform may cap enabled rows when the vendor exposes
+  only one OS-user credential (Windows Antigravity: one); create and enable
+  enforce that cap atomically. A pre-existing over-cap set stays loadable but
+  is typed `credential_profile_ambiguous`: targeted routing, setup, quota, and
+  `next_up` fail loudly without selecting, probing, disabling, or deleting a
+  row until the operator disables extras.
+  ONE resolve owner (the orchestrator) resolves the per-harness EFFECTIVE
+  account by the operator-locked order: (1) an explicit per-run/per-thread pin
+  is STRICT — unknown/disabled/harness-mismatched ids refuse typed, a fresh
+  exhausted window refuses typed (`subscription_window_exhausted` + reset
+  time), and a pin never silently rotates; (2) an unpinned THREAD turn stays
+  on its durable bound account — derived from the thread's own lane
+  evidence, never a second hand-maintained record — while that row is
+  ready, and moves to a pool sibling ONLY with a disclosed lane switch;
+  (3) otherwise the quota-aware POOL of enabled+ready subscription rows
+  routes the run: fresh model-applicable headroom descending, unknown/stale
+  quota after known-positive headroom but before exhausted (stale quota
+  never authorizes routing — D3; an OBSERVED live block — a reactive
+  vendor-limit cooldown or spent window, stale-but-live included — ranks a
+  row exhausted with its release instant), a row that recently answered this
+  model's request with a different model (a live, self-expiring
+  model-substitution observation), or whose session an unpinned run started
+  on it recently ended before any progress for this same requested model (a
+  live, self-expiring pre-progress refusal observation, scoped to that exact
+  account and requested model and never recorded by a pin), ranks after
+  every other selectable row, oldest observation first, and is never
+  excluded by it; deterministic profile-id tie-break.
+  **CONCEPT-CHANGE(INV-135), #363:** an unpinned choice is admitted on FRESH
+  readiness, with one bounded exception for Cursor rows: when a row's
+  `cursor-agent status` probe did not answer within its own budget, that row
+  store's last POSITIVE status answer, if younger than five minutes, may admit
+  the row to an UNPINNED choice (bound row, pool, rotation, `next_up`). The
+  row stays disclosed as stale unknown — never a fresh pass, never an
+  identity — and a spawn on it says so. A logged-out answer from that store
+  or any Claudexor-handled credential mutation revokes it. No positive answer,
+  an expired one, any other probe failure, and an explicit pin keep the
+  strict behavior: a pin is never admitted on it, and every other stale
+  observation still serves only an already selected route. Rationale: an
+  unanswered probe is not vendor evidence of either state, whatever delayed
+  it; the row's own recent positive answer with no observed logout since is
+  the best evidence at hand, and refusing it let unanswered probes alone
+  report "no ready account". The exception widens only unpinned
+  availability, where a wrong guess meets the pool's ordinary failover,
+  and leaves the pin contract
+  unchanged. The per-harness `limit_action` stored default is the kind-aware
+  `auto` — it RESOLVES at decision time to `rotate` for subscription
+  (`local_session`) subjects and `fail` for metered API-key or unknown
+  routes, while explicitly persisted `fail`/`ask`/`rotate` keep their exact
+  meaning and stored files are never rewritten (only the interpretation of
+  an ABSENT key changed) — so a pool row's typed vendor limit fails over to
+  the next ready pool sibling out of the box, never across credential kinds
+  and never for a pin. An empty or exhausted pool is a TYPED TERMINAL: the
+  run refuses `credential_pool_exhausted` (category `harness_unavailable`)
+  carrying the pool's EARLIEST known reset, before the transient machinery
+  can burn same-profile retries on an already-refused subject — waiting for
+  the window is the default. The policy-governed API-key fallback from
+  INV-061 may serve the exhausted pool ONLY over that terminal verdict and
+  ONLY under the EXPLICIT `api_key` preference — an explicit, disclosed
+  ROUTE, never a credential row, never an account count, never silently
+  under `auto`. Enabling/disabling a row
+  (the toggle) is the only routing control; there is NO user-settable
+  "Active" account. Accounts are SYMMETRIC: every row carries the same
+  Enabled toggle and the same Delete (removal is provable — success means
+  the row and all material Claudexor owns under the effective cleanup policy
+  are gone; vendor-owned OS-user credentials may be deliberately left
+  unchanged only when the typed receipt says so; a partial required cleanup is
+  a typed retryable error, never a removed-with-warning receipt). ONE server
+  projection — `accountPools` — owns the informational per-harness
+  `next_up` verdict, computed by the same routing owner, so no surface
+  re-derives it. Native-session resume never crosses rows (the engine
+  boundary re-verifies every cached session against the RESOLVED account).
+  Deletion retires the canonical id PLUS every migrated legacy alias (the
+  null quota subject, default lane homes, durable pins, `rotation_eligible`
+  entries) in one lifecycle operation, so an id cannot dangle or resurrect
+  stale auth; the supported downgrade path is the engine's own migration
+  rollback command, run BEFORE installing an older engine. verify: schema
+  credential-profile.ts + accounts-migration.ts; orchestrator
+  preflightProfile/account-pool tests; the accounts-unified-migration
+  battery; threads binding/resume-isolation tests; profile-delete tests;
+  `packages/harness-cursor/src/status-cache.test.ts` +
+  `packages/orchestrator/src/rowAdmission.test.ts` (#363 stale admission).
 - **INV-136** High-volume UI evidence is PROGRESSIVE, BOUNDED, and honest:
   per-run milestone bursts are exactly one in-flight request plus at most one
   trailing refresh (events during the trailing load cannot chain more GETs);

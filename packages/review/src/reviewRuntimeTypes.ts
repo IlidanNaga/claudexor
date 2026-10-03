@@ -38,6 +38,7 @@ export interface ReviewerOutput {
   text: string;
   sealedProjectionError?: string;
   observedModel?: string;
+  observedCredentialProfileId?: string;
   observedSource: RouteProof["observed"]["evidence_source"];
   costUsd: number;
   costEstimated: boolean;
@@ -77,7 +78,9 @@ export interface ReviewerProgressEvent {
   provider_family: ProviderFamily;
   requested_model: string | null;
   requested_effort: EffortHint | null;
+  credential_profile_id?: string | null;
   observed_model?: string | null;
+  observed_credential_profile_id?: string | null;
   observed_source?: RouteProof["observed"]["evidence_source"];
   route_proof_status?: RouteProof["status"];
   from_auth_mode?: string;
@@ -98,6 +101,7 @@ export interface ReviewCandidateResult {
     provider_family: ProviderFamily;
     requested_model: string | null;
     requested_effort: string | null;
+    credential_profile_id?: string | null;
   }[];
   crossFamilyHealthy: boolean;
   healthyProviders: ProviderFamily[];

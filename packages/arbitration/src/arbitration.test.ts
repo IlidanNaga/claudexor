@@ -35,6 +35,28 @@ function candidate(label: string, over: Partial<CandidateEvidence> = {}): Candid
 }
 
 describe("arbitrate", () => {
+  it("keeps unreviewed apply permission separate from verification evidence and legacy absence", () => {
+    const unreviewed = candidate("A", {
+      reviewVerified: false,
+      finalReviewClean: false,
+      gates: [],
+      testsPassed: 0,
+      testsTotal: 0,
+    });
+    const off = arbitrate([unreviewed], { reviewRequested: false }).decision;
+    expect(off.facts).toMatchObject({ review: "not_run", review_requested: false });
+    expect(off.apply_recommendation).toBe("apply");
+    expect(off.verification_basis).toBe("none");
+    expect(arbitrate([unreviewed]).decision.apply_recommendation).toBe("human_review");
+    expect(arbitrate([unreviewed], { reviewRequested: true }).decision.apply_recommendation).toBe(
+      "human_review",
+    );
+    const checked = arbitrate(
+      [candidate("A", { reviewVerified: false, finalReviewClean: false })],
+      { reviewRequested: false },
+    ).decision;
+    expect(checked.verification_basis).toBe("deterministic_checks");
+  });
   it("ranks a green candidate over one failing a required gate", () => {
     const a = candidate("A");
     const b = candidate("B", { gates: [gate(false)] });
@@ -116,6 +138,45 @@ describe("arbitrate", () => {
   });
 
   it("does not mask harness failures as no_op when the diff is empty", () => {
+    // A zero-configured-gate errored run: the producer appends the synthetic
+    // harness pseudo-gate for lifecycle, but computes the test counts from the
+    // configured gates only (0/0, not the polluted 0/1).
+    const res = arbitrate([
+      candidate("A", {
+        diffBytes: 0,
+        diffSize: 0,
+        gates: [
+          {
+            id: "harness",
+            status: "failed",
+            required: true,
+            command: "codex",
+            exit_code: 1,
+            duration_ms: 1,
+            stdout_tail: null,
+            stderr_tail: null,
+            output_truncated: false,
+          },
+        ],
+        testsPassed: 0,
+        testsTotal: 0,
+        finalReviewClean: false,
+      }),
+    ]);
+    expect(res.decision.facts.lifecycle).toBe("failed");
+    expect(res.decision.facts.reason).toBe("harness_failed");
+    expect(res.decision.apply_recommendation).not.toBe("apply");
+    // The pseudo-gate is lifecycle evidence, never a configured check: no
+    // resurrected "tests=0% / required gates FAILED / gates 0/1".
+    expect(res.decision.facts.checks).toBe("not_configured");
+    expect(res.decision.why_winner).toContain("tests=n/a");
+    expect(res.decision.final_checks).toContain("required gates n/a (none configured)");
+  });
+
+  it("keeps checks not_configured even when a producer repollutes the counts with the pseudo-gate", () => {
+    // Guard for the configuredGates() seam: a legacy/foreign producer that
+    // counted the synthetic harness row into testsTotal must still not flip
+    // the checks axis to failed — the gate rows are the ground truth.
     const res = arbitrate([
       candidate("A", {
         diffBytes: 0,
@@ -139,8 +200,85 @@ describe("arbitrate", () => {
       }),
     ]);
     expect(res.decision.facts.lifecycle).toBe("failed");
-    expect(res.decision.facts.reason).toBe("harness_failed");
+    expect(res.decision.facts.checks).toBe("not_configured");
+    expect(res.decision.final_checks).toContain("required gates n/a (none configured)");
+  });
+
+  it("fails checks for a gate-less candidate with failing raw tests (base behavior kept)", () => {
+    // sol counterexample 1: dropping the raw testsTotal>0 disjunct turned
+    // 0/10 failing tests with no gates into checks=not_configured + apply.
+    const res = arbitrate([candidate("A", { gates: [], testsPassed: 0, testsTotal: 10 })]);
+    expect(res.decision.facts.checks).toBe("failed");
     expect(res.decision.apply_recommendation).not.toBe("apply");
+  });
+
+  it("keeps the checks axis on configured gates when the harness errored after a green gate", () => {
+    // sol counterexample 2 / grok M1 / fable m: the augmented requiredOk must
+    // not leak into checks — configured gate passed, harness errored: the
+    // record stays self-consistent (labels and checks both configured-only),
+    // lifecycle still carries the harness failure.
+    const harnessRow = {
+      id: "harness",
+      status: "failed" as const,
+      required: true,
+      command: "codex",
+      exit_code: 1,
+      duration_ms: 1,
+      stdout_tail: null,
+      stderr_tail: null,
+      output_truncated: false,
+    };
+    const res = arbitrate([
+      candidate("A", { gates: [gate(true), harnessRow], testsPassed: 1, testsTotal: 1 }),
+    ]);
+    expect(res.decision.facts.lifecycle).toBe("failed");
+    expect(res.decision.facts.reason).toBe("harness_failed");
+    expect(res.decision.facts.checks).toBe("passed");
+    expect(res.decision.final_checks.join(" ")).toContain("required gates passed");
+    expect(res.decision.apply_recommendation).not.toBe("apply");
+  });
+
+  it("keeps existing test-axis ordering between errored candidates (raw counts rank)", () => {
+    // sol counterexample 3: routing the RANKING fraction through configured
+    // counts made 1/10 and 9/10 both rank 100% and the 1/10 candidate win.
+    const harnessRow = {
+      id: "harness",
+      status: "failed" as const,
+      required: true,
+      command: "codex",
+      exit_code: 1,
+      duration_ms: 1,
+      stdout_tail: null,
+      stderr_tail: null,
+      output_truncated: false,
+    };
+    const weak = candidate("weak", {
+      gates: [gate(true), harnessRow],
+      testsPassed: 1,
+      testsTotal: 10,
+      diffBytes: 1,
+      diffSize: 1,
+      finalReviewClean: false,
+      reviewVerified: false,
+    });
+    const strong = candidate("strong", {
+      gates: [gate(true), harnessRow],
+      testsPassed: 9,
+      testsTotal: 10,
+      diffBytes: 500,
+      diffSize: 500,
+      finalReviewClean: false,
+      reviewVerified: false,
+    });
+    const res = arbitrate([weak, strong]);
+    expect(res.ranking[0]?.label).toBe("strong");
+    // QA-028 on the ranking surface: the axis FORMAT explains the ordering
+    // its VALUE produced (the configured label rendered both as 100%, leaving
+    // decisive_axis unable to explain itself — final-lane finding).
+    const scorecard = res.decision.ranking_scorecard ?? [];
+    const fmt = (label: string) => scorecard.find((row) => row.label === label)?.axes?.tests ?? "";
+    expect(fmt("strong")).toContain("90%");
+    expect(fmt("weak")).toContain("10%");
   });
 
   it("adopts a no-gate run on a VERIFIED clean cross-family review, basis disclosed", () => {
@@ -336,5 +474,51 @@ describe("arbitrate", () => {
         res.decision.final_checks.some((c) => c.includes("tie: winner chosen by route order")),
       ).toBe(true);
     });
+  });
+});
+
+describe("required_gates axis format matches its ranking predicate", () => {
+  it("an errored zero-gate loser formats distinguishably from a healthy zero-gate winner", () => {
+    const base = {
+      acceptanceCovered: [],
+      acceptanceTotal: 0,
+      findings: [],
+      testsPassed: 0,
+      testsTotal: 0,
+      finalReviewClean: true,
+      diffSize: 1,
+    };
+    const healthy = { ...base, attemptId: "B", label: "Candidate B", gates: [] };
+    const errored = {
+      ...base,
+      attemptId: "A",
+      label: "Candidate A",
+      gates: [
+        {
+          id: "harness",
+          command: "harness",
+          exit_code: 1,
+          status: "failed" as const,
+          duration_ms: 0,
+          required: true,
+          stdout_tail: null,
+          stderr_tail: null,
+          output_truncated: false,
+        },
+      ],
+    };
+    const record = arbitrate([errored, healthy]).decision;
+    const axes = record.ranking_scorecard.map((row) => ({
+      id: row.attempt_id,
+      gates: row.axes["required_gates"],
+    }));
+    const winner = axes.find((a) => a.id === "B");
+    const loser = axes.find((a) => a.id === "A");
+    // QA-028: the axis value and label on ONE surface may never disagree —
+    // and the decisive-axis disclosure must be able to EXPLAIN the pick, so
+    // the two candidates' formats must differ when their values do.
+    expect(winner?.gates).not.toBe(loser?.gates);
+    expect(loser?.gates).toContain("FAILED");
+    expect(loser?.gates).toContain("harness errored");
   });
 });

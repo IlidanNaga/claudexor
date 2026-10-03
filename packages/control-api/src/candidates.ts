@@ -14,6 +14,7 @@ import {
   confinementBoundaryProven,
   ReviewFinding,
   isBlocking,
+  RecordedAppliedAttemptFacts,
   type DecisionRecord,
 } from "@claudexor/schema";
 
@@ -92,7 +93,11 @@ export function candidatesFor(runDir: string, decision: DecisionRecord | null): 
             }
           : null,
       rankingAxes: scorecardRow ? scorecardRow.axes : null,
-      confinement: confinementCard(raw),
+      confinement: confinementCard(
+        RecordedAppliedAttemptFacts.safeParse(raw).success
+          ? RecordedAppliedAttemptFacts.parse(raw)
+          : raw,
+      ),
     });
     if (parsed.success) out.push(parsed.data);
   }

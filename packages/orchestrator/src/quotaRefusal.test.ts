@@ -9,9 +9,21 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ArtifactStore } from "@claudexor/artifact-store";
 import { EventLog } from "@claudexor/event-log";
-import { RunFailure, type CredentialProfile, type QuotaSnapshot } from "@claudexor/schema";
+import {
+  HarnessRunSpec,
+  RunFailure,
+  type CredentialProfile,
+  type QuotaConstraint,
+  type QuotaSnapshot,
+} from "@claudexor/schema";
 import { type CandidateRun, unanimousDeclaredFailure } from "./candidateEvidence.js";
-import { preflightCredentialProfile } from "./credential-profile-rotation.js";
+import { preflightDefaultSubject } from "./credential-preflight.js";
+import {
+  profileHeadroomBreach,
+  rotateSpecOnTypedLimit,
+  type ProfilePolicy,
+} from "./credential-profile-rotation.js";
+import { resolveAccountForRun, subscriptionWindowExhausted } from "./account-resolution.js";
 import { type DeclaredFailure, failTerminally } from "./runTerminalResults.js";
 
 const dirs: string[] = [];
@@ -55,20 +67,11 @@ const spent: QuotaSnapshot = {
 };
 
 function refusal(): unknown {
-  try {
-    preflightCredentialProfile({
-      profile,
-      harnessId: "claude",
-      policy: { limit_action: "fail", rotation_eligible: [], headroom_threshold: 0.9 },
-      registry: [profile],
-      snapshots: [spent],
-      readyProfileIds: new Set(),
-      emit: () => {},
-    });
-  } catch (error) {
-    return error;
-  }
-  throw new Error("preflightCredentialProfile did not refuse a breached headroom under fail");
+  // The strict-pin refusal path (D-U6): a fresh breach of the pinned
+  // account's window becomes the typed subscription_window_exhausted error.
+  const breach = profileHeadroomBreach([spent], "claude", profile.profile_id, 0.9, null);
+  if (!breach) throw new Error("fixture snapshot did not breach the headroom threshold");
+  return subscriptionWindowExhausted(profile.profile_id, "claude", breach);
 }
 
 function terminalFailure(error: unknown): RunFailure {
@@ -154,5 +157,234 @@ describe("unanimousDeclaredFailure (no ranking of mixed causes)", () => {
   it("has nothing to say about an empty or untyped candidate set", () => {
     expect(unanimousDeclaredFailure([])).toBeNull();
     expect(unanimousDeclaredFailure([slot(undefined), slot(undefined)])).toBeNull();
+  });
+});
+
+// A5: the WHOLE pool refused. Within ONE pool the fold is the EARLIEST known
+// reset (one reopened member is enough to retry) — the across-candidates
+// LATEST rule above stays untouched.
+describe("credential pool exhaustion (A5)", () => {
+  const EARLY = "2099-01-01T06:00:00.000Z";
+  const MID = "2099-01-01T12:00:00.000Z";
+  const LATE = "2099-01-01T18:00:00.000Z";
+
+  const mkProfile = (id: string): CredentialProfile => ({
+    ...profile,
+    profile_id: id,
+    display_name: id,
+    isolation_locator: `/tmp/p/${id}`,
+  });
+
+  const snapshotFor = (
+    subjectId: string | null,
+    constraint: Partial<QuotaConstraint>,
+  ): QuotaSnapshot => ({
+    subject: {
+      harness: "claude",
+      credential_route: "vendor_native",
+      plan_label: null,
+      subject_id: subjectId,
+    },
+    constraints: [
+      {
+        id: "window",
+        label: "Window",
+        used_ratio: null,
+        window_seconds: null,
+        resets_at: null,
+        cooldown_until: null,
+        ...constraint,
+      } as QuotaConstraint,
+    ],
+    source: "claude_oauth_usage",
+    observed_at: new Date().toISOString(),
+    freshness: "fresh",
+  });
+
+  const rotatePolicy: ProfilePolicy = {
+    limit_action: "rotate",
+    rotation_eligible: [],
+    headroom_threshold: 0.9,
+  };
+
+  const rotateArgs = (snapshots: QuotaSnapshot[], lastResetsAt: string | null) => ({
+    spec: HarnessRunSpec.parse({
+      session_id: "se-1",
+      intent: "implement" as const,
+      prompt: "go",
+      cwd: "/repo",
+    }),
+    harnessId: "claude",
+    attemptId: "a01",
+    policy: rotatePolicy,
+    registry: [mkProfile("b"), mkProfile("c")],
+    snapshots,
+    probeReadyProfiles: async () => new Set(["b", "c"]),
+    triedProfiles: new Set<string>(),
+    markers: { sawAgentProgress: false, fileChanges: 0 },
+    sawTypedLimit: true,
+    sawRetryable: true,
+    attemptErrored: true,
+    deliverableEmpty: true,
+    lastLimit: { retryDelayMs: null, resetsAt: lastResetsAt },
+    emit: () => {},
+    newSessionId: () => "se-2",
+    defaultRouteWasVendorNative: true,
+  });
+
+  it("terminalizes with the EARLIEST reset within the pool, the default subject's own limit included", async () => {
+    // Pool: b reopens LATE, c reopens MID; the DEFAULT subject itself reopens
+    // EARLY — the registry's own evidence for the triggering subject joins the
+    // fold (and outranks the raw stream limit's unknown reset).
+    const result = await rotateSpecOnTypedLimit(
+      rotateArgs(
+        [
+          snapshotFor("b", { cooldown_until: LATE }),
+          snapshotFor("c", { cooldown_until: MID }),
+          snapshotFor(null, { cooldown_until: EARLY }),
+        ],
+        null,
+      ),
+    );
+    expect(result).toMatchObject({
+      poolExhausted: {
+        code: "credential_pool_exhausted",
+        category: "harness_unavailable",
+        resetsAt: EARLY,
+      },
+    });
+  });
+
+  it("an unknown reset anywhere in the pool makes the pool's reset unknown", async () => {
+    // The triggering subject's typed limit carried NO reset (the cursor
+    // day-granularity class) and the registry has not ingested it: the pool
+    // cannot promise a reopen time even though b's reset is known.
+    const result = await rotateSpecOnTypedLimit(
+      rotateArgs(
+        [snapshotFor("b", { cooldown_until: MID }), snapshotFor("c", { cooldown_until: LATE })],
+        null,
+      ),
+    );
+    expect(result).toMatchObject({
+      poolExhausted: { code: "credential_pool_exhausted", resetsAt: null },
+    });
+  });
+
+  it("an api_key sibling's stale cooldown is NEVER pool evidence for a subscription subject (member-only gate)", async () => {
+    // A subscription (native-session) subject dies structurally; the only
+    // registered identity is a METERED api_key sibling — a row rotation could
+    // never select (`credential_kind_mismatch`). Its own cooldown evidence
+    // must not let the terminal claim "the credential pool refused": the
+    // attempt keeps its TRUE failure (fail-as-is → null).
+    const metered: CredentialProfile = {
+      ...profile,
+      profile_id: "metered",
+      display_name: "metered",
+      credential_kind: "api_key",
+      isolation_locator: null,
+      secret_ref: "anthropic_key:metered",
+    };
+    const meteredCooldown: QuotaSnapshot = {
+      ...snapshotFor("metered", { cooldown_until: MID }),
+      subject: {
+        harness: "claude",
+        credential_route: "managed_api_key",
+        plan_label: null,
+        subject_id: "metered",
+      },
+    };
+    const result = await rotateSpecOnTypedLimit({
+      ...rotateArgs([meteredCooldown], null),
+      registry: [metered],
+      probeReadyProfiles: async () => new Set<string>(),
+      // STRUCTURAL death: no typed limit, so the subject carries no evidence.
+      sawTypedLimit: false,
+      sawRetryable: false,
+    });
+    expect(result).toBeNull();
+  });
+
+  it("lands in failure.yaml with its code and folded reset intact", async () => {
+    const result = await rotateSpecOnTypedLimit(
+      rotateArgs(
+        [snapshotFor("b", { cooldown_until: MID }), snapshotFor("c", { cooldown_until: LATE })],
+        EARLY,
+      ),
+    );
+    const failure = terminalFailure(
+      result && "poolExhausted" in result ? result.poolExhausted : null,
+    );
+    expect(failure.code).toBe("credential_pool_exhausted");
+    expect(failure.category).toBe("harness_unavailable");
+    // b reopens MID; the subject's own typed limit says EARLY — earliest wins.
+    expect(failure.resetsAt).toBe(EARLY);
+  });
+
+  it("a PINNED subject's OBSERVED spent window refuses TYPED before spawn — a pin never rotates (D-U6 + A4)", async () => {
+    const events: string[] = [];
+    await expect(
+      resolveAccountForRun({
+        harnessId: "claude",
+        registry: [profile],
+        policy: rotatePolicy,
+        snapshots: [
+          snapshotFor("valentine", { used_ratio: 1, resets_at: MID, window_seconds: 604800 }),
+        ],
+        quota: { snapshots: [], absences: [] },
+        unusable: [],
+        probe: undefined,
+        pinnedProfile: profile,
+        boundProfileId: null,
+        threadId: null,
+        model: null,
+        defaultRoute: "local_session",
+        nativeCredentialsDisabled: false,
+        authPreference: "auto",
+        notePoolApiKeyRoute: () => {},
+        emit: (type) => events.push(type),
+      }),
+    ).rejects.toMatchObject({
+      code: "subscription_window_exhausted",
+      category: "harness_unavailable",
+      resetsAt: MID,
+    });
+    // The refusal is a decision with provenance: the typed event precedes it,
+    // and the pool is never consulted for a pin.
+    expect(events).toEqual(["route.profile.headroom_exceeded"]);
+  });
+
+  it("legacy default subject under rotate: a bare headroom breach with no alternative PROCEEDS (not proven spent)", () => {
+    const kept = preflightDefaultSubject({
+      harnessId: "claude",
+      policy: rotatePolicy,
+      registry: [],
+      snapshots: [
+        // 0.91 of the DEFAULT subject's window — proximity, not exhaustion.
+        snapshotFor(null, { used_ratio: 0.91, resets_at: RESETS_AT, window_seconds: 604800 }),
+      ],
+      readyProfileIds: new Set(),
+      defaultRoute: "local_session",
+      emit: () => {},
+    });
+    // null = keep the default subject: the run proceeds and the vendor is
+    // the truth (a bare breach never becomes a pool terminal).
+    expect(kept).toBeNull();
+  });
+
+  it("preflight default subject: its own live block with a fully-blocked pool refuses TYPED with the earliest reset", () => {
+    expect(() =>
+      preflightDefaultSubject({
+        harnessId: "claude",
+        policy: rotatePolicy,
+        registry: [mkProfile("b")],
+        snapshots: [
+          snapshotFor(null, { cooldown_until: MID }),
+          snapshotFor("b", { cooldown_until: EARLY }),
+        ],
+        readyProfileIds: new Set(["b"]),
+        defaultRoute: "local_session",
+        emit: () => {},
+      }),
+    ).toThrowError(expect.objectContaining({ code: "credential_pool_exhausted", resetsAt: EARLY }));
   });
 });

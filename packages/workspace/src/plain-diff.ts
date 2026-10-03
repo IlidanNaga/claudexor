@@ -1,9 +1,34 @@
-import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync } from "node:fs";
-import { resolve, sep } from "node:path";
+import {
+  closeSync,
+  constants,
+  cpSync,
+  existsSync,
+  fstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+} from "node:fs";
+import { join, resolve, sep } from "node:path";
 import { parseUnifiedDiff } from "@claudexor/core";
 import { containsSecretLikeToken } from "@claudexor/util";
 
 const MAX_BINARY_SECRET_SCAN_BYTES = 32 * 1024 * 1024;
+
+/** Legacy live convergence capture only. Explicit directory workspaces use a selected footprint. */
+export function snapshotLegacyDirectoryBaseline(repoRoot: string, base: string): void {
+  const baseline = join(base, "baseline");
+  const skip = new Set([".git", "node_modules", "__pycache__", ".venv", "venv"]);
+  try {
+    mkdirSync(baseline, { recursive: true });
+    for (const entry of readdirSync(repoRoot)) {
+      if (!skip.has(entry))
+        cpSync(join(repoRoot, entry), join(baseline, entry), { recursive: true });
+    }
+  } catch {
+    /* Existing captureDiff reports unavailable legacy capture. */
+  }
+}
 
 /** Rewrite only structural GNU/BSD `diff -ruN` headers to git-style paths.
  * Missing-side headers become `/dev/null`, making added/deleted files exactly
@@ -50,8 +75,15 @@ export function relativizePlainDiffHeaders(
       inHunk = true;
       continue;
     }
-    if (line.startsWith("Binary files ") && line.endsWith(" differ") && !inHunk) {
+    // A bare `Binary files … differ` record is structural wherever it stands:
+    // hunk content always carries a ' '/'+'/'-' prefix, so it cannot forge
+    // this line. GNU diff 3.8 emits it right after the previous file's hunks
+    // with no `diff …` command echo in between (#252), so the previous hunk
+    // must not hide it from relativization — an unrelativized absolute path
+    // would escape the exact-prefix exclusion and repo-relative policy globs.
+    if (line.startsWith("Binary files ") && line.endsWith(" differ")) {
       lines[index] = swap(line);
+      inHunk = false;
     }
   }
   return lines.join("\n");

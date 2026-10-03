@@ -1,18 +1,25 @@
-import type { HarnessAdapter } from "@claudexor/core";
+import {
+  prepareHarnessProcessing,
+  admitPreparedProcessing,
+  stampCredentialProfileSelection,
+  type HarnessAdapter,
+  type PreparedHarnessProcessing,
+} from "@claudexor/core";
 import { preflightEvidence, type DiffEvidence, writeDiffEvidence } from "@claudexor/context";
 import type {
   AuthPreference,
+  CredentialProfile,
   EffortHint,
   HarnessEvent,
   ProviderFamily,
   ReviewFinding,
   RouteProof,
+  ProcessingPreference,
 } from "@claudexor/schema";
 import { HarnessRunSpec, ReviewFinding as ReviewFindingSchema } from "@claudexor/schema";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
-import { rm } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import {
   appendLine,
@@ -59,18 +66,39 @@ export type { ReviewCandidateResult, ReviewerProgressEvent } from "./reviewRunti
 import { reviewerAuthMode, reviewerAuthSwitchFromEvent } from "./reviewRuntimeTypes.js";
 import { ReviewerCostKnowledge } from "./reviewerCostKnowledge.js";
 import { ReviewerSpendAccumulator, type PartialReviewerSpend } from "./reviewerSpendAccumulator.js";
+import { WorkspaceManager } from "@claudexor/workspace";
+import {
+  cleanupReviewerWorkspace,
+  createReviewerArtifactContext,
+  emitReviewerProgress,
+  insufficientEvidenceFinding,
+  redactValue,
+  safeFilePart,
+  sleep,
+  transientRetryDelayMs,
+  updateReviewerMetadata,
+  writeParseError,
+} from "./reviewerArtifacts.js";
 
 export interface ReviewerSpec {
   adapter: HarnessAdapter;
   providerFamily: ProviderFamily;
   requestedModel?: string | null;
   requestedEffort?: EffortHint | null;
+  processingPreference?: ProcessingPreference;
+  processing?: PreparedHarnessProcessing;
+  processingAllowPaid?: boolean;
   authPreference?: AuthPreference | null;
+  /** Exact resolved profile (null = pool/default); `profilePinned: false` = the pool chose it. */
+  credentialProfile?: CredentialProfile | null;
+  profilePinned?: boolean;
 }
 
 export interface ReviewCandidateInput {
   candidateLabel: string;
   diff: string;
+  /** Explicit selected postimage manifest for ordinary-folder review. */
+  candidatePaths?: string[];
   evidenceDir: string;
   artifactsDir?: string;
   evidenceReadOnly?: boolean;
@@ -79,13 +107,9 @@ export interface ReviewCandidateInput {
     candidateTree: string;
     packetManifestSha256: string;
   };
-  /** Owner-amended delta scope (INV-125 second amendment, 2026-08-04).
-   * SUBTRACTIVE by design (wave-6 integrity finding): there is NO harness
-   * parameter — the delta applies ONLY to the contract's sol slot (the
-   * cursor lane), the base SHA must match the sealed packet's FINGERPRINTS
-   * delta entries, and DELTA.patch must verify as the exact
-   * deltaBaseSha..candidateSha diff. Sealed-packet mode only; every other
-   * lane always reviews the full context. */
+  /** Subtractive delta for the fixed Cursor/Sol slot in sealed-packet mode
+   * (INV-125). Other lanes retain full context; the base SHA and diff must
+   * match the sealed packet, as checked by assertSealedDeltaScope. */
   deltaScope?: { baseSha: string };
   cwd: string;
   reviewers: ReviewerSpec[];
@@ -95,6 +119,10 @@ export interface ReviewCandidateInput {
   env?: Record<string, string>;
   signal?: AbortSignal;
   onReviewerEvent?: (event: ReviewerProgressEvent) => void;
+  /** Cumulative panel cash plus amounts of unknown meaning on potentially paid routes. */
+  onUsageCost?: (panelPaidOrUnknownUsd: number) => boolean;
+  /** Exact prepared slot, before each physical send; caller owns the panel lease. */
+  onBeforeDispatch?: (reviewerIndex: number, spec: HarnessRunSpec) => void | Promise<void>;
 }
 
 const DEFAULT_REVIEWER_TIMEOUT_MS = 10 * 60_000;
@@ -141,11 +169,8 @@ function readSealedDeltaEvidence(dir: string): DiffEvidence {
  * delta subject, so a mislabeled attestation cannot be produced upstream. */
 const SOL_DELTA_HARNESS_ID = "cursor";
 
-/** Fail-closed launch-time verification of an owner-amended delta scope
- * (wave-6 integrity finding f-…: the flag's former free parameters could
- * mislabel a signed attestation). The base SHA and delta digest must match
- * the sealed FINGERPRINTS entries, and DELTA.patch must be the exact
- * deltaBaseSha..candidateSha diff of the candidate repository. */
+/** Verify the optional delta against the packet and exact frozen candidate;
+ * the fixed reviewer slot remains outside caller control. */
 function assertSealedDeltaScope(
   input: ReviewCandidateInput,
   baseSha: string,
@@ -205,6 +230,7 @@ function assertSealedDeltaScope(
 function reviewerRouteProof(
   reviewer: ReviewerSpec,
   modelId: string | null,
+  credentialProfileId: string | null | undefined,
   source: RouteProof["observed"]["evidence_source"],
   peerFamilies: ProviderFamily[],
 ): RouteProof {
@@ -213,10 +239,14 @@ function reviewerRouteProof(
       harness_id: reviewer.adapter.id,
       provider_family: reviewer.providerFamily,
       model_hint: reviewer.requestedModel ?? null,
+      ...(reviewer.credentialProfile !== undefined
+        ? { credential_profile_id: reviewer.credentialProfile?.profile_id ?? null }
+        : {}),
     },
     {
       provider: reviewer.providerFamily,
       model_id: modelId,
+      ...(credentialProfileId !== undefined ? { credential_profile_id: credentialProfileId } : {}),
       evidence_source: modelId ? source : "unavailable",
     },
     peerFamilies,
@@ -227,12 +257,19 @@ function reviewerInfo(
   reviewer: ReviewerSpec,
   routeProofStatus: RouteProof["status"],
   observedModel: string | null = null,
+  observedCredentialProfileId: string | null | undefined = undefined,
 ): ReviewerInfo {
   return {
     harness_id: reviewer.adapter.id,
     requested_model: reviewer.requestedModel ?? null,
     requested_effort: reviewer.requestedEffort ?? null,
+    ...(reviewer.credentialProfile !== undefined
+      ? { credential_profile_id: reviewer.credentialProfile?.profile_id ?? null }
+      : {}),
     observed_model: observedModel,
+    ...(observedCredentialProfileId !== undefined
+      ? { observed_credential_profile_id: observedCredentialProfileId }
+      : {}),
     route_proof_status: routeProofStatus,
   };
 }
@@ -271,6 +308,7 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
     reviewerRouteProof(
       reviewer,
       null,
+      undefined,
       "unavailable",
       reviewerFamilies.filter((_, otherIndex) => otherIndex !== index),
     ),
@@ -281,10 +319,18 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
       provider_family: reviewer.providerFamily,
       requested_model: reviewer.requestedModel ?? null,
       requested_effort: reviewer.requestedEffort ?? null,
+      ...(reviewer.credentialProfile !== undefined
+        ? { credential_profile_id: reviewer.credentialProfile?.profile_id ?? null }
+        : {}),
     }),
   );
   const healthyReviewerIndexes = new Set<number>();
   const reviewerSpend = new ReviewerSpendAccumulator(input.reviewers.length);
+  const streamedPaid = Array<number>(input.reviewers.length).fill(0);
+  const budgetAbort = new AbortController();
+  const reviewerSignal = input.signal
+    ? AbortSignal.any([input.signal, budgetAbort.signal])
+    : budgetAbort.signal;
   const reviewerTimeoutMs = input.reviewerTimeoutMs ?? DEFAULT_REVIEWER_TIMEOUT_MS;
   const reviewWaveId =
     input.env?.["CLAUDEXOR_REVIEW_WAVE_ID"] ?? process.env["CLAUDEXOR_REVIEW_WAVE_ID"] ?? null;
@@ -338,11 +384,14 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
     ].filter(Boolean);
     throw new Error(`mandatory evidence preflight failed (${parts.join("; ")})`);
   }
-  const postimagePaths = extractDiffPostimagePaths(input.diff);
+  const postimagePaths = input.candidatePaths
+    ? new Set(input.candidatePaths)
+    : extractDiffPostimagePaths(input.diff);
   const candidateInventory = await buildReviewerCandidateInventory(
     input.cwd,
     postimagePaths,
     input.evidenceReadOnly === true,
+    input.candidatePaths,
   );
   const artifactsBaseDir = input.artifactsDir ?? join(input.evidenceDir, "reviewer-artifacts");
   if (
@@ -390,6 +439,11 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
     if (input.signal?.aborted) return;
     const artifact = createReviewerArtifactContext(artifactsBaseDir, index, reviewer);
     artifacts[index] = artifact;
+    // Each parallel reviewer gets a disposable scratch/state namespace. The
+    // profile's credential store remains adapter-owned; this HOME only prevents
+    // native mutable session/config state from colliding between slots.
+    const reviewerScratch = new WorkspaceManager(input.cwd).readOnlyHomeEnv();
+    const reviewerEnv = { ...(input.env ?? {}), ...reviewerScratch.env };
     let reviewerWorkspace: ReviewerWorkspace | null = null;
     let spec: HarnessRunSpec | null = null;
     try {
@@ -429,10 +483,7 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
         candidate_inventory_reason: candidateInventory.reason,
         review_scope: deltaBase ? "delta" : "full",
         ...(deltaBase
-          ? {
-              delta_base_sha: deltaBase,
-              delta_sha256: verifiedDeltaScope!.deltaSha256,
-            }
+          ? { delta_base_sha: deltaBase, delta_sha256: verifiedDeltaScope!.deltaSha256 }
           : {}),
         ...frozenMetadata,
       });
@@ -461,13 +512,38 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
           : {}),
         model_hint: reviewer.requestedModel ?? null,
         effort_hint: reviewer.requestedEffort ?? null,
+        processing_preference: reviewer.processingPreference,
+        processing: reviewer.processing?.receipt,
+        processing_cost_basis: reviewer.processing?.costBasis,
+        processing_allow_paid: reviewer.processingAllowPaid,
         auth_preference: reviewer.authPreference ?? "auto",
+        credential_profile: reviewer.credentialProfile ?? null,
         env_inheritance: input.envInheritance ?? "mirror_native",
         ...(input.evidenceReadOnly && input.frozenIdentity
           ? { output_schema: SEALED_REVIEW_OUTPUT_SCHEMA }
           : {}),
-        ...(input.env ? { env: input.env } : {}),
+        env: reviewerEnv,
       });
+      stampCredentialProfileSelection(spec, { pinned: reviewer.profilePinned !== false });
+      if (input.onBeforeDispatch)
+        spec.extra["processingAdmission"] = async (actual: HarnessRunSpec) => {
+          // The adapter resolves the concrete profile/route while preparing
+          // this attempt. Keep billing tied to that current SSOT rather than
+          // the reviewer-level preflight (which may be stale after rotation).
+          actual.extra["routeBillingKnowledge"] = (resolved: HarnessRunSpec) => {
+            const profileKind = resolved.credential_profile?.credential_kind;
+            return profileKind === "api_key"
+              ? "metered"
+              : profileKind
+                ? "subscription_entitlement"
+                : resolved.auth_preference === "api_key"
+                  ? "metered"
+                  : resolved.auth_preference === "subscription"
+                    ? "subscription_entitlement"
+                    : "unknown";
+          };
+          await input.onBeforeDispatch!(index, actual);
+        };
       writeText(artifact.promptPath, spec.prompt);
       updateReviewerMetadata(artifact, {
         session_id: spec.session_id,
@@ -491,7 +567,8 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
         message: `Reviewer setup failed: ${message}`,
       });
       if (reviewerWorkspace) await cleanupReviewerWorkspace(reviewerWorkspace, artifact);
-      const proof = reviewerRouteProof(reviewer, null, "unavailable", reviewerFamilies);
+      reviewerScratch.dispose();
+      const proof = reviewerRouteProof(reviewer, null, undefined, "unavailable", reviewerFamilies);
       routeProofs[index] = proof;
       findingsByReviewer[index]?.push(
         insufficientEvidenceFinding(
@@ -505,6 +582,7 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
 
     let text = "";
     let streamObservedModel: string | undefined;
+    let streamObservedCredentialProfileId: string | undefined;
     let routeModel: string | undefined;
     let routeSource: RouteProof["observed"]["evidence_source"] = "unavailable";
     let reviewerError: string | null = null;
@@ -519,12 +597,26 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
           : (input.transientRetryPolicy ?? DEFAULT_REVIEWER_TRANSIENT_RETRY_POLICY),
         artifact,
         input.onReviewerEvent,
-        input.signal,
+        reviewerSignal,
         input.evidenceReadOnly === true,
+        (amount) => {
+          streamedPaid[index] = amount;
+          try {
+            if (input.onUsageCost?.(streamedPaid.reduce((sum, value) => sum + value, 0))) {
+              budgetAbort.abort("review_budget_cap");
+              return true;
+            }
+            return false;
+          } catch (error) {
+            budgetAbort.abort("review_budget_observer_failed");
+            throw error;
+          }
+        },
       );
       text = out.text;
       sealedProjectionError = out.sealedProjectionError ?? null;
       streamObservedModel = out.observedModel;
+      streamObservedCredentialProfileId = out.observedCredentialProfileId;
       routeModel = out.observedModel;
       routeSource = out.observedSource;
       reviewerSpend.record(index, out);
@@ -536,6 +628,7 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
       reviewerError = redactSecrets(err instanceof Error ? err.message : String(err));
       const partial = err as PartialReviewerSpend & {
         partialObservedModel?: string;
+        partialObservedCredentialProfileId?: string;
         partialObservedSource?: RouteProof["observed"]["evidence_source"];
         partialSealedProjectionError?: string;
         partialText?: string;
@@ -552,20 +645,30 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
         routeModel = partial.partialObservedModel;
         routeSource = partial.partialObservedSource ?? "stream_event";
       }
+      if (partial?.partialObservedCredentialProfileId) {
+        streamObservedCredentialProfileId = partial.partialObservedCredentialProfileId;
+      }
       writeParseError(artifact, { error: reviewerError });
     } finally {
       await cleanupReviewerWorkspace(reviewerWorkspace, artifact);
+      reviewerScratch.dispose();
     }
 
     const proof = reviewerRouteProof(
       reviewer,
       routeModel ?? null,
+      streamObservedCredentialProfileId,
       routeSource,
       reviewerFamilies.filter((_, i) => i !== index),
     );
     routeProofs[index] = proof;
 
-    const info = reviewerInfo(reviewer, proof.status, streamObservedModel ?? null);
+    const info = reviewerInfo(
+      reviewer,
+      proof.status,
+      streamObservedModel ?? null,
+      streamObservedCredentialProfileId,
+    );
     const sealedParse = input.evidenceReadOnly
       ? parseSealedReviewEnvelopeDetailed(text, info)
       : null;
@@ -713,6 +816,7 @@ async function collectReviewerOutput(
   onReviewerEvent: ReviewCandidateInput["onReviewerEvent"],
   signal?: AbortSignal,
   sealed = false,
+  onUsageCost?: (paidOrUnknownUsd: number) => boolean,
 ): Promise<ReviewerOutput> {
   const controller = new AbortController();
   spec.extra["abortSignal"] = controller.signal;
@@ -739,6 +843,7 @@ async function collectReviewerOutput(
   let cancelledBySignal = false;
   let firstEventTime: string | null = null;
   let observedModel: string | undefined;
+  let observedCredentialProfileId: string | undefined;
   let observedSource: RouteProof["observed"]["evidence_source"] = "unavailable";
   let observedAuthMode: "local_session" | "api_key" | null = null;
   let currentAuthMode: "local_session" | "api_key" | null = null;
@@ -755,8 +860,32 @@ async function collectReviewerOutput(
     cancelledBySignal || signal?.aborted === true || controller.signal.aborted;
 
   const consumeOnce = async (nativeTry: number): Promise<ReviewerOutput> => {
+    if (isCancelled()) throw new Error("Reviewer cancelled before dispatch");
+    if (runSpec.processing_preference || reviewer.adapter.prepareProcessing) {
+      const prepared = await prepareHarnessProcessing(reviewer.adapter, {
+        preference: runSpec.processing_preference,
+        model: runSpec.model_hint,
+        effort: runSpec.effort_hint,
+        cwd: runSpec.cwd,
+        env: runSpec.env,
+        credentialProfile: runSpec.credential_profile,
+        authPreference: runSpec.auth_preference,
+        allowPaid: runSpec.processing_allow_paid,
+      });
+      runSpec = {
+        ...runSpec,
+        processing: prepared.receipt,
+        processing_cost_basis: prepared.costBasis,
+      };
+    }
+    if (isCancelled()) throw new Error("Reviewer cancelled before dispatch");
+    await admitPreparedProcessing(runSpec);
+    const markPhysicalDispatchStarted = runSpec.extra["markPhysicalDispatchStarted"];
+    if (typeof markPhysicalDispatchStarted === "function")
+      (markPhysicalDispatchStarted as () => void)();
+    if (isCancelled()) throw new Error("Reviewer cancelled before dispatch");
     currentAuthMode = null;
-    costKnowledge.startAttempt();
+    costKnowledge.startAttempt(runSpec);
     const iter = (reviewer.adapter.review ?? reviewer.adapter.run).call(reviewer.adapter, runSpec);
     currentIter = iter;
     let text = "";
@@ -764,6 +893,7 @@ async function collectReviewerOutput(
     let sawError = false;
     let lastError: string | null = null;
     let attemptObservedModel: string | undefined;
+    let attemptObservedCredentialProfileId: string | undefined;
     let attemptObservedSource: RouteProof["observed"]["evidence_source"] = "unavailable";
     const sealedMessageEvents: unknown[] = [];
     for await (const ev of iter) {
@@ -799,7 +929,7 @@ async function collectReviewerOutput(
         observedAuthModes.add(disclosedAuthMode);
         updateReviewerMetadata(artifact, { auth_modes: [...observedAuthModes] });
       }
-      costKnowledge.observeEvent(currentAuthMode);
+      costKnowledge.observeEvent(currentAuthMode, ev);
       if (!observedAuthMode) {
         observedAuthMode = disclosedAuthMode;
         if (observedAuthMode) updateReviewerMetadata(artifact, { auth_mode: observedAuthMode });
@@ -809,7 +939,7 @@ async function collectReviewerOutput(
         updateReviewerMetadata(artifact, { first_event_time: firstEventTime });
         emitReviewerProgress(artifact, reviewer, onReviewerEvent, {
           type: "reviewer.first_event",
-          at: firstEventTime,
+          at: eventTime,
         });
       }
       if (
@@ -820,14 +950,15 @@ async function collectReviewerOutput(
       ) {
         costUsd += ev.usage.cost_usd;
         if (ev.usage.estimated) costEstimated = true;
-        costKnowledge.observeUsage(currentAuthMode, ev.usage.estimated === true);
-        if (currentAuthMode === "local_session") {
-          valuationUsd += ev.usage.cost_usd;
-        } else if (currentAuthMode === "api_key") {
-          cashUsd += ev.usage.cost_usd;
-        } else {
-          unknownUsd += ev.usage.cost_usd;
-        }
+        costKnowledge.observeUsage(
+          currentAuthMode,
+          ev.usage.cost_usd,
+          ev.usage.estimated === true,
+          ev,
+        );
+        cashUsd = costKnowledge.totals.cashUsd;
+        valuationUsd = costKnowledge.totals.valuationUsd;
+        unknownUsd = costKnowledge.totals.unknownUsd;
         updateReviewerMetadata(artifact, {
           cost_usd: costUsd,
           cost_estimated: costEstimated,
@@ -835,6 +966,10 @@ async function collectReviewerOutput(
           valuation_usd: valuationUsd,
           unknown_usd: unknownUsd,
         });
+        const paidOrUnknown = cashUsd + costKnowledge.unknownPaidUsd;
+        if (paidOrUnknown > 0 && onUsageCost?.(paidOrUnknown)) {
+          throw new Error("Reviewer stopped at the existing paid budget cap");
+        }
       }
       if (sealed && ev.type === "message" && ev.final === true) {
         sealedMessageEvents.push(persistedEvent);
@@ -868,6 +1003,13 @@ async function collectReviewerOutput(
           observed_source: observedSource,
         });
       }
+      if (typeof ev.credential_profile_id === "string" && ev.credential_profile_id.length > 0) {
+        observedCredentialProfileId = ev.credential_profile_id;
+        attemptObservedCredentialProfileId = ev.credential_profile_id;
+        updateReviewerMetadata(artifact, {
+          observed_credential_profile_id: ev.credential_profile_id,
+        });
+      }
     }
     if (isCancelled()) {
       throw new Error("Reviewer cancelled");
@@ -897,6 +1039,9 @@ async function collectReviewerOutput(
         at: retryAt,
         duration_ms: Date.now() - startMs,
         observed_model: attemptObservedModel ?? null,
+        ...(attemptObservedCredentialProfileId !== undefined
+          ? { observed_credential_profile_id: attemptObservedCredentialProfileId }
+          : {}),
         observed_source: attemptObservedSource,
         message: `Reviewer transient failure produced no output; retrying (${nativeTry + 1}/${transientRetryPolicy.maxRetries})`,
       });
@@ -932,6 +1077,9 @@ async function collectReviewerOutput(
         completion_time: completedTime,
         duration_ms: durationMs,
         observed_model: attemptObservedModel ?? null,
+        ...(attemptObservedCredentialProfileId !== undefined
+          ? { observed_credential_profile_id: attemptObservedCredentialProfileId }
+          : {}),
         observed_source: attemptObservedSource,
         raw_normalized_stream_path: artifact.eventsPath,
         transcript_path: artifact.transcriptPath,
@@ -941,6 +1089,9 @@ async function collectReviewerOutput(
         at: completedTime,
         duration_ms: durationMs,
         observed_model: attemptObservedModel ?? null,
+        ...(attemptObservedCredentialProfileId !== undefined
+          ? { observed_credential_profile_id: attemptObservedCredentialProfileId }
+          : {}),
         observed_source: attemptObservedSource,
       });
     }
@@ -950,6 +1101,12 @@ async function collectReviewerOutput(
       text,
       ...(sealedProjectionError ? { sealedProjectionError } : {}),
       observedModel: attemptObservedModel,
+      ...((attemptObservedCredentialProfileId ?? observedCredentialProfileId)
+        ? {
+            observedCredentialProfileId:
+              attemptObservedCredentialProfileId ?? observedCredentialProfileId,
+          }
+        : {}),
       observedSource: attemptObservedSource,
       costUsd,
       costEstimated,
@@ -980,6 +1137,7 @@ async function collectReviewerOutput(
           partialCashKnowledge: knowledge.cashKnowledge,
           partialValuationKnowledge: knowledge.valuationKnowledge,
           partialObservedModel: observedModel,
+          partialObservedCredentialProfileId: observedCredentialProfileId,
           partialObservedSource: observedSource,
           partialText,
         }),
@@ -1004,6 +1162,9 @@ async function collectReviewerOutput(
           timeout_time: timedOutAt,
           duration_ms: durationMs,
           observed_model: observedModel ?? null,
+          ...(observedCredentialProfileId !== undefined
+            ? { observed_credential_profile_id: observedCredentialProfileId }
+            : {}),
           observed_source: observedSource,
           raw_normalized_stream_path: artifact.eventsPath,
           transcript_path: artifact.transcriptPath,
@@ -1013,6 +1174,9 @@ async function collectReviewerOutput(
           at: timedOutAt,
           duration_ms: durationMs,
           observed_model: observedModel ?? null,
+          ...(observedCredentialProfileId !== undefined
+            ? { observed_credential_profile_id: observedCredentialProfileId }
+            : {}),
           observed_source: observedSource,
           message: `Reviewer timed out after ${timeoutMs}ms`,
         });
@@ -1027,6 +1191,7 @@ async function collectReviewerOutput(
             partialCashKnowledge: knowledge.cashKnowledge,
             partialValuationKnowledge: knowledge.valuationKnowledge,
             partialObservedModel: observedModel,
+            partialObservedCredentialProfileId: observedCredentialProfileId,
             partialObservedSource: observedSource,
             partialText,
           }),
@@ -1070,6 +1235,7 @@ async function collectReviewerOutput(
         partialCashKnowledge: knowledge.cashKnowledge,
         partialValuationKnowledge: knowledge.valuationKnowledge,
         partialObservedModel: observedModel,
+        partialObservedCredentialProfileId: observedCredentialProfileId,
         partialObservedSource: observedSource,
         partialText,
       });
@@ -1083,151 +1249,4 @@ async function collectReviewerOutput(
       /* timeout path: consume may reject after the race already returned */
     });
   }
-}
-
-async function cleanupReviewerWorkspace(
-  workspace: ReviewerWorkspace,
-  artifact: ReviewerArtifactContext,
-): Promise<void> {
-  try {
-    await rm(workspace.root, { recursive: true, force: true });
-    tryUpdateReviewerMetadata(artifact, { reviewer_workspace_cleanup: "removed" });
-  } catch (err) {
-    tryUpdateReviewerMetadata(artifact, {
-      reviewer_workspace_cleanup: "failed",
-      reviewer_workspace_cleanup_error: redactSecrets(
-        err instanceof Error ? err.message : String(err),
-      ),
-    });
-  }
-}
-
-function createReviewerArtifactContext(
-  baseDir: string,
-  index: number,
-  reviewer: ReviewerSpec,
-): ReviewerArtifactContext {
-  const dir = join(
-    baseDir,
-    `${String(index + 1).padStart(2, "0")}-${safeFilePart(reviewer.adapter.id)}`,
-  );
-  ensureDir(dir);
-  const progressPath = join(baseDir, "reviewer-progress.jsonl");
-  const metadata = {
-    harness_id: reviewer.adapter.id,
-    provider_family: reviewer.providerFamily,
-    requested_model: reviewer.requestedModel ?? null,
-    requested_effort: reviewer.requestedEffort ?? null,
-    artifact_dir: dir,
-  };
-  const ctx: ReviewerArtifactContext = {
-    dir,
-    progressPath,
-    metadataPath: join(dir, "metadata.json"),
-    eventsPath: join(dir, "raw-normalized-stream.jsonl"),
-    transcriptPath: join(dir, "transcript.md"),
-    promptPath: join(dir, "prompt.md"),
-    parsedPath: join(dir, "parsed-json-blocks.json"),
-    parseErrorPath: join(dir, "parse-error.json"),
-    metadata,
-  };
-  writeJson(ctx.metadataPath, metadata);
-  writeText(ctx.eventsPath, "");
-  writeText(ctx.transcriptPath, "");
-  return ctx;
-}
-
-function safeFilePart(value: string): string {
-  const safe = value.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+/, "");
-  let end = safe.length;
-  while (end > 0 && safe[end - 1] === "-") end -= 1;
-  return safe.slice(0, end) || "reviewer";
-}
-
-function emitReviewerProgress(
-  artifact: ReviewerArtifactContext,
-  reviewer: ReviewerSpec,
-  onReviewerEvent: ReviewCandidateInput["onReviewerEvent"],
-  patch: Omit<
-    ReviewerProgressEvent,
-    "harness_id" | "provider_family" | "requested_model" | "requested_effort" | "artifact_dir"
-  >,
-): void {
-  const event: ReviewerProgressEvent = {
-    harness_id: reviewer.adapter.id,
-    provider_family: reviewer.providerFamily,
-    requested_model: reviewer.requestedModel ?? null,
-    requested_effort: reviewer.requestedEffort ?? null,
-    artifact_dir: artifact.dir,
-    ...(typeof artifact.metadata["review_wave_id"] === "string"
-      ? { review_wave_id: artifact.metadata["review_wave_id"] }
-      : {}),
-    ...patch,
-  };
-  const redacted = redactValue(event);
-  appendLine(artifact.progressPath, JSON.stringify(redacted));
-  try {
-    onReviewerEvent?.(redacted);
-  } catch {
-    /* progress observers must never affect review state */
-  }
-}
-
-function transientRetryDelayMs(policy: TransientRetryPolicy, retryIndex: number): number {
-  return Math.min(policy.initialDelayMs * 2 ** retryIndex, policy.maxDelayMs);
-}
-
-function sleep(ms: number): Promise<void> {
-  if (ms <= 0) return Promise.resolve();
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function updateReviewerMetadata(
-  artifact: ReviewerArtifactContext,
-  patch: Record<string, unknown>,
-): void {
-  artifact.metadata = { ...artifact.metadata, ...redactValue(patch) };
-  writeJson(artifact.metadataPath, artifact.metadata);
-}
-
-function tryUpdateReviewerMetadata(
-  artifact: ReviewerArtifactContext,
-  patch: Record<string, unknown>,
-): void {
-  try {
-    updateReviewerMetadata(artifact, patch);
-  } catch {
-    // Cleanup telemetry must never hide the review result or original error.
-  }
-}
-
-function writeParseError(artifact: ReviewerArtifactContext, value: Record<string, unknown>): void {
-  writeJson(artifact.parseErrorPath, redactValue(value));
-}
-
-function redactValue<T>(value: T): T {
-  try {
-    return JSON.parse(redactSecrets(JSON.stringify(value))) as T;
-  } catch {
-    return value;
-  }
-}
-
-function insufficientEvidenceFinding(reviewer: ReviewerInfo, claim: string): ReviewFinding {
-  return ReviewFindingSchema.parse({
-    id: newId("f"),
-    severity: "INSUFFICIENT_EVIDENCE",
-    category: "test_gap",
-    claim,
-    evidence: {},
-    proposed_fix: "Treat this review as inconclusive and rerun with a healthy reviewer.",
-    reviewer: {
-      harness_id: reviewer.harness_id,
-      requested_model: reviewer.requested_model ?? null,
-      requested_effort: reviewer.requested_effort ?? null,
-      observed_model: reviewer.observed_model ?? null,
-      route_proof_status: reviewer.route_proof_status ?? "unverified",
-    },
-    status: "insufficient_evidence",
-  });
 }

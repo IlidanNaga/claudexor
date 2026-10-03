@@ -1,5 +1,371 @@
 # claudexor
 
+## 3.18.0
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies [fb1fdb4]
+  - @claudexor/cli@3.18.0
+
+## 3.17.2
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/cli@3.17.2
+
+## 3.17.1
+
+### Patch Changes
+
+- Updated dependencies [72825b9]
+  - @claudexor/cli@3.17.1
+
+## 3.17.0
+
+### Patch Changes
+
+- @claudexor/cli@3.17.0
+
+## 3.16.0
+
+### Patch Changes
+
+- Updated dependencies [788ddca]
+  - @claudexor/cli@3.16.0
+
+## 3.15.1
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/cli@3.15.1
+
+## 3.15.0
+
+### Patch Changes
+
+- Updated dependencies [3bc8af4]
+  - @claudexor/cli@3.15.0
+
+## 3.14.0
+
+### Patch Changes
+
+- Updated dependencies [2c024ac]
+- Updated dependencies [7e615b6]
+- Updated dependencies [fb42a94]
+  - @claudexor/cli@3.14.0
+
+## 3.13.0
+
+### Minor Changes
+
+- Make daemon regular-job and independent strategy concurrency caps configurable through user-global runtime settings, with startup-frozen effective values and honest configured-versus-effective diagnostics.
+
+### Patch Changes
+
+- @claudexor/cli@3.13.0
+
+## 3.12.10
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/cli@3.12.10
+
+## 3.12.9
+
+### Patch Changes
+
+- @claudexor/cli@3.12.9
+
+## 3.12.8
+
+### Patch Changes
+
+- @claudexor/cli@3.12.8
+
+## 3.12.7
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/cli@3.12.7
+
+## 3.12.6
+
+### Patch Changes
+
+- @claudexor/cli@3.12.6
+
+## 3.12.5
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/cli@3.12.5
+
+## 3.12.4
+
+### Patch Changes
+
+- Updated dependencies [67c7a71]
+  - @claudexor/cli@3.12.4
+
+## 3.12.3
+
+### Patch Changes
+
+- A run marked `execution.delegated` may request `access: full` without a user-level trust record. The external orchestrator that owns the workspace carries its own authority, so there is no operator at a surface to ask for the one-time grant. Runs started at a surface keep the existing typed 403 refusal and its retry remedy, and an admitted delegated run still records `full` as its effective profile.
+  - @claudexor/cli@3.12.3
+
+## 3.12.2
+
+### Patch Changes
+
+- @claudexor/cli@3.12.2
+
+## 3.12.1
+
+### Patch Changes
+
+- @claudexor/cli@3.12.1
+
+## 3.12.0
+
+### Patch Changes
+
+- Updated dependencies [217d53f]
+  - @claudexor/cli@3.12.0
+
+## 3.11.0
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/cli@3.11.0
+
+## 3.10.5
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/cli@3.10.5
+
+## 3.10.4
+
+### Patch Changes
+
+- @claudexor/cli@3.10.4
+
+## 3.10.3
+
+### Patch Changes
+
+- @claudexor/cli@3.10.3
+
+## 3.10.2
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/cli@3.10.2
+
+## 3.10.1
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/cli@3.10.1
+
+## 3.10.0
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/cli@3.10.0
+
+## 3.9.8
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/cli@3.9.8
+
+## 3.9.7
+
+### Patch Changes
+
+- Owner-authorized publication exception for 3.9.7 (owner decision 2026-09-04): the release ships without the custom Ed25519 review attestation and runtime manifests, so in-place engine update and first-time remote bootstrap are unavailable for this version; signed/notarized app artifacts, npm provenance, SBOMs, and GitHub artifact provenance are unchanged. 3.9.6 was prepared and tagged but never published.
+  - @claudexor/cli@3.9.7
+
+## 3.9.6
+
+### Patch Changes
+
+- Updated dependencies [7e1269c]
+  - @claudexor/cli@3.9.6
+
+## 3.9.5
+
+### Patch Changes
+
+- Updated dependencies [6e54444]
+  - @claudexor/cli@3.9.5
+
+## 3.9.4
+
+### Patch Changes
+
+- 8a7eb06: Readonly claude runs keep AskUserQuestion; workspace_write can run commands (Bash pre-approved for workspace_write/full only, honoring caller deny and Bash(...) scoping) with the asymmetry typed as the new `write_mechanism` capability; zero-gate runs stop lying in both directions (counts from configured gates, "gates n/a (none configured)" wording, ranking demotion preserved); outputSchema rides interactive lanes (the DT2.1-16 refusal is lifted, live-verified); cancellations carry typed provenance (`RunControl.reason_code`: user_cancelled | host_cancelled | owner_task_gone, validated at both boundaries and threaded into the abort token).
+  - @claudexor/cli@3.9.4
+
+## 3.9.3
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/cli@3.9.3
+
+## 3.9.2
+
+### Patch Changes
+
+- Updated dependencies [14e1dd3]
+  - @claudexor/cli@3.9.2
+
+## 3.9.1
+
+### Patch Changes
+
+- Updated dependencies [574711f]
+  - @claudexor/cli@3.9.1
+
+## 3.9.0
+
+### Patch Changes
+
+- Updated dependencies [69500f8]
+- Updated dependencies [11a785c]
+- Updated dependencies [fd623ff]
+- Updated dependencies [48ae659]
+- Updated dependencies [278e436]
+  - @claudexor/cli@3.9.0
+
+## 3.8.4
+
+### Patch Changes
+
+- @claudexor/cli@3.8.4
+
+## 3.8.3
+
+### Patch Changes
+
+- @claudexor/cli@3.8.3
+
+## 3.8.2
+
+### Patch Changes
+
+- Make reviewer routing agents-first: preserve optional credential-profile
+  identity through reviewer surfaces, expose the read-only accounts doorway, and
+  disclose unavailable reviewer families instead of silently dropping them.
+- Updated dependencies [fc15ea8]
+  - @claudexor/cli@3.8.2
+
+## 3.8.1
+
+### Patch Changes
+
+- Updated dependencies [ce6dba1]
+- Updated dependencies [2794ec7]
+  - @claudexor/cli@3.8.1
+
+## 3.8.0
+
+### Patch Changes
+
+- Updated dependencies [6054b7d]
+  - @claudexor/cli@3.8.0
+
+## 3.7.0
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/cli@3.7.0
+
+## 3.6.0
+
+### Patch Changes
+
+- Updated dependencies [895967f]
+  - @claudexor/cli@3.6.0
+
+## 3.5.0
+
+### Patch Changes
+
+- Updated dependencies [2316ef8]
+  - @claudexor/cli@3.5.0
+
+## 3.4.2
+
+### Patch Changes
+
+- e92ec81: Fix the crash that killed every mutating delegated cursor run on macOS: cursor-agent
+  keeps its chat store in SQLite under the scoped HOME, SQLite canonicalizes the database
+  path on open (`realpath(3)` lstat/readlinks every intermediate path component), and the
+  Seatbelt profile's runtime-root read deny covered the components between the runtime
+  root and the allowed scoped home — SQLITE_CANTOPEN, `RetriableError: [internal] unable
+to open database file`, within seconds. This is the same class the CODEX_HOME fix
+  closed for the native state root, so the metadata traversal carve-out now covers the
+  union of EVERY own root's denied ancestors (scoped home, worktree, native state root):
+  literal, metadata-only (`file-read-metadata`), placed after the deny it punches
+  through. File data under the runtime root, sibling projects, and directory listings
+  (readdir is a data read) stay denied, and the boundary probe semantics are unchanged;
+  two-sided sandbox-exec tests — including a cursor-shaped SQLite open+WAL write and its
+  pre-fix reproduction with the carve-out stripped — and a second real-harness battery
+  phase-13 case (delegated mutating cursor under the boundary, capability-checked against
+  the real repo mutation and its green test gate) pin both directions.
+  - @claudexor/cli@3.4.2
+
+## 3.4.1
+
+### Patch Changes
+
+- Windows native-login groundwork with honest process contracts (PR #189, with Renat/dead9111): cross-platform absolute-path schema (regex pattern survives schema generation, Swift mirror included), opt-in win32 kernel-birth-time process identity (PowerShell GetProcessTimes reader, login lane only), identity-gated `taskkill /T /F` termination with a disclosed leader-death emptiness proof, executable-image-only (`.exe`/`.com`) Windows harness binary resolution with a shim advisory, Windows environment-key forwarding matched case-insensitively, the journal partition walker separator fix (Windows daemon no longer demands recovery on second start), and a required windows-latest CI lane.
+  - @claudexor/cli@3.4.1
+
+## 3.4.0
+
+### Minor Changes
+
+- 530e8e3: Protect shared data roots with a persistent root-authority barrier (writer epoch + proven serving-version floor) and start the daemon in two stages: transport comes up recovery-only with product routes typed-refused, destructive recovery runs only after the read-only journal verdict and floor advance, and the handshake reports servingMode so the macOS app keeps Connecting instead of adopting a recovering daemon. Pre-fix runtimes can no longer seize a fixed root or reap live runs before journal readiness.
+
+### Patch Changes
+
+- 3798dd1: The daemon no longer crashes when a disconnected follower is written to.
+- e0b2bbb: Treat web as optional for every non-off policy, keep Cursor web-off refusals explicit, and enable native Cursor web approvals for managed read-only runs without disabling its sandbox.
+- f53a085: Recover automatically from Linux zombie daemon writer leases while keeping live or uncertain owners fail-closed and fencing concurrent stale takeovers by lease generation.
+  - @claudexor/cli@3.4.0
+
+## 3.3.16
+
+### Patch Changes
+
+- 7ccbdb3: App packaging now removes the pre-3.3.13 assembled bundle after successful compilation. Garbage-collection reporting recognizes the real default `v2` archive while keeping `v1` and all generation-named children under explicit roots unrecognized and advisory. The Cursor adapter now accepts the current prompt-echo and token-usage stream without inventing a dollar cost.
+- ff2147a: Preserve the built-in OpenRouter instance's finite non-negative `usage.cost`,
+  including zero, as an exact USD account charge receipt while keeping generic
+  raw-api cost unknown. Treat explicit terminal provider-error completions as
+  failures with safe typed error, usage, and completion evidence, never as
+  deliverable messages or patches; ordinary stop and length completions remain
+  successful.
+  - @claudexor/cli@3.3.16
+
 ## 3.3.15
 
 ### Patch Changes

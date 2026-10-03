@@ -96,10 +96,10 @@
                       "readonly",
                       "workspace_write",
                       "full",
-                      "external_sandbox_full",
-                      "inherit_native"
+                      "inherit_native",
+                      "external_sandbox_full"
                     ],
-                    "description": "Filesystem/command access profile for a run: readonly (no writes), workspace_write (writes inside the workspace only), full (unrestricted; requires the per-repo trust allow), external_sandbox_full (the harness stands its native sandbox down; the engine applies its own OS boundary only on delegated runs — requested directly this is unrestricted, and not behind the trust allow), inherit_native (defer to the harness's own native sandbox settings)."
+                    "description": "Access profile recorded by an immutable historical artifact. external_sandbox_full is retired and cannot be requested by active surfaces."
                   },
                   {
                     "type": "null"

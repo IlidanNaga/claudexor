@@ -3,26 +3,42 @@ import { namespacedSecretRefBase } from "@claudexor/util";
 import { Id, IsoTimestamp } from "./primitives.js";
 import { AuthAvailability, AuthVerification } from "./auth.js";
 
+/** Exact profile-policy problem vocabulary shared by mutation and admission
+ * surfaces. ControlProblem remains open for unrelated domain errors. */
+export const CredentialProfileProblemCode = z.enum([
+  "credential_profile_required",
+  "credential_profile_exists",
+  "credential_profile_limit_exceeded",
+  "credential_profile_ambiguous",
+]);
+export type CredentialProfileProblemCode = z.infer<typeof CredentialProfileProblemCode>;
+
 /**
- * The credential transport a profile isolates (INV-135). `config_dir_login` is
- * a vendor-owned login living in a Claudexor-scoped config dir or HOME
- * (Claude CLAUDE_CONFIG_DIR / Codex CODEX_HOME / Cursor file-store HOME);
- * `oauth_token` and `api_key` are secret-store references. Default vendor
- * stores are NEVER a profile's isolation locator — profiles are additive.
+ * The binding kind a profile uses (INV-135, unified account model).
+ * `config_dir_login` owns Claudexor-scoped vendor state in a config dir or HOME
+ * (Claude CLAUDE_CONFIG_DIR / Codex
+ * CODEX_HOME / Cursor file-store HOME). The Claudexor-owned LEGACY native
+ * dirs are legal locators — the startup migration registers them as the
+ * `claude-default`/`codex-default` rows without moving bytes; the vendor's
+ * ordinary host stores (~/.claude, ~/.codex) stay outside the owned root and
+ * are never a locator. A vendor OS-user credential may live outside that
+ * state and remain unchanged when the binding is removed. `oauth_token` and
+ * `api_key` are managed secret-store references.
  */
 export const CredentialKind = z
   .enum(["config_dir_login", "oauth_token", "api_key"])
   .describe(
-    "Credential transport a profile isolates: a scoped vendor config-dir login, a stored OAuth token, or a stored API key.",
+    "Binding kind for a profile: Claudexor-owned scoped vendor state, a managed OAuth secret, or a managed API-key secret; a vendor OS-user credential may remain outside that state.",
   );
 export type CredentialKind = z.infer<typeof CredentialKind>;
 
 /**
- * Durable, NON-SECRET registry entry for one credential identity of one
- * harness (INV-135). Secret material never lives here: `config_dir_login`
- * points at a vendor-owned directory, token/key kinds point at a namespaced
- * secret-store name. Readiness is intentionally NOT durable — it is the
- * doctor's `CredentialProfileStatus` projection.
+ * Durable, NON-SECRET named binding for one harness (INV-135). Secret material
+ * never lives here: `config_dir_login` points at Claudexor-owned scoped vendor
+ * state while effective platform policy may keep the credential at OS-user
+ * scope; token/key kinds point at a namespaced managed-secret name. Readiness
+ * is intentionally NOT durable — it is the doctor's
+ * `CredentialProfileStatus` projection.
  */
 export const CredentialProfile = z
   .object({
@@ -35,7 +51,7 @@ export const CredentialProfile = z
       .nullable()
       .default(null)
       .describe(
-        "Canonical absolute config-dir path for config_dir_login profiles; null for secret-ref kinds.",
+        "Canonical absolute path to Claudexor-owned scoped vendor state for config_dir_login bindings; null for secret-ref kinds.",
       ),
     secret_ref: z
       .string()
@@ -84,7 +100,7 @@ export const CredentialProfile = z
     }
   })
   .describe(
-    "Durable non-secret registry entry for one credential identity of one harness; secret material lives in the vendor dir or the secret store, never here.",
+    "Durable non-secret named binding for one harness; credential material may live in Claudexor-owned scoped state, a managed secret store, or a platform-declared vendor/OS-user store, never in this row.",
   );
 export type CredentialProfile = z.infer<typeof CredentialProfile>;
 
@@ -99,17 +115,39 @@ export const CredentialProfileStatus = z
     availability: AuthAvailability,
     verification: AuthVerification,
     /** WHAT the `verification` verdict is worth. `local_store` means only that
-     * this profile's own credential material is present and well-formed where
-     * it should be — it cannot tell a live token from a revoked one.
-     * `vendor` means the vendor itself answered a request made with THIS
-     * profile's credential. A router that needs "configured AND healthy" must
-     * read this alongside `verification`; `passed` + `local_store` promises
-     * strictly less than it sounds. */
+     * this binding's required local state or managed secret is present and
+     * well-formed — it cannot tell a live token from a revoked one. `vendor`
+     * means the vendor answered under THIS binding's exact environment and
+     * effective platform credential policy. A router that needs "configured
+     * AND healthy" must read this alongside `verification`; `passed` +
+     * `local_store` promises strictly less than it sounds. */
     verification_source: z
       .enum(["local_store", "vendor"])
       .default("local_store")
       .describe(
-        "How the verification verdict was reached: local_store = the profile's credential material is present locally (says nothing about the token being live); vendor = the vendor answered a request made with this profile's own credential.",
+        "How the verification verdict was reached: local_store = the binding's required local state or managed secret is present (says nothing about a token being live); vendor = the vendor answered under the exact binding environment and effective platform credential policy.",
+      ),
+    /** A bounded last-known-good transport observation. */
+    stale: z
+      .boolean()
+      .optional()
+      .describe(
+        "True only for a bounded stale last-known-good observation; stale is never a fresh passed verification.",
+      ),
+    stale_age_ms: z
+      .number()
+      .int()
+      .nonnegative()
+      .optional()
+      .describe("Age in milliseconds of the bounded stale observation, when stale is true."),
+    /** What a stale observation stands on, when it is not the generic
+     * last-known-good transport grace (absent) that only an already selected
+     * route may consume. INV-135 #363: only a Cursor row produces this. */
+    stale_basis: z
+      .enum(["last_positive_after_timeout"])
+      .optional()
+      .describe(
+        "Basis of a stale observation: last_positive_after_timeout = the status probe did not answer within its budget and this row store's last positive status answer, still inside its bounded interval, stands in; unpinned pool admission alone may consume it. Absent = the generic last-known-good grace, consumable only by an already selected route.",
       ),
     detail: z.string().optional().describe("Redacted human-readable probe evidence."),
     last_verified_at: IsoTimestamp.nullable()
@@ -121,6 +159,113 @@ export const CredentialProfileStatus = z
   .strict()
   .describe("Doctor-owned readiness projection for one credential profile; never durable config.");
 export type CredentialProfileStatus = z.infer<typeof CredentialProfileStatus>;
+
+/** Why an observed credential is unusable, in the OBSERVER's typed vocabulary:
+ * `auth_revoked` = the vendor rejected the credential itself (401/403);
+ * `capability_refused` = a typed non-retryable entitlement refusal was observed
+ * on the attempt stream (org-disabled, model-not-entitled — model-scoped when
+ * the attempt carried a model hint); `verification_failed` = the profile's own
+ * doctor probe failed verification. */
+export const CredentialUnusableCode = z
+  .enum(["auth_revoked", "capability_refused", "verification_failed"])
+  .describe(
+    "Typed reason an observed credential is unusable: vendor rejection, entitlement refusal, or a failed profile verification probe.",
+  );
+export type CredentialUnusableCode = z.infer<typeof CredentialUnusableCode>;
+
+/**
+ * ONE typed observation that a credential subject is UNUSABLE — dead as a
+ * credential, not merely quota-spent (A7 differential probe). Deliberately a
+ * bounded, self-expiring OBSERVATION, never durable config: profile readiness
+ * stays the doctor's projection (`CredentialProfileStatus`), and quota-spent
+ * evidence stays the quota registry's cooldown snapshots. The clearing
+ * contract is threefold: `expires_at` self-expiry (bounded TTL), a successful
+ * model response for the same subject, and any credential-generation change
+ * (re-login / profile mutation).
+ */
+export const CredentialUnusableObservation = z
+  .object({
+    harness_id: Id.describe("Harness family the observed subject belongs to."),
+    profile_id: Id.nullable().describe(
+      "Observed credential profile, or null for the harness's default subject.",
+    ),
+    /** Model the refusal was observed under, when the evidence cannot prove it
+     * is credential-wide (an entitlement refusal may be model-scoped). Null =
+     * the evidence condemns the credential for every model. */
+    model: z
+      .string()
+      .nullable()
+      .describe(
+        "Model hint the refusal was observed under (entitlement refusals may be model-scoped); null = credential-wide.",
+      ),
+    code: CredentialUnusableCode,
+    source: z
+      .enum(["vendor_poller", "attempt_stream", "local_probe"])
+      .describe(
+        "Where the evidence came from: the quota poller's typed absence, a typed refusal on the attempt stream, or the profile's own doctor probe.",
+      ),
+    detail: z.string().nullable().describe("Redacted human-readable evidence."),
+    observed_at: IsoTimestamp.describe("When the unusable verdict was observed."),
+    expires_at: IsoTimestamp.describe(
+      "Self-expiry instant (bounded TTL); after this the observation is ignored.",
+    ),
+  })
+  .strict()
+  .describe(
+    "A bounded, self-expiring typed observation that a credential subject is unusable (dead credential, not spent quota); never durable config.",
+  );
+export type CredentialUnusableObservation = z.infer<typeof CredentialUnusableObservation>;
+
+/**
+ * ONE typed observation that an account answered a model operation's request
+ * for `requested_model` with another model. It is not a quota fact (the
+ * vendor's quota meter does not show this state) and not a dead credential: the
+ * row stays selectable and only RANKS after other selectable rows for that
+ * requested model (INV-135). In-memory and self-expiring, never durable config.
+ */
+export const ModelSubstitutionObservation = z
+  .object({
+    harness_id: Id.describe("Harness family the observed account belongs to."),
+    profile_id: Id.describe("Account row that answered with another model."),
+    requested_model: z.string().describe("Model the operation asked this account for."),
+    observed_at: IsoTimestamp.describe("When the substitution was observed."),
+    expires_at: IsoTimestamp.describe(
+      "Self-expiry instant (observation retention, not a vendor reset time); after this the observation is ignored.",
+    ),
+  })
+  .strict()
+  .describe(
+    "A bounded, self-expiring typed observation that an account served a different model than a model operation requested; it orders the account pool and never excludes a row.",
+  );
+export type ModelSubstitutionObservation = z.infer<typeof ModelSubstitutionObservation>;
+
+/**
+ * ONE typed observation that a pool account's vendor session STARTED and then
+ * ended in a terminal refusal before any agent progress, with no deliverable
+ * and no mutation — for this requested model, on an unpinned run. It is read
+ * from the typed attempt evidence, never from the vendor's wording, and claims
+ * no quota fact and no dead credential: the row stays selectable and only RANKS
+ * after other selectable rows for that requested model (INV-135). In-memory
+ * and self-expiring, never durable config.
+ */
+export const PreProgressRefusalObservation = z
+  .object({
+    harness_id: Id.describe("Harness family the observed account belongs to."),
+    profile_id: Id.describe("Account row whose started session was refused before progress."),
+    requested_model: z
+      .string()
+      .nullable()
+      .describe("Model the run asked this account for; null = the harness default model."),
+    observed_at: IsoTimestamp.describe("When the pre-progress refusal was observed."),
+    expires_at: IsoTimestamp.describe(
+      "Self-expiry instant (observation retention, not a vendor reset time); after this the observation is ignored.",
+    ),
+  })
+  .strict()
+  .describe(
+    "A bounded, self-expiring typed observation that an account refused a started session before any progress; it orders the account pool and never excludes a row.",
+  );
+export type PreProgressRefusalObservation = z.infer<typeof PreProgressRefusalObservation>;
 
 /**
  * NON-SECRET account identity projection (INV-067/INV-135): the email and plan
@@ -192,6 +337,61 @@ export const ControlNextUpIdentity = z
 export type ControlNextUpIdentity = z.infer<typeof ControlNextUpIdentity>;
 
 /**
+ * The account an UNPINNED run of a harness would route to next under the
+ * UNIFIED account model (INV-135): every account is a named registry row, so
+ * the pool verdict is either an enabled row, the policy-governed API-key
+ * ROUTE (INV-061 — a route, never a row), or nothing routable. This union is
+ * carried ONLY by `accountPools` — the legacy `ControlNextUpIdentity` stays
+ * untouched because old strict decoders throw on unknown kinds.
+ */
+export const ControlPoolNextUp = z
+  .discriminatedUnion("kind", [
+    z
+      .object({ kind: z.literal("profile"), profileId: Id })
+      .strict()
+      .describe("An enabled account row is who an unpinned run routes to next."),
+    z
+      .object({ kind: z.literal("api_key_route") })
+      .strict()
+      .describe(
+        "The account pool is empty or exhausted; the unpinned route is the policy-governed API key (INV-061) — a route, never an account row.",
+      ),
+    z
+      .object({ kind: z.literal("none"), reason: z.string() })
+      .strict()
+      .describe("An unpinned run has nothing routable, with a human reason."),
+  ])
+  .describe(
+    "Server-computed pool routing verdict for one harness's unpinned runs (unified account model).",
+  );
+export type ControlPoolNextUp = z.infer<typeof ControlPoolNextUp>;
+
+/** Per-harness POOL AUTHORITY of the unified account model: routing facts live
+ * here; account facts live on the profile rows. */
+export const ControlHarnessAccountPool = z
+  .object({
+    harness_id: Id.describe("Harness family this pool verdict belongs to."),
+    next_up: ControlPoolNextUp,
+  })
+  .strict()
+  .describe(
+    "Per-harness pool authority (unified account model): who an unpinned run routes to next.",
+  );
+export type ControlHarnessAccountPool = z.infer<typeof ControlHarnessAccountPool>;
+
+/** GET /account-pools — the pool-authority read AND the unified-accounts
+ * feature marker (its catalog presence is absent from 3.5.0 engines). */
+export const ControlAccountPoolsResponse = z
+  .object({
+    accountPools: z
+      .array(ControlHarnessAccountPool)
+      .describe("Pool routing verdict per harness, computed by the routing owner."),
+  })
+  .strict()
+  .describe("Per-harness account-pool authority under the unified account model.");
+export type ControlAccountPoolsResponse = z.infer<typeof ControlAccountPoolsResponse>;
+
+/**
  * Per-harness ACCOUNTS AUTHORITY projection (INV-135, the accounts symmetry):
  * the native "CLI login" pseudo-row state and the informational `next_up`
  * identity, computed ONCE on the server so no client re-derives the symmetry.
@@ -248,7 +448,13 @@ export const ControlCredentialProfilesResponse = z
       .array(ControlHarnessAccounts)
       .default([])
       .describe(
-        "Per-harness accounts authority (INV-135): the native CLI-login pseudo-row state and the server-computed Active identity, so no surface re-derives the accounts symmetry.",
+        "Per-harness accounts authority (INV-135): the native CLI-login pseudo-row state and the server-computed Active identity, so no surface re-derives the accounts symmetry. A unified-model engine emits [] here (the key must stay present for legacy strict clients) and carries routing facts in accountPools instead.",
+      ),
+    accountPools: z
+      .array(ControlHarnessAccountPool)
+      .default([])
+      .describe(
+        "Additive per-harness pool authority of the unified account model: routing facts (next_up incl. the api_key_route kind) live here so legacy strict next_up decoders never see unknown kinds. Old clients ignore this key.",
       ),
   })
   .strict()
@@ -282,12 +488,12 @@ export type ControlCredentialProfileUpdateResponse = z.infer<
   typeof ControlCredentialProfileUpdateResponse
 >;
 
-/** Register a config-dir login profile (claude/codex/cursor) from a UI surface —
+/** Register a config-dir login profile (agy/claude/codex/cursor) from a UI surface —
  * the same ONE locked registration owner `claudexor profiles add` uses. */
 export const ControlCredentialProfileCreateRequest = z
   .object({
     harnessId: Id.describe(
-      "Harness family (claude | codex | cursor) for the config-dir login profile.",
+      "Harness family (agy | claude | codex | cursor) for the config-dir login profile.",
     ),
     profileId: Id.describe("New profile id (bounded slug, unique per harness)."),
     displayName: z
@@ -302,20 +508,37 @@ export type ControlCredentialProfileCreateRequest = z.infer<
   typeof ControlCredentialProfileCreateRequest
 >;
 
-/** DELETE /credential-profiles/:harness/:id — removes the registry entry and
- * the profile's OWN credential material (its scoped login dir, or its
- * namespaced secret). The default vendor store is untouchable by design. */
+/** DELETE /credential-profiles/:harness/:id — removes the binding and any state
+ * Claudexor owns (a scoped state dir, migrated owned locator, or namespaced
+ * secret). Success proves that owned cleanup; a partial failure is retryable
+ * and keeps the row registered. A typed disposition says when a vendor-owned
+ * OS-user credential was deliberately left unchanged. */
 export const ControlCredentialProfileDeleteResponse = z
   .object({
     profile: CredentialProfile.describe("The removed registry entry."),
     removed: z.literal(true),
     credentialCleanup: z
       .enum(["config_dir_removed", "secret_deleted", "none"])
-      .describe("What credential material was deleted alongside the registry entry."),
+      .describe(
+        "What Claudexor-owned state or managed secret was removed with the binding; this does not assert that a vendor OS-user credential changed.",
+      ),
     cleanupWarning: z
       .string()
       .optional()
-      .describe("Present when the registry entry was removed but cleanup failed (orphan left)."),
+      .describe(
+        "DEPRECATED (wire-compat only): a unified-model engine never emits it — partial cleanup is a typed retryable error instead of a removed-with-warning receipt.",
+      ),
+    vendorCredentialDisposition: z
+      .object({
+        owner: z.literal("vendor"),
+        state: z.literal("left_unchanged"),
+        scope: z.literal("os_user"),
+      })
+      .strict()
+      .optional()
+      .describe(
+        "Exact disclosure that profile binding removal left a vendor-owned OS-user credential unchanged; absence preserves legacy receipts.",
+      ),
   })
   .strict()
   .describe("Receipt for a credential-profile removal.");

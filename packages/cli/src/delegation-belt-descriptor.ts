@@ -13,7 +13,7 @@ import type { ExtraMcpServer, PaidBudget } from "@claudexor/schema";
  * for credential isolation. Left to default, the belt's `defaultSocketPath()`
  * and token lookup both re-derive under that scoped HOME → a socket/token that
  * does not exist → the belt tries to AUTO-START a fresh daemon there, fails
- * ("daemon did not come up within 30s"), and every belt run tool errors. Pin
+ * after its bounded readiness wait, and every belt run tool errors. Pin
  * the belt to the real daemon by injecting the ACTUAL config root (so the token
  * and daemon dir resolve to this daemon's) and the exact socket path — both
  * captured from the live daemon env at descriptor-build time, so this is correct
@@ -38,7 +38,8 @@ export function beltDaemonDiscoveryEnv(): Record<string, string> {
  * dispatches `mcp serve-belt` before daemon initialization, so the same path
  * works for direct dev/npm `claudexord.js`, the npm bin wrapper, and the
  * packaged single-file `claudexord.bundle.cjs`. There is no adjacent-file
- * guess and no second CLI copy in the app closure.
+ * guess: even when the reviewed operator CLI is present in the closure, the
+ * belt deliberately re-enters the exact daemon entry already serving it.
  */
 export function resolveDaemonEntry(
   argv1: string | undefined = process.argv[1],

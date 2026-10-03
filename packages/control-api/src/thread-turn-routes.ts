@@ -1,16 +1,10 @@
-/**
- * Thread-turn write routes: POST /threads/:id/turns (create + enqueue) and
- * POST /threads/:id/turns/:turnId/retry (re-enqueue a REFUSED turn).
- *
- * Extracted from daemon-server.ts (INV-124 ratchet). The server passes a thin
- * ctx of bound helpers; these functions own the per-thread serialization and
- * the refused-turn honesty rules (persist the refusal ON the turn, INV-093).
- */
+/** Thread-turn creation and refused-turn retry over the existing journal authority. */
 import { createHash } from "node:crypto";
 import type { ServerResponse } from "node:http";
 import {
   ControlRunStartInfo,
   ControlRunStartRequest,
+  RunExecution,
   ControlThreadTurnResponse,
   TRUST_FULL_ACCESS_CODE,
 } from "@claudexor/schema";
@@ -23,6 +17,7 @@ import {
 import type { DaemonFacadeClient, DaemonRunRecord } from "./daemon-server.js";
 import { assertLatestThreadTurn, inspectThreadTurnCreateReplay } from "./thread-recovery.js";
 import { chainThreadMutation } from "./thread-mutation.js";
+import { assertActiveThreadAccessOverride } from "./thread-access-migration.js";
 import {
   assertPlanAnswerQuestionsArtifact,
   assertPlanAnswerSubmission,
@@ -259,6 +254,7 @@ export function handleThreadTurnCreate(
         run_ids?: string[];
         workspace?: { mode?: string };
       };
+      assertActiveThreadAccessOverride(thread.access, body["access"]);
       const turns = detail.turns as Array<Record<string, unknown>>;
       let prompt = String(body["prompt"] ?? "");
       let mode = typeof body["mode"] === "string" ? (body["mode"] as string) : thread.mode;
@@ -336,11 +332,16 @@ export function handleThreadTurnCreate(
       }
       // Agent turns run "live" in the execution tree (in-place project or the
       // thread worktree — the runner resolves which from thread.workspace).
-      const isolation = mode === "agent" ? "live" : "envelope";
+      const isolation =
+        body.execution?.workspaceKind === "directory"
+          ? (body.execution.isolation ?? (mode === "agent" ? "live" : "envelope"))
+          : mode === "agent"
+            ? "live"
+            : "envelope";
       // Sticky routing inheritance (thin gateway — pure DTO passthrough, the
       // engine's orderPool/resolveCandidateAdapters owns all ordering): pool/
       // primary precedence is per-turn body > thread sticky > omit (engine then
-      // auto-pools doctor-ok / falls back to config primary).
+      // auto-pools doctor-OK defaults plus exact-profile-ready account rows / falls back to config primary).
       // The pool THIS turn routes/races over: a per-turn override, else the
       // thread's sticky pool, else omit.
       const turnPool = Array.isArray(body["harnesses"])
@@ -373,7 +374,7 @@ export function handleThreadTurnCreate(
           prompt,
           scope: thread.repo ? { kind: "project", root: thread.repo.root } : { kind: "none" },
           mode,
-          execution: { isolation },
+          execution: { ...RunExecution.parse(runStartBody.execution ?? {}), isolation },
           threadId,
           parentRunId: thread.head_run_id ?? undefined,
           planRunId: planRunId ?? undefined,

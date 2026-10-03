@@ -1,0 +1,44 @@
+{
+  "$ref": "#/definitions/UsageCostSummary",
+  "definitions": {
+    "UsageCostSummary": {
+      "type": "object",
+      "properties": {
+        "cashUsd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "valuationUsd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "unknownUsd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cashKnowledge": {
+          "type": "string",
+          "enum": [
+            "exact",
+            "estimated",
+            "unknown"
+          ],
+          "description": "Quality of incremental-cash cost evidence for an operation."
+        },
+        "valuationKnowledge": {
+          "$ref": "#/definitions/UsageCostSummary/properties/cashKnowledge"
+        }
+      },
+      "required": [
+        "cashUsd",
+        "valuationUsd",
+        "unknownUsd",
+        "cashKnowledge",
+        "valuationKnowledge"
+      ],
+      "additionalProperties": false,
+      "description": "Observed usage components. An amount of unknown meaning is not charged cash; separately proven included service can still establish exact zero incremental cash."
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

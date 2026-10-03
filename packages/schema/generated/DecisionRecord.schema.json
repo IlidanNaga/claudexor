@@ -31,7 +31,10 @@
               "description": "Terminal lifecycle of the run."
             },
             "noChanges": {
-              "type": "boolean",
+              "type": [
+                "boolean",
+                "null"
+              ],
               "default": false,
               "description": "True when the run finished without changing any files (the ex no_op fact)."
             },
@@ -55,6 +58,10 @@
               "description": "Review axis: approved (clean cross-family verified review), blocked (open accepted findings), or not_run.",
               "default": "not_run"
             },
+            "review_requested": {
+              "type": "boolean",
+              "description": "Frozen model-review intent. False permits an honestly unreviewed result; absent historical records retain the review requirement."
+            },
             "reason": {
               "anyOf": [
                 {
@@ -71,6 +78,8 @@
                     "stuck_no_progress",
                     "wall_clock_exceeded",
                     "user_cancelled",
+                    "host_cancelled",
+                    "owner_task_gone",
                     "crash_interrupted",
                     "workspace_unavailable",
                     "input_required",
@@ -351,10 +360,11 @@
           "type": "string",
           "enum": [
             "none",
+            "deterministic_checks",
             "cross_family_review",
             "both"
           ],
-          "description": "What backed an applyable outcome: none (non-applyable), cross_family_review (a clean cross-family verified review), or both (deterministic gates and that review).",
+          "description": "Verification evidence: none, deterministic_checks, cross_family_review (clean and verified), or both. An intentionally unreviewed result can be applicable without verification evidence.",
           "default": "none"
         },
         "final_verify": {
@@ -362,6 +372,10 @@
             {
               "type": "object",
               "properties": {
+                "base_manifest_sha256": {
+                  "type": "string",
+                  "description": "Exact directory manifest verified; not a Git commit identifier."
+                },
                 "attempted": {
                   "type": "boolean",
                   "description": "Whether the final verify was attempted."

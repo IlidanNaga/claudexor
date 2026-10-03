@@ -1,48 +1,103 @@
 import { namespacedSecretRefBase, resolveSecret } from "@claudexor/secrets";
 import type { AuthPreference } from "@claudexor/schema";
-import { runCapture } from "@claudexor/core";
+import { runCapture, type CaptureResult } from "@claudexor/core";
 import { redactSecrets } from "@claudexor/util";
+import { resolveCursorBin } from "./bin.js";
 
-const BIN = process.env.CLAUDEXOR_CURSOR_BIN || "cursor-agent";
 const CURSOR_LOGGED_OUT =
   /not logged in|not authenticated|unauthenticated|authentication required|no account|account\s*:\s*(?:none|unknown|not configured|-)(?:\s|$)|authenticated\s*:\s*(?:false|no|none|0)|logged in\s*:\s*(?:false|no|none|0)/i;
+const CURSOR_JSON_STATUS_UNSUPPORTED =
+  /(?:unknown|unrecognized|unsupported|invalid|unimplemented)\s+(?:option|flag|argument)[^\n]*--format|--format[^\n]*(?:unknown|unrecognized|unsupported|invalid|unimplemented)\s+(?:option|flag|argument)|(?:unknown|unrecognized|unsupported|invalid|unimplemented)[^\n]*(?:--format|json status)/i;
 
 const MAX_CURSOR_ACCOUNT_EMAIL_LENGTH = 320;
+/** Budget of one `cursor-agent status` child, enforced by a timer the probe owns. */
+export const CURSOR_STATUS_TIMEOUT_MS = 10_000;
 
 /**
  * Typed, allowlisted observation from `cursor-agent status`. Raw status output
  * never leaves this parser. Only an anchored email principal may become an
  * Accounts identity; every other successful-but-unknown shape fails closed.
+ * `observedAt` is when the vendor gave a reused positive answer (status-cache.ts).
+ * An unknown observation stays unknown: `timedOut` means the probe's OWN
+ * budget expired before observed native exit or caller cancellation (never
+ * inferred from a signal or elapsed wall time). `lastPositive` (set only by the coordinator on such a
+ * timeout) is the row store's bounded last positive answer — stale evidence
+ * for unpinned admission alone, never authentication (#363, INV-135).
  */
 export type CursorStatusObservation =
-  | { kind: "authenticated"; email?: string }
+  | { kind: "authenticated"; email?: string; observedAt?: string; vendorAuthenticated?: true }
   | { kind: "loggedOut" }
-  | { kind: "unknown"; error?: string };
+  | {
+      kind: "unknown";
+      error?: string;
+      timedOut?: boolean;
+      lastPositive?: { observedAt: string; ageMs: number };
+    };
 
 /** Probe only Cursor's vendor-owned native session in the supplied run env. */
 export async function probeCursorNativeAuth(
   env?: Record<string, string | null | undefined>,
   abortSignal?: AbortSignal,
   capture: typeof runCapture = runCapture,
+  budgetMs: number = CURSOR_STATUS_TIMEOUT_MS,
 ): Promise<CursorStatusObservation> {
   try {
-    const result = await capture(BIN, ["status"], {
-      env,
-      timeoutMs: 10_000,
-      abortSignal,
-      cancelSignal: "SIGTERM",
-      cancelKillDelayMs: 0,
-    });
+    const bin = resolveCursorBin();
+    const profileScoped = Boolean(
+      env?.["AGENT_CLI_CREDENTIAL_STORE"] || env?.["CURSOR_CONFIG_DIR"],
+    );
+    const status = (args: string[]) =>
+      ownedStatusChild(capture, bin, args, env, abortSignal, budgetMs);
+    const { result, ownTimeout } = await status(
+      profileScoped ? ["status", "--format", "json"] : ["status"],
+    );
     const text = `${result.stdout}\n${result.stderr}`;
     if (result.code !== 0) {
+      if (ownTimeout) return cursorStatusUnanswered(result, budgetMs);
+      // Older Cursor binaries may reject the JSON status flag. One bounded
+      // text retry preserves profile-scoped readiness without treating a
+      // failed JSON probe as proof that the account is logged out. A signal,
+      // timeout, or an unrelated non-zero status is unknown transport
+      // evidence, not a capability/format negotiation result.
+      if (
+        profileScoped &&
+        result.signal === null &&
+        typeof result.code === "number" &&
+        result.code !== 0 &&
+        cursorJsonStatusUnsupported(text)
+      ) {
+        const { result: fallback, ownTimeout: fallbackTimeout } = await status(["status"]);
+        const fallbackText = `${fallback.stdout}\n${fallback.stderr}`;
+        if (fallback.code === 0 && fallback.signal === null) {
+          const observed = cursorAuthenticatedObservation(fallbackText);
+          if (observed) return observed;
+          if (cursorStatusLoggedOut(fallbackText)) return { kind: "loggedOut" };
+        }
+        if (fallbackTimeout) return cursorStatusUnanswered(fallback, budgetMs);
+      }
       return {
         kind: "unknown",
         error: `cursor-agent status failed (${result.code ?? result.signal ?? "unknown result"})`,
       };
     }
+    if (profileScoped) {
+      const jsonObservation = cursorJsonStatusObservation(result.stdout);
+      if (jsonObservation) return jsonObservation;
+      if (ownTimeout) return cursorStatusUnanswered(result, budgetMs);
+      // A successful JSON-capable probe owns the profile-scoped evidence. If
+      // its output is malformed or an unknown shape, do not reinterpret stdout
+      // or stderr through the legacy text grammar: diagnostics can mention an
+      // unrelated host account. Text parsing is reached only through the
+      // explicit unsupported-JSON fallback above.
+      return {
+        kind: "unknown",
+        error: `cursor-agent status returned unrecognized JSON output (${result.code})`,
+      };
+    }
     const authenticated = cursorAuthenticatedObservation(text);
     if (authenticated) return authenticated;
     if (cursorStatusLoggedOut(text)) return { kind: "loggedOut" };
+    if (ownTimeout) return cursorStatusUnanswered(result, budgetMs);
     // Status output can contain the signed-in account principal. Unknown
     // output is not evidence and must not be copied into doctor/setup logs.
     return {
@@ -55,6 +110,124 @@ export async function probeCursorNativeAuth(
       error: redactSecrets(err instanceof Error ? err.message : String(err)).slice(0, 500),
     };
   }
+}
+
+/**
+ * One `cursor-agent status` child under a budget timer this probe OWNS (#363).
+ * `ownTimeout` means the timer was observed before caller cancellation or
+ * native child exit. Stdio may close later (an inherited pipe can outlive its
+ * parent); waiting for capture alone would mislabel that parent's exit. This
+ * orders host observations, not an unobservable kernel-level causal history.
+ */
+async function ownedStatusChild(
+  capture: typeof runCapture,
+  bin: string,
+  args: string[],
+  env: Record<string, string | null | undefined> | undefined,
+  abortSignal: AbortSignal | undefined,
+  budgetMs: number,
+): Promise<{ result: CaptureResult; ownTimeout: boolean }> {
+  const budget = new AbortController();
+  // First observed cause; a cooperative timeout can still exit with code 1.
+  const first: { cause: "timeout" | "cancel" | "exit" | null } = {
+    cause: abortSignal?.aborted ? "cancel" : null,
+  };
+  const onCancel = () => {
+    first.cause ??= "cancel";
+  };
+  abortSignal?.addEventListener("abort", onCancel, { once: true });
+  const timer = setTimeout(() => {
+    first.cause ??= "timeout";
+    budget.abort();
+  }, budgetMs);
+  try {
+    const result = await capture(bin, args, {
+      env,
+      abortSignal: abortSignal ? AbortSignal.any([abortSignal, budget.signal]) : budget.signal,
+      cancelSignal: "SIGTERM",
+      cancelKillDelayMs: 0,
+      onExit: () => {
+        first.cause ??= "exit";
+      },
+    });
+    return { result, ownTimeout: first.cause === "timeout" };
+  } finally {
+    clearTimeout(timer);
+    abortSignal?.removeEventListener("abort", onCancel);
+  }
+}
+
+/**
+ * No recognized answer, and the probe's own budget was the first observed
+ * end cause: login state is unknown, never a logout (#363).
+ */
+function cursorStatusUnanswered(
+  result: Pick<CaptureResult, "code" | "signal">,
+  budgetMs: number,
+): CursorStatusObservation {
+  return {
+    kind: "unknown",
+    error: `cursor-agent status did not answer within ${budgetMs / 1000}s (${result.signal ?? result.code ?? "killed"}); login state unknown`,
+    timedOut: true,
+  };
+}
+
+function cursorJsonStatusUnsupported(text: string): boolean {
+  return CURSOR_JSON_STATUS_UNSUPPORTED.test(text);
+}
+
+/**
+ * Profile-scoped Cursor status supports a machine-readable form. Keep the
+ * parser deliberately allowlisted: a successful JSON blob with an unfamiliar
+ * shape is still unknown evidence, never an authenticated account.
+ */
+function cursorJsonStatusObservation(text: string): CursorStatusObservation | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(text.trim());
+  } catch {
+    return null;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const verdict = ["authenticated", "isAuthenticated", "loggedIn", "logged_in"].find(
+    (key) => typeof record[key] === "boolean",
+  );
+  if (!verdict) return null;
+  if (record[verdict] !== true) return { kind: "loggedOut" };
+  // Native status catches getMe errors and still reports isAuthenticated.
+  // Only its successful server response carries these typed userInfo fields.
+  const userInfo =
+    record.userInfo && typeof record.userInfo === "object" && !Array.isArray(record.userInfo)
+      ? (record.userInfo as Record<string, unknown>)
+      : null;
+  const vendorAuthenticated =
+    record.status === "authenticated" &&
+    record.isAuthenticated === true &&
+    userInfo !== null &&
+    (["email", "firstName", "lastName", "createdAt"].some(
+      (key) => typeof userInfo[key] === "string",
+    ) ||
+      ["userId", "teamId"].some(
+        (key) => typeof userInfo[key] === "number" && Number.isInteger(userInfo[key]),
+      ));
+  const candidates = [
+    ...(vendorAuthenticated ? [userInfo?.email] : []),
+    record.email,
+    (record.account as Record<string, unknown> | null)?.email,
+    (record.user as Record<string, unknown> | null)?.email,
+  ];
+  const email = candidates.find(
+    (candidate): candidate is string =>
+      typeof candidate === "string" &&
+      candidate.length <= MAX_CURSOR_ACCOUNT_EMAIL_LENGTH &&
+      /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(candidate),
+  );
+  return {
+    kind: "authenticated",
+    ...(email ? { email } : {}),
+    ...(vendorAuthenticated ? { vendorAuthenticated: true as const } : {}),
+  };
 }
 
 export function cursorStatusAuthenticated(code: number | null, text: string): boolean {

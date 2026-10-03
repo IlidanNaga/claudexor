@@ -54,6 +54,12 @@ export const RunReason = z
     "stuck_no_progress",
     "wall_clock_exceeded",
     "user_cancelled",
+    // Host-initiated cancellations (2026-08-30): the daemon/an integrating
+    // host stopped the run, not a human — and the specific case where the
+    // owning task on the caller's side is gone. Absent reason still coerces
+    // to user_cancelled for wire compatibility.
+    "host_cancelled",
+    "owner_task_gone",
     "crash_interrupted",
     "workspace_unavailable",
     // D-16 work_state / context reasons.
@@ -76,10 +82,17 @@ export const RunOutcomeFacts = z
       .describe("Terminal lifecycle of the run."),
     noChanges: z
       .boolean()
+      .nullable()
       .default(false)
       .describe("True when the run finished without changing any files (the ex no_op fact)."),
     checks: ChecksState.default("not_configured"),
     review: ReviewState.default("not_run"),
+    review_requested: z
+      .boolean()
+      .optional()
+      .describe(
+        "Frozen model-review intent. False permits an honestly unreviewed result; absent historical records retain the review requirement.",
+      ),
     reason: RunReason.nullable()
       .default(null)
       .describe("Typed reason qualifying a non-clean terminal; null on a clean success."),
@@ -98,6 +111,16 @@ export const RunOutcomeFacts = z
   .describe("Independent terminal outcome axes of a run (D8/D18).");
 export type RunOutcomeFacts = z.infer<typeof RunOutcomeFacts>;
 
+/** Review permission is independent from lifecycle, checks and patch validity.
+ * Only a persisted opt-out grants unreviewed apply; legacy absence never does. */
+export function reviewAllowsApply(
+  facts: Pick<RunOutcomeFacts, "review" | "review_requested">,
+): boolean {
+  return (
+    facts.review === "approved" || (facts.review === "not_run" && facts.review_requested === false)
+  );
+}
+
 export const ApplyRecommendation = z
   .enum(["apply", "inspect", "continue", "human_review"])
   .describe(
@@ -105,17 +128,12 @@ export const ApplyRecommendation = z
   );
 export type ApplyRecommendation = z.infer<typeof ApplyRecommendation>;
 
-// What backed a `ready`/applyable outcome: a clean cross-family verified review,
-// or both deterministic gates AND that review. `none` for non-applyable outcomes.
-// Surfaced honestly so a no-test run adopted on review evidence never reads as
-// "tests passed" (CLAUDEXOR_BIBLE §5 evidence, §11 delivery). A gates-ONLY basis
-// is intentionally absent: a `ready` run always carries a verified review (a
-// gate-pass without cross-family verification resolves to review_not_run, not
-// ready), so the enum ships only values the arbitrator actually produces.
+// Verification evidence, independent from permission to apply. Deliberately
+// unreviewed work with no configured checks has basis none, never fake approval.
 export const VerificationBasis = z
-  .enum(["none", "cross_family_review", "both"])
+  .enum(["none", "deterministic_checks", "cross_family_review", "both"])
   .describe(
-    "What backed an applyable outcome: none (non-applyable), cross_family_review (a clean cross-family verified review), or both (deterministic gates and that review).",
+    "Verification evidence: none, deterministic_checks, cross_family_review (clean and verified), or both. An intentionally unreviewed result can be applicable without verification evidence.",
   );
 export type VerificationBasis = z.infer<typeof VerificationBasis>;
 
@@ -128,6 +146,10 @@ export type VerificationBasis = z.infer<typeof VerificationBasis>;
  */
 export const FinalVerifyRecord = z
   .object({
+    base_manifest_sha256: z
+      .string()
+      .optional()
+      .describe("Exact directory manifest verified; not a Git commit identifier."),
     attempted: z.boolean().describe("Whether the final verify was attempted."),
     /** Base the verify tree was created from (the winner envelope's base_sha). */
     base_sha: z

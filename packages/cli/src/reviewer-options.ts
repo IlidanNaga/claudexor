@@ -2,7 +2,7 @@ import {
   EFFORT_HINT_HELP,
   EffortHint,
   ProviderFamily,
-  type ControlReviewerPanelEntry,
+  ControlReviewerPanelEntry,
   type EffortHint as EffortHintValue,
 } from "@claudexor/schema";
 
@@ -138,4 +138,33 @@ export function parseReviewerPanel(
   if (out.length === 0)
     throw new Error("invalid --reviewer-panel value (expected at least one harness entry)");
   return out;
+}
+
+/**
+ * Parse the round-trippable structured reviewer-panel spelling.  The compact
+ * flag intentionally remains unpinned; profile ids are broad identifiers and
+ * do not belong in an escaping-sensitive `harness=model:effort` grammar.
+ */
+export function parseReviewerPanelJson(
+  value: string | undefined,
+): ControlReviewerPanelEntry[] | undefined {
+  if (value === undefined) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error(
+      "invalid --reviewer-panel-json value (expected a JSON array of reviewer objects)",
+    );
+  }
+  const result = ControlReviewerPanelEntry.array().safeParse(parsed);
+  if (!result.success) {
+    throw new Error(
+      `invalid --reviewer-panel-json value (expected a JSON array of {harness, model?, effort?, processingPreference?, credentialProfileId?}: ${result.error.issues.map((issue) => issue.message).join("; ")})`,
+    );
+  }
+  if (result.data.length === 0) {
+    throw new Error("invalid --reviewer-panel-json value (expected at least one reviewer entry)");
+  }
+  return result.data;
 }

@@ -1,3 +1,10 @@
+import { claudeMcpArgs } from "./mcp-args.js";
+import {
+  prepareClaudeSessionProcessing,
+  claudeProcessingArgs,
+  applyClaudeRunProcessing,
+  claudeProcessingObserver,
+} from "./processing.js";
 import type {
   AccessProfile,
   AuthSourceReadiness,
@@ -16,10 +23,9 @@ import {
 import type { DoctorSpec, HarnessAdapter, InteractionChannel } from "@claudexor/core";
 import {
   abortSignalFromSpec,
-  browserMcpCommand,
   HarnessUnavailableError,
+  throwIfEffortRejected,
   interactionChannelFromSpec,
-  labelStreams,
   needsScopedHomeKeychainBridge,
   normalizeEffort,
   providerScrubEnv,
@@ -39,37 +45,58 @@ import {
   CLAUDE_KNOWN_MODELS,
   CLAUDE_KNOWN_MODELS_VERIFIED_AGAINST,
 } from "./capability-profile.js";
-export { claudeQuotaModelAliases } from "./capability-profile.js";
+export { CLAUDE_MANAGED_LOGIN, claudeQuotaModelAliases } from "./capability-profile.js";
 import { claudeNativeLoginRemedy } from "./doctor-remedy.js";
 import { claudeNativeHomeEnv, defaultNativeClaudeConfigDir } from "./native-home.js";
 export { claudeAccountIdentity, defaultNativeClaudeConfigDir } from "./native-home.js";
 import { createClaudeParser } from "./parse.js";
 import { probeClaudeCredentialProfile, resolveClaudeProfileRoute } from "./profile.js";
 export { canonicalProfileConfigDir } from "./profile.js";
+import {
+  claudeAuthSourceReadiness,
+  probeClaudeAuthStatus,
+  redactClaudeDoctorDetail,
+  staleClaudeAuthStatusEvent,
+  type ClaudeAuthStatusProbe,
+} from "./auth-status.js";
+export {
+  clearClaudeAuthStatusCache,
+  claudeAuthSourceReadiness,
+  redactClaudeDoctorDetail,
+} from "./auth-status.js";
+export type { ClaudeAuthStatusProbe } from "./auth-status.js";
 import { smokeIsolatedApiKey, smokeIsolatedOAuthToken } from "./smoke.js";
 import {
   BIN,
   CLAUDE_EFFORT_SNAPSHOT,
   CLAUDE_EFFORT_SNAPSHOT_VERIFIED_AGAINST,
   claudeRunEffortResolution,
+  claudeEffortLadder,
+  claudeRunPatchPath,
+  detectClaudeVersion,
   probeClaudeEffortLevels,
   probeClaudeHelp,
 } from "./effort-probe.js";
 export { BIN, CLAUDE_EFFORT_SNAPSHOT } from "./effort-probe.js";
+export {
+  CLAUDE_AUTH_REFRESH_TERMINATION_UNCONFIRMED,
+  claudeOauthAccessTokenIsFresh,
+  refreshClaudeNativeAuth,
+} from "./auth-refresh.js";
 export { CLAUDE_VENDOR_CLI_VERSION } from "./vendor-cli-version.js";
 import {
   claudeAttachmentBlocks,
   handleControlRequestFrame,
   initialSessionFrames,
   isControlRequestFrame,
-  isResultFrame,
 } from "./interactive.js";
+import { createClaudeLiveInput, type ClaudeLiveInput } from "./live-input.js";
+import { withClaudeInstructionsFile } from "./instructions-file.js";
+import { CLAUDE_MODEL_INVENTORY, probeClaudeModels } from "./model-probe.js";
 
 export const CLAUDE_PROVIDER_ENV_DENYLIST = PROVIDER_SECRET_ENV.filter(
   (k) => k !== "ANTHROPIC_API_KEY",
 );
-
-// The `--effort` ladder is read from the INSTALLED binary (`probeClaudeEffortLevels`).
 
 /** Exported for focused route-policy tests; runtime uses this exact selector. */
 export const selectClaudeRunAuthRoute = selectStrictAuthRoute;
@@ -92,7 +119,6 @@ function permissionArgs(access: AccessProfile): string[] {
     case "workspace_write":
       return ["--permission-mode", "acceptEdits"];
     case "full":
-    case "external_sandbox_full":
       return ["--permission-mode", "bypassPermissions"];
     case "inherit_native":
       return [];
@@ -120,12 +146,14 @@ const CLAUDE_READONLY_REQUIRED_FLAGS = [
  * a probe that failed once (or that a cancelled run read) stayed failed for the
  * process lifetime, so a long-lived daemon reported readonly enforcement
  * unavailable forever. It bought nothing either: the spawn is already memoized,
- * and what is left is a handful of `includes` over text we already hold.
+ * and what is left is a handful of `includes` over text we already hold. A
+ * run's PATH patch selects the binary the flags are read from, as for the ladder.
  */
 export async function probeClaudeReadonlyProfile(
   abortSignal?: AbortSignal,
+  patchPath?: string,
 ): Promise<ClaudeReadonlyProfileProbe> {
-  const probe = await probeClaudeHelp(abortSignal);
+  const probe = await probeClaudeHelp(abortSignal, patchPath);
   if (!probe.ok) {
     return {
       supported: false,
@@ -149,41 +177,11 @@ export async function probeClaudeReadonlyProfile(
   };
 }
 
-async function detectVersion(abortSignal?: AbortSignal): Promise<string | null> {
-  try {
-    const r = await runCapture(BIN, ["--version"], {
-      timeoutMs: 10_000,
-      abortSignal,
-      cancelSignal: "SIGTERM",
-      cancelKillDelayMs: 0,
-    });
-    return r.stdout.trim() || `${BIN} (version unknown)`;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Native-session probe with a distinct PROBE-FAILURE state (same contract as
- * the codex adapter's probeLogin). `claude auth status` prints a typed JSON
- * verdict `{loggedIn, authMethod, ...}` on stdout; the exit code alone is NOT
- * the auth verdict. When the JSON is present we trust its `loggedIn` field;
- * a probe that produces no parseable verdict is a probe error, never a silent
- * "not logged in".
- */
-export interface ClaudeAuthStatusProbe {
-  loggedIn: boolean;
-  authed: boolean;
-  authMethod: string | null;
-  probeError: string | null;
-}
-
+/** Options for probing the default or explicitly selected native Claude store. */
 export interface ClaudeAuthStatusProbeOptions {
   env?: Record<string, string | null | undefined>;
-  /** Explicit CLAUDE_CONFIG_DIR for the probe (INV-135, release wave round-17
-   * BLOCK): without it the probe re-normalizes onto the DEFAULT native dir —
-   * a credential-profile probe must inspect ITS OWN store, never the
-   * default's. Callers without a profile omit it and keep the default. */
+  /** Explicit CLAUDE_CONFIG_DIR for the probe (INV-135): a credential-profile
+   * probe must inspect its own store, never the default's. */
   configDir?: string;
   abortSignal?: AbortSignal;
   runCapture?: typeof runCapture;
@@ -211,39 +209,25 @@ export async function probeAuthStatus(
   options: ClaudeAuthStatusProbeOptions = {},
 ): Promise<ClaudeAuthStatusProbe> {
   try {
-    const env = claudeNativeEnv(options.env, options.configDir);
-    const r = await (options.runCapture ?? runCapture)(bin, ["auth", "status"], {
+    const configDir = options.configDir ?? defaultNativeClaudeConfigDir(options.env);
+    const env = claudeNativeEnv(options.env, configDir);
+    return await probeClaudeAuthStatus(bin, {
       env,
-      timeoutMs: 10_000,
+      configDir,
       abortSignal: options.abortSignal,
-      cancelSignal: "SIGTERM",
-      cancelKillDelayMs: 0,
+      runCapture: options.runCapture,
     });
-    try {
-      const verdict = JSON.parse(r.stdout.trim()) as { loggedIn?: unknown; authMethod?: unknown };
-      if (typeof verdict.loggedIn === "boolean" && typeof verdict.authMethod === "string") {
-        return {
-          loggedIn: verdict.loggedIn,
-          authed: verdict.loggedIn && verdict.authMethod === "claude.ai",
-          authMethod: verdict.authMethod,
-          probeError: null,
-        };
-      }
-    } catch {
-      /* no typed JSON verdict: fall through to probe-error disclosure */
-    }
-    const detail =
-      labelStreams(r.stderr, r.stdout, { transform: redactSecrets }) ??
-      `claude auth status exited with ${r.code ?? r.signal ?? "unknown result"}`;
-    return { loggedIn: false, authed: false, authMethod: null, probeError: detail };
   } catch (err) {
+    // Config/home normalization is part of the probe boundary too.  A bad
+    // locator or keychain bridge must remain a typed probe failure, rather
+    // than escaping and making callers mistake a transient status problem for
+    // a harness crash or a logged-out account.
+    const detail = err instanceof Error ? err.message : String(err);
     return {
       loggedIn: false,
       authed: false,
       authMethod: null,
-      probeError: [...redactSecrets(err instanceof Error ? err.message : String(err))]
-        .slice(0, 300)
-        .join(""),
+      probeError: redactClaudeDoctorDetail(detail),
     };
   }
 }
@@ -264,58 +248,6 @@ function claudeOAuthToken(): string | null {
   return resolveSecret("claude_oauth") || process.env.CLAUDE_CODE_OAUTH_TOKEN || null;
 }
 
-export function claudeAuthSourceReadiness(input: {
-  native: ClaudeAuthStatusProbe;
-  oauthAvailable: boolean;
-  oauthVerification: "passed" | "failed" | "not_run";
-  oauthDetail: string;
-  apiKeyAvailable: boolean;
-  apiKeyVerification: "passed" | "failed" | "not_run";
-  apiKeyDetail: string;
-}): AuthSourceReadiness[] {
-  const nativeReady = input.native.authed && input.native.probeError === null;
-  const nativeAvailability = input.native.probeError
-    ? "unknown"
-    : input.native.loggedIn
-      ? "available"
-      : "unavailable";
-  const nativeVerification = nativeReady
-    ? "passed"
-    : input.native.probeError || !input.native.loggedIn
-      ? "not_run"
-      : "failed";
-  return [
-    {
-      source: "native_session",
-      availability: nativeAvailability,
-      verification: nativeVerification,
-      detail: nativeReady
-        ? "vendor status confirmed authMethod=claude.ai in the exact run environment"
-        : input.native.probeError
-          ? `auth-status probe failed: ${redactClaudeDoctorDetail(input.native.probeError)}`
-          : input.native.loggedIn
-            ? `Claude is logged in via ${input.native.authMethod ?? "unknown"}, not claude.ai`
-            : "official native Claude session is not logged in",
-    },
-    {
-      source: "oauth_token_env",
-      availability: input.oauthAvailable ? "available" : "unavailable",
-      verification: input.oauthVerification,
-      detail: input.oauthDetail,
-    },
-    {
-      source: "api_key_env",
-      availability: input.apiKeyAvailable ? "available" : "unavailable",
-      verification: input.apiKeyVerification,
-      detail: input.apiKeyDetail,
-    },
-  ];
-}
-
-export function redactClaudeDoctorDetail(text: string): string {
-  return redactSecrets(text).slice(0, 500);
-}
-
 /** The runtime surface the profile module needs (test-stubbable). */
 export type ClaudeProfileRuntimeDeps = Pick<
   ClaudeRuntimeDeps,
@@ -323,7 +255,7 @@ export type ClaudeProfileRuntimeDeps = Pick<
 >;
 
 type ClaudeRuntimeDeps = {
-  detectVersion: typeof detectVersion;
+  detectVersion: typeof detectClaudeVersion;
   probeAuthStatus: typeof probeAuthStatus;
   anthropicApiKey: typeof anthropicApiKey;
   claudeOAuthToken: typeof claudeOAuthToken;
@@ -335,12 +267,14 @@ type ClaudeRuntimeDeps = {
   probeReadonlyProfile: typeof probeClaudeReadonlyProfile;
   /** Effort ladder of the installed binary; falls back to the recorded snapshot. */
   probeEffortLevels: typeof probeClaudeEffortLevels;
+  /** Cached prompt-free initialize picker (model-probe.ts); total, never empty. */
+  probeModels: typeof probeClaudeModels;
   runCliHarness: typeof runCliHarness;
 };
 
 export function createClaudeAdapter(deps: Partial<ClaudeRuntimeDeps> = {}): HarnessAdapter {
   const runtime: ClaudeRuntimeDeps = {
-    detectVersion,
+    detectVersion: detectClaudeVersion,
     probeAuthStatus,
     anthropicApiKey,
     claudeOAuthToken,
@@ -349,12 +283,19 @@ export function createClaudeAdapter(deps: Partial<ClaudeRuntimeDeps> = {}): Harn
     smokeIsolatedOAuthToken,
     probeReadonlyProfile: probeClaudeReadonlyProfile,
     probeEffortLevels: probeClaudeEffortLevels,
+    probeModels: probeClaudeModels,
     runCliHarness,
     ...deps,
   };
+  const live = createClaudeLiveInput();
   return {
     id: "claude",
-
+    effortParameter: "--effort",
+    capabilityProfile: CLAUDE_CAPABILITY_PROFILE,
+    prepareProcessing: prepareClaudeSessionProcessing,
+    // Live input into a running interactive session (live-input.ts): typed
+    // receipts from the native stdin queue; never cancels or fails the run.
+    message: live.message,
     async discover(): Promise<HarnessManifest> {
       const version = await runtime.detectVersion();
       if (version === null) {
@@ -368,7 +309,10 @@ export function createClaudeAdapter(deps: Partial<ClaudeRuntimeDeps> = {}): Harn
       // rather than declaring one version's list for every version.
       const efforts = await runtime.probeEffortLevels();
       const native = await runtime.probeAuthStatus(BIN, { env: claudeNativeEnv() });
-      const authed = native.authed;
+      // A stale result is only bounded last-known-good evidence for an
+      // already selected profile.  Discovery must not advertise it as a
+      // currently authenticated default route.
+      const authed = native.authed && native.stale !== true;
       const oauthTokenAvailable = runtime.claudeOAuthToken() !== null;
       const authModes = [
         ...(authed || oauthTokenAvailable ? ["local_session"] : []),
@@ -382,6 +326,8 @@ export function createClaudeAdapter(deps: Partial<ClaudeRuntimeDeps> = {}): Harn
         adapter_version: CLAUDEXOR_VERSION,
         provider_family: "anthropic",
         capabilities: {
+          ...CLAUDE_MODEL_INVENTORY,
+          processing_preferences: ["standard", "fast", "economy"],
           plan: true,
           implement: true,
           create_from_scratch: true,
@@ -418,6 +364,10 @@ export function createClaudeAdapter(deps: Partial<ClaudeRuntimeDeps> = {}): Harn
           ...CLAUDE_CAPABILITY_PROFILE,
           access_control: {
             readonly_mechanism: readonlyProfile.supported ? "tool_allowlist" : "none",
+            // workspace_write pre-approves Bash with no FS/network fence
+            // (claude has no sandbox): BROADER than codex's seatbelt, said
+            // typed here instead of prose in another repo.
+            write_mechanism: "tool_policy",
           },
           auth: {
             ...CLAUDE_CAPABILITY_PROFILE.auth,
@@ -431,10 +381,9 @@ export function createClaudeAdapter(deps: Partial<ClaudeRuntimeDeps> = {}): Harn
           },
         },
         auth_modes: authModes,
-        // external_sandbox_full: bypassPermissions; engine boundary exists only on delegated runs — direct requests are unrestricted.
         access_profiles_supported: [
           ...(readonlyProfile.supported ? ["readonly" as const] : []),
-          ...(["workspace_write", "full", "external_sandbox_full", "inherit_native"] as const),
+          ...(["workspace_write", "full", "inherit_native"] as const),
         ],
       });
     },
@@ -461,7 +410,7 @@ export function createClaudeAdapter(deps: Partial<ClaudeRuntimeDeps> = {}): Harn
             abortSignal: _spec.abortSignal,
           })
         : { loggedIn: false, authed: false, authMethod: null, probeError: null };
-      const nativeCliReady = login.authed;
+      const nativeCliReady = login.authed && login.stale !== true;
       // Native-session and stored setup-token proofs are separate sources.
       const oauthToken = probeOAuth ? runtime.claudeOAuthToken() : null;
       const oauthTokenAvailable = oauthToken !== null;
@@ -507,7 +456,9 @@ export function createClaudeAdapter(deps: Partial<ClaudeRuntimeDeps> = {}): Harn
         apiKeyAvailable: apiKey,
       });
       const probeUnknown =
-        preference !== "api_key" && login.probeError !== null && !oauthTokenAvailable;
+        preference !== "api_key" &&
+        (login.probeError !== null || login.stale === true) &&
+        !oauthTokenAvailable;
       // INV-067: name the real cause + designed remedy (see doctor-remedy.ts).
       const nativeLoginRemedy = claudeNativeLoginRemedy(nativeEnv);
       const allIntents = [
@@ -548,11 +499,15 @@ export function createClaudeAdapter(deps: Partial<ClaudeRuntimeDeps> = {}): Harn
         ? []
         : preference === "subscription"
           ? [
-              login.probeError && !oauthTokenAvailable
-                ? `Claude native-session probe failed: ${redactClaudeDoctorDetail(login.probeError)}`
-                : oauthTokenAvailable
-                  ? `Claude setup-token verification failed: ${oauthSmoke.detail}`
-                  : `Claude subscription route is not ready: ${nativeLoginRemedy}`,
+              login.stale && !oauthTokenAvailable
+                ? `Claude native-session auth-status probe is stale; using last-known-good session${
+                    login.staleAgeMs === undefined ? "" : ` (${login.staleAgeMs}ms old)`
+                  }`
+                : login.probeError && !oauthTokenAvailable
+                  ? `Claude native-session probe failed: ${redactClaudeDoctorDetail(login.probeError)}`
+                  : oauthTokenAvailable
+                    ? `Claude setup-token verification failed: ${oauthSmoke.detail}`
+                    : `Claude subscription route is not ready: ${nativeLoginRemedy}`,
             ]
           : preference === "api_key"
             ? [
@@ -560,9 +515,19 @@ export function createClaudeAdapter(deps: Partial<ClaudeRuntimeDeps> = {}): Harn
                   ? `isolated Claude API-key smoke failed: ${apiSmoke.detail}`
                   : "Claude API-key route is not configured",
               ]
-            : apiKey
-              ? [`isolated Claude API-key smoke failed: ${apiSmoke.detail}`]
-              : [`not authenticated: ${nativeLoginRemedy}`];
+            : login.stale
+              ? [
+                  `Claude native-session auth-status probe is stale; using last-known-good session${
+                    login.staleAgeMs === undefined ? "" : ` (${login.staleAgeMs}ms old)`
+                  }`,
+                ]
+              : apiKey
+                ? [`isolated Claude API-key smoke failed: ${apiSmoke.detail}`]
+                : login.probeError
+                  ? [
+                      `Claude native-session probe failed: ${redactClaudeDoctorDetail(login.probeError)}`,
+                    ]
+                  : [`not authenticated: ${nativeLoginRemedy}`];
       return ConformanceReportSchema.parse({
         harness_id: "claude",
         status: ok
@@ -590,11 +555,15 @@ export function createClaudeAdapter(deps: Partial<ClaudeRuntimeDeps> = {}): Harn
                   status: nativeCliReady ? "pass" : "fail",
                   detail: nativeCliReady
                     ? "vendor status confirmed authMethod=claude.ai in the exact run environment"
-                    : login.probeError
-                      ? `auth-status probe failed (NOT an auth verdict): ${redactClaudeDoctorDetail(login.probeError)}`
-                      : login.loggedIn
-                        ? `logged in via ${login.authMethod ?? "unknown"}, not claude.ai`
-                        : "not logged in (run `claudexor auth login claude`)",
+                    : login.stale
+                      ? `auth-status probe is stale; using last-known-good native session${
+                          login.staleAgeMs === undefined ? "" : ` (${login.staleAgeMs}ms old)`
+                        }`
+                      : login.probeError
+                        ? `auth-status probe failed (NOT an auth verdict): ${redactClaudeDoctorDetail(login.probeError)}`
+                        : login.loggedIn
+                          ? `logged in via ${login.authMethod ?? "unknown"}, not claude.ai`
+                          : "not logged in (run `claudexor auth login claude`)",
                 },
               ]
             : []),
@@ -632,11 +601,15 @@ export function createClaudeAdapter(deps: Partial<ClaudeRuntimeDeps> = {}): Harn
     },
 
     run(spec: HarnessRunSpec): AsyncIterable<HarnessEvent> {
-      return runClaude(spec, runtime);
+      return runClaude(spec, runtime, live);
     },
 
     review(spec: HarnessRunSpec): AsyncIterable<HarnessEvent> {
-      return runClaude(spec, runtime);
+      return runClaude(spec, runtime, live);
+    },
+
+    models(spec) {
+      return runtime.probeModels(spec, { resolveProfileSecret: runtime.resolveProfileSecret });
     },
 
     probeCredentialProfile(
@@ -669,12 +642,9 @@ export function claudeArgsForSpec(
   /** What the installed CLI advertises; the recorded snapshot by default so
    * arg-shape callers stay synchronous and the probe stays optional. */
   advertisedEfforts: readonly EffortHint[] = CLAUDE_EFFORT_SNAPSHOT,
+  instructionsPath?: string,
 ): string[] {
-  // Interactive sessions deliver the prompt as a stream-json user message on
-  // stdin (the control protocol's transport); one-shot runs keep the prompt arg.
-  // `--permission-prompt-tool stdio` is the live-verified switch that routes
-  // permission prompts (AskUserQuestion included) onto the control channel as
-  // control_request frames instead of headless auto-denial.
+  // Both paths use stdin; the interactive control protocol keeps sole ownership.
   const args = interactive
     ? [
         "-p",
@@ -685,36 +655,38 @@ export function claudeArgsForSpec(
         "--verbose",
         "--permission-prompt-tool",
         "stdio",
+        // Echo every stdin user frame back (`isReplay`): the live-input receipt.
+        "--replay-user-messages",
         ...permissionArgs(spec.access),
       ]
     : [
         "-p",
-        spec.prompt,
+        "--input-format",
+        "text",
         "--output-format",
         "stream-json",
         "--verbose",
         ...permissionArgs(spec.access),
       ];
   if (spec.model_hint) args.push("--model", spec.model_hint);
+  args.push(...claudeProcessingArgs(spec));
   // W-C4 live deltas (engine-gated to single-candidate lanes; parser tags payload.delta).
   if (spec.stream_deltas) args.push("--include-partial-messages");
-  // Resolve against what the INSTALLED CLI advertises: an advertised level goes
-  // through verbatim (so a newer binary's level needs no code change here), a
-  // rankable one clamps, and anything else sends no flag rather than a level the
-  // vendor would reject. Null = not requested OR not tunable -> pass no flag.
-  const eff = normalizeEffort(spec.effort_hint, advertisedEfforts);
+  // Use the installed CLI's ladder: pass advertised levels, clamp rankable
+  // preferences, and omit unsupported or unrequested levels.
+  const eff = normalizeEffort(
+    spec.effort_hint,
+    advertisedEfforts,
+    claudeEffortLadder(advertisedEfforts),
+  );
   if (eff) args.push("--effort", eff);
   if (spec.max_turns !== null && spec.max_turns > 0)
     args.push("--max-turns", String(spec.max_turns));
-  // Per-run caller instructions APPEND to (never replace) the default system
-  // prompt, current-invocation-only. The engine withholds them from synthesis,
-  // reviewers, and the auth smoke.
-  if (spec.instructions && spec.instructions.trim())
-    args.push("--append-system-prompt", spec.instructions);
-  // Structured output: constrain the FINAL message to the caller's JSON
-  // Schema. LIVE-VERIFIED (2.1.165): `--json-schema <inline JSON>` with
-  // --output-format stream-json. Passed only when the engine set it (the
-  // engine gates on the json_schema_output capability).
+  if (spec.instructions?.trim()) {
+    if (!instructionsPath) throw new Error("Claude system instructions require an owned file");
+    args.push("--append-system-prompt-file", instructionsPath);
+  }
+  // The engine gates native final-output constraints on json_schema_output.
   if (spec.output_schema !== undefined && spec.output_schema !== null) {
     args.push("--json-schema", JSON.stringify(spec.output_schema));
   }
@@ -740,7 +712,13 @@ function toolPermissionArgs(spec: HarnessRunSpec): string[] {
   const args: string[] = [];
   if (spec.access === "readonly") {
     const builtins = CLAUDE_READONLY_BUILTIN_TOOLS.filter((tool) => allow.has(tool));
-    args.push("--tools", builtins.join(","));
+    // AskUserQuestion rides --tools outside the allow filter (live-verified
+    // 2.1.221): in the constant it dies in the allow filter; in `allow` it
+    // would be pre-approved in --allowedTools, suppressing the very
+    // control_request the bridge needs. One-shot readonly = harmless no-op.
+    // A caller's explicit deny wins (never both --tools and --disallowedTools).
+    const asks = deny.has("AskUserQuestion") ? [] : ["AskUserQuestion"];
+    args.push("--tools", [...builtins, ...asks].join(","));
   }
   if (allow.size > 0) args.push("--allowedTools", [...allow].join(","));
   if (deny.size > 0) args.push("--disallowedTools", [...deny].join(","));
@@ -761,6 +739,20 @@ function toolPermissionSets(spec: HarnessRunSpec): { allow: Set<string>; deny: S
       deny.add(tool);
       allow.delete(tool);
     }
+  } else if (
+    (spec.access === "workspace_write" || spec.access === "full") &&
+    !deny.has("Bash") &&
+    ![...allow].some((tool) => tool.startsWith("Bash("))
+  ) {
+    // workspace_write/full ONLY: pre-approve Bash — under acceptEdits the
+    // bridge denied every non-edit command (pytest/node/curl), a silent
+    // capability loss on every daemon run; live-verified 2.1.221 (dontAsk
+    // hard-refuses pre-bridge, auto is a no-op, only the allowlist works).
+    // inherit_native must not be widened, and a caller's Bash(...) allow
+    // pattern is an explicit narrowing this must not undo. No FS/net
+    // sandbox exists, so this is BROADER than codex's seatbelt — disclosed
+    // as the typed write_mechanism capability (owner decision 2026-08-30).
+    allow.add("Bash");
   }
   if (policy === "off") {
     for (const tool of CLAUDE_WEB_TOOLS) {
@@ -784,41 +776,17 @@ function toolPermissionSets(spec: HarnessRunSpec): { allow: Set<string>; deny: S
   return { allow, deny };
 }
 
-/**
- * Inject engine-owned MCP servers via `--mcp-config` inline JSON (no disk
- * write — fits the scoped HOME and works under `--bare`): the Playwright
- * browser MCP and every `extra_mcp_servers` entry (the delegation belt, etc.)
- * merged into one `mcpServers` map. The browser rides `external_context_policy`
- * (live egress, dropped under `off`); extra servers are engine-owned local
- * processes, not web egress, so they inject regardless of web policy. Empty
- * when nothing is to be injected.
- */
-function claudeMcpArgs(spec: HarnessRunSpec): string[] {
-  const mcpServers: Record<
-    string,
-    { command: string; args: string[]; env?: Record<string, string> }
-  > = {};
-  if (spec.browser && spec.external_context_policy !== "off") {
-    mcpServers["browser"] = browserMcpCommand(spec.browser);
-  }
-  for (const server of spec.extra_mcp_servers ?? []) {
-    mcpServers[server.name] = {
-      command: server.command,
-      args: server.args,
-      ...(Object.keys(server.env).length > 0 ? { env: server.env } : {}),
-    };
-  }
-  if (Object.keys(mcpServers).length === 0) return [];
-  return ["--mcp-config", JSON.stringify({ mcpServers })];
-}
-
 async function* runClaude(
   spec: HarnessRunSpec,
   runtime: ClaudeRuntimeDeps,
+  live: ClaudeLiveInput,
 ): AsyncIterable<HarnessEvent> {
   const abortSignal = abortSignalFromSpec(spec);
   if (spec.access === "readonly") {
-    const readonlyProfile = await runtime.probeReadonlyProfile(abortSignal);
+    const readonlyProfile = await runtime.probeReadonlyProfile(
+      abortSignal,
+      claudeRunPatchPath(spec),
+    );
     if (!readonlyProfile.supported) {
       yield {
         type: "error",
@@ -847,6 +815,7 @@ async function* runClaude(
   let oauthToken: string | null = null;
   let subscriptionSource: "native_session" | "oauth_token_env" | null = null;
   let route: "subscription" | "api_key" | null;
+  let staleAuthStatus: { ageMs?: number } | null = null;
 
   if (profile) {
     const resolved = await resolveClaudeProfileRoute(profile, spec.env, runtime, abortSignal);
@@ -857,6 +826,7 @@ async function* runClaude(
     }
     ({ nativeEnv, key, oauthToken, subscriptionSource } = resolved);
     route = resolved.route;
+    if (resolved.authStatusStale) staleAuthStatus = { ageMs: resolved.authStatusStaleAgeMs };
   } else {
     const native: ClaudeAuthStatusProbe =
       authPreference === "api_key"
@@ -870,7 +840,10 @@ async function* runClaude(
     // back to API-key auth. Preserve the exact selected subscription source so a
     // native session can never be silently replaced by an OAuth-token env route.
     const trySub = (): boolean => {
-      if (native.authed) {
+      // The process-local LKG grace belongs to explicit profile routes.  The
+      // unprofiled/default ladder must not let a stale native verdict mask the
+      // OAuth/API fallback or claim that the default session is live.
+      if (native.authed && native.stale !== true) {
         subscriptionSource = "native_session";
         return true;
       }
@@ -885,6 +858,13 @@ async function* runClaude(
       key ??= runtime.anthropicApiKey();
       return key !== null;
     });
+
+    if (native.stale) {
+      staleAuthStatus = { ageMs: native.staleAgeMs };
+    }
+
+    if (staleAuthStatus !== null)
+      yield staleClaudeAuthStatusEvent(spec.session_id, staleAuthStatus.ageMs);
 
     // Auto selecting its API-key fallback is a paid-route switch and must remain
     // typed/visible; explicit routes never fall back.
@@ -920,11 +900,16 @@ async function* runClaude(
     }
   }
 
+  if (profile && staleAuthStatus !== null) {
+    yield staleClaudeAuthStatusEvent(spec.session_id, staleAuthStatus.ageMs);
+  }
+
   const useSubscription = route === "subscription";
-  // Probe the installed effort ladder through the shared memoized help capture.
   const effort = await claudeRunEffortResolution(spec, runtime, abortSignalFromSpec(spec));
-  const args = claudeArgsForSpec(spec, interactive, useSubscription, effort.advertised);
-  if (effort.disclosure) yield effort.disclosure;
+  spec = applyClaudeRunProcessing(spec, nativeEnv.CLAUDE_CONFIG_DIR, useSubscription);
+  const processing = spec.processing;
+  yield effort.event;
+  throwIfEffortRejected(effort.resolution);
   // Scrub all provider secrets, then re-add only this route's credential.
   const env: Record<string, string | null | undefined> =
     subscriptionSource === "native_session" ? nativeEnv : { ...spec.env, ...providerScrubEnv() };
@@ -939,42 +924,55 @@ async function* runClaude(
     ? ("vendor_native" as const)
     : ("managed_api_key" as const);
   const credentialSource = useSubscription ? subscriptionSource! : ("api_key_env" as const);
+  const observeProcessing =
+    processing && claudeProcessingObserver(processing, spec.processing_cost_basis!);
   const baseParser = createClaudeParser({
     deniedTools: toolPermissionSets(spec).deny,
     requiredMcpServers: (spec.extra_mcp_servers ?? [])
       .filter((server) => server.required)
       .map((server) => server.name),
   });
-  yield* runtime.runCliHarness({
-    bin: BIN,
-    args,
-    spec,
-    env,
-    label: "claude",
-    redact: redactSecrets,
-    parseEvent: (obj, sessionId) => {
-      const out = baseParser(obj, sessionId);
-      if (out) {
-        for (const ev of out) {
-          // The auth route is fixed before spawn. Carry it on every event so
-          // a later api_retry/quota record remains independently attributable.
-          ev.credential_route = credentialRoute;
-          ev.credential_source = credentialSource;
-          if (profile) ev.credential_profile_id = profile.profile_id;
+  yield* withClaudeInstructionsFile(spec.instructions, (instructionsPath) =>
+    runtime.runCliHarness({
+      bin: BIN,
+      args: claudeArgsForSpec(
+        spec,
+        interactive,
+        useSubscription,
+        effort.advertised,
+        instructionsPath,
+      ),
+      spec,
+      env,
+      label: "claude",
+      redact: redactSecrets,
+      parseEvent: (obj, sessionId) => {
+        const parsed = baseParser(obj, sessionId);
+        const processed = observeProcessing ? observeProcessing(obj, parsed, sessionId) : parsed;
+        const out = live.observe(obj, processed, sessionId);
+        if (out) {
+          for (const ev of out) {
+            // Keep every event attributable to its fixed auth route.
+            ev.credential_route = credentialRoute;
+            ev.credential_source = credentialSource;
+            if (profile) ev.credential_profile_id = profile.profile_id;
+          }
         }
-      }
-      return out;
-    },
-    stopAfterEvent: (event) => event.payload?.["code"] === "required_mcp_startup_failed",
-    ...(interactive
-      ? {
-          session: {
-            initialStdin: initialSessionFrames(spec.prompt, attachmentBlocks),
-            matches: isControlRequestFrame,
-            handle: (obj, io) => handleControlRequestFrame(obj, io, spec.session_id, channel),
-            closeStdinOn: isResultFrame,
-          },
-        }
-      : {}),
-  });
+        return out;
+      },
+      stopAfterEvent: (event) => event.payload?.["code"] === "required_mcp_startup_failed",
+      ...(interactive
+        ? {
+            session: {
+              initialStdin: initialSessionFrames(spec.prompt, attachmentBlocks),
+              matches: isControlRequestFrame,
+              handle: (obj, io) => handleControlRequestFrame(obj, io, spec.session_id, channel),
+              // Hold stdin while live messages or background work remain.
+              closeStdinOn: (obj) => live.closeStdinOn(spec.session_id, obj),
+              onIo: live.onIo,
+            },
+          }
+        : { input: spec.prompt }),
+    }),
+  );
 }

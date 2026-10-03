@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join, relative } from "node:path";
+import { verifyWin32ConptyHelperCustody } from "./lib/win32-conpty-artifact.mjs";
 
 const appBundle = readRequiredArgument("--app-bundle");
 let input = "";
@@ -24,6 +25,7 @@ const browserPackagePath = join(
 const browserPackage = readJson(browserPackagePath);
 const expectedBrowserVersion = core.dependencies?.["@playwright/mcp"];
 const bundledNodePath = join(resources, "node");
+const win32ConptyPath = join(resources, "native", "claudexor-conpty-helper.exe");
 
 if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(expectedBrowserVersion ?? "")) {
   fail("packages/core must pin @playwright/mcp to an exact version");
@@ -40,6 +42,7 @@ const bundledNodeVersion = execFileSync(bundledNodePath, ["--version"], {
 if (bundledNodeVersion !== `v${nodeVersion}`) {
   fail(`packaged Node ${bundledNodeVersion} does not match .node-version v${nodeVersion}`);
 }
+verifyWin32ConptyHelperCustody([win32ConptyPath]);
 
 const dependencies = licensedPackages(licenses);
 const browserDependency = dependencies.find(
@@ -88,6 +91,20 @@ const processIdentity = {
   ...packagedFile(appBundle, join(resources, "native", "claudexor-process-identity")),
   comment: "Universal arm64+x86_64 Darwin process-identity helper bundled with Claudexor.",
 };
+const win32Conpty = {
+  SPDXID: spdxId("claudexor-conpty-helper", root.version),
+  name: "claudexor-conpty-helper",
+  versionInfo: root.version,
+  downloadLocation: "NOASSERTION",
+  filesAnalyzed: false,
+  licenseConcluded: root.license ?? "NOASSERTION",
+  licenseDeclared: root.license ?? "NOASSERTION",
+  copyrightText: "NOASSERTION",
+  primaryPackagePurpose: "APPLICATION",
+  ...packagedFile(appBundle, win32ConptyPath),
+  comment:
+    "Standalone PE32+ x64 ConPTY setup-login bridge; app/archive integrity only, with no Authenticode claim.",
+};
 const nodeRuntime = {
   SPDXID: spdxId("Node.js-runtime", nodeVersion),
   name: "Node.js runtime",
@@ -109,8 +126,8 @@ const nodeRuntime = {
   comment: "Node executable bundled to run the Claudexor daemon and setup helper offline.",
 };
 
-const runtimeComponents = [browserDependency, processIdentity, nodeRuntime];
-const packages = [product, ...dependencies, processIdentity, nodeRuntime];
+const runtimeComponents = [browserDependency, processIdentity, win32Conpty, nodeRuntime];
+const packages = [product, ...dependencies, processIdentity, win32Conpty, nodeRuntime];
 packages.sort((a, b) => a.name.localeCompare(b.name) || a.versionInfo.localeCompare(b.versionInfo));
 
 const sha = process.env.GITHUB_SHA ?? "local";

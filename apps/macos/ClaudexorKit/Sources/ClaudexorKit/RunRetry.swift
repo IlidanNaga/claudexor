@@ -17,11 +17,16 @@ public struct RunAgainDifference: Codable, Sendable, Equatable {
     public let reason: String
 }
 
+public struct RunAgainAccessChoice: Codable, Sendable, Equatable {
+    public let required: Bool
+}
+
 public struct RunAgainDraft: Codable, Sendable {
     public let sourceRunId: String
     /// Lossless editable request object. Keeping this schema-driven avoids a
     /// hand-maintained Swift mirror silently dropping newly added run controls.
     public let request: JSONValue
+    public let accessChoice: RunAgainAccessChoice
     public let differences: [RunAgainDifference]
 }
 
@@ -52,12 +57,17 @@ public extension GatewayClient {
     /// Submit the schema-owned editable draft without narrowing it through a
     /// hand-maintained Swift request mirror. Only the user-edited prompt is
     /// replaced; future nested controls survive byte-for-shape.
-    func startRunAgain(request draft: JSONValue, prompt: String) async throws -> RunStartResult {
+    func startRunAgain(
+        request draft: JSONValue,
+        prompt: String,
+        access: String? = nil
+    ) async throws -> RunStartResult {
         let encoded = try Self.encoder.encode(draft)
         guard var object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any] else {
             throw GatewayError.decoding("run-again draft is not an object")
         }
         object["prompt"] = prompt
+        if let access { object["access"] = access }
         var req = request("runs", method: "POST")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try JSONSerialization.data(withJSONObject: object)

@@ -17,26 +17,48 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createInterface } from "node:readline";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import zlib from "node:zlib";
 import {
+  assertExistingDefaultSecondStartupStable,
   assertNoPreexistingDaemon,
-  assertRegularFileUnchanged,
+  automaticBatteryHarnesses,
+  batteryReviewerPanelEntry,
+  canonicalBatteryProfileState,
   describeFileSnapshot,
   durableAttemptRouteEvidence,
   evaluateRequiredNativeRoutes,
   isBatteryRepoRoot,
   isCrossFamilyConvergenceRefusal,
+  nativeBatteryRowReady,
+  projectBatteryHarnessReadiness,
+  projectBatteryDaemonLease,
   relevantRunAttemptKeys,
   resolveRealHarnessBatteryLayout,
   runtimeReplacementIdentityFromHandshake,
   sameDaemonLease,
+  selectBatteryProfile,
+  selectRealHarnessBatteryModel,
   snapshotRegularFile,
+  validateExistingDefaultStartupTransition,
   validateBatteryRunArtifacts,
   validateBatteryTaskIdentity,
+  withBatteryReviewerModels,
+  withExplicitBatteryModels,
 } from "./lib/real-harness-battery-state.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -80,19 +102,21 @@ const { ArtifactStore } = artifactStoreModule;
 const {
   awaitDaemonTermination,
   DaemonClient,
-  daemonLeaseOwner,
   defaultSocketPath,
-  processIsAlive,
+  inspectDaemonWriterLease,
   readToken,
   socketAlive,
 } = daemonModule;
 const {
+  AccountsUnifiedMigrationFile,
   ControlRunDetail,
   FrozenTaskContractArtifact,
+  GlobalConfig,
   HarnessEvent,
   RunDeliveryState,
   RunEvent,
   RunTelemetry,
+  DELIBERATE_NO_OUTER_BOUNDARY_REASON,
 } = schemaModule;
 const { CLAUDEXOR_VERSION, redactSecrets } = utilModule;
 const { admitAndAwaitRuntimeReplacementStop } = runtimeStopModule;
@@ -112,8 +136,9 @@ const resultsDir = join(batteryRoot, "results");
 const reposDir = join(batteryRoot, "repos");
 const logsDir = join(batteryRoot, "logs");
 const maxUsd = process.env.CLAUDEXOR_BATTERY_MAX_USD ?? "1.50";
+const requiredCodexProfileId = "mironov_codex2";
 const timeoutMs = Number(process.env.CLAUDEXOR_BATTERY_TIMEOUT_MS ?? 20 * 60_000);
-const requestedHarnesses = (process.env.CLAUDEXOR_BATTERY_HARNESSES ?? "codex,claude,cursor")
+const requestedHarnesses = (process.env.CLAUDEXOR_BATTERY_HARNESSES ?? "codex,claude,cursor,agy")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
@@ -133,8 +158,14 @@ mkdirSync(reposDir, { recursive: true, mode: 0o700 });
 mkdirSync(logsDir, { recursive: true, mode: 0o700 });
 
 const protectedConfigPath = join(configDir, "config.yaml");
+const protectedMigrationPath = join(configDir, "migration", "accounts-unified.json");
 const protectedConfigBefore =
   layout.mode === "existing_default" ? snapshotRegularFile(protectedConfigPath) : null;
+const protectedMigrationBefore =
+  layout.mode === "existing_default" ? snapshotRegularFile(protectedMigrationPath) : null;
+const protectedStateReader = new ArtifactStore(root);
+const protectedConfigBeforeValue =
+  layout.mode === "existing_default" ? protectedStateReader.readYaml(protectedConfigPath) : null;
 
 const env = {
   ...process.env,
@@ -170,17 +201,28 @@ const evidence = {
   configDir,
   configMode: layout.mode,
   configBefore: protectedConfigBefore ? describeFileSnapshot(protectedConfigBefore) : null,
+  migrationBefore: protectedMigrationBefore ? describeFileSnapshot(protectedMigrationBefore) : null,
   configAfter: null,
+  migrationAfter: null,
   configUnchanged: layout.mode === "scratch" ? null : false,
+  startupState: {
+    valid: layout.mode === "scratch" ? null : false,
+    classification: null,
+    validatedRows: [],
+    first: null,
+    second: null,
+  },
   forcedBuildVerified: true,
   forcedBuild: forcedBuildReceipt,
   cli,
   node: nodeBin,
   version: null,
   candidate: { sha: null, tree: null },
-  daemon: { start: null, handshake: null, entrySha256: null, stop: null },
+  daemon: { start: null, starts: [], handshake: null, entrySha256: null, stop: null, stops: [] },
   requestedHarnesses,
-  okHarnesses: [],
+  automaticRouteHarnesses: [],
+  requiredRouteHarnesses: [],
+  harnessReadiness: {},
   harnessReports: {},
 };
 const runtimeState = {
@@ -203,7 +245,15 @@ function record(status, phase, name, detail = {}, extras = {}) {
   const item = { status, phase, name, detail: redactDetail(detail), ...redactDetail(extras) };
   results.push(item);
   const tag =
-    status === "pass" ? "PASS" : status === "skip" ? "SKIP" : status === "env" ? "ENV" : "FAIL";
+    status === "pass"
+      ? "PASS"
+      : status === "skip"
+        ? "SKIP"
+        : status === "env"
+          ? "ENV"
+          : status === "conditional"
+            ? "OMIT"
+            : "FAIL";
   const summary = typeof item.detail === "string" ? item.detail : JSON.stringify(item.detail);
   process.stdout.write(
     `${tag.padEnd(5)} ${phase.padEnd(10)} ${name.padEnd(44)} ${summary.slice(0, 180)}\n`,
@@ -222,6 +272,9 @@ function skip(phase, name, detail = {}, extras = {}) {
 }
 function envfail(phase, name, detail = {}, extras = {}) {
   return record("env", phase, name, detail, extras);
+}
+function conditional(phase, name, detail = {}, extras = {}) {
+  return record("conditional", phase, name, detail, extras);
 }
 
 function isTransientEnvOutput(out) {
@@ -273,19 +326,20 @@ function runGit(args, cwd) {
 }
 
 function runCli(args, opts = {}) {
-  const name = opts.name ?? args.join(" ");
+  const routedArgs = withExplicitBatteryModels(args, selectBatteryModel);
+  const name = opts.name ?? routedArgs.join(" ");
   const cwd = opts.cwd ?? root;
-  let out = run(nodeBin, [cli, ...args], { cwd, timeoutMs: opts.timeoutMs ?? timeoutMs });
+  let out = run(nodeBin, [cli, ...routedArgs], { cwd, timeoutMs: opts.timeoutMs ?? timeoutMs });
   let retriedForEnv = false;
   if (out.code !== 0 && isTransientEnvOutput({ ...out, json: null }) && opts.envRetry !== false) {
     retriedForEnv = true;
-    out = run(nodeBin, [cli, ...args], { cwd, timeoutMs: opts.timeoutMs ?? timeoutMs });
+    out = run(nodeBin, [cli, ...routedArgs], { cwd, timeoutMs: opts.timeoutMs ?? timeoutMs });
   }
   const lp = logPath(name);
   writeFileSync(
     lp,
     [
-      `$ claudexor ${args.join(" ")}`,
+      `$ claudexor ${routedArgs.join(" ")}`,
       `cwd=${cwd}`,
       `exit=${out.code}`,
       "",
@@ -320,7 +374,7 @@ function runCliText(args, opts = {}) {
   return runCli(args, { ...opts, json: false });
 }
 
-async function startBatteryDaemon() {
+async function startBatteryDaemon(startup = "primary") {
   const socketPath = defaultSocketPath();
   const expectedEntry = join(root, "packages", "cli", "dist", "claudexord.js");
   evidence.daemon.entrySha256 = createHash("sha256")
@@ -330,12 +384,12 @@ async function startBatteryDaemon() {
     name: "daemon-preflight",
     envRetry: false,
   });
-  const preflightLease = daemonLeaseOwner(socketPath);
+  const preflightLease = projectBatteryDaemonLease(inspectDaemonWriterLease(socketPath));
   const preflightSocketAlive = await socketAlive(socketPath);
   assertNoPreexistingDaemon({
     statusCode: preflight.code,
     socketIsAlive: preflightSocketAlive,
-    leaseIsAlive: Boolean(preflightLease && processIsAlive(preflightLease.pid)),
+    lease: preflightLease,
   });
 
   const started = runCliJson(["daemon", "start"], {
@@ -343,21 +397,25 @@ async function startBatteryDaemon() {
     envRetry: false,
   });
   const startedPid = started.json?.pid;
-  const lease = daemonLeaseOwner(socketPath);
-  if (Number.isSafeInteger(startedPid) && startedPid > 0 && lease?.pid === startedPid) {
+  const lease = projectBatteryDaemonLease(inspectDaemonWriterLease(socketPath));
+  const capableOwner = lease.capableOwner;
+  if (Number.isSafeInteger(startedPid) && startedPid > 0 && capableOwner?.pid === startedPid) {
     const token = readToken();
     if (token) {
       // Capture cleanup authority as soon as the detached child proves writer
       // ownership. A later readiness/handshake failure must not leak it.
       runtimeState.daemonOwned = true;
-      runtimeState.daemonLease = lease;
+      runtimeState.daemonLease = capableOwner;
       runtimeState.daemonClient = new DaemonClient(socketPath, token);
-      evidence.daemon.start = {
+      const startEvidence = {
+        startup,
         pid: startedPid,
         ready: started.json?.ready === true,
         alreadyRunning: started.json?.alreadyRunning === true,
-        processIdentity: lease.identity?.status ?? null,
+        processIdentity: capableOwner.identity?.status ?? null,
       };
+      evidence.daemon.starts.push(startEvidence);
+      if (startup === "primary") evidence.daemon.start = startEvidence;
     }
   }
   if (
@@ -369,7 +427,7 @@ async function startBatteryDaemon() {
   ) {
     throw new Error(`battery could not prove a fresh daemon start; inspect ${started.log}`);
   }
-  if (!runtimeState.daemonOwned || !lease || lease.pid !== startedPid) {
+  if (!runtimeState.daemonOwned || !capableOwner || capableOwner.pid !== startedPid) {
     throw new Error("fresh daemon pid does not own the writer lease; refusing cleanup authority");
   }
 
@@ -385,6 +443,14 @@ async function startBatteryDaemon() {
   });
   if (!response.ok) throw new Error(`battery daemon handshake failed (HTTP ${response.status})`);
   const handshake = await response.json();
+  // C7e: the battery drives real product routes — a recovery-only daemon
+  // (absent servingMode = a pre-#165 daemon serving normally) is a hard stop.
+  const servingMode = handshake?.servingMode ?? "normal";
+  if (servingMode !== "normal") {
+    throw new Error(
+      `battery daemon is serving ${servingMode}; refusing to run the battery against a recovery plane`,
+    );
+  }
   // Capture the identity before candidate validation. A mismatching but valid
   // fresh daemon must still be stopped through the identity-bound RPC.
   runtimeState.daemonIdentity = runtimeReplacementIdentityFromHandshake(handshake);
@@ -395,30 +461,41 @@ async function startBatteryDaemon() {
   ) {
     throw new Error("battery daemon handshake does not match the exact source candidate");
   }
-  evidence.daemon.handshake = {
+  const handshakeEvidence = {
+    startup,
     version: handshake.engine.version,
     sha: handshake.engine.sha,
     entry: handshake.engine.entry,
     entrySha256: evidence.daemon.entrySha256,
   };
+  if (startup === "primary") evidence.daemon.handshake = handshakeEvidence;
   runtimeState.baselineJobIds = new Set(
     (await runtimeState.daemonClient.list()).map((job) => job.id),
   );
-  pass("phase0", "fresh exact-candidate daemon", evidence.daemon.handshake);
+  pass(
+    startup === "primary" ? "phase0" : "state",
+    startup === "primary"
+      ? "fresh exact-candidate daemon"
+      : "second exact-candidate daemon startup",
+    handshakeEvidence,
+  );
 }
 
-async function stopBatteryDaemon() {
+async function stopBatteryDaemon(startup = "primary") {
   if (!runtimeState.daemonOwned) return;
   const socketPath = defaultSocketPath();
   const expectedOwner = runtimeState.daemonLease;
   const client = runtimeState.daemonClient;
-  const currentOwner = daemonLeaseOwner(socketPath);
+  const currentOwner = projectBatteryDaemonLease(inspectDaemonWriterLease(socketPath)).capableOwner;
   if (!client || !sameDaemonLease(expectedOwner, currentOwner)) {
-    evidence.daemon.stop = {
+    const stopEvidence = {
+      startup,
       stopped: false,
       reason: "captured daemon owner is no longer current; successor left untouched",
     };
-    fail("cleanup", "battery-owned daemon stopped", evidence.daemon.stop);
+    evidence.daemon.stops.push(stopEvidence);
+    evidence.daemon.stop = stopEvidence;
+    fail("cleanup", "battery-owned daemon stopped", stopEvidence);
     return;
   }
   try {
@@ -432,32 +509,144 @@ async function stopBatteryDaemon() {
       (options) => awaitDaemonTermination(socketPath, options),
       expectedOwner,
     );
-    const leaseReleased = daemonLeaseOwner(socketPath) === null;
+    const leaseReleased = projectBatteryDaemonLease(
+      inspectDaemonWriterLease(socketPath),
+    ).physicallyAbsent;
     const valid = termination.outcome !== "still_alive" && leaseReleased;
-    evidence.daemon.stop = {
+    const stopEvidence = {
+      startup,
       stopped: valid,
       outcome: termination.outcome,
       detail: termination.detail,
       leaseReleased,
     };
-    (valid ? pass : fail)("cleanup", "battery-owned daemon stopped", evidence.daemon.stop);
-    if (valid) runtimeState.daemonOwned = false;
+    evidence.daemon.stops.push(stopEvidence);
+    evidence.daemon.stop = stopEvidence;
+    (valid ? pass : fail)("cleanup", "battery-owned daemon stopped", stopEvidence);
+    if (valid) {
+      runtimeState.daemonOwned = false;
+      runtimeState.daemonClient = null;
+      runtimeState.daemonIdentity = null;
+      runtimeState.daemonLease = null;
+    }
   } catch (error) {
-    evidence.daemon.stop = {
+    const stopEvidence = {
+      startup,
       stopped: false,
       reason: error instanceof Error ? error.message : String(error),
     };
-    fail("cleanup", "battery-owned daemon stopped", evidence.daemon.stop);
+    evidence.daemon.stops.push(stopEvidence);
+    evidence.daemon.stop = stopEvidence;
+    fail("cleanup", "battery-owned daemon stopped", stopEvidence);
   }
 }
 
-function verifyProtectedConfig() {
-  if (!protectedConfigBefore) return;
+function migrationBackupSnapshots(snapshot) {
+  if (!snapshot?.exists || !snapshot.bytes) return {};
+  let migration;
   try {
-    const after = assertRegularFileUnchanged(protectedConfigPath, protectedConfigBefore);
-    evidence.configAfter = describeFileSnapshot(after);
-    evidence.configUnchanged = true;
-    pass("cleanup", "default config remained byte-identical", evidence.configAfter);
+    migration = JSON.parse(snapshot.bytes.toString("utf8"));
+  } catch {
+    return {};
+  }
+  const migrationRoot = resolve(configDir, "migration");
+  const snapshots = {};
+  for (const record of Object.values(migration ?? {})) {
+    const backupRef = record?.backup_ref;
+    if (typeof backupRef !== "string" || !isAbsolute(backupRef)) continue;
+    const absolute = resolve(backupRef);
+    const relToMigration = relative(migrationRoot, absolute);
+    if (relToMigration.startsWith("..") || isAbsolute(relToMigration)) continue;
+    try {
+      const configPath = join(absolute, "config.yaml");
+      snapshots[backupRef] = {
+        ...snapshotRegularFile(configPath),
+        value: protectedStateReader.readYaml(configPath),
+      };
+    } catch {
+      // The pure validator turns an unsafe/missing backup into the one typed
+      // state-contract failure; do not read outside the migration namespace.
+    }
+  }
+  return snapshots;
+}
+
+async function verifyProtectedStartupState() {
+  if (!protectedConfigBefore || !protectedMigrationBefore) return;
+  const firstConfig = snapshotRegularFile(protectedConfigPath);
+  const firstMigration = snapshotRegularFile(protectedMigrationPath);
+  evidence.startupState.first = {
+    config: describeFileSnapshot(firstConfig),
+    migration: describeFileSnapshot(firstMigration),
+  };
+  let transition;
+  try {
+    transition = validateExistingDefaultStartupTransition({
+      configBefore: protectedConfigBefore,
+      migrationBefore: protectedMigrationBefore,
+      configAfter: firstConfig,
+      migrationAfter: firstMigration,
+      configBeforeValue: protectedConfigBeforeValue,
+      configAfterValue: protectedStateReader.readYaml(protectedConfigPath),
+      backupSnapshots: migrationBackupSnapshots(firstMigration),
+      globalConfigSchema: GlobalConfig,
+      migrationSchema: AccountsUnifiedMigrationFile,
+    });
+    evidence.startupState.classification = transition.classification;
+    evidence.startupState.validatedRows = transition.validatedRows;
+    pass("state", "first startup state transition", {
+      classification: transition.classification,
+      validatedRows: transition.validatedRows,
+      ...evidence.startupState.first,
+    });
+  } catch (error) {
+    evidence.configAfter = describeFileSnapshot(firstConfig);
+    evidence.migrationAfter = describeFileSnapshot(firstMigration);
+    evidence.configUnchanged = false;
+    evidence.startupState.valid = false;
+    fail("state", "first startup state transition", {
+      error: error instanceof Error ? error.message : String(error),
+      before: {
+        config: evidence.configBefore,
+        migration: evidence.migrationBefore,
+      },
+      after: evidence.startupState.first,
+    });
+    return;
+  }
+
+  try {
+    await startBatteryDaemon("idempotency-restart");
+  } catch (error) {
+    fail("state", "second startup completed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  } finally {
+    if (runtimeState.daemonOwned) await stopBatteryDaemon("idempotency-restart");
+  }
+
+  try {
+    const secondConfig = snapshotRegularFile(protectedConfigPath);
+    const secondMigration = snapshotRegularFile(protectedMigrationPath);
+    evidence.startupState.second = assertExistingDefaultSecondStartupStable({
+      configAfterFirst: firstConfig,
+      migrationAfterFirst: firstMigration,
+      configAfterSecond: secondConfig,
+      migrationAfterSecond: secondMigration,
+    });
+    evidence.configAfter = describeFileSnapshot(secondConfig);
+    evidence.migrationAfter = describeFileSnapshot(secondMigration);
+    evidence.configUnchanged =
+      protectedConfigBefore.exists === secondConfig.exists &&
+      protectedConfigBefore.mode === secondConfig.mode &&
+      (protectedConfigBefore.bytes === null
+        ? secondConfig.bytes === null
+        : protectedConfigBefore.bytes.equals(secondConfig.bytes));
+    evidence.startupState.valid = true;
+    pass("state", "second startup left migration state byte-identical", {
+      classification: transition.classification,
+      ...evidence.startupState.second,
+    });
   } catch (error) {
     evidence.configAfter = (() => {
       try {
@@ -466,11 +655,22 @@ function verifyProtectedConfig() {
         return null;
       }
     })();
+    evidence.migrationAfter = (() => {
+      try {
+        return describeFileSnapshot(snapshotRegularFile(protectedMigrationPath));
+      } catch {
+        return null;
+      }
+    })();
     evidence.configUnchanged = false;
-    fail("cleanup", "default config remained byte-identical", {
+    evidence.startupState.valid = false;
+    fail("state", "second startup left migration state byte-identical", {
       error: error instanceof Error ? error.message : String(error),
-      before: evidence.configBefore,
-      after: evidence.configAfter,
+      first: evidence.startupState.first,
+      second: {
+        config: evidence.configAfter,
+        migration: evidence.migrationAfter,
+      },
     });
   }
 }
@@ -1079,8 +1279,10 @@ function writeMarkerPng(path, text) {
   );
 }
 
-function harnessOk(h) {
-  return evidence.okHarnesses.includes(h);
+function harnessAutomaticallyReady(h) {
+  return (
+    automaticBatteryHarnesses([h], evidence.harnessReadiness, evidence.harnessReports).length > 0
+  );
 }
 
 function harnessIntent(h, intent) {
@@ -1088,16 +1290,8 @@ function harnessIntent(h, intent) {
   return (report.enabledIntents ?? report.enabled_intents ?? []).includes(intent);
 }
 
-function available(list) {
-  return list.filter(harnessOk);
-}
-
-function needHarness(phase, h, label = h) {
-  if (!harnessOk(h)) {
-    skip(phase, label, { reason: "doctor not ok / not available" });
-    return false;
-  }
-  return true;
+function automaticallyAvailable(list) {
+  return automaticBatteryHarnesses(list, evidence.harnessReadiness, evidence.harnessReports);
 }
 
 async function runReadonlyPhase() {
@@ -1118,8 +1312,7 @@ async function runReadonlyPhase() {
       });
     }
   }
-  for (const h of requestedHarnesses) {
-    if (!needHarness(phase, h, `${h} read-only`)) continue;
+  for (const h of automaticallyAvailable(requestedHarnesses)) {
     assertPrimaryOutput(
       phase,
       `${h} ask 2+2`,
@@ -1188,7 +1381,7 @@ async function runReadonlyPhase() {
       "report.md",
     );
   }
-  const multi = available(requestedHarnesses);
+  const multi = automaticallyAvailable(requestedHarnesses);
   if (multi.length >= 2) {
     const plan = runCliJson(
       [
@@ -1244,13 +1437,12 @@ async function runReadonlyPhase() {
         omissions: artifactExists(ed.runDir, "final/omissions.md"),
       });
     }
-  } else skip(phase, "multi read-only", { reason: "need >=2 doctor-ok harnesses" });
+  } else skip(phase, "multi read-only", { reason: "need >=2 automatic-route harnesses" });
 }
 
 function runWritePhase() {
   const phase = "phase2";
-  for (const h of requestedHarnesses) {
-    if (!needHarness(phase, h, `${h} run`)) continue;
+  for (const h of automaticallyAvailable(requestedHarnesses)) {
     const repo = makeMathRepo(`${phase}-${h}`, { addBug: true });
     const out = runCliJson(
       baseRunArgs("Fix src/math.js add(a,b) so node --test passes. Do not change tests.", h, [
@@ -1286,9 +1478,9 @@ function runWritePhase() {
 
 function runMultiWritePhase() {
   const phase = "phase3";
-  const multi = available(requestedHarnesses);
+  const multi = automaticallyAvailable(requestedHarnesses);
   if (multi.length < 2) {
-    skip(phase, "multi write features", { reason: "need >=2 doctor-ok harnesses" });
+    skip(phase, "multi write features", { reason: "need >=2 automatic-route harnesses" });
     return;
   }
   {
@@ -1424,14 +1616,17 @@ function runMultiWritePhase() {
   }
   const singleFamilyReviewer = multi.find((h) => harnessIntent(h, "review"));
   if (singleFamilyReviewer) runDegradationControl(phase, singleFamilyReviewer);
-  else fail(phase, "single-family degradation control", { reason: "no doctor-ok reviewer" });
+  else
+    fail(phase, "single-family degradation control", {
+      reason: "no automatic-route reviewer",
+    });
 }
 
 function runDegradationControl(phase, onlyHarness) {
   // An explicit same-family panel proves the degradation contract without
   // rewriting user-global harness settings. This keeps the existing-session
   // VM lane read-only with respect to config.yaml.
-  const reviewerPanel = ["--reviewer-panel", onlyHarness];
+  const reviewerPanel = ["--reviewer-panel", batteryReviewerPanelEntry(onlyHarness)];
   const repo = makeMathRepo(`${phase}-single-family-control`, { addBug: true });
   const out = runCliJson(
     [
@@ -1530,9 +1725,11 @@ function chooseVerifiedRun() {
 
 function runLifecyclePhase() {
   const phase = "phase4";
-  const multi = available(requestedHarnesses);
+  const multi = automaticallyAvailable(requestedHarnesses);
   if (multi.length < 2) {
-    skip(phase, "apply/decision lifecycle", { reason: "need >=2 doctor-ok harnesses" });
+    skip(phase, "apply/decision lifecycle", {
+      reason: "need >=2 automatic-route harnesses",
+    });
     return;
   }
   const verified = chooseVerifiedRun();
@@ -1782,9 +1979,8 @@ function runRevertScenario(phase, multi) {
 
 function runCreatePhase() {
   const phase = "phase5";
-  const multi = available(requestedHarnesses);
-  for (const h of requestedHarnesses) {
-    if (!needHarness(phase, h, `${h} create`)) continue;
+  const multi = automaticallyAvailable(requestedHarnesses);
+  for (const h of automaticallyAvailable(requestedHarnesses)) {
     const repo = makeEmptyCreateRepo(`${phase}-${h}`);
     const out = runCliJson(
       [
@@ -1854,14 +2050,14 @@ function runCreatePhase() {
         patch: ev?.patchNonEmpty,
         error: out.json?.error,
       });
-  } else skip(phase, "multi create", { reason: "need >=2 doctor-ok harnesses" });
+  } else skip(phase, "multi create", { reason: "need >=2 automatic-route harnesses" });
 }
 
 function runVisionPhase() {
   const phase = "phase6";
   const png = join(batteryRoot, "marker.png");
   writeMarkerPng(png, marker);
-  const visionHarnesses = available(["codex", "claude"]);
+  const visionHarnesses = automaticallyAvailable(["codex", "claude"]);
   for (const h of visionHarnesses) {
     const out = runCliJson(
       [
@@ -1871,6 +2067,7 @@ function runVisionPhase() {
         h,
         "--image",
         png,
+        ...(h === "claude" ? ["--model", "claude-sonnet-4-6"] : []),
         "--effort",
         "low",
         "--max-usd",
@@ -1898,6 +2095,10 @@ function runVisionPhase() {
         visionHarnesses.join(","),
         "--image",
         png,
+        "--primary-harness",
+        "claude",
+        "--model",
+        "claude-sonnet-4-6",
         "--effort",
         "low",
         "--max-usd",
@@ -1915,8 +2116,8 @@ function runVisionPhase() {
         answer: answer.slice(0, 200),
         runId: out.json?.runId,
       });
-  } else skip(phase, "multi image", { reason: "need codex+claude ok" });
-  if (harnessOk("cursor")) {
+  } else skip(phase, "multi image", { reason: "need codex+claude automatic routes" });
+  if (harnessAutomaticallyReady("cursor")) {
     const out = runCliJson(
       [
         "ask",
@@ -1943,35 +2144,68 @@ function runVisionPhase() {
         json: out.json,
         log: rel(out.log),
       });
-  } else skip(phase, "cursor image negative", { reason: "cursor not ok" });
+  } else skip(phase, "cursor image negative", { reason: "cursor has no automatic route" });
 }
 
 function runWebPhase() {
   const phase = "phase7";
   const prompt =
     "Use live web/search evidence to fetch https://example.com and answer with the page heading/domain in one sentence.";
-  const webHarnesses = available(["codex", "claude"]);
+  const validatedJournal = (runDir, expectedRunId) => {
+    if (typeof runDir !== "string" || typeof expectedRunId !== "string") {
+      return { valid: false, reason: "run_events_missing_or_malformed", events: [] };
+    }
+    try {
+      const task = FrozenTaskContractArtifact.safeParse(
+        new ArtifactStore(root).readYaml(join(runDir, "context", "task.yaml")),
+      );
+      if (!task.success) {
+        return { valid: false, reason: "task_contract_missing_or_malformed", events: [] };
+      }
+      return validateBatteryRunArtifacts({
+        job: { runId: expectedRunId, taskId: task.data.task_id },
+        task: task.data,
+        eventText: readFileSync(join(runDir, "events.jsonl"), "utf8"),
+        telemetry: null,
+        telemetryPresent: false,
+        runEventSchema: RunEvent,
+        harnessEventSchema: HarnessEvent,
+        telemetrySchema: RunTelemetry,
+      });
+    } catch {
+      return { valid: false, reason: "run_events_missing_or_malformed", events: [] };
+    }
+  };
+  const assertOptionalWebOutput = (name, out) => {
+    if (out.envFailure) {
+      assertRunStatus(phase, name, out, ["succeeded"]);
+      return null;
+    }
+    const detail = assertPrimaryOutput(phase, name, out, "answer.md");
+    if (detail?.lifecycle !== "succeeded" || detail?.outputReadyState !== "ready") return detail;
+    const journal = validatedJournal(detail?.runDir ?? out.json?.runDir, out.json?.runId);
+    const started =
+      journal.valid && journal.events.some((event) => event?.type === "harness.started");
+    const observation = {
+      runId: out.json?.runId ?? null,
+      started,
+      journalValid: journal.valid,
+      journalReason: journal.reason,
+      webStatus: detail?.telemetry?.web?.status ?? null,
+      webAttempted: detail?.telemetry?.web?.attempted ?? null,
+      webSatisfied: detail?.telemetry?.web?.satisfied ?? null,
+    };
+    (started ? pass : fail)(phase, `${name} harness started`, observation);
+    if (journal.valid) pass(phase, `${name} web observation`, observation);
+    return detail;
+  };
+  const webHarnesses = automaticallyAvailable(["codex", "claude"]);
   for (const h of webHarnesses) {
     const out = runCliJson(
       ["ask", prompt, "--harness", h, "--web", "live", "--effort", "low", "--max-usd", maxUsd],
       { cwd: repos.readonly, name: `${phase}-${h}-web` },
     );
-    const detail = inspectRun(out.json?.runId ?? "", repos.readonly);
-    const st = detail?.telemetry?.web?.status;
-    if (out.code === 0 && st === "satisfied")
-      pass(phase, `${h} web satisfied`, {
-        runId: out.json?.runId,
-        status: st,
-        tool: detail.telemetry.web.tool,
-        target: detail.telemetry.web.target,
-      });
-    else
-      fail(phase, `${h} web satisfied`, {
-        runId: out.json?.runId,
-        status: st,
-        error: out.json?.error ?? out.json?.summary,
-        log: rel(out.log),
-      });
+    assertOptionalWebOutput(`${h} live-policy answer`, out);
   }
   if (webHarnesses.length >= 2) {
     const out = runCliJson(
@@ -1989,20 +2223,10 @@ function runWebPhase() {
       ],
       { cwd: repos.readonly, name: `${phase}-multi-web` },
     );
-    const detail = inspectRun(out.json?.runId ?? "", repos.readonly);
-    const st = detail?.telemetry?.web?.status;
-    if (out.code === 0 && st === "satisfied")
-      pass(phase, "multi web satisfied", { runId: out.json?.runId, status: st });
-    else
-      fail(phase, "multi web satisfied", {
-        runId: out.json?.runId,
-        status: st,
-        error: out.json?.error ?? out.json?.summary,
-        log: rel(out.log),
-      });
-  } else skip(phase, "multi web", { reason: "need codex+claude ok" });
-  if (harnessOk("cursor")) {
-    const out = runCliJson(
+    assertOptionalWebOutput("multi live-policy answer", out);
+  } else skip(phase, "multi web", { reason: "need codex+claude automatic routes" });
+  if (harnessAutomaticallyReady("cursor")) {
+    const live = runCliJson(
       [
         "ask",
         prompt,
@@ -2015,27 +2239,63 @@ function runWebPhase() {
         "--max-usd",
         maxUsd,
       ],
-      { cwd: repos.readonly, name: `${phase}-cursor-web-negative` },
+      { cwd: repos.readonly, name: `${phase}-cursor-web` },
     );
+    assertOptionalWebOutput("cursor live-policy answer", live);
+
+    const off = runCliJson(
+      [
+        "ask",
+        "Answer exactly: 4",
+        "--harness",
+        "cursor",
+        "--web",
+        "off",
+        "--effort",
+        "low",
+        "--max-usd",
+        maxUsd,
+      ],
+      { cwd: repos.readonly, name: `${phase}-cursor-web-off` },
+    );
+    const offRunDir = off.json?.runDir;
+    const failure =
+      typeof offRunDir === "string"
+        ? new ArtifactStore(root).readYaml(join(offRunDir, "final", "failure.yaml"))
+        : null;
+    const expectedMessage =
+      "cursor cannot guarantee web is disabled (manifest web_policy=uncontrolled); rerun with --web auto, --web cached, or --web live, or select a harness that can enforce --web off";
+    const offJournal = validatedJournal(offRunDir, off.json?.runId);
+    const offEvidence = {
+      runId: off.json?.runId ?? null,
+      exit: off.code,
+      category: failure?.category ?? null,
+      safeMessage: failure?.safeMessage ?? null,
+      journalValid: offJournal.valid,
+      journalReason: offJournal.reason,
+      harnessStarted: offJournal.valid
+        ? offJournal.events.some((event) => event?.type === "harness.started")
+        : null,
+    };
     if (
-      out.code !== 0 &&
-      /web policy|web-capable|uncontrolled/.test(
-        JSON.stringify(out.json ?? {}) + out.stdout + out.stderr,
-      )
-    )
-      pass(phase, "cursor web fail-loud", {
-        status: out.json?.status,
-        error: out.json?.error ?? out.json?.summary,
-      });
-    else fail(phase, "cursor web fail-loud", { exit: out.code, json: out.json, log: rel(out.log) });
-  } else skip(phase, "cursor web negative", { reason: "cursor not ok" });
+      off.code !== 0 &&
+      offEvidence.category === "harness_unavailable" &&
+      offEvidence.safeMessage === expectedMessage &&
+      offEvidence.journalValid === true &&
+      offEvidence.harnessStarted === false
+    ) {
+      pass(phase, "cursor off typed refusal", offEvidence);
+    } else {
+      fail(phase, "cursor off typed refusal", { ...offEvidence, log: rel(off.log) });
+    }
+  } else skip(phase, "cursor web", { reason: "cursor has no automatic route" });
 }
 
 async function runPlanPhase() {
   const phase = "phase8";
-  const multi = available(requestedHarnesses);
+  const multi = automaticallyAvailable(requestedHarnesses);
   if (multi.length < 2) {
-    skip(phase, "plan lifecycle", { reason: "need >=2 doctor-ok harnesses" });
+    skip(phase, "plan lifecycle", { reason: "need >=2 automatic-route harnesses" });
     return;
   }
   const repo = makeMathRepo(`${phase}-plan`, {
@@ -2082,6 +2342,7 @@ async function runPlanPhase() {
       execution: { isolation: "live" },
       harnesses: multi,
       primaryHarness: multi[0],
+      models: batteryRoutingModels(multi),
       effort: "low",
       paidBudget: { kind: "finite", maxUsd: Number(maxUsd) },
       maxSeconds: 30 * 60,
@@ -2127,14 +2388,14 @@ async function runPlanPhase() {
     const implementOutcome = await enqueueAndAwait(
       client,
       addr,
-      {
+      withBatteryReviewerModels({
         ...shared,
         prompt: "Implement this plan.",
         mode: "agent",
         planRunId: planOutcome.runId,
         n: Math.min(3, multi.length),
         tests: [{ program: "node", args: ["--test"] }],
-      },
+      }),
       { waitForTerminal: true },
     );
     const runOut = {
@@ -2253,7 +2514,9 @@ async function runDelegationPhase() {
   // A non-injecting Cursor lane continues as ordinary Agent, but records the
   // stable typed reason instead of silently pretending Delegate was effective.
   const phase = "phase9";
-  const candidates = available(requestedHarnesses).filter((h) => h === "claude" || h === "codex");
+  const candidates = automaticallyAvailable(requestedHarnesses).filter(
+    (h) => h === "claude" || h === "codex",
+  );
   for (const h of candidates) {
     const repo = makeMathRepo(`${phase}-${h}-delegate`, { addBug: true });
     const accessArgs = [];
@@ -2346,8 +2609,52 @@ async function runDelegationPhase() {
     }
   }
   if (candidates.length === 0)
-    skip(phase, "agent --delegate", { reason: "need a doctor-ok claude/codex harness" });
-  if (harnessOk("cursor")) {
+    skip(phase, "agent --delegate", {
+      reason: "need an automatic-route claude/codex harness",
+    });
+  if (harnessAutomaticallyReady("codex")) {
+    const repo = makeMathRepo(`${phase}-codex-delegate-workspace`, { addBug: true });
+    const out = runCliJson(
+      [
+        "agent",
+        "Fix add() and verify with node --test in this repo.",
+        "--delegate",
+        "--harness",
+        "codex",
+        "--test",
+        testCmd(),
+        "--effort",
+        "low",
+        "--max-usd",
+        maxUsd,
+      ],
+      { cwd: repo, name: `${phase}-codex-delegate-workspace` },
+    );
+    const detail = out.json?.runId ? inspectRun(out.json.runId, repo) : null;
+    const delegation = detail?.telemetry?.delegation;
+    if (
+      out.code === 0 &&
+      out.json?.status === "succeeded" &&
+      delegation?.requested === true &&
+      delegation?.effective === false &&
+      delegation?.reason === "access_profile_incompatible" &&
+      detail?.runFacts?.outcome?.checks === "passed" &&
+      detail?.work_product?.meta?.result_kind === "patch"
+    )
+      pass(phase, "codex workspace_write Delegate degrades to ordinary Agent", {
+        runId: out.json.runId,
+        delegation,
+      });
+    else
+      fail(phase, "codex workspace_write Delegate degrades to ordinary Agent", {
+        exit: out.code,
+        status: out.json?.status,
+        delegation,
+        failure: out.json?.failure ?? null,
+        log: rel(out.log),
+      });
+  }
+  if (harnessAutomaticallyReady("cursor")) {
     const repo = makeMathRepo(`${phase}-cursor-delegate`, { addBug: true });
     const out = runCliJson(
       [
@@ -2403,81 +2710,584 @@ async function runDelegationPhase() {
   }
 }
 
-/**
- * Delegated MUTATING run under the OS boundary (the CODEX_HOME canonicalize
- * regression, 2026-08-10). A run with `execution.delegated: true` and a
- * write-capable access is the ONE shape that gets the engine's kernel-enforced
- * confinement (macOS Seatbelt) — and codex canonicalizes its CODEX_HOME through
- * the confined runtime root at startup. Before the metadata traversal
- * carve-out in confinement.ts, that shape crashed 100% of the time within
- * seconds (`failed to canonicalize CODEX_HOME ... Operation not permitted`,
- * `route.transient.exhausted: process_crash`), while readonly/ask children —
- * including everything the belt phase above starts — sailed through, which is
- * exactly how the regression shipped unnoticed. This phase is the smoke that
- * makes it visible.
- */
-async function runDelegatedConfinementPhase() {
-  const phase = "phase13";
-  if (!harnessOk("codex")) {
-    skip(phase, "delegated mutating codex confined", { reason: "codex not doctor-ok" });
-    return;
+/** A private execution clone: stable project identity and mutable cwd must
+ * never collapse back into one path in this external-orchestrator phase. */
+function makeExecutionClone(stableProject, name) {
+  const execution = join(reposDir, cleanName(`${name}-execution`));
+  rmSync(execution, { recursive: true, force: true });
+  runGit(["clone", "--no-hardlinks", stableProject, execution], reposDir);
+  return execution;
+}
+
+function boundedNativeStateFiles(rootDir, limit = 8_000) {
+  if (!rootDir || !existsSync(rootDir)) return [];
+  const files = [];
+  const pending = [rootDir];
+  while (pending.length > 0 && files.length < limit) {
+    const dir = pending.pop();
+    let names = [];
+    try {
+      names = readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      const path = join(dir, name);
+      let stat;
+      try {
+        stat = lstatSync(path);
+      } catch {
+        continue;
+      }
+      if (stat.isSymbolicLink()) continue;
+      if (stat.isDirectory()) pending.push(path);
+      else if (stat.isFile()) files.push(path);
+      if (files.length >= limit) break;
+    }
   }
-  const repo = makeMathRepo(`${phase}-codex-delegated`, { addBug: true });
+  return files;
+}
+
+function runArtifactContains(runDir, needle) {
+  if (!runDir || !existsSync(runDir)) return false;
+  for (const path of boundedNativeStateFiles(runDir)) {
+    try {
+      if (statSync(path).size <= 5 * 1024 * 1024 && readFileSync(path).includes(needle))
+        return true;
+    } catch {
+      /* binary/vanished artifacts are irrelevant to this bounded text search */
+    }
+  }
+  return false;
+}
+
+function browserToolObserved(runDir) {
+  const eventsPath = runDir ? join(runDir, "events.jsonl") : "";
+  if (!eventsPath || !existsSync(eventsPath)) return false;
+  for (const line of readFileSync(eventsPath, "utf8").split("\n")) {
+    if (!line) continue;
+    try {
+      const event = JSON.parse(line);
+      const payload = event?.type === "harness.event" ? event.payload : null;
+      if (
+        (payload?.type === "tool_call" || payload?.type === "tool_result") &&
+        payload?.tool?.kind === "mcp" &&
+        /(browser|playwright)/i.test(payload?.tool?.name ?? "")
+      )
+        return true;
+    } catch {
+      /* malformed journal is independently rejected by the normal battery */
+    }
+  }
+  return false;
+}
+
+const batteryModelCache = new Map();
+
+function selectBatteryModel(harnessId) {
+  const cached = batteryModelCache.get(harnessId);
+  if (cached) return cached;
+  const catalog = runCliJson(["models", "--harness", harnessId], {
+    name: `battery-${harnessId}-models`,
+    envRetry: false,
+  });
+  const models = catalog.json?.harnesses?.[0]?.models ?? [];
+  const ids = models.map((model) => model.id).filter((id) => typeof id === "string");
+  const selected = selectRealHarnessBatteryModel(harnessId, ids);
+  batteryModelCache.set(harnessId, selected);
+  return selected;
+}
+
+function batteryRoutingModels(harnesses) {
+  const models = {};
+  for (const harnessId of harnesses) {
+    const selected = selectBatteryModel(harnessId);
+    if (harnessId === "claude" && (!selected.id || !/haiku/i.test(selected.id))) {
+      throw new Error(
+        "real-harness battery requires an explicit catalog-backed Claude Haiku model",
+      );
+    }
+    if (selected.id) models[harnessId] = selected.id;
+  }
+  return models;
+}
+
+function batteryScalarModel(harnessId) {
+  const selected = selectBatteryModel(harnessId);
+  if (harnessId === "claude" && (!selected.id || !/haiku/i.test(selected.id))) {
+    throw new Error("real-harness battery requires an explicit catalog-backed Claude Haiku model");
+  }
+  return selected.id ? { model: selected.id } : {};
+}
+
+async function runNativeAccessSuccessRow(phase, row, profileEntry) {
+  const stable = makeMathRepo(`${phase}-${row.id}-stable`, { addBug: true });
+  const execution = makeExecutionClone(stable, `${phase}-${row.id}`);
+  const stableTree = runGit(["rev-parse", "HEAD^{tree}"], stable);
+  const stableMath = readFileSync(join(stable, "src", "math.js"));
+  const model = selectBatteryModel(row.harness);
+  const profileState = row.profileId
+    ? canonicalBatteryProfileState(profileEntry, row.harness)
+    : { valid: true, locator: null, files: [] };
+  let trustGranted = false;
   try {
+    if (row.access === "full") {
+      const trust = runCliJson(["trust", "--allow-full-access"], {
+        cwd: stable,
+        name: `${phase}-${row.id}-trust`,
+        envRetry: false,
+      });
+      if (trust.code !== 0) {
+        fail(phase, row.name, {
+          reason: "full trust failed",
+          exit: trust.code,
+          log: rel(trust.log),
+        });
+        return;
+      }
+      trustGranted = true;
+    }
     const { ensureDaemon, enqueueAndAwait } = await import("../packages/cli/dist/daemon-run.js");
     const { client, addr } = await ensureDaemon();
-    // The external-orchestrator shape, verbatim: one-shot POST /runs, live
-    // isolation, delegated, workspace_write, codex.
+    const browserInstruction = row.browser
+      ? " First use the provided browser tool to open https://example.com and read its page title."
+      : "";
     const outcome = await enqueueAndAwait(
       client,
       addr,
-      {
-        prompt: "Fix add() in src/math.js so the node:test suite passes. Do not ask questions.",
+      withBatteryReviewerModels({
+        prompt: `Fix add() in src/math.js so node --test passes. Do not ask questions.${browserInstruction}`,
         mode: "agent",
-        scope: { kind: "project", root: repo },
-        execution: { isolation: "live", delegated: true },
-        harnesses: ["codex"],
-        primaryHarness: "codex",
-        access: "workspace_write",
+        scope: { kind: "project", root: stable },
+        execution: { isolation: "live", delegated: true, workspaceRoot: execution },
+        harnesses: [row.harness],
+        primaryHarness: row.harness,
+        access: row.access,
+        ...(row.profileId ? { credentialProfileId: row.profileId } : {}),
+        ...(model.id ? { model: model.id } : {}),
+        web: "auto",
+        ...(row.browser ? { browser: true } : {}),
         effort: "low",
         paidBudget: { kind: "finite", maxUsd: Number(maxUsd) },
         maxSeconds: 15 * 60,
         tests: [{ program: "node", args: ["--test"] }],
-      },
+      }),
       { waitForTerminal: true },
     );
     const projected = outcome.runId
       ? await controlRunDetail(outcome.runId)
       : { detail: null, error: "run id missing" };
-    const confinements = (projected.detail?.candidates ?? [])
-      .map((candidate) => candidate.confinement)
-      .filter(Boolean);
-    // On macOS the boundary must be PROVEN (mechanism + verified denied path);
-    // elsewhere the attempt must state the reason there was none. Either way,
-    // silence is a failure — a delegated mutating run may not terminalize
-    // without applied evidence.
-    const evidenceOk =
-      confinements.length > 0 &&
-      (process.platform === "darwin"
-        ? confinements.every((c) => c.proven === true && c.verifiedDeniedPath)
-        : confinements.every((c) => c.proven === true || c.unavailableReason));
-    if (outcome.status === "succeeded" && evidenceOk) {
-      pass(phase, "delegated mutating codex confined", {
-        runId: outcome.runId,
-        confinements,
+    const detail = projected.detail;
+    const candidates = detail?.candidates ?? [];
+    const boundaryEvidence = candidates.map((candidate) => candidate.confinement).filter(Boolean);
+    const absenceExact =
+      boundaryEvidence.length > 0 &&
+      boundaryEvidence.every(
+        (item) =>
+          item.proven === false &&
+          item.mechanism === null &&
+          item.verifiedDeniedPath === null &&
+          item.unavailableReason === DELIBERATE_NO_OUTER_BOUNDARY_REASON,
+      );
+    const job = (await runtimeState.daemonClient.list()).find(
+      (candidate) => candidate.runId === outcome.runId,
+    );
+    const params =
+      job?.params && typeof job.params === "object" && !Array.isArray(job.params) ? job.params : {};
+    const task = outcome.runDir
+      ? protectedStateReader.readYaml(join(outcome.runDir, "context", "task.yaml"))
+      : null;
+    const stableUntouched =
+      runGit(["rev-parse", "HEAD^{tree}"], stable) === stableTree &&
+      readFileSync(join(stable, "src", "math.js")).equals(stableMath) &&
+      run("git", ["status", "--porcelain"], { cwd: stable }).stdout.trim() === "";
+    const executionMutated = !readFileSync(join(execution, "src", "math.js")).equals(stableMath);
+    const gateGreen = run("node", ["--test"], { cwd: execution, timeoutMs: 120_000 }).code === 0;
+    const route = detail?.summary?.route;
+    const auth = detail?.summary?.authRoute;
+    const namedProfileExact = row.profileId ? auth?.profileId === row.profileId : true;
+    const nativeRoute = auth?.effective === "local_session" && auth?.source === "native_session";
+    const browserReceipt = row.browser
+      ? detail?.summary?.requestRequirements?.find(
+          (receipt) => receipt.capability === "browser" && receipt.harness_id === row.harness,
+        )
+      : null;
+    const browserUsed = row.browser ? browserToolObserved(outcome.runDir) : null;
+    const rootPairExact =
+      params?.scope?.root === stable && params?.execution?.workspaceRoot === execution;
+    const taskStable = task?.repo?.root === stable;
+    const noWrapper = !runArtifactContains(outcome.runDir, Buffer.from("sandbox-exec"));
+    const valid =
+      outcome.status === "succeeded" &&
+      detail?.summary?.requestedAccess === row.access &&
+      detail?.summary?.effectiveAccess === row.access &&
+      detail?.runFacts?.outcome?.checks === "passed" &&
+      stableUntouched &&
+      executionMutated &&
+      gateGreen &&
+      rootPairExact &&
+      taskStable &&
+      absenceExact &&
+      noWrapper &&
+      namedProfileExact &&
+      nativeRoute &&
+      profileState.valid &&
+      typeof route?.requestedModel === "string" &&
+      route?.verified === true &&
+      typeof route?.observedModel === "string" &&
+      (!row.browser || (browserReceipt?.effective === true && browserUsed === true));
+    (valid ? pass : fail)(phase, row.name, {
+      runId: outcome.runId ?? null,
+      status: outcome.status,
+      access: {
+        requested: detail?.summary?.requestedAccess ?? null,
+        effective: detail?.summary?.effectiveAccess ?? null,
+      },
+      model: {
+        selected: model.id,
+        selection: model.source,
+        requested: route?.requestedModel ?? null,
+        observed: route?.observedModel ?? null,
+        verified: route?.verified ?? false,
+      },
+      profile: {
+        requested: row.profileId ?? null,
+        observed: auth?.profileId ?? null,
+        nativeRoute,
+        nativeState: profileState,
+      },
+      roots: { stable, execution, rootPairExact, taskStable },
+      mutation: { stableUntouched, executionMutated, gateGreen },
+      browser: row.browser ? { receipt: browserReceipt ?? null, toolObserved: browserUsed } : null,
+      boundaryEvidence,
+      noSandboxExec: noWrapper,
+      fullResidual:
+        row.access === "full"
+          ? "Out-of-root host effects are possible and are not captured or rolled back by this run."
+          : null,
+      projectionError: projected.error ?? null,
+      error: outcome.error ?? null,
+    });
+  } catch (error) {
+    fail(phase, row.name, {
+      error: redactSecrets(error instanceof Error ? error.message : String(error)),
+    });
+  } finally {
+    if (trustGranted) {
+      const revoke = runCliJson(["trust", "--revoke-full-access"], {
+        cwd: stable,
+        name: `${phase}-${row.id}-trust-revoke`,
+        envRetry: false,
       });
-    } else {
-      fail(phase, "delegated mutating codex confined", {
-        runId: outcome.runId ?? null,
-        status: outcome.status,
-        error: outcome.error ?? null,
-        confinements,
-        projectionError: projected.error ?? null,
+      (revoke.code === 0 ? pass : fail)(phase, `${row.name} trust revoked`, {
+        exit: revoke.code,
+        log: rel(revoke.log),
       });
     }
+  }
+}
+
+async function runNativeAccessRefusalRow(phase, row, wantedCode) {
+  const stable = makeMathRepo(`${phase}-${row.id}-stable`, { addBug: true });
+  const execution = makeExecutionClone(stable, `${phase}-${row.id}`);
+  const beforeJobs = new Set((await runtimeState.daemonClient.list()).map((job) => job.id));
+  let problem = null;
+  let outcome = null;
+  try {
+    const { ensureDaemon, enqueueAndAwait } = await import("../packages/cli/dist/daemon-run.js");
+    const { client, addr } = await ensureDaemon();
+    outcome = await enqueueAndAwait(
+      client,
+      addr,
+      withBatteryReviewerModels({
+        prompt: "Fix add() in src/math.js so node --test passes.",
+        mode: "agent",
+        scope: { kind: "project", root: stable },
+        execution: { isolation: "live", delegated: true, workspaceRoot: execution },
+        harnesses: [row.harness],
+        primaryHarness: row.harness,
+        access: "workspace_write",
+        ...(row.profileId ? { credentialProfileId: row.profileId } : {}),
+        ...(row.browser ? { browser: true, web: "auto" } : { web: "off" }),
+        effort: "low",
+        paidBudget: { kind: "finite", maxUsd: Number(maxUsd) },
+        maxSeconds: 5 * 60,
+        tests: [{ program: "node", args: ["--test"] }],
+      }),
+      { waitForTerminal: true },
+    );
+    problem = { code: outcome.errorCode, message: outcome.error };
   } catch (error) {
-    fail(phase, "delegated mutating codex confined", {
-      error: redactSecrets(error instanceof Error ? error.message : String(error)),
+    problem = {
+      code: error && typeof error === "object" ? error.code : null,
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+  const afterJobs = await runtimeState.daemonClient.list();
+  const newJobs = afterJobs.filter((job) => !beforeJobs.has(job.id));
+  const spawned = newJobs.some((job) => {
+    if (!job.runDir || !existsSync(join(job.runDir, "events.jsonl"))) return false;
+    return readFileSync(join(job.runDir, "events.jsonl"), "utf8").includes('"harness.started"');
+  });
+  const executionUnchanged =
+    run("git", ["status", "--porcelain"], { cwd: execution }).stdout.trim() === "";
+  const valid = problem?.code === wantedCode && !spawned && executionUnchanged;
+  (valid ? pass : fail)(phase, row.name, {
+    wantedCode,
+    problem,
+    newJobs: newJobs.map((job) => ({ id: job.id, runId: job.runId ?? null, state: job.state })),
+    harnessStarted: spawned,
+    executionUnchanged,
+    runId: outcome?.runId ?? null,
+  });
+}
+
+/** OpenCode scoped-write incompatibility is adapter-static and must remain
+ * provable when no optional OpenCode binary/auth route exists. Exercise the
+ * public adapter in a fresh process whose configured binary is a trap: the
+ * exact typed error must arrive before an event and the trap must stay untouched. */
+async function runOpenCodeOfflineAccessRefusalRow(phase) {
+  const name = "OpenCode workspace_write typed pre-spawn refusal";
+  const stable = makeMathRepo(`${phase}-opencode-workspace-refusal-stable`, { addBug: true });
+  const execution = makeExecutionClone(stable, `${phase}-opencode-workspace-refusal`);
+  const trapBin = join(logsDir, `${phase}-opencode-spawn-trap.sh`);
+  const trapMarker = join(logsDir, `${phase}-opencode-spawned`);
+  rmSync(trapBin, { force: true });
+  rmSync(trapMarker, { force: true });
+  writeFileSync(trapBin, '#!/bin/sh\n: > "$CLAUDEXOR_OPENCODE_TRAP_MARKER"\nexit 91\n', {
+    mode: 0o700,
+  });
+
+  const spec = {
+    session_id: `${phase}-opencode-offline`,
+    task_id: `${phase}-opencode-offline`,
+    attempt_id: `${phase}-opencode-offline`,
+    cwd: execution,
+    prompt: "This process must refuse before the configured binary starts.",
+    instructions: "",
+    intent: "implement",
+    access: "workspace_write",
+    env: { CLAUDEXOR_OPENCODE_TRAP_MARKER: trapMarker },
+  };
+  const adapterUrl = pathToFileURL(
+    join(root, "packages", "harness-opencode", "dist", "index.js"),
+  ).href;
+  const helperUrl = pathToFileURL(
+    join(root, "scripts", "lib", "real-harness-battery-state.mjs"),
+  ).href;
+  const probeSource = [
+    `import { createOpenCodeAdapter } from ${JSON.stringify(adapterUrl)};`,
+    `import { probeHarnessAccessRefusal } from ${JSON.stringify(helperUrl)};`,
+    `const result = await probeHarnessAccessRefusal({ adapter: createOpenCodeAdapter(), spec: ${JSON.stringify(spec)}, wantedCode: "access_profile_incompatible" });`,
+    "process.stdout.write(JSON.stringify(result));",
+    "if (!result.valid) process.exitCode = 2;",
+  ].join("\n");
+  const probe = spawnSync(nodeBin, ["--input-type=module", "-e", probeSource], {
+    cwd: root,
+    env: {
+      ...env,
+      CLAUDEXOR_OPENCODE_BIN: trapBin,
+      CLAUDEXOR_OPENCODE_TRAP_MARKER: trapMarker,
+    },
+    encoding: "utf8",
+    timeout: 30_000,
+  });
+  let result = null;
+  try {
+    const lastLine = String(probe.stdout ?? "")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .at(-1);
+    result = lastLine ? JSON.parse(lastLine) : null;
+  } catch {
+    result = null;
+  }
+  const trapInvoked = existsSync(trapMarker);
+  const stableUnchanged =
+    run("git", ["status", "--porcelain"], { cwd: stable }).stdout.trim() === "";
+  const executionUnchanged =
+    run("git", ["status", "--porcelain"], { cwd: execution }).stdout.trim() === "";
+  const valid =
+    probe.status === 0 &&
+    result?.valid === true &&
+    result?.code === "access_profile_incompatible" &&
+    result?.eventsEmitted === 0 &&
+    !trapInvoked &&
+    stableUnchanged &&
+    executionUnchanged;
+  (valid ? pass : fail)(phase, name, {
+    exit: probe.status,
+    signal: probe.signal ?? null,
+    result,
+    trapInvoked,
+    stableUnchanged,
+    executionUnchanged,
+    stderr: redactSecrets(String(probe.stderr ?? "").trim()),
+  });
+}
+
+/** Positive native access, not containment: every required success mutates
+ * only the disposable execution clone, completes a real gate, proves its
+ * selected native account/model, and records the deliberate absence of an
+ * additional outer OS boundary. */
+async function runNativeAccessPhase() {
+  const phase = "phase13";
+  const profiles = runCliJson(["profiles", "list"], {
+    name: `${phase}-profiles`,
+    envRetry: false,
+  });
+  if (profiles.code !== 0 || !profiles.json?.profiles) {
+    fail(phase, "credential profile inventory", {
+      exit: profiles.code,
+      log: rel(profiles.log),
+    });
+  } else {
+    pass(phase, "credential profile inventory", { profiles: profiles.json.profiles.length });
+  }
+  const entries = profiles.json?.profiles ?? [];
+  const named = {
+    codex: selectBatteryProfile(entries, "codex", requiredCodexProfileId),
+    claude: selectBatteryProfile(entries, "claude", "proton2"),
+    cursor: selectBatteryProfile(entries, "cursor", "sol-validator"),
+    agy: selectBatteryProfile(entries, "agy", "anton-razzhigaev"),
+  };
+  const rows = [
+    {
+      id: "codex-default-ws",
+      name: "Codex default native workspace_write",
+      harness: "codex",
+      access: "workspace_write",
+    },
+    {
+      id: "codex-mironov-codex2-ws",
+      name: "Codex mironov_codex2 native workspace_write",
+      harness: "codex",
+      access: "workspace_write",
+      profileId: named.codex?.profile?.profile_id,
+      requiresProfile: true,
+    },
+    {
+      id: "claude-default-ws",
+      name: "Claude default native workspace_write",
+      harness: "claude",
+      access: "workspace_write",
+    },
+    {
+      id: "claude-proton2-browser-ws",
+      name: "Claude proton2 workspace_write Browser",
+      harness: "claude",
+      access: "workspace_write",
+      profileId: named.claude?.profile?.profile_id,
+      requiresProfile: true,
+      browser: true,
+    },
+    {
+      id: "cursor-default-ws",
+      name: "Cursor default native workspace_write",
+      harness: "cursor",
+      access: "workspace_write",
+    },
+    {
+      id: "cursor-sol-validator-ws",
+      name: "Cursor sol-validator native workspace_write",
+      harness: "cursor",
+      access: "workspace_write",
+      profileId: named.cursor?.profile?.profile_id,
+      requiresProfile: true,
+    },
+    {
+      id: "cursor-sol-validator-full",
+      name: "Cursor sol-validator trusted full",
+      harness: "cursor",
+      access: "full",
+      profileId: named.cursor?.profile?.profile_id,
+      requiresProfile: true,
+    },
+    {
+      id: "agy-named-ws",
+      name: "Agy named native workspace_write",
+      harness: "agy",
+      access: "workspace_write",
+      profileId: named.agy?.profile?.profile_id,
+      requiresProfile: true,
+    },
+  ];
+  for (const row of rows) {
+    if (!requestedHarnesses.includes(row.harness)) {
+      skip(phase, row.name, { reason: `${row.harness} not requested` });
+      continue;
+    }
+    const entry = row.requiresProfile ? named[row.harness] : null;
+    if (row.requiresProfile && !row.profileId) {
+      skip(phase, row.name, { reason: "required named profile is absent or not ready" });
+      continue;
+    }
+    if (
+      !nativeBatteryRowReady({
+        defaultHarnessReady: harnessAutomaticallyReady(row.harness),
+        requiresProfile: row.requiresProfile === true,
+        profileEntry: entry,
+      })
+    ) {
+      skip(phase, row.name, {
+        reason: row.requiresProfile
+          ? "required named profile is not ready"
+          : `${row.harness} has no automatic route`,
+        readiness: evidence.harnessReadiness[row.harness] ?? null,
+      });
+      continue;
+    }
+    await runNativeAccessSuccessRow(phase, row, entry);
+  }
+
+  const codexProfileId = named.codex?.profile?.profile_id;
+  if (requestedHarnesses.includes("codex") && codexProfileId) {
+    await runNativeAccessRefusalRow(
+      phase,
+      {
+        id: "codex-mironov-codex2-browser-ws-refusal",
+        name: "Codex workspace_write Browser requires explicit Full",
+        harness: "codex",
+        profileId: codexProfileId,
+        browser: true,
+      },
+      "browser_unavailable",
+    );
+    await runNativeAccessSuccessRow(
+      phase,
+      {
+        id: "codex-mironov-codex2-browser-full",
+        name: "Codex mironov_codex2 trusted Full Browser",
+        harness: "codex",
+        access: "full",
+        profileId: codexProfileId,
+        browser: true,
+      },
+      named.codex,
+    );
+  } else {
+    skip(phase, "Codex Browser access matrix", {
+      reason: "required Codex profile is not ready",
+    });
+  }
+
+  await runOpenCodeOfflineAccessRefusalRow(phase);
+  if (harnessAutomaticallyReady("opencode")) {
+    await runNativeAccessSuccessRow(
+      phase,
+      {
+        id: "opencode-full",
+        name: "OpenCode conditional trusted Full smoke",
+        harness: "opencode",
+        access: "full",
+      },
+      null,
+    );
+  } else {
+    conditional(phase, "OpenCode trusted Full smoke", {
+      reason: "OpenCode binary/route unavailable",
+      readiness: evidence.harnessReports.opencode ?? null,
     });
   }
 }
@@ -2518,12 +3328,12 @@ function stdioServer(args, cwd) {
   return { send, waitFor, messages, close, stderrText: () => stderr };
 }
 
-/** MCP serve smoke against a REAL doctor-ok harness. */
+/** MCP serve smoke against a real automatic-route harness. */
 async function runMcpServePhase() {
   const phase = "phase10";
-  const [h] = available(requestedHarnesses);
+  const [h] = automaticallyAvailable(requestedHarnesses);
   if (!h) {
-    skip(phase, "mcp serve smoke", { reason: "no doctor-ok harness" });
+    skip(phase, "mcp serve smoke", { reason: "no automatic-route harness" });
     return;
   }
   const repo = makeMathRepo(`${phase}-mcp`, { addBug: true });
@@ -2567,6 +3377,7 @@ async function runMcpServePhase() {
           prompt: "Answer exactly: 4. What is 2+2?",
           repoPath: repo,
           harness: h,
+          ...batteryScalarModel(h),
           effort: "low",
           paidBudget: { kind: "finite", maxUsd: Number(maxUsd) },
         },
@@ -2621,6 +3432,20 @@ async function runMcpServePhase() {
         initialStatus: structured.status,
         terminalStatus: terminal.status,
       });
+      // issue #85: the terminal MCP structured receipt must equal the
+      // control-detail receipt for the same run, structurally, and be non-null.
+      const projected = await controlRunDetail(structured.runId);
+      const controlFacts = projected.detail?.runFacts ?? null;
+      const mcpFacts = terminal.runFacts ?? null;
+      if (mcpFacts !== null && controlFacts !== null && isDeepStrictEqual(mcpFacts, controlFacts))
+        pass(phase, "mcp runFacts parity", { harness: h, runId: structured.runId });
+      else
+        fail(phase, "mcp runFacts parity", {
+          runId: structured.runId,
+          mcpReceiptPresent: mcpFacts !== null,
+          controlReceiptPresent: controlFacts !== null,
+          projectionError: projected.error,
+        });
     } else {
       const text = String(call?.result?.content?.[0]?.text ?? "");
       fail(phase, "mcp ask result", {
@@ -2637,12 +3462,12 @@ async function runMcpServePhase() {
   }
 }
 
-/** ACP serve smoke against a REAL doctor-ok harness. */
+/** ACP serve smoke against a real automatic-route harness. */
 async function runAcpServePhase() {
   const phase = "phase11";
-  const [h] = available(requestedHarnesses);
+  const [h] = automaticallyAvailable(requestedHarnesses);
   if (!h) {
-    skip(phase, "acp serve smoke", { reason: "no doctor-ok harness" });
+    skip(phase, "acp serve smoke", { reason: "no automatic-route harness" });
     return;
   }
   const repo = makeMathRepo(`${phase}-acp`, { addBug: true });
@@ -2679,6 +3504,7 @@ async function runAcpServePhase() {
           claudexor: {
             mode: "ask",
             harness: h,
+            ...batteryScalarModel(h),
             effort: "low",
             paidBudget: { kind: "finite", maxUsd: Number(maxUsd) },
           },
@@ -2710,9 +3536,22 @@ async function runAcpServePhase() {
       receipt.runId.length > 0 &&
       receipt.status === "succeeded" &&
       controlsApplied
-    )
+    ) {
       pass(phase, "acp prompt round-trip", { harness: h, runId: receipt.runId });
-    else
+      // issue #85: the ACP terminal _meta receipt must equal the control-detail
+      // receipt for the same run, structurally, and be non-null.
+      const acpFacts = receipt.runFacts ?? null;
+      const controlFacts = projected.detail?.runFacts ?? null;
+      if (acpFacts !== null && controlFacts !== null && isDeepStrictEqual(acpFacts, controlFacts))
+        pass(phase, "acp runFacts parity", { harness: h, runId: receipt.runId });
+      else
+        fail(phase, "acp runFacts parity", {
+          runId: receipt.runId,
+          acpReceiptPresent: acpFacts !== null,
+          controlReceiptPresent: controlFacts !== null,
+          projectionError: projected.error,
+        });
+    } else
       fail(phase, "acp prompt round-trip", {
         stopReason: done?.result?.stopReason,
         sawChunk: Boolean(chunk),
@@ -2791,7 +3630,8 @@ function phase0(harnessPhasesRequested = true) {
       log: rel(version.log),
     });
   }
-  const doctor = runCliJson(["doctor"], { name: "doctor" });
+  const doctor = runCliJson(["doctor", "--all"], { name: "doctor-all" });
+  let doctorHarnesses = [];
   if (doctor.code !== 0 || !doctor.json?.harnesses) {
     fail(phase, "doctor", {
       exit: doctor.code,
@@ -2799,24 +3639,74 @@ function phase0(harnessPhasesRequested = true) {
       stderr: doctor.stderr,
       log: rel(doctor.log),
     });
-    return false;
+  } else {
+    doctorHarnesses = doctor.json.harnesses;
   }
-  const byId = new Map(doctor.json.harnesses.map((h) => [h.id, h]));
+
+  const profiles = runCliJson(["profiles", "list"], {
+    name: "phase0-profiles",
+    envRetry: false,
+  });
+  let profileEntries = [];
+  let accountPools = [];
+  if (profiles.code !== 0 || !Array.isArray(profiles.json?.profiles)) {
+    fail(phase, "credential profile and pool inventory", {
+      exit: profiles.code,
+      log: rel(profiles.log),
+    });
+  } else {
+    profileEntries = profiles.json.profiles;
+    accountPools = Array.isArray(profiles.json.accountPools) ? profiles.json.accountPools : [];
+    pass(phase, "credential profile and pool inventory", {
+      profiles: profileEntries.length,
+      accountPools: accountPools.length,
+    });
+  }
+  const byId = new Map(doctorHarnesses.map((h) => [h.id, h]));
+  for (const status of doctorHarnesses) evidence.harnessReports[status.id] = status;
+  const named = {
+    codex: selectBatteryProfile(profileEntries, "codex", requiredCodexProfileId),
+    claude: selectBatteryProfile(profileEntries, "claude", "proton2"),
+    cursor: selectBatteryProfile(profileEntries, "cursor", "sol-validator"),
+    agy: selectBatteryProfile(profileEntries, "agy", "anton-razzhigaev"),
+  };
   for (const h of requestedHarnesses) {
-    const s = byId.get(h);
-    if (s) evidence.harnessReports[h] = s;
-    if (s?.status === "ok") {
-      evidence.okHarnesses.push(h);
-      pass(phase, `${h} doctor-ok`, { intents: s.enabledIntents ?? s.enabled_intents ?? [] });
+    const doctorReport = byId.get(h) ?? null;
+    const readiness = projectBatteryHarnessReadiness({
+      harnessId: h,
+      doctorReport,
+      accountPools,
+      profileEntries,
+      requiredProfileEntry: named[h] ?? null,
+    });
+    evidence.harnessReadiness[h] = readiness;
+    if (readiness.automaticRouteReady) evidence.automaticRouteHarnesses.push(h);
+    if (readiness.requiredRouteReady) evidence.requiredRouteHarnesses.push(h);
+    const detail = {
+      automaticRouteReady: readiness.automaticRouteReady,
+      requiredRouteReady: readiness.requiredRouteReady,
+      automaticSource: readiness.automaticSource,
+      requiredSource: readiness.requiredSource,
+      doctorStatus: doctorReport?.status ?? "missing",
+      poolNextUp: readiness.poolNextUp,
+      requiredProfileId: named[h]?.profile?.profile_id ?? null,
+      intents: doctorReport?.enabledIntents ?? doctorReport?.enabled_intents ?? [],
+    };
+    if (readiness.requiredRouteReady) {
+      pass(phase, `${h} route readiness`, detail);
     } else if (harnessPhasesRequested) {
-      fail(phase, `${h} doctor-ok`, { status: s?.status ?? "missing", reasons: s?.reasons ?? [] });
+      fail(phase, `${h} route readiness`, {
+        ...detail,
+        reasons: doctorReport?.reasons ?? [],
+      });
     } else {
       // Only harness-INDEPENDENT phases were requested (e.g. PHASES=12):
       // a missing real harness is context, not a battery failure.
-      skip(phase, `${h} doctor-ok`, { status: s?.status ?? "missing" });
+      skip(phase, `${h} route readiness`, detail);
     }
   }
-  evidence.okHarnesses = [...new Set(evidence.okHarnesses)];
+  evidence.automaticRouteHarnesses = [...new Set(evidence.automaticRouteHarnesses)];
+  evidence.requiredRouteHarnesses = [...new Set(evidence.requiredRouteHarnesses)];
   const auth = runCliJson(["auth", "status"], { name: "auth-status" });
   if (auth.code === 0)
     pass(phase, "auth status", { harnesses: (auth.json?.harnesses ?? []).length });
@@ -2831,7 +3721,7 @@ function phase0(harnessPhasesRequested = true) {
       });
     else fail(phase, "models", { exit: models.code, log: rel(models.log) });
   }
-  return evidence.okHarnesses.length > 0;
+  return evidence.requiredRouteHarnesses.length > 0;
 }
 
 const repos = {
@@ -2859,10 +3749,10 @@ async function main() {
     }
     if (
       layout.mode === "existing_default" &&
-      ["codex", "claude", "cursor"].some((harness) => !requestedHarnesses.includes(harness))
+      ["codex", "claude", "cursor", "agy"].some((harness) => !requestedHarnesses.includes(harness))
     ) {
       throw new Error(
-        "existing-default acceptance requires codex, claude, and cursor in CLAUDEXOR_BATTERY_HARNESSES",
+        "existing-default acceptance requires codex, claude, cursor, and agy in CLAUDEXOR_BATTERY_HARNESSES",
       );
     }
     if (
@@ -2875,7 +3765,7 @@ async function main() {
     const ready = phase0(harnessPhasesRequested);
     if (!ready && harnessPhasesRequested) {
       fail("phase0", "readiness gate", {
-        reason: "no requested harness is doctor-ok; harness-dependent phases cannot proceed",
+        reason: "no requested harness has an automatic or required named route",
       });
     }
     if (ready) {
@@ -2888,7 +3778,7 @@ async function main() {
       if (phaseEnabled("phase7")) runWebPhase();
       if (phaseEnabled("phase8")) await runPlanPhase();
       if (phaseEnabled("phase9")) await runDelegationPhase();
-      if (phaseEnabled("phase13")) await runDelegatedConfinementPhase();
+      if (phaseEnabled("phase13")) await runNativeAccessPhase();
       if (phaseEnabled("phase10")) await runMcpServePhase();
       if (phaseEnabled("phase11")) await runAcpServePhase();
     }
@@ -2911,8 +3801,13 @@ async function main() {
       fail("cleanup", "battery-owned daemon cleanup completed", {
         error: error instanceof Error ? error.message : String(error),
       });
-    } finally {
-      verifyProtectedConfig();
+    }
+    try {
+      await verifyProtectedStartupState();
+    } catch (error) {
+      fail("state", "existing-default startup state verification completed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
   const summary = {
@@ -2923,6 +3818,7 @@ async function main() {
       fail: results.filter((r) => r.status === "fail").length,
       env: results.filter((r) => r.status === "env").length,
       skip: results.filter((r) => r.status === "skip").length,
+      conditional: results.filter((r) => r.status === "conditional").length,
     },
     results,
   };
@@ -2937,8 +3833,9 @@ async function main() {
     `- candidate: \`${evidence.candidate.sha ?? "unknown"}\``,
     `- config mode: \`${layout.mode}\``,
     `- requested harnesses: ${requestedHarnesses.join(", ")}`,
-    `- doctor-ok harnesses: ${evidence.okHarnesses.join(", ") || "(none)"}`,
-    `- counts: PASS=${summary.counts.pass} FAIL=${summary.counts.fail} ENV=${summary.counts.env} SKIP=${summary.counts.skip}`,
+    `- automatic-route harnesses: ${evidence.automaticRouteHarnesses.join(", ") || "(none)"}`,
+    `- required-route harnesses: ${evidence.requiredRouteHarnesses.join(", ") || "(none)"}`,
+    `- counts: PASS=${summary.counts.pass} FAIL=${summary.counts.fail} ENV=${summary.counts.env} SKIP=${summary.counts.skip} CONDITIONAL=${summary.counts.conditional}`,
     "",
     "| status | phase | name | detail |",
     "|---|---|---|---|",
@@ -2951,11 +3848,11 @@ async function main() {
   const mdPath = join(resultsDir, "real-harness-battery.md");
   writeFileSync(mdPath, md);
   process.stdout.write(
-    `\nRESULT PASS=${summary.counts.pass} FAIL=${summary.counts.fail} ENV=${summary.counts.env} SKIP=${summary.counts.skip}\nreport=${jsonPath}\nsummary=${mdPath}\n`,
+    `\nRESULT PASS=${summary.counts.pass} FAIL=${summary.counts.fail} ENV=${summary.counts.env} SKIP=${summary.counts.skip} CONDITIONAL=${summary.counts.conditional}\nreport=${jsonPath}\nsummary=${mdPath}\n`,
   );
   const strictFailure =
     layout.mode === "existing_default" &&
-    (summary.counts.env > 0 || summary.counts.skip > 0 || evidence.configUnchanged !== true);
+    (summary.counts.env > 0 || summary.counts.skip > 0 || evidence.startupState.valid !== true);
   process.exitCode = summary.counts.fail > 0 || strictFailure ? 1 : 0;
 }
 

@@ -25,7 +25,6 @@
             "readonly",
             "workspace_write",
             "full",
-            "external_sandbox_full",
             "inherit_native"
           ],
           "description": "Default access profile for runs in the repo."

@@ -1,21 +1,31 @@
 import { describe, expect, it } from "vitest";
 import { EffortHint, mergeEffortLadders } from "./effort.js";
+import * as SetupLoginProtocol from "./setup-login-protocol.js";
 import {
+  AccessProfile,
+  ActiveTaskContract,
   CredentialProfile,
   HARNESS_INACTIVITY_TIMEOUT_DEFAULT_MS,
+  DAEMON_MAX_CONCURRENT_DEFAULT,
+  MAX_COUNCIL_MEMBERS_DEFAULT,
+  MAX_DEEP_SCAN_WIDTH_DEFAULT,
+  MAX_PARALLEL_CANDIDATES_DEFAULT,
   ControlCredentialProfilesResponse,
   ControlRunDecisionRequest,
   ControlRunSummary,
   ControlRunStartRequest,
+  RecordedControlRunStartRequest,
   ControlSetupJob,
   ControlSetupJobCreateRequest,
   ControlSetupJobEvent,
   ControlSetupJobSnapshot,
   ControlSettingsSnapshot,
+  ControlSettingsUpdateRequest,
   ControlThread,
   ControlThreadTurnRequest,
   ConformanceReport,
   FrozenTaskContractArtifact,
+  RecordedAppliedAttemptFacts,
   HarnessManifest,
   HarnessStatusDto,
   HarnessRunSpec,
@@ -27,6 +37,7 @@ import {
   Session,
   ContinuityDisclosure,
   LaneCheckpoint,
+  SetupExecutableEvidence,
   TaskContract,
   Thread,
   ThreadTurn,
@@ -114,6 +125,69 @@ describe("TaskContract", () => {
     expect(tc.budget.routing_goal).toBe("auto");
     expect(tc.constraints.protected_path_approvals).toEqual([]);
     expect(tc.convergence.require_tests_pass).toBe(true);
+    expect(tc).not.toHaveProperty("review_requested");
+    expect(TaskContract.parse({ ...tc, review_requested: false }).review_requested).toBe(false);
+    expect(ControlRunStartRequest.parse({ prompt: "hello" })).not.toHaveProperty("review");
+    expect(RecordedControlRunStartRequest.parse({ prompt: "hello" })).not.toHaveProperty("review");
+  });
+
+  it("separates active access from immutable historical decoding, including nested grants", () => {
+    expect(AccessProfile.options).toEqual([
+      "readonly",
+      "workspace_write",
+      "full",
+      "inherit_native",
+    ]);
+    expect(
+      ControlRunStartRequest.safeParse({ prompt: "x", access: "external_sandbox_full" }).success,
+    ).toBe(false);
+    expect(
+      RecordedControlRunStartRequest.parse({ prompt: "x", access: "external_sandbox_full" }).access,
+    ).toBe("external_sandbox_full");
+
+    const historical = {
+      task_id: "t-old",
+      created_at: "2026-06-05T00:00:00Z",
+      repo: { root: "/repo", base_ref: "main" },
+      schema_version: 2,
+      mode: { kind: "agent" },
+      user_intent: { raw: "old run" },
+      access: {
+        requested_profile: "external_sandbox_full",
+        effective_profile: "external_sandbox_full",
+      },
+      tests: {
+        commands: [
+          {
+            id: "gate-1",
+            program: "true",
+            trust_required: true,
+            trust_grant: {
+              projectDigest: "sha256:project",
+              configDigest: "sha256:config",
+              commandDigest: "sha256:command",
+              executablePath: "/usr/bin/true",
+              executableDigest: "sha256:executable",
+              accessProfile: "external_sandbox_full",
+            },
+          },
+        ],
+      },
+    };
+    expect(TaskContract.safeParse(historical).success).toBe(true);
+    expect(ActiveTaskContract.safeParse(historical).success).toBe(false);
+    expect(
+      RecordedAppliedAttemptFacts.parse({
+        harness_home_isolated: true,
+        harness_home_dir: "/scoped",
+        access_applied: "external_sandbox_full",
+        credential_profile_applied: null,
+        confinement_mechanism: "seatbelt",
+        confinement_profile_digest: "sha256:profile",
+        confinement_verified_denied_path: "/denied",
+        confinement_unavailable_reason: null,
+      }).access_applied,
+    ).toBe("external_sandbox_full");
   });
 
   it("requires an explicit gate list only when decoding frozen task authority", () => {
@@ -139,6 +213,21 @@ describe("ControlSettingsSnapshot", () => {
     const snapshot = ControlSettingsSnapshot.parse({
       runtime: {
         reviewerTimeoutMs: 2_400_000,
+        concurrency: {
+          configured: {
+            maxConcurrent: 24,
+            maxParallelCandidates: 6,
+            maxDeepScanWidth: 10,
+            maxCouncilMembers: 5,
+          },
+          effective: {
+            maxConcurrent: 12,
+            maxParallelCandidates: 4,
+            maxDeepScanWidth: 8,
+            maxCouncilMembers: 4,
+          },
+          restartRequired: true,
+        },
         transientRetry: {
           maxRetries: 3,
           initialDelayMs: 2_000,
@@ -147,9 +236,25 @@ describe("ControlSettingsSnapshot", () => {
       },
     });
     expect(snapshot.runtime.reviewerTimeoutMs).toBe(2_400_000);
+    expect(snapshot.runtime.concurrency!.restartRequired).toBe(true);
+    expect(snapshot.runtime.concurrency!.configured.maxConcurrent).toBe(24);
+    expect(snapshot.runtime.concurrency!.effective.maxConcurrent).toBe(12);
     expect(snapshot.runtime.transientRetry.maxRetries).toBe(3);
     expect(snapshot.runtime.transientRetry.initialDelayMs).toBe(2_000);
     expect(snapshot.runtime.transientRetry.maxDelayMs).toBe(20_000);
+  });
+});
+
+describe("runtime concurrency settings surface", () => {
+  it("keeps startup-frozen concurrency out of POST settings patches", () => {
+    expect(() =>
+      ControlSettingsUpdateRequest.parse({
+        runtime: { concurrency: { maxConcurrent: 48 } },
+      }),
+    ).toThrow();
+    expect(() =>
+      ControlSettingsUpdateRequest.parse({ concurrency: { maxConcurrent: 48 } }),
+    ).toThrow();
   });
 });
 
@@ -168,6 +273,37 @@ describe("harness inactivity watchdog default", () => {
     expect(ControlSettingsSnapshot.parse({}).runtime.harnessInactivityTimeoutMs).toBe(
       HARNESS_INACTIVITY_TIMEOUT_DEFAULT_MS,
     );
+  });
+});
+
+describe("runtime concurrency caps", () => {
+  it("uses the product defaults and accepts larger finite values", () => {
+    const runtime = GlobalConfig.parse({}).runtime;
+    expect(runtime.max_concurrent).toBe(DAEMON_MAX_CONCURRENT_DEFAULT);
+    expect(runtime.max_parallel_candidates).toBe(MAX_PARALLEL_CANDIDATES_DEFAULT);
+    expect(runtime.max_deep_scan_width).toBe(MAX_DEEP_SCAN_WIDTH_DEFAULT);
+    expect(runtime.max_council_members).toBe(MAX_COUNCIL_MEMBERS_DEFAULT);
+    const larger = GlobalConfig.parse({
+      runtime: {
+        max_concurrent: 64,
+        max_parallel_candidates: 12,
+        max_deep_scan_width: 16,
+        max_council_members: 10,
+      },
+    }).runtime;
+    expect(larger).toMatchObject({
+      max_concurrent: 64,
+      max_parallel_candidates: 12,
+      max_deep_scan_width: 16,
+      max_council_members: 10,
+    });
+  });
+
+  it("rejects invalid values and a Council cap below two", () => {
+    for (const value of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => GlobalConfig.parse({ runtime: { max_concurrent: value } })).toThrow();
+    }
+    expect(() => GlobalConfig.parse({ runtime: { max_council_members: 1 } })).toThrow();
   });
 });
 
@@ -242,6 +378,38 @@ describe("RouteProof + HarnessManifest", () => {
     });
     expect(m.capabilities.implement).toBe(true);
     expect(m.capabilities.web_policy).toBe("none");
+  });
+
+  it("leaves model_inventory_absence ABSENT by default, which every consumer reads as authoritative", () => {
+    // INV-104: an adapter that says nothing keeps the strict gate. Only a
+    // producer that knows it cannot tell its own answer from a substituted one
+    // declares `advisory`, and it must say so out loud.
+    const bare = HarnessManifest.parse({
+      id: "fake-success",
+      display_name: "Fake",
+      kind: "fake",
+      provider_family: "local",
+      capabilities: {},
+    });
+    expect(bare.capabilities.model_inventory_absence).toBeUndefined();
+    expect(
+      HarnessManifest.parse({
+        id: "codexish",
+        display_name: "Codexish",
+        kind: "local_cli",
+        provider_family: "openai",
+        capabilities: { model_inventory_absence: "advisory" },
+      }).capabilities.model_inventory_absence,
+    ).toBe("advisory");
+    expect(() =>
+      HarnessManifest.parse({
+        id: "codexish",
+        display_name: "Codexish",
+        kind: "local_cli",
+        provider_family: "openai",
+        capabilities: { model_inventory_absence: "maybe" },
+      }),
+    ).toThrow();
   });
 });
 
@@ -323,6 +491,17 @@ describe("Control API schemas", () => {
           path: "/tmp/forged-plan.md",
         },
       }).success,
+    ).toBe(false);
+  });
+
+  it("inherits thread-turn mode without changing the standalone Agent default", () => {
+    expect(ControlThreadTurnRequest.parse({ prompt: "continue" })).not.toHaveProperty("mode");
+    expect(ControlRunStartRequest.parse({ prompt: "start" }).mode).toBe("agent");
+    for (const mode of ["ask", "plan", "agent"] as const) {
+      expect(ControlThreadTurnRequest.parse({ prompt: "continue", mode }).mode).toBe(mode);
+    }
+    expect(
+      ControlThreadTurnRequest.safeParse({ prompt: "continue", mode: "unknown" }).success,
     ).toBe(false);
   });
 
@@ -415,7 +594,12 @@ describe("Control API schemas", () => {
       mode: "agent",
       scope: { kind: "project", root: "/repo" },
       reviewerPanel: [
-        { harness: "claude", model: "claude-opus-4-8", effort: "max" },
+        {
+          harness: "claude",
+          model: "claude-opus-4-8",
+          effort: "max",
+          credentialProfileId: "reviewer-a",
+        },
         { harness: "cursor", model: "gemini-3.1-pro" },
         { harness: "cursor", model: "gemini-3.5-flash" },
       ],
@@ -429,7 +613,12 @@ describe("Control API schemas", () => {
       ephemeral: false,
     });
     expect(req.reviewerPanel).toEqual([
-      { harness: "claude", model: "claude-opus-4-8", effort: "max" },
+      {
+        harness: "claude",
+        model: "claude-opus-4-8",
+        effort: "max",
+        credentialProfileId: "reviewer-a",
+      },
       { harness: "cursor", model: "gemini-3.1-pro" },
       { harness: "cursor", model: "gemini-3.5-flash" },
     ]);
@@ -996,8 +1185,119 @@ describe("CredentialProfile validation (INV-135)", () => {
     const dup = GlobalConfig.safeParse({ credential_profiles: [entry, entry] });
     expect(dup.success).toBe(false);
     const distinct = GlobalConfig.safeParse({
-      credential_profiles: [entry, { ...entry, harness_id: "codex" }],
+      credential_profiles: [
+        entry,
+        { ...entry, harness_id: "codex", isolation_locator: "/abs/other" },
+      ],
     });
     expect(distinct.success).toBe(true);
+  });
+
+  it("profile_policy.limit_action: ABSENT parses to the A6 'auto' stored default; explicit values are never reinterpreted (3=A)", () => {
+    const absent = GlobalConfig.parse({ harnesses: { claude: {} } });
+    expect(absent.harnesses["claude"]?.profile_policy.limit_action).toBe("auto");
+    for (const limit_action of ["auto", "fail", "ask", "rotate"] as const) {
+      const cfg = GlobalConfig.parse({
+        harnesses: { claude: { profile_policy: { limit_action } } },
+      });
+      expect(cfg.harnesses["claude"]?.profile_policy.limit_action).toBe(limit_action);
+    }
+  });
+
+  it("the config registry refuses two rows sharing one isolation_locator (unified account model)", () => {
+    // One dir = one credential: two names for the same store would make
+    // deletion, routing, and quota attribution ambiguous — including across
+    // harnesses (deleting one row's material would gut the other row).
+    const entry = {
+      ...base,
+      credential_kind: "config_dir_login",
+      isolation_locator: "/abs/dir",
+    };
+    const sharedAcrossIds = GlobalConfig.safeParse({
+      credential_profiles: [entry, { ...entry, profile_id: "other" }],
+    });
+    expect(sharedAcrossIds.success).toBe(false);
+    expect(JSON.stringify(sharedAcrossIds.error?.issues)).toContain("share isolation_locator");
+    const sharedAcrossHarnesses = GlobalConfig.safeParse({
+      credential_profiles: [entry, { ...entry, harness_id: "codex" }],
+    });
+    expect(sharedAcrossHarnesses.success).toBe(false);
+    // Secret-ref rows carry no locator and stay unconstrained by this rule.
+    const secretRefRows = GlobalConfig.safeParse({
+      credential_profiles: [
+        { ...base, credential_kind: "api_key", secret_ref: "anthropic:acc-1" },
+        {
+          ...base,
+          profile_id: "other",
+          credential_kind: "api_key",
+          secret_ref: "anthropic:acc-2",
+        },
+      ],
+    });
+    expect(secretRefRows.success).toBe(true);
+  });
+});
+
+describe("SetupLoginAbsolutePath (cross-platform absolute paths)", () => {
+  const accepted = [
+    "/var/run/job",
+    "/Users/user/.codex",
+    "/a",
+    "C:\\Users\\user\\AppData\\Local\\claudexor",
+    "c:\\program files\\codex\\bin\\codex.exe",
+    "C:/Users/user/AppData/Local/claudexor",
+    "\\\\server\\share\\jobDir",
+    "//server/share/jobDir",
+  ];
+  const refused = [
+    "relative/path",
+    "./relative",
+    "../parent",
+    "runner-state.json",
+    // Drive- and root-relative spellings resolve against per-process state.
+    "C:relative\\without\\slash",
+    "d:foo/bar",
+    "\\Windows\\System32\\cmd.exe",
+    "",
+    "   ",
+    "/path/with/\0/nullbyte",
+    "C:\\path\\with\0null",
+  ];
+
+  it("accepts POSIX, drive-rooted and UNC paths and refuses the rest", () => {
+    for (const path of accepted) {
+      expect(SetupLoginProtocol.SetupLoginAbsolutePath.safeParse(path).success).toBe(true);
+    }
+    for (const path of refused) {
+      expect(SetupLoginProtocol.SetupLoginAbsolutePath.safeParse(path).success).toBe(false);
+    }
+  });
+
+  it("applies the same rule to executable evidence realpaths", () => {
+    const evidence = {
+      realpath: "/usr/local/bin/codex",
+      sha256: "0".repeat(64),
+      size: 1024,
+      mode: 0o755,
+      device: "123",
+      inode: "456",
+    };
+    expect(SetupExecutableEvidence.safeParse(evidence).success).toBe(true);
+    expect(
+      SetupExecutableEvidence.safeParse({
+        ...evidence,
+        realpath: "C:\\Program Files\\Codex\\codex.exe",
+      }).success,
+    ).toBe(true);
+    expect(
+      SetupExecutableEvidence.safeParse({ ...evidence, realpath: "./codex.exe" }).success,
+    ).toBe(false);
+  });
+
+  it("survives schema generation as a JSON Schema pattern, not a refinement", () => {
+    // A `.refine()` is invisible to schema:gen, so every wire consumer would
+    // silently accept relative paths; the regex is the shared contract.
+    expect(SetupLoginProtocol.ABSOLUTE_PATH_PATTERN.test("C:\\x")).toBe(true);
+    expect(SetupLoginProtocol.ABSOLUTE_PATH_PATTERN.test("C:x")).toBe(false);
   });
 });

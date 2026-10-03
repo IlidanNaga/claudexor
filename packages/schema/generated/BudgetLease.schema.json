@@ -51,6 +51,45 @@
         "cost": {
           "type": "object",
           "properties": {
+            "processing": {
+              "type": "object",
+              "properties": {
+                "nativeMode": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "\\S",
+                      "description": "User-supplied string that must contain visible content, not just whitespace."
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "User-supplied string that must contain visible content, not just whitespace."
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "included",
+                    "paid_credits",
+                    "cash",
+                    "valuation",
+                    "unknown"
+                  ]
+                },
+                "source": {
+                  "$ref": "#/definitions/BudgetLease/properties/cost/properties/processing/properties/nativeMode/anyOf/0"
+                }
+              },
+              "required": [
+                "nativeMode",
+                "kind",
+                "source"
+              ],
+              "additionalProperties": false,
+              "description": "Mode-qualified billing evidence for an existing cost record. Authentication alone does not establish included premium service; credits, cash, and token valuation stay distinct."
+            },
             "knowledge": {
               "type": "string",
               "enum": [

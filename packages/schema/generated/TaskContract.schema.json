@@ -70,6 +70,10 @@
           "additionalProperties": false,
           "description": "Canonical run mode for this task."
         },
+        "review_requested": {
+          "type": "boolean",
+          "description": "Resolved model-review intent frozen for this run; absent on historical contracts, which retain review-required semantics. This is intent, not a review verdict."
+        },
         "delegation_requested": {
           "type": "boolean",
           "default": false,
@@ -347,10 +351,10 @@
                               "readonly",
                               "workspace_write",
                               "full",
-                              "external_sandbox_full",
-                              "inherit_native"
+                              "inherit_native",
+                              "external_sandbox_full"
                             ],
-                            "description": "Effective access profile covered by this grant."
+                            "description": "Effective access profile recorded by this historical grant."
                           }
                         },
                         "required": [
@@ -362,13 +366,13 @@
                           "accessProfile"
                         ],
                         "additionalProperties": false,
-                        "description": "External exact grant for one versioned project test command."
+                        "description": "Historical exact grant for one versioned project test command."
                       },
                       {
                         "type": "null"
                       }
                     ],
-                    "description": "Matching external grant; null when none was found.",
+                    "description": "Matching historical external grant; null when none was found.",
                     "default": null
                   }
                 },
@@ -377,7 +381,7 @@
                   "id"
                 ],
                 "additionalProperties": false,
-                "description": "A deterministic typed-argv test command used as a verification gate."
+                "description": "A deterministic typed-argv test command recorded in an immutable TaskContract."
               },
               "default": [],
               "description": "Deterministic test commands configured as gates."
@@ -398,8 +402,8 @@
                 "readonly",
                 "workspace_write",
                 "full",
-                "external_sandbox_full",
-                "inherit_native"
+                "inherit_native",
+                "external_sandbox_full"
               ],
               "description": "Access profile the caller requested.",
               "default": "workspace_write"
@@ -434,7 +438,7 @@
             "web_required": {
               "type": "boolean",
               "default": false,
-              "description": "Whether the task requires live web evidence."
+              "description": "Whether a persisted task contract explicitly requires web evidence; ordinary run policies keep this false."
             },
             "effective_mode": {
               "$ref": "#/definitions/TaskContract/properties/external_context/properties/policy",
@@ -547,6 +551,15 @@
           },
           "default": {},
           "description": "Resolved harness-scoped model map for this run (harness id to model id); empty means every route uses its per-harness settings default."
+        },
+        "processing_preference": {
+          "type": "string",
+          "enum": [
+            "standard",
+            "fast",
+            "economy"
+          ],
+          "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
         },
         "routing_efforts": {
           "type": "object",

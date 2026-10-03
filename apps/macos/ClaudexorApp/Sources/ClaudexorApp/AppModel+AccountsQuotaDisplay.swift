@@ -185,8 +185,21 @@ extension AppModel {
             (accountsQuotaDisplayGenerations[locationID] ?? 0) &+ 1
         if locationID == .local { quotaResponse = response }
         else { remoteQuotaResponses[locationID] = response }
-        accountsQuotaDisplayStates[locationID] = .current(
-            observedAt: Self.quotaObservedAt(response))
+        // A refresh that skipped vendors for an active rate-limit cooldown is
+        // NOT uniformly current: those vendors ride last-known data, so the
+        // display says so instead of stamping the request-time refreshed_at
+        // over them (honest states — unknown ≠ fresh).
+        let refreshSkipped = response.refreshSkipped ?? []
+        if refreshSkipped.isEmpty {
+            accountsQuotaDisplayStates[locationID] = .current(
+                observedAt: Self.quotaObservedAt(response))
+        } else {
+            let vendors = refreshSkipped.map(\.vendor).joined(separator: ", ")
+            accountsQuotaDisplayStates[locationID] = .stale(
+                reason:
+                    "Rate-limit cooldown: \(vendors) served from last-known data (not re-fetched).",
+                observedAt: Self.quotaObservedAt(response))
+        }
         quotaStatus = nil
     }
 

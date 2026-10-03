@@ -15,6 +15,9 @@ export interface ResolvedRouteContext {
   cwd: string;
   /** Scoped env the run will receive verbatim in `spec.env`. */
   env: Record<string, string>;
+  /** Optional per-harness durable lane env. Thread ask/plan routes use this so
+   * doctor, model inventory, and the eventual spawn share one HOME. */
+  envForHarness?: (harnessId: string) => Record<string, string> | null;
   /** Release the scoped state after the run (or a failed routing) ends. */
   dispose: () => void;
 }
@@ -23,9 +26,17 @@ export interface ResolvedRouteContext {
  * Resolve the read-only route context: the scoped throwaway HOME every
  * read-only attempt of this run will spawn with (workspace §6/§7 containment).
  */
-export function resolveReadOnlyRouteContext(execRoot: string): ResolvedRouteContext {
+export function resolveReadOnlyRouteContext(
+  execRoot: string,
+  envForHarness?: ResolvedRouteContext["envForHarness"],
+): ResolvedRouteContext {
   const scoped = new WorkspaceManager(execRoot).readOnlyHomeEnv();
-  return { cwd: execRoot, env: scoped.env, dispose: scoped.dispose };
+  return {
+    cwd: execRoot,
+    env: scoped.env,
+    ...(envForHarness ? { envForHarness } : {}),
+    dispose: scoped.dispose,
+  };
 }
 
 /**
@@ -49,7 +60,7 @@ export async function candidateStatusInRouteContext(
   if (!ctx || !host?.manifest) return host;
   const scoped = await gateway.routeStatus(harnessId, {
     cwd: ctx.cwd,
-    env: ctx.env,
+    env: ctx.envForHarness?.(harnessId) ?? ctx.env,
     authPreference,
     fresh: true,
   });

@@ -6,7 +6,7 @@ import ClaudexorKit
 /// as evidence. M9-UX item 8: IMAGES render as large thumbnail cards in a grid;
 /// text-like files (md/txt/yaml/json/log) render as COMPACT list rows (name,
 /// size, one-line preview) that open a full text viewer with a proper LoadState;
-/// everything else opens externally. Reuses the binary-aware
+/// other documents use the bounded preview. Reuses the binary-aware
 /// `GET /runs/:id/artifacts(/:path)` control-API path. Technical artifacts
 /// (events.jsonl, context/, attempts/) stay in Diagnostics, not the gallery.
 struct ArtifactGalleryView: View {
@@ -334,6 +334,8 @@ private struct ArtifactImageCard: View {
     /// D15 identity-keyed image slot: a card reused for a different run/path never
     /// shows the previous file's bytes. `DecodedImage` boxes the actor crossing.
     @State private var imageSlot = PayloadSlot<DecodedImage>()
+    @State private var previewRequest: SafeFilePreviewRequest?
+    @State private var previewFailed = false
 
     private var identity: PayloadIdentity {
         PayloadIdentity(
@@ -348,12 +350,16 @@ private struct ArtifactImageCard: View {
     var body: some View {
         Button {
             Task {
-                await openArtifactExternally(
-                    model: model,
-                    locationID: locationID,
-                    runId: runId,
-                    path: art.path,
-                    produced: produced)
+                do {
+                    previewRequest = try await stagedArtifactPreview(
+                        model: model,
+                        locationID: locationID,
+                        runId: runId,
+                        path: art.path,
+                        produced: produced, mime: art.mime)
+                } catch {
+                    previewFailed = true
+                }
             }
         } label: {
             VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
@@ -366,8 +372,12 @@ private struct ArtifactImageCard: View {
             .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
         }
         .buttonStyle(.plain)
-        .help("\(art.path) — click to open full size")
+        .help("\(art.path) — click to preview full size")
         .task(id: identity) { await loadImage() }
+        .sheet(item: $previewRequest) { SafeFilePreviewSheet(request: $0) }
+        .alert("Preview unavailable", isPresented: $previewFailed) {
+            Button("OK", role: .cancel) {}
+        }
     }
 
     @ViewBuilder private var preview: some View {
@@ -376,7 +386,7 @@ private struct ArtifactImageCard: View {
                 Image(nsImage: image).resizable().scaledToFit()
             } else if imageLoadFailed {
                 Image(systemName: "photo.badge.exclamationmark").font(.system(size: 28)).foregroundStyle(.secondary)
-                    .help("Too large to preview — click to open externally")
+                    .help("Thumbnail unavailable — click to inspect the file preview")
             } else {
                 ProgressView().controlSize(.small)
             }
@@ -417,7 +427,7 @@ private struct ArtifactImageCard: View {
         if decoded.image != nil {
             imageSlot.commit(.loaded(decoded), for: id)
         } else {
-            imageSlot.commit(.failed(.notRenderable("Too large to preview — click to open externally")), for: id)
+            imageSlot.commit(.failed(.notRenderable("Thumbnail unavailable — click to inspect the file preview")), for: id)
         }
     }
 }
@@ -431,14 +441,10 @@ private struct ArtifactRow: View {
     let art: ArtifactInfo
     var produced: Bool = false
 
-    /// D15 identity-keyed text slot: a row reused for a different run/path never
-    /// shows the previous file's text. Fetched lazily so it both feeds the
-    /// one-line preview AND warms the viewer — tapping opens INSTANTLY into
-    /// whatever state the fetch is in (loading spinner / text / failed), which is
-    /// the M9-UX item-8 bug fix: the viewer no longer blocks on the whole fetch
-    /// before appearing.
-    @State private var textSlot = PayloadSlot<String>()
-    @State private var showViewer = false
+    /// One identity-keyed snapshot feeds both the row and its immediately
+    /// presented loading/error/content sheet; a click never duplicates its fetch.
+    @State private var previewSlot = PayloadSlot<SafeFilePreviewRequest>()
+    @State private var showPreview = false
 
     private var category: ArtifactCategory { ArtifactCategory.of(mime: art.mime, path: art.path) }
     private var isText: Bool { category == .text }
@@ -462,7 +468,7 @@ private struct ArtifactRow: View {
                         .lineLimit(1).truncationMode(.tail)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                Image(systemName: isText ? "chevron.right" : "arrow.up.forward.app")
+                Image(systemName: "chevron.right")
                     .font(.caption2).foregroundStyle(.tertiary)
             }
             .padding(.vertical, Theme.Spacing.xs)
@@ -472,10 +478,13 @@ private struct ArtifactRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(isText ? "\(art.path) — open text viewer" : "\(art.path) — open externally")
-        // Lazily fetch text for the preview + viewer (visible rows only).
-        .task(id: identity) { if isText { await loadText() } }
-        .sheet(isPresented: $showViewer) { textViewer }
+        .help("\(art.path) — preview")
+        .task(id: identity) { if isText { await loadPreview() } }
+        .sheet(isPresented: $showPreview) {
+            ArtifactPreviewSheet(state: previewSlot.state, path: art.path) {
+                Task { await loadPreview(force: true) }
+            }
+        }
     }
 
     /// The one-line summary: type · size, plus a content preview once loaded.
@@ -492,8 +501,9 @@ private struct ArtifactRow: View {
 
     /// The first non-blank line of the loaded text, bounded — the row preview.
     private var previewLine: String? {
-        switch textSlot.state {
-        case .loaded(let text):
+        switch previewSlot.state {
+        case .loaded(let request):
+            guard let text = request.source?.text else { return nil }
             let line = text.split(whereSeparator: \.isNewline)
                 .first { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
             return line.map { String($0.prefix(140)) } ?? "(blank)"
@@ -515,74 +525,24 @@ private struct ArtifactRow: View {
     }
 
     private func tap() {
-        if isText {
-            showViewer = true                       // opens INSTANTLY; content streams in
-        } else {
-            Task {
-                await openArtifactExternally(
-                    model: model,
-                    locationID: locationID,
-                    runId: runId,
-                    path: art.path,
-                    produced: produced)
-            }
-        }
+        showPreview = true
+        Task { await loadPreview() }
     }
 
-    @ViewBuilder private var textViewer: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text(fileName).font(.headline)
-                Spacer()
-                Button("Done") { showViewer = false }
-            }
-            .padding(Theme.Spacing.md)
-            Divider()
-            Group {
-                switch textSlot.state {
-                case .loaded(let text):
-                    ScrollView {
-                        MarkdownOutputView(markdown: text)
-                            .padding(Theme.Spacing.md)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                case .empty:
-                    ContentUnavailableView("Empty file", systemImage: "doc")
-                case .failed(let error):
-                    VStack(spacing: Theme.Spacing.sm) {
-                        Text(error.message).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
-                            .multilineTextAlignment(.center)
-                        Button("Retry") { Task { await loadText(force: true) } }
-                            .buttonStyle(.bordered).controlSize(.small)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                case .idle, .loading:
-                    ProgressView("Loading \(fileName)…").controlSize(.small)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-            }
-        }
-        .frame(minWidth: 520, minHeight: 360)
-    }
-
-    private func loadText(force: Bool = false) async {
+    private func loadPreview(force: Bool = false) async {
         let id = identity
-        if force { textSlot = PayloadSlot<String>() }
-        textSlot.begin(id)
-        // Already terminal for this identity (a warmed preview) — don't refetch.
-        if !force, textSlot.state.isTerminal { return }
-        // QA-067: typed outcome so a 409 sensitive-file refusal renders as its
-        // typed reason (not a generic offline blob or a perpetual spinner).
-        let outcome = produced
-            ? await model.producedTextOutcome(
-                runId: runId, path: art.path, locationID: locationID)
-            : await model.artifactTextOutcome(
-                runId: runId, path: art.path, locationID: locationID)
-        switch outcome {
-        case .success(let content):
-            textSlot.commit(content.isEmpty ? .empty : .loaded(content), for: id)
-        case .failure(let error):
-            textSlot.commit(.failed(error), for: id)
+        if force { previewSlot = PayloadSlot<SafeFilePreviewRequest>() }
+        if previewSlot.identity == id, previewSlot.state != .idle { return }
+        previewSlot.begin(id)
+        do {
+            let request = try await stagedArtifactPreview(
+                model: model, locationID: locationID, runId: runId,
+                path: art.path, produced: produced, mime: art.mime)
+            previewSlot.commit(.loaded(request), for: id)
+        } catch {
+            let reason = error as? PayloadError
+                ?? .notRenderable("\(art.path): The file could not be staged for preview. Try again.")
+            previewSlot.commit(.failed(reason), for: id)
         }
     }
 }

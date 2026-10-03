@@ -1,8 +1,12 @@
 import { JournalRecoveryRequiredError } from "@claudexor/journal";
+import type { ControlSetupJob } from "@claudexor/schema";
+import { hasUnconfirmedSetupTermination } from "./setup-job-reducer.js";
 
 export interface SetupLifecycleHandle {
   start(): Promise<void>;
-  list(filter: { active: true }): readonly unknown[];
+  list(filter: {
+    active: boolean;
+  }): ReadonlyArray<Pick<ControlSetupJob, "outcome" | "terminationReconciliation">>;
   beginDrain(): void;
   shutdown(): Promise<void>;
 }
@@ -29,22 +33,31 @@ export class SetupLifecycleBinding<TStore, THandle extends SetupLifecycleHandle>
     private readonly create: (store: TStore) => THandle,
   ) {}
 
-  /** Start the initial supervisor when the projection is healthy. */
-  async start(): Promise<void> {
-    let store: TStore;
-    try {
-      store = this.slot.current();
-    } catch (error) {
-      // A corrupt partition is a supported degraded startup. Calling
-      // current() later reproduces the typed recovery error for every setup
-      // route while the recovery plane remains available.
-      if (error instanceof JournalRecoveryRequiredError) return;
-      throw error;
-    }
-    const handle = this.create(store);
-    this.active = handle;
-    this.activeGeneration = this.slot.generation();
-    await handle.start();
+  /** Start the initial supervisor when the projection is healthy. Serialized
+   * with replaceAfter/shutdown and IDEMPOTENT (S2-CR2): on the global-reopen
+   * path the quarantine route's replaceAfter already bound and started a
+   * supervisor before onNormalAdmission calls start() — that supervisor stays
+   * the live one instead of being orphaned mid-monitor-loop by a second
+   * handle over the same store. Once draining/shutdown began, start() stays
+   * refused so no undrainable supervisor can appear. */
+  start(): Promise<void> {
+    return this.exclusive(async () => {
+      if (this.active !== null || this.draining) return;
+      let store: TStore;
+      try {
+        store = this.slot.current();
+      } catch (error) {
+        // A corrupt partition is a supported degraded startup. Calling
+        // current() later reproduces the typed recovery error for every setup
+        // route while the recovery plane remains available.
+        if (error instanceof JournalRecoveryRequiredError) return;
+        throw error;
+      }
+      const handle = this.create(store);
+      this.active = handle;
+      this.activeGeneration = this.slot.generation();
+      await handle.start();
+    });
   }
 
   current(): THandle {
@@ -70,7 +83,11 @@ export class SetupLifecycleBinding<TStore, THandle extends SetupLifecycleHandle>
    * or recovery-blocked generation throws so the caller fails closed as
    * activity-unknown rather than treating absence as idle. */
   hasActiveWork(): boolean {
-    return this.current().list({ active: true }).length > 0;
+    const setup = this.current();
+    return (
+      setup.list({ active: true }).length > 0 ||
+      setup.list({ active: false }).some(hasUnconfirmedSetupTermination)
+    );
   }
 
   beginDrain(): void {

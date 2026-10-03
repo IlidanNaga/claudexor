@@ -9,6 +9,9 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { once } from "node:events";
+import { connect, type Socket } from "node:net";
+import { createInterface } from "node:readline";
 import { DurableJournal } from "@claudexor/journal";
 import {
   RunEvent,
@@ -61,6 +64,7 @@ function commandAuthority(
 } {
   const journal = new DurableJournal({ rootDir: join(dir, "journal"), partition });
   const store = new CommandStore(journal);
+  store.recoverAfterStartup();
   return { journal, store, slot: { current: () => store } };
 }
 
@@ -148,6 +152,62 @@ async function terminal(client: DaemonClient, id: string): Promise<JobRecord> {
 }
 
 describe("DaemonServer", () => {
+  it("freezes review intent at acceptance without changing wire idempotency or historical params", async () => {
+    const dir = tempDir("review-intent");
+    const authority = commandAuthority(dir);
+    const socketPath = join(dir, "daemon.sock");
+    const historical = {
+      prompt: "old Agent",
+      mode: "agent",
+      scope: { kind: "project", root: dir },
+    };
+    authority.store.accept({
+      id: "job-old",
+      params: historical,
+      idempotencyKey: "old",
+      clientId: "test",
+    });
+    authority.store.update("job-old", { state: "succeeded" });
+    const observed: unknown[] = [];
+    const server = new DaemonServer({
+      socketPath,
+      token: "token",
+      commands: authority.slot,
+      runner: async (params) => {
+        observed.push(params);
+        return { lifecycle: "succeeded" };
+      },
+    });
+    await server.start();
+    try {
+      const client = new DaemonClient(socketPath, "token");
+      const old = await client.enqueue(historical, { idempotencyKey: "old", clientId: "test" });
+      expect(old).toMatchObject({ id: "job-old", reused: true });
+      expect(authority.store.get("job-old")?.params).not.toHaveProperty("review");
+      for (const [index, controls, expected] of [
+        [0, {}, false],
+        [1, { review: true }, true],
+        [2, { attempts: 3 }, true],
+        [3, { attempts: 3, review: false }, false],
+        [4, { reviewerPanel: [{ harness: "codex" }] }, true],
+        [5, { prompt: "", attachments: [{ resourceId: "resource-attachment-only" }] }, false],
+      ] as const) {
+        const request = { ...historical, prompt: "new Agent", ...controls };
+        const options = { idempotencyKey: `review-${index}`, clientId: "test" };
+        const first = await client.enqueue(request, options);
+        const completed = await terminal(client, first.id);
+        expect(completed.params).toMatchObject({ review: expected });
+        const replay = await client.enqueue(request, options);
+        expect(replay).toMatchObject({ id: first.id, reused: true });
+        const lookup = authority.store.find({ params: request, ...options });
+        expect(lookup?.id).toBe(first.id);
+      }
+      expect(observed).toHaveLength(6);
+    } finally {
+      await server.stop();
+      authority.journal.close();
+    }
+  });
   it("never replaces a regular file at the configured socket path", async () => {
     const dir = tempDir("unsafe-socket");
     const socketPath = join(dir, "keep.txt");
@@ -212,6 +272,12 @@ describe("DaemonServer", () => {
       socketPath,
       token: "token",
       commands: authority.slot,
+      runtimeConcurrencyCaps: {
+        max_concurrent: 24,
+        max_parallel_candidates: 6,
+        max_deep_scan_width: 10,
+        max_council_members: 5,
+      },
       runner: async (params) => {
         ran += 1;
         return { lifecycle: "succeeded", echoed: (params as { value: number }).value * 2 };
@@ -220,7 +286,15 @@ describe("DaemonServer", () => {
     await server.start();
     try {
       const client = new DaemonClient(socketPath, "token");
-      await expect(client.health()).resolves.toMatchObject({ ok: true });
+      await expect(client.health()).resolves.toMatchObject({
+        ok: true,
+        capacity: {
+          maxConcurrent: 24,
+          maxParallelCandidates: 6,
+          maxDeepScanWidth: 10,
+          maxCouncilMembers: 5,
+        },
+      });
       const accepted = await client.enqueue(
         { value: 21 },
         { idempotencyKey: "create-1", clientId: "test" },
@@ -230,6 +304,138 @@ describe("DaemonServer", () => {
       expect(ran).toBe(1);
       await expect(new DaemonClient(socketPath, "wrong").health()).rejects.toThrow(/unauthorized/);
     } finally {
+      await server.stop();
+      authority.journal.close();
+    }
+  });
+
+  it("normalizes reason_code at the real RPC dispatch: forgery coerced, typed code delivered", async () => {
+    // sol/grok finding: the earlier tests pinned the normalizer helpers, not
+    // the claudexor.cancel call site — a later change passing params.reason_code
+    // into abort() unvalidated would keep them green. This drives the actual
+    // DaemonServer dispatch through the real client.
+    const dir = tempDir("cancel-rpc");
+    const authority = commandAuthority(dir);
+    const socketPath = join(dir, "daemon.sock");
+    const seen: unknown[] = [];
+    const server = new DaemonServer({
+      socketPath,
+      token: "token",
+      commands: authority.slot,
+      runner: (_params, ctx) =>
+        new Promise((resolve) => {
+          ctx.signal.addEventListener("abort", () => {
+            seen.push(ctx.signal.reason);
+            resolve({ lifecycle: "cancelled" });
+          });
+        }),
+    });
+    await server.start();
+    try {
+      const client = new DaemonClient(socketPath, "token");
+      const first = await client.enqueue({ n: 1 }, { idempotencyKey: "c-1", clientId: "test" });
+      // Forgery attempt: wall_clock_exceeded is daemon-internal, NOT client vocabulary.
+      await client.call("claudexor.cancel", { id: first.id, reason_code: "wall_clock_exceeded" });
+      await terminal(client, first.id);
+      const second = await client.enqueue({ n: 2 }, { idempotencyKey: "c-2", clientId: "test" });
+      await client.call("claudexor.cancel", { id: second.id, reason_code: "host_cancelled" });
+      await terminal(client, second.id);
+      // Forged deadline coerced away at the boundary: abort(undefined) leaves
+      // the platform's default AbortError as the reason, never the string.
+      expect(seen[0]).not.toBe("wall_clock_exceeded");
+      expect(typeof seen[0]).not.toBe("string");
+      expect(seen[1]).toBe("host_cancelled"); // typed code rides the abort signal
+    } finally {
+      await server.stop();
+      authority.journal.close();
+    }
+  });
+
+  it("drops a disconnected RPC follower without crashing other followers", async () => {
+    // Keep the fixture name short: macOS caps Unix-domain socket paths.
+    const dir = tempDir("epipe");
+    const authority = commandAuthority(dir);
+    authority.store.accept({
+      id: "job-disconnected",
+      params: { value: 1 },
+      idempotencyKey: "disconnected",
+      clientId: "test",
+    });
+    let markStatusRead!: () => void;
+    const statusRead = new Promise<void>((resolve) => {
+      markStatusRead = resolve;
+    });
+    const socketPath = join(dir, "daemon.sock");
+    const server = new DaemonServer({
+      socketPath,
+      token: "token",
+      commands: {
+        current: () => authority.store,
+        findById: () => {
+          markStatusRead();
+          return authority.store;
+        },
+      },
+      runner: async () => ({ lifecycle: "succeeded" }),
+    });
+    const serverSockets = (server as unknown as { followers: { sockets: Set<Socket> } }).followers
+      .sockets;
+    const escaped: unknown[] = [];
+    const collect = (error: unknown): void => void escaped.push(error);
+    let survivor: Socket | undefined;
+    let doomed: Socket | undefined;
+    let survivorLines: ReturnType<typeof createInterface> | undefined;
+    process.on("uncaughtException", collect);
+    try {
+      await server.start();
+      survivor = connect(socketPath);
+      doomed = connect(socketPath);
+      survivor.on("error", () => {});
+      doomed.on("error", () => {});
+      await Promise.all([once(survivor, "connect"), once(doomed, "connect")]);
+      for (let attempt = 0; attempt < 50 && serverSockets.size !== 2; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+      expect(serverSockets.size).toBe(2);
+
+      doomed.write(
+        `${JSON.stringify({
+          id: 1,
+          method: "claudexor.status",
+          params: { id: "job-disconnected" },
+          token: "token",
+        })}\n`,
+      );
+      await statusRead;
+      doomed.destroy();
+
+      // The server's awaited dispatch resumes after the client closes. EPIPE is
+      // delivered asynchronously through readline, not thrown by Socket.write.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      survivorLines = createInterface({ input: survivor });
+      const survivorReply = new Promise<unknown>((resolve, reject) => {
+        survivorLines!.once("line", (line) => resolve(JSON.parse(line)));
+        survivorLines!.once("error", reject);
+      });
+      survivor.write(
+        `${JSON.stringify({
+          id: 2,
+          method: "claudexor.health",
+          token: "token",
+        })}\n`,
+      );
+      await expect(survivorReply).resolves.toMatchObject({
+        id: 2,
+        result: { ok: true },
+      });
+      expect(escaped).toEqual([]);
+      expect(serverSockets.size).toBe(1);
+    } finally {
+      process.off("uncaughtException", collect);
+      survivorLines?.close();
+      doomed?.destroy();
+      survivor?.destroy();
       await server.stop();
       authority.journal.close();
     }
@@ -1350,6 +1556,62 @@ describe("DaemonServer", () => {
     expect(() => commandAuthority(dir)).toThrow(/duplicate|multiple terminal events/);
   });
 
+  it("defaults to twelve regular concurrent jobs and queues the thirteenth", async () => {
+    const dir = tempDir("c12");
+    const authority = commandAuthority(dir);
+    const socketPath = join(dir, "daemon.sock");
+    let active = 0;
+    let maxActive = 0;
+    let started = 0;
+    let releaseRuns!: () => void;
+    const runBarrier = new Promise<void>((resolve) => {
+      releaseRuns = resolve;
+    });
+    const server = new DaemonServer({
+      socketPath,
+      token: "token",
+      commands: authority.slot,
+      runner: async (params, ctx) => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        started += 1;
+        ctx.onRunStart({
+          runId: `run-${(params as { id: number }).id}`,
+          taskId: "task",
+          runDir: dir,
+        });
+        try {
+          await runBarrier;
+          return { lifecycle: "succeeded" };
+        } finally {
+          active -= 1;
+        }
+      },
+    });
+    await server.start();
+    const client = new DaemonClient(socketPath, "token");
+    let jobs: Array<{ id: string }> = [];
+    try {
+      jobs = await Promise.all(
+        Array.from({ length: 13 }, (_, index) => client.enqueue({ id: index + 1 })),
+      );
+      expect(started).toBe(12);
+      await expect(client.health()).resolves.toMatchObject({ active: 12, queue: 1 });
+
+      releaseRuns();
+      const records = await Promise.all(jobs.map((job) => terminal(client, job.id)));
+      expect(records.map((record) => record.state)).toEqual(Array(13).fill("succeeded"));
+      expect(maxActive).toBe(12);
+    } finally {
+      releaseRuns();
+      if (jobs.length > 0) {
+        await Promise.all(jobs.map((job) => terminal(client, job.id))).catch(() => {});
+      }
+      await server.stop();
+      authority.journal.close();
+    }
+  });
+
   it("bounds concurrency and cancellation while exposing run identity", async () => {
     const dir = tempDir("concurrency");
     const authority = commandAuthority(dir);
@@ -1935,6 +2197,7 @@ describe("InteractionRegistry", () => {
 
     const secondJournal = new DurableJournal({ rootDir, partition: "global" });
     const second = new InteractionStore(secondJournal);
+    second.recoverAfterStartup();
     expect(second.pendingForRun("run-restart")).toEqual([]);
     expect(second.status("run-restart", "question")).toBe("resolved");
     secondJournal.close();

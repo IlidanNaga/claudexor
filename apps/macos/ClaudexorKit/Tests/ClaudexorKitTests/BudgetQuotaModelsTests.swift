@@ -47,6 +47,29 @@ import Testing
         #expect(snapshot.availability?.modelScopedExhaustions.first?.appliesToModels == ["fable"])
     }
 
+    @Test func quotaDecodesOptionalRefreshSkippedAndKeepsAbsenceAbsent() throws {
+        // Additive disclosure: a refresh that skipped a vendor for an active
+        // poll rate-limit cooldown names it; an absent wire field stays nil
+        // and re-encodes absent (older daemons predate the projection, and
+        // wire fixtures round-trip byte-faithfully).
+        let skipped = try JSONDecoder().decode(ControlQuotaResponse.self, from: Data(#"""
+        {"snapshots":[],"absences":[],"refreshed_at":"2026-08-29T00:00:00Z",
+         "refresh_skipped":[{"vendor":"claude","not_before":"2026-08-29T00:20:00Z"}]}
+        """#.utf8))
+        #expect(skipped.refreshSkipped?.count == 1)
+        #expect(skipped.refreshSkipped?.first?.vendor == "claude")
+        #expect(skipped.refreshSkipped?.first?.notBefore == "2026-08-29T00:20:00Z")
+
+        let absent = try JSONDecoder().decode(ControlQuotaResponse.self, from: Data(#"""
+        {"snapshots":[],"absences":[],"refreshed_at":null}
+        """#.utf8))
+        // Absent on the wire stays absent (nil), and re-encoding must not mint
+        // the field - wire fixtures round-trip byte-faithfully.
+        #expect(absent.refreshSkipped == nil)
+        let reencoded = try JSONEncoder().encode(absent)
+        #expect(!String(decoding: reencoded, as: UTF8.self).contains("refresh_skipped"))
+    }
+
     // Ф2 valuation fields (QA-023c): an UNKNOWN valuation stays absent and is
     // NEVER coerced to a fake $0; a KNOWN valuation surfaces.
     @Test func budgetSnapshotHonorsUnknownValuation() throws {

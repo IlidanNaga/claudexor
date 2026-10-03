@@ -3,9 +3,11 @@
  * M7 engine-runtime UPDATE unit builder (D22).
  *
  * The update unit shipped by the macOS app's auto-updater is the fixed set of
- * engine-owned resources listed in CLOSURE_ENTRIES. Node, the CLI, UI resources,
- * and icons remain app-owned; a Node bump ships a new DMG. We build the tarball
- * from the already-signed, already-verified app bundle. Internal package links
+ * engine-owned resources listed in CLOSURE_ENTRIES. The reviewed CLI bundle is
+ * included so an embedding host can invoke exact operational commands from the
+ * same signed closure. Node, UI resources, and icons remain app-owned; a Node
+ * bump ships a new DMG. The independent engine-resource stage is the source;
+ * --app-bundle remains available to verify an assembled app. Internal package links
  * are materialized as regular files/directories and links escaping their
  * closure entry are refused. The resulting single archive can be unpacked by
  * hosts without POSIX symlink semantics.
@@ -45,6 +47,7 @@ import {
   copyTreeMaterialized,
 } from "./lib/remote-runtime-archive.mjs";
 import { runtimeArchiveName, runtimeArchiveUrl } from "./lib/runtime-manifest-contract.mjs";
+import { verifyWin32ConptyHelperCustody } from "./lib/win32-conpty-artifact.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..");
@@ -57,6 +60,7 @@ const ROOT = resolve(HERE, "..");
  */
 const CLOSURE_ENTRIES = [
   "claudexord.bundle.cjs",
+  "claudexor.bundle.cjs",
   "setup-login-runner.cjs",
   "browser-mcp-runtime",
   "native",
@@ -215,8 +219,11 @@ function main() {
   const appBundle = options["app-bundle"];
   const version = options.version;
   const outDir = options.out;
-  if (!appBundle || !version || !outDir) {
-    fail("usage: build-runtime-closure.mjs --app-bundle DIR --version X.Y.Z --out DIR");
+  const resourceRoot = options.resources;
+  if (Boolean(appBundle) === Boolean(resourceRoot) || !version || !outDir) {
+    fail(
+      "usage: build-runtime-closure.mjs (--resources DIR | --app-bundle DIR) --version X.Y.Z --out DIR",
+    );
   }
   if (!isSemver(version)) fail(`--version '${version}' is not a valid semver`);
 
@@ -225,9 +232,9 @@ function main() {
     fail(`--version ${version} does not match the generated CLAUDEXOR_VERSION ${generated}`);
   }
 
-  const resources = resolve(appBundle, "Contents/Resources");
+  const resources = resourceRoot ? resolve(resourceRoot) : resolve(appBundle, "Contents/Resources");
   if (!existsSync(resources) || !statSync(resources).isDirectory()) {
-    fail(`app bundle has no Contents/Resources: ${resources}`);
+    fail(`engine resource directory is missing: ${resources}`);
   }
   for (const entry of CLOSURE_ENTRIES) {
     const path = join(resources, entry);
@@ -237,6 +244,21 @@ function main() {
     if (info.isSymbolicLink() || (!info.isDirectory() && !info.isFile())) {
       fail(`closure entry must be a regular file or directory: Contents/Resources/${entry}`);
     }
+  }
+  // This universal update also serves Darwin. Linux-only resources (or a
+  // Windows helper alone) must not be published as that complete closure.
+  const darwinHelper = join(resources, "native", "claudexor-process-identity");
+  if (
+    !existsSync(darwinHelper) ||
+    !lstatSync(darwinHelper).isFile() ||
+    statSync(darwinHelper).size === 0
+  ) {
+    fail("universal runtime closure requires the native/claudexor-process-identity file");
+  }
+  const expectedWin32ConptySha256 = options["win32-conpty-sha256"];
+  const win32ConptyHelper = join(resources, "native", "claudexor-conpty-helper.exe");
+  if (expectedWin32ConptySha256 !== undefined) {
+    verifyWin32ConptyHelperCustody([win32ConptyHelper], expectedWin32ConptySha256);
   }
   // Node MUST stay app-owned: refuse to ship it inside the update closure even
   // if a future build-app.sh change accidentally routed it here.
@@ -264,6 +286,12 @@ function main() {
     // Run the addon guard AFTER link materialization so a linked directory
     // cannot hide a forbidden `.node` payload from the recursive walk.
     assertNoNativeAddons(staged, CLOSURE_ENTRIES);
+    if (expectedWin32ConptySha256 !== undefined) {
+      verifyWin32ConptyHelperCustody(
+        [win32ConptyHelper, join(staged, "native", "claudexor-conpty-helper.exe")],
+        expectedWin32ConptySha256,
+      );
+    }
 
     // Tar the closure entries at the ROOT of the archive (no leading ./ dir),
     // so unpacking into versions/<v>/ yields
@@ -276,14 +304,17 @@ function main() {
     if (!existsSync(tarballPath) || statSync(tarballPath).size === 0) {
       throw new Error(`tar produced no runtime closure at ${tarballPath}`);
     }
-    // The stamped bundle inside the PACKED closure MUST carry this exact build
-    // sha, so manifest and `--probe` identity agree byte-for-byte.
-    const bundleText = readFileSync(join(staged, "claudexord.bundle.cjs"), "utf8");
-    if (!bundleText.includes(buildSha)) {
-      throw new Error(
-        `claudexord.bundle.cjs is not stamped with build sha ${buildSha}: run build-app.sh with the ` +
-          "esbuild CLAUDEXOR_BUILD_SHA define (bundled + downloaded closures must be stamped identically)",
-      );
+    // Both executable JS entries inside the PACKED closure MUST carry this
+    // exact build sha. The daemon's probe and the host-invoked CLI therefore
+    // stay bound to the same reviewed publication identity.
+    for (const bundle of ["claudexord.bundle.cjs", "claudexor.bundle.cjs"]) {
+      const bundleText = readFileSync(join(staged, bundle), "utf8");
+      if (!bundleText.includes(buildSha)) {
+        throw new Error(
+          `${bundle} is not stamped with build sha ${buildSha}: run build-engine-resources.sh with the ` +
+            "esbuild CLAUDEXOR_BUILD_SHA define (bundled + downloaded closures must be stamped identically)",
+        );
+      }
     }
   } finally {
     rmSync(work, { recursive: true, force: true });

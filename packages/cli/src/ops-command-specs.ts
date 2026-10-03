@@ -122,6 +122,19 @@ export const OPS_COMMAND_SPECS_BEFORE_REMOTE = [
 
 export const OPS_COMMAND_SPECS_AFTER_REMOTE = [
   {
+    id: "accounts",
+    positionalPatterns: [
+      { min: 0, max: 0 },
+      { prefix: ["snapshot"], min: 1, max: 1 },
+    ],
+    usageArgs: "[snapshot]",
+    summary:
+      "Read-only atomic Accounts snapshot: profiles, readiness, quota freshness, and next-up routing",
+    flags: ["json"],
+    mutability: "read",
+    stability: "stable",
+  },
+  {
     id: "gc",
     positionalPatterns: [{ min: 0, max: 0 }],
     usageArgs: "[--dry-run]",

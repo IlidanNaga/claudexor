@@ -50,6 +50,55 @@ describe("transient failure taxonomy (GH #31)", () => {
     expect(t.transientFailures[0]?.retryDelayMs).toBe(4000);
   });
 
+  it("a cursor-shaped A1 vendor-limit ERROR event arms the rotation predicate (rateLimits grows)", () => {
+    // Exact shape harness-cursor emits since A1 for the live incident stderr
+    // ("ActionRequiredError: You've hit your usage limit… resets … 9/12/2026"):
+    // a terminal error event carrying the typed rate_limit signal, model-scoped
+    // to the requested model, resets_at honestly null (day-granular vendor
+    // date rides as payload evidence only).
+    const t = fresh();
+    observeAttemptTelemetry(
+      t,
+      ev({
+        type: "error",
+        error: "ActionRequiredError: You've hit your usage limit",
+        rate_limit: {
+          resets_at: null,
+          retry_delay_ms: null,
+          applies_to_models: ["gemini-3.7-flash-high"],
+        },
+        status: { kind: "api_retry", error_category: "rate_limit" },
+        payload: { cursor_vendor_limit: true, vendor_reset_day: "2026-09-12" },
+      }),
+    );
+    // Feeds the W5.4 reactive-rotation predicate (sawTypedLimit)…
+    expect(t.rateLimits).toHaveLength(1);
+    expect(t.rateLimits[0]?.resetsAt).toBeNull();
+    // …and lands exactly ONE transient observation (rate_limit error_category
+    // is deliberately NOT double-counted through classifyStatusError).
+    expect(t.transientFailures).toHaveLength(1);
+    expect(t.transientFailures[0]?.category).toBe("rate_limited");
+  });
+
+  it("a claude-shaped A1 entitlement status classifies capability_refused (NOT retryable)", () => {
+    // Exact shape harness-claude emits since A1 for the org-disabled plain
+    // prose ("Your organization has disabled Claude subscription access…").
+    const t = fresh();
+    observeAttemptTelemetry(
+      t,
+      ev({
+        type: "status",
+        text: "entitlement: Your organization has disabled Claude subscription access for Claude Code",
+        status: { kind: "api_retry", error_category: "oauth_org_not_allowed" },
+        payload: { entitlement_denied: true },
+      }),
+    );
+    expect(t.transientFailures).toHaveLength(1);
+    expect(t.transientFailures[0]?.category).toBe("capability_refused");
+    expect(t.transientFailures[0]?.retryable).toBe(false);
+    expect(t.rateLimits).toHaveLength(0);
+  });
+
   it("rate_limited classification is stable with OR without a Retry-After (delay preserved when present)", () => {
     const withDelay = fresh();
     observeAttemptTelemetry(
@@ -185,5 +234,118 @@ describe("transient failure taxonomy (GH #31)", () => {
     expect(record.transient_failures[0]?.category).toBe("auth_failed");
     expect(record.transient_failures[0]?.retryable).toBe(false);
     expect(record.transient_failures[0]?.adapter_code).toBe("authentication_failed");
+  });
+});
+
+// A harness that VOICED its own error and then exited non-zero did not crash.
+// The relabel is behaviour-neutral: exit evidence never becomes a retry signal
+// (the explicit `retryable: false` in classifyCompletedCrash — `unknown_harness_error`
+// is `true` in the category table, so removing that override turns these red),
+// and the vendor's code is opaque evidence that feeds no other telemetry input.
+describe("harness-reported terminal error (exit evidence)", () => {
+  const vendorFailure = {
+    code: "server_overloaded",
+    message: "Selected model is at capacity. Please try a different model.",
+    source: "codex_rollout",
+  };
+  const completed = (payload: Record<string, unknown>) => {
+    const t = fresh();
+    observeAttemptTelemetry(t, ev({ type: "completed", payload }));
+    return t;
+  };
+
+  it("labels a voiced non-zero exit unknown_harness_error, never retryable, exit code preserved", () => {
+    const t = completed({ exit_code: 1, harness_reported_error: true });
+    expect(t.transientFailures).toHaveLength(1);
+    expect(t.transientFailures[0]?.category).toBe("unknown_harness_error");
+    expect(t.transientFailures[0]?.retryable).toBe(false);
+    expect(t.transientFailures[0]?.adapterCode).toBe("exit_1");
+    expect(t.transientFailures[0]?.vendorFailure).toBeNull();
+  });
+
+  it("carries the adapter-attached vendor failure on the observation, verbatim", () => {
+    const t = completed({
+      exit_code: 1,
+      harness_reported_error: true,
+      vendor_failure: vendorFailure,
+    });
+    expect(t.transientFailures[0]?.vendorFailure).toEqual(vendorFailure);
+    expect(t.transientFailures[0]?.category).toBe("unknown_harness_error");
+  });
+
+  it("keeps a SILENT non-zero exit a process_crash (unchanged)", () => {
+    const t = completed({ exit_code: 1 });
+    expect(t.transientFailures[0]?.category).toBe("process_crash");
+    expect(t.transientFailures[0]?.retryable).toBe(false);
+    expect(t.transientFailures[0]?.adapterCode).toBe("exit_1");
+  });
+
+  it("keeps a signal kill a process_crash whatever the harness said before it", () => {
+    const t = completed({ exit_signal: "SIGKILL", harness_reported_error: true });
+    expect(t.transientFailures[0]?.category).toBe("process_crash");
+    expect(t.transientFailures[0]?.signal).toBe("SIGKILL");
+    expect(t.transientFailures[0]?.retryable).toBe(false);
+  });
+
+  it("classifies nothing for an aborted or a clean completion, voiced or not", () => {
+    expect(
+      completed({ aborted: true, exit_code: 1, harness_reported_error: true }).transientFailures,
+    ).toHaveLength(0);
+    expect(
+      completed({ exit_code: 0, harness_reported_error: true }).transientFailures,
+    ).toHaveLength(0);
+  });
+
+  it("drops a malformed vendor_failure to null without changing the classification", () => {
+    for (const bad of [
+      42,
+      "server_overloaded",
+      { code: "x".repeat(129), source: "codex_rollout" },
+    ]) {
+      const t = completed({ exit_code: 1, harness_reported_error: true, vendor_failure: bad });
+      expect(t.transientFailures).toHaveLength(1);
+      expect(t.transientFailures[0]?.category).toBe("unknown_harness_error");
+      expect(t.transientFailures[0]?.retryable).toBe(false);
+      expect(t.transientFailures[0]?.vendorFailure).toBeNull();
+    }
+  });
+
+  it("never retries on exit evidence: every exit payload shape is retryable:false", () => {
+    const shapes: Record<string, unknown>[] = [
+      { exit_code: 1 },
+      { exit_code: 1, harness_reported_error: true },
+      { exit_code: 1, harness_reported_error: true, vendor_failure: vendorFailure },
+      { exit_signal: "SIGKILL" },
+      { exit_signal: "SIGKILL", harness_reported_error: true },
+      { spawn_failed: true },
+    ];
+    for (const payload of shapes) {
+      const t = completed(payload);
+      expect(t.transientFailures, JSON.stringify(payload)).toHaveLength(1);
+      expect(t.transientFailures[0]?.retryable, JSON.stringify(payload)).toBe(false);
+    }
+  });
+
+  it("a vendor code that NAMES a limit feeds no rate-limit input and adds no second observation", () => {
+    const t = completed({
+      exit_code: 1,
+      harness_reported_error: true,
+      vendor_failure: { ...vendorFailure, code: "usage_limit_exceeded" },
+    });
+    expect(t.rateLimits).toHaveLength(0);
+    expect(t.transientFailures).toHaveLength(1);
+    expect(t.transientFailures[0]?.category).toBe("unknown_harness_error");
+  });
+
+  it("keeps the vendor failure OUT of the persisted attempt telemetry record", () => {
+    const t = completed({
+      exit_code: 1,
+      harness_reported_error: true,
+      vendor_failure: vendorFailure,
+    });
+    const record = attemptTelemetryRecord("a01", "codex", t);
+    expect(record.transient_failures[0]?.category).toBe("unknown_harness_error");
+    expect(JSON.stringify(record)).not.toContain("server_overloaded");
+    expect(record.transient_failures[0]).not.toHaveProperty("vendorFailure");
   });
 });

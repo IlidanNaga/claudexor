@@ -136,22 +136,23 @@ extension ThreadsScreen {
             text: composerText,
             attachments: composerAttachments,
             mode: composerMode,
-            selectedAccess: model.effectiveThreadAccess.flatMap(AccessProfile.init(wire:))
-                ?? model.composerAccessDefault
+            selectedAccess: threadAccessSelection.suggestedAccess
         )
     }
 
     func resetPerTurnComposerOptions() {
         // Explicit switches reset non-sticky knobs. First-turn materialization
         // uses the field-wise completion merge instead, so next-message edits
-        // made during the await survive. Access seeds from selected authority,
-        // never Browser's effective override.
+        // made during the await survive. Access seeds from selected authority;
+        // Browser remains an independent per-turn request axis.
         capUsdText = ""
         selectedWebPolicy = "auto"
         authRoutePreference = ""
         effortPreference = ""
-        selectedAccess = model.effectiveThreadAccess.flatMap(AccessProfile.init(wire:))
-            ?? model.composerAccessDefault
+        threadAccessSelection = .resolve(
+            recordedWire: model.effectiveThreadAccess,
+            defaultAccess: model.composerAccessDefault
+        )
         maxAttempts = TurnOptions.singleDefaultAttempts
         showOptions = false
         browser = false
@@ -160,6 +161,7 @@ extension ThreadsScreen {
         councilEnabled = false
         councilMembers = 2
         reviewDraft = .init()
+        reviewChanges = false
         testCommandText = ""
         composerModels = [:]
         poolModelCatalogs = [:]
@@ -171,7 +173,7 @@ extension ThreadsScreen {
             attachments: composerAttachments,
             mode: composerMode,
             capUsdText: capUsdText,
-            selectedAccess: selectedAccess,
+            selectedAccess: threadAccessSelection.suggestedAccess,
             selectedWebPolicy: selectedWebPolicy,
             authRoutePreference: authRoutePreference,
             effortPreference: effortPreference,
@@ -182,6 +184,7 @@ extension ThreadsScreen {
             councilMembers: councilMembers,
             browser: browser,
             reviewDraft: reviewDraft,
+            reviewChanges: reviewChanges,
             testCommandText: testCommandText,
             composerModels: composerModels
         )
@@ -192,19 +195,48 @@ extension ThreadsScreen {
         composerAttachments = draft.attachments
         composerMode = draft.mode
         capUsdText = draft.capUsdText
-        selectedAccess = draft.selectedAccess
+        threadAccessSelection = .active(draft.selectedAccess)
         selectedWebPolicy = draft.selectedWebPolicy
         authRoutePreference = draft.authRoutePreference
         effortPreference = draft.effortPreference
         maxAttempts = draft.maxAttempts
-        agentStrategy = draft.agentStrategy
+        agentStrategy = draft.agentStrategy.reconciling(access: draft.selectedAccess)
         delegate = draft.delegate
         councilEnabled = draft.councilEnabled
         councilMembers = draft.councilMembers
         browser = draft.browser
         reviewDraft = draft.reviewDraft
+        reviewChanges = draft.reviewChanges
         testCommandText = draft.testCommandText
         composerModels = draft.composerModels
+    }
+
+    /// D26 sticky access selection. Migration-required historical state is not
+    /// cleared optimistically: even choosing the repository default sends an
+    /// explicit PATCH and stays blocked until the updated thread is observed.
+    func selectComposerAccess(_ picked: AccessProfile) {
+        agentStrategy = agentStrategy.reconciling(access: picked)
+        let action = threadAccessSelection.action(
+            selecting: picked,
+            recordedWire: model.effectiveThreadAccess,
+            defaultAccess: model.composerAccessDefault
+        )
+        guard let patchWire = action.patchWire else {
+            threadAccessSelection = .active(action.access)
+            return
+        }
+        if !action.waitsForPersistence {
+            threadAccessSelection = .active(action.access)
+        }
+        let selection = composerSelectionContext
+        Task {
+            await model.setThreadAccess(patchWire)
+            guard action.waitsForPersistence,
+                  composerSelectionContext == selection,
+                  model.effectiveThreadAccess == patchWire
+            else { return }
+            threadAccessSelection = .active(action.access)
+        }
     }
 
     /// Cancel the selected thread's active head run (server-owned cancel via

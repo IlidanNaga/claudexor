@@ -1,3 +1,4 @@
+import type { CancelReasonCode, CommandListQuery } from "@claudexor/schema";
 import { type Socket, connect } from "node:net";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
@@ -118,7 +119,11 @@ export class DaemonClient {
       idempotencyRequest: options.idempotencyRequest,
     });
   }
-  list() {
+  /** Addressed read: `query` names one run id or one Delegate parent so the
+   * daemon selects before it projects. Omit it for the whole retained product
+   * list. An engine older than the query ignores it and answers with the full
+   * list, so a caller must still apply its own selection to the result. */
+  list(query?: CommandListQuery) {
     return this.call<
       {
         id: string;
@@ -137,10 +142,10 @@ export class DaemonClient {
         startedAt?: string;
         finishedAt?: string;
       }[]
-    >("claudexor.list");
+    >("claudexor.list", query ? { query } : undefined);
   }
-  cancel(id: string) {
-    return this.call("claudexor.cancel", { id });
+  cancel(id: string, reasonCode?: CancelReasonCode) {
+    return this.call("claudexor.cancel", reasonCode ? { id, reason_code: reasonCode } : { id });
   }
   fenceDelegationParent(runId: string) {
     return this.call<{ runId: string; fenced: boolean }>("claudexor.delegationFence", { runId });

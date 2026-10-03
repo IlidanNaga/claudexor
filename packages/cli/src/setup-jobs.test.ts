@@ -14,6 +14,8 @@ import { join } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import {
   AuthCapabilityVerifier,
+  bindCredentialMutationWindow,
+  credentialMutationWindowOpen,
   ProcessGroupService,
   type HarnessAdapter,
   type KnownProcessIdentity,
@@ -25,9 +27,13 @@ import type {
   AuthSourceReadiness,
   CredentialRoute,
   HarnessRunSpec,
+  SetupNativeCommandErrorCode,
 } from "@claudexor/schema";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { loadConfig } from "@claudexor/config";
+import { defaultNativeClaudeConfigDir } from "@claudexor/harness-claude";
 import { defaultNativeCodexHome } from "@claudexor/harness-codex";
+import { noProjectRepoRoot } from "@claudexor/util";
 import {
   atomicPrivateJson,
   readLoginManifest,
@@ -36,8 +42,16 @@ import {
   SETUP_LOGIN_PROTOCOL_VERSION,
 } from "./setup-login-protocol.js";
 import { registerConfigDirProfile } from "./profile-registration.js";
-import { resolveProfileBinding, resolveSetupLoginRunnerPath } from "./setup-job-support.js";
+import {
+  resolveLoginProfileBinding,
+  resolveProfileBinding,
+  resolveSetupLoginRunnerPath,
+} from "./setup-job-support.js";
 import { createSetupJobManager } from "./setup-jobs.js";
+import { SetupJobStore } from "./setup-job-store.js";
+import * as CredentialWindow from "./setup-credential-window.js";
+import { SetupLifecycleBinding } from "./setup-lifecycle-binding.js";
+import { DaemonRuntimeShutdown } from "./daemon-runtime-shutdown.js";
 
 let root: string;
 let codexBinary: string;
@@ -209,7 +223,7 @@ function writeRunnerResultV2(
     commandStarted?: boolean;
     exitCode?: number | null;
     signal?: string | null;
-    errorCode?: "permit_timeout" | "spawn_failed" | "device_auth_unsupported";
+    errorCode?: SetupNativeCommandErrorCode;
     permitIssuedAt?: string | null;
     executionId?: string;
   } = {},
@@ -500,6 +514,56 @@ describe("setup jobs", () => {
     await manager.shutdown();
   });
 
+  it.each(["agy", "claude", "cursor"])(
+    "seals %s client_pty as external attach before any daemon runner/probe",
+    async (harness) => {
+      process.env.CLAUDEXOR_CONFIG_DIR = join(root, "client-pty-config");
+      const binary = join(root, `fake-${harness}`);
+      writeFileSync(binary, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+      chmodSync(binary, 0o700);
+      const envKey = `CLAUDEXOR_${harness.toUpperCase()}_BIN`;
+      const oldBinary = process.env[envKey];
+      process.env[envKey] = binary;
+      const profile = registerConfigDirProfile({ harnessId: harness, profileId: "work" }).profile;
+      const spawnProcess = vi.fn();
+      let terminalOpens = 0;
+      const manager = createSetupJobManager({
+        rootDir: join(root, `client-pty-${harness}`),
+        platform: "linux",
+        runnerPath: resolveSetupLoginRunnerPath(),
+        spawn: spawnProcess as never,
+        openTerminal: () => {
+          terminalOpens += 1;
+          return fakeOpener();
+        },
+      });
+      try {
+        await manager.start();
+        const job = manager.create({
+          harness,
+          action: "login",
+          authRequest: "subscription",
+          profileId: profile.profile_id,
+          transport: "client_pty",
+        });
+        expect(job).toMatchObject({ state: "waiting_for_input", transport: "client_pty" });
+        const manifest = readLoginManifest(manager._store.paths(job.jobId).manifest);
+        expect(manifest.binary).toBe(realpathSync(binary));
+        expect(manifest.profileConfigDir).toBe(profile.isolation_locator);
+        expect(manifest).not.toHaveProperty("deviceCodePath");
+        expect(manifest).not.toHaveProperty("loginMode");
+        expect(manifest).not.toHaveProperty("inputPath");
+        expect(manifest).not.toHaveProperty("ptyStdin");
+        expect(spawnProcess).not.toHaveBeenCalled();
+        expect(terminalOpens).toBe(0);
+      } finally {
+        await manager.shutdown();
+        if (oldBinary === undefined) delete process.env[envKey];
+        else process.env[envKey] = oldBinary;
+      }
+    },
+  );
+
   it("permits a client_pty attach after its journaled deadline was extended", async () => {
     let nowMs = Date.parse("2026-07-25T00:00:00.000Z");
     const group = processGroupFixture({ leader: knownLeader(12) });
@@ -757,7 +821,8 @@ describe("setup jobs", () => {
         input: { fresh: true, authPreference: "subscription", aborted: false },
       },
     ]);
-    expect(invalidatedHarnesses).toEqual(["codex"]);
+    // #363: the window opened at the execution permit and closed at the proven end.
+    expect(invalidatedHarnesses).toEqual(["codex", "codex"]);
     expect(capability.lookups).toEqual(["codex"]);
     expect(capability.runs).toHaveLength(1);
     expect(capability.runs[0]).toMatchObject({
@@ -889,7 +954,7 @@ describe("setup jobs", () => {
       });
       expect(capability.lookups).toEqual(["codex"]);
       expect(capability.runs).toHaveLength(1);
-      expect(invalidatedHarnesses).toEqual(["codex"]);
+      expect(invalidatedHarnesses).toEqual(["codex", "codex"]); // window entry + close
       expect(probedHarnesses).toEqual(["codex"]);
       expect(callbackSawDurableReceipt).toBe(true);
       await manager.shutdown();
@@ -903,7 +968,7 @@ describe("setup jobs", () => {
       exitCode: 17,
       errorCode: undefined,
       expectedReason: "command_failed",
-      expectedInvalidations: ["codex"],
+      expectedInvalidations: ["codex", "codex"], // window entry + close (#363)
     },
     {
       label: "command that never started",
@@ -989,7 +1054,7 @@ describe("setup jobs", () => {
     writeRunnerStateV2(first, job.jobId, group.leader, "running", observedAt);
     writeRunnerResultV2(first, job.jobId, { exitCode: 9 });
     expect(await waitForTerminal(first, job.jobId)).toBe("failed");
-    expect(firstInvalidations).toEqual(["codex"]);
+    expect(firstInvalidations).toEqual(["codex", "codex"]); // window entry + close
     await first.shutdown();
     first._store.journal.close();
 
@@ -1471,6 +1536,8 @@ describe("setup jobs", () => {
       outcome: { reason: "cancelled_by_user", exitCode: 0, signal: null },
       nativeCommand: { commandStarted: true, exitCode: 0, signal: null },
     });
+    // The permit was written straight into the store (no manager transition),
+    // so only the receipt-proven close invalidates (#363).
     expect(invalidatedHarnesses).toEqual(["codex"]);
     expect(group.signals).toEqual([]);
     await manager.shutdown();
@@ -1487,14 +1554,36 @@ describe("setup jobs", () => {
       processGroups: group.service,
       monitorPollMs: 1,
     });
-    await manager.start();
+    const binding = new SetupLifecycleBinding(
+      { current: () => manager._store, generation: () => 1 },
+      () => manager,
+    );
+    await binding.start();
+    const stopped: string[] = [];
+    const runtime = new DaemonRuntimeShutdown({
+      setup: binding,
+      daemon: { stop: async () => void stopped.push("daemon") },
+      control: () => ({ stop: async () => void stopped.push("control") }),
+      journal: { close: () => manager._store.journal.close() },
+      forceExit: () => undefined,
+    });
+    const expectReplacementBusy = () => {
+      expect(() => runtime.beginRuntimeReplacement()).toThrowError(
+        expect.objectContaining({ code: "runtime_replacement_busy" }),
+      );
+      expect(runtime.requested()).toBe(false);
+      expect(stopped).toEqual([]);
+      expect(manager._supervisorHealth().state).toBe("healthy");
+    };
     const job = manager.create(LOGIN_REQUEST);
+    expectReplacementBusy();
     writeRunnerStateV2(manager, job.jobId, leader);
     await waitForPhase(manager, job.jobId, "awaiting_user");
     group.setObserved(knownLeader(21, "darwin:1710000001:000021"));
     const result = await manager.cancel({ jobId: job.jobId });
     expect(result.outcome?.reason).toBe("termination_unconfirmed");
     expect(group.signals).toEqual([]);
+    expectReplacementBusy();
     expect(manager.create(LOGIN_REQUEST).jobId).toBe(job.jobId);
     expect(() => manager.reconcile({ jobId: job.jobId })).toThrow(/not proven empty/);
     group.setObserved({ status: "missing", pid: leader.pid, platform: "darwin" });
@@ -1504,8 +1593,16 @@ describe("setup jobs", () => {
       terminationReconciliation: { status: "empty" },
     });
     expect(manager.reconcile({ jobId: job.jobId })).toEqual(reconciled);
-    expect(manager.create(LOGIN_REQUEST).jobId).not.toBe(job.jobId);
-    await manager.shutdown();
+    expect(binding.hasActiveWork()).toBe(false);
+    const next = manager.create(LOGIN_REQUEST);
+    expect(next.jobId).not.toBe(job.jobId);
+    expectReplacementBusy();
+    await manager.cancel({ jobId: next.jobId });
+    expect(binding.hasActiveWork()).toBe(false);
+    const stopping = runtime.beginRuntimeReplacement();
+    expect(runtime.requested()).toBe(true);
+    expect(stopped).toEqual(["control", "daemon"]);
+    await stopping;
   });
 
   it.each(["cancel", "timeout"] as const)(
@@ -1545,6 +1642,89 @@ describe("setup jobs", () => {
       expect(group.signals).toEqual(["SIGTERM", "SIGKILL"]);
       expect(done.outcome?.reason).toBe(kind === "cancel" ? "cancelled_by_user" : "timed_out");
       await manager.shutdown();
+    },
+  );
+
+  it.each([
+    ["cancel", false],
+    ["timeout", false],
+    ["cancel", true],
+    ["timeout", true],
+  ] as const)(
+    "keeps the existing %s grace while group probes are unknown (persistent=%s)",
+    async (kind, persistent) => {
+      let ms = Date.now();
+      let killedAt: number | undefined;
+      let recover = false;
+      let probesAfterKill = 0;
+      const group = processGroupFixture({
+        leader: knownLeader(32),
+        onSignal: (signal) => {
+          if (signal === "SIGKILL") killedAt = ms;
+        },
+      });
+      const probe = group.service.probeEmpty.bind(group.service);
+      vi.spyOn(group.service, "probeEmpty").mockImplementation((handle) => {
+        if (killedAt !== undefined) {
+          probesAfterKill += 1;
+          if (!recover && (persistent || ms - killedAt < 100)) {
+            return { status: "unknown", pgid: handle.pgid, reason: "permission_denied" };
+          }
+        }
+        return probe(handle);
+      });
+      const bumps: string[] = [];
+      const manager = createSetupJobManager({
+        rootDir: join(root, `probe-grace-${kind}-${persistent}`),
+        platform: "darwin",
+        runnerPath: "/tmp/setup-login-runner.js",
+        openTerminal: fakeOpener,
+        now: () => new Date(ms),
+        monitorPollMs: 1,
+        terminationGraceMs: 200,
+        sleep: async (delay) => {
+          expect(manager.credentialMutationOpen("codex")).toBe(true);
+          ms += delay;
+        },
+        processGroups: group.service,
+        onCredentialStateMayHaveChanged: (harness) => bumps.push(harness),
+      });
+      await manager.start();
+      try {
+        const job = manager.create(LOGIN_REQUEST);
+        writeRunnerStateV2(
+          manager,
+          job.jobId,
+          group.leader,
+          "awaiting_permit",
+          new Date(ms).toISOString(),
+        );
+        await waitForPhase(manager, job.jobId, "awaiting_user");
+        expect(bumps).toEqual(["codex"]);
+        const done =
+          kind === "cancel"
+            ? await manager.cancel({ jobId: job.jobId })
+            : ((ms = Date.parse(job.deadlineAt!)),
+              await waitForTerminal(manager, job.jobId),
+              manager.status({ jobId: job.jobId }));
+        expect(group.signals).toEqual(["SIGTERM", "SIGKILL"]);
+        expect(probesAfterKill).toBeGreaterThanOrEqual(2);
+        if (persistent) {
+          expect(ms - killedAt!).toBe(200);
+          expect(done.outcome?.reason).toBe("termination_unconfirmed");
+          expect(manager.credentialMutationOpen("codex")).toBe(true);
+          expect(bumps).toEqual(["codex"]);
+          recover = true;
+          manager.reconcile({ jobId: job.jobId });
+        } else {
+          expect(ms - killedAt!).toBe(100);
+          expect(done.outcome?.reason).toBe(kind === "cancel" ? "cancelled_by_user" : "timed_out");
+        }
+        expect(manager.credentialMutationOpen("codex")).toBe(false);
+        expect(bumps).toEqual(["codex", "codex"]);
+      } finally {
+        await manager.shutdown();
+      }
     },
   );
 
@@ -1955,6 +2135,117 @@ describe("setup jobs", () => {
     await manager.shutdown();
   });
 
+  it.each([
+    ["terminal_transport_unavailable", "not_supported", "not_supported"],
+    ["terminal_transport_unsupported", "not_supported", "not_supported"],
+    ["terminal_transport_probe_failed", "failed", "launch_failed"],
+    ["terminal_transport_failed", "failed", "launch_failed"],
+  ] as const)(
+    "maps a pre-vendor %s receipt to its exact durable outcome",
+    async (errorCode, expectedState, expectedReason) => {
+      const group = processGroupFixture({ leader: knownLeader(160) });
+      const manager = createSetupJobManager({
+        rootDir: join(root, `terminal-receipt-${errorCode}`),
+        platform: "darwin",
+        runnerPath: "/tmp/setup-login-runner.js",
+        openTerminal: fakeOpener,
+        monitorPollMs: 1,
+        processGroups: group.service,
+      });
+      await manager.start();
+      const job = manager.create(LOGIN_REQUEST);
+      const observedAt = new Date().toISOString();
+      writeRunnerStateV2(manager, job.jobId, group.leader, "awaiting_permit", observedAt);
+      await waitForPhase(manager, job.jobId, "awaiting_user");
+      writeRunnerStateV2(manager, job.jobId, group.leader, "running", observedAt);
+      const permitIssuedAt = manager.status({ jobId: job.jobId }).execution?.permitIssuedAt ?? null;
+      writeRunnerResultV2(manager, job.jobId, {
+        commandStarted: false,
+        errorCode,
+        exitCode: null,
+        permitIssuedAt,
+      });
+      expect(await waitForTerminal(manager, job.jobId)).toBe(expectedState);
+      expect(manager.status({ jobId: job.jobId })).toMatchObject({
+        state: expectedState,
+        outcome: { reason: expectedReason },
+        nativeCommand: { commandStarted: false, errorCode },
+      });
+      await manager.shutdown();
+    },
+  );
+
+  it("keeps a post-start terminal transport break distinct from vendor spawn", async () => {
+    const group = processGroupFixture({ leader: knownLeader(161) });
+    const manager = createSetupJobManager({
+      rootDir: join(root, "terminal-receipt-post-start"),
+      platform: "darwin",
+      runnerPath: "/tmp/setup-login-runner.js",
+      openTerminal: fakeOpener,
+      monitorPollMs: 1,
+      processGroups: group.service,
+    });
+    await manager.start();
+    const job = manager.create(LOGIN_REQUEST);
+    const observedAt = new Date().toISOString();
+    writeRunnerStateV2(manager, job.jobId, group.leader, "awaiting_permit", observedAt);
+    await waitForPhase(manager, job.jobId, "awaiting_user");
+    writeRunnerStateV2(manager, job.jobId, group.leader, "running", observedAt);
+    writeRunnerResultV2(manager, job.jobId, {
+      commandStarted: true,
+      errorCode: "terminal_transport_failed",
+      exitCode: null,
+    });
+    expect(await waitForTerminal(manager, job.jobId)).toBe("failed");
+    expect(manager.status({ jobId: job.jobId })).toMatchObject({
+      outcome: { reason: "command_failed" },
+      nativeCommand: { commandStarted: true, errorCode: "terminal_transport_failed" },
+    });
+    expect(manager.status({ jobId: job.jobId }).message).toContain(
+      "terminal transport failed after the vendor command started",
+    );
+    await manager.shutdown();
+  });
+
+  it("never offers the macOS-only Terminal handoff off macOS", async () => {
+    // The remedy names `--browser-redirect`, which startObservableLogin refuses
+    // unless the daemon runs on macOS. Windows reaches this message now that
+    // the daemon-hosted login works there, so it must not be advertised.
+    const group = processGroupFixture({ leader: knownLeader(107) });
+    const manager = createSetupJobManager({
+      rootDir: join(root, "device-auth-unsupported-linux"),
+      platform: "linux",
+      runnerPath: "/tmp/setup-login-runner.js",
+      openTerminal: fakeOpener,
+      // The device-code flow launches the runner via spawn (no Terminal); the
+      // fake stays alive so the state machine is driven by the sidecars below.
+      spawn: (() => fakeOpener()) as unknown as typeof import("node:child_process").spawn,
+      monitorPollMs: 1,
+      processGroups: group.service,
+      sleep: async () => {},
+    });
+    await manager.start();
+    // The device-code flow is the daemon-hosted one that works off macOS.
+    const job = manager.create(DEVICE_CODE_REQUEST);
+    const observedAt = new Date().toISOString();
+    writeRunnerStateV2(manager, job.jobId, group.leader, "awaiting_permit", observedAt);
+    await waitForPhase(manager, job.jobId, "awaiting_user");
+    writeRunnerStateV2(manager, job.jobId, group.leader, "running", observedAt);
+    const permitIssuedAt = manager.status({ jobId: job.jobId }).execution?.permitIssuedAt ?? null;
+    writeRunnerResultV2(manager, job.jobId, {
+      commandStarted: false,
+      errorCode: "device_auth_unsupported",
+      exitCode: null,
+      permitIssuedAt,
+    });
+    await waitForTerminal(manager, job.jobId);
+    const done = manager.status({ jobId: job.jobId });
+    expect(done.state).toBe("not_supported");
+    expect(done.message).toContain("upgrade the codex CLI");
+    expect(done.message).not.toContain("--browser-redirect");
+    await manager.shutdown();
+  });
+
   it("seals the daemon-resolved default native store into a default-lane login manifest", async () => {
     // Hit live 2026-08-04: the detached login worker re-derived the codex home
     // from its own bootstrap env, which drops CLAUDEXOR_CONFIG_DIR — so
@@ -2254,6 +2545,87 @@ describe("setup jobs for credential profiles (INV-135)", () => {
     expect(() => manager.create(LOGIN_REQUEST)).toThrow(/another codex login job is active/);
   });
 
+  it("refuses a default Antigravity login and never offers to extend its own window", async () => {
+    process.env.CLAUDEXOR_CONFIG_DIR = join(root, "cfg-agy");
+    // Hermetic like the claude/cursor fakes above: without this the test only
+    // passes on a host that happens to have a real `agy` on PATH.
+    const oldAgyBin = process.env.CLAUDEXOR_AGY_BIN;
+    const fakeAgy = join(root, "fake-agy");
+    writeFileSync(fakeAgy, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    chmodSync(fakeAgy, 0o700);
+    process.env.CLAUDEXOR_AGY_BIN = fakeAgy;
+    registerConfigDirProfile({ harnessId: "agy", profileId: "work" });
+    const manager = createSetupJobManager({
+      rootDir: join(root, "store-agy"),
+      platform: "darwin",
+      runnerPath: "/tmp/setup-login-runner.js",
+      openTerminal: fakeOpener,
+    });
+    const AGY_LOGIN = { harness: "agy", action: "login", authRequest: "subscription" } as const;
+    // agy has NO default binding store, so a profile-less login is refused at
+    // create time rather than targeting vendor state at the daemon's HOME.
+    expect(() => manager.create(AGY_LOGIN)).toThrow(/no default credential store/);
+
+    const job = manager.create({ ...AGY_LOGIN, profileId: "work" });
+    // The deadline is the VENDOR's 60s window, published as fixed so no
+    // surface offers to extend a window the vendor will not honor.
+    expect(job.deadlineFixed).toBe(true);
+    const window = Date.parse(job.deadlineAt!) - Date.parse(job.createdAt);
+    expect(window).toBeGreaterThan(0);
+    expect(window).toBeLessThanOrEqual(61_000);
+    expect(() => manager.extend({ jobId: job.jobId })).toThrow(/cannot be extended/);
+    await manager.shutdown();
+    if (oldAgyBin === undefined) delete process.env.CLAUDEXOR_AGY_BIN;
+    else process.env.CLAUDEXOR_AGY_BIN = oldAgyBin;
+  });
+
+  it("resolveLoginProfileBinding (K.4): claude/codex profile-less logins stay unbound with a best-effort bootstrap row, cursor binds to cursor-default, explicit ids pass through", () => {
+    process.env.CLAUDEXOR_CONFIG_DIR = join(root, "cfg-login-binding");
+    const registry = () => loadConfig(noProjectRepoRoot()).global.credential_profiles;
+
+    // (a) codex profile-less login: null binding (the default-store job runs
+    // as before) plus a best-effort cold bootstrap row at the exact native
+    // dir the job targets.
+    expect(resolveLoginProfileBinding("codex", "login", undefined)).toBeNull();
+    expect(registry()).toContainEqual(
+      expect.objectContaining({
+        profile_id: "codex-default",
+        harness_id: "codex",
+        isolation_locator: defaultNativeCodexHome(),
+      }),
+    );
+
+    // A bootstrap-registration failure never blocks the login: a plain FILE
+    // squatting the claude native dir makes ensureBootstrapProfile's mkdir
+    // throw, yet the binding is still the ordinary null default-store branch
+    // and no half-registered row appears.
+    const claudeDir = defaultNativeClaudeConfigDir();
+    mkdirSync(join(claudeDir, ".."), { recursive: true });
+    writeFileSync(claudeDir, "not a directory");
+    expect(resolveLoginProfileBinding("claude", "login", undefined)).toBeNull();
+    expect(registry().some((p) => p.harness_id === "claude")).toBe(false);
+
+    // (b) cursor has no default store (D-U3): the profile-less login
+    // auto-binds to the isolated cursor-default bootstrap row.
+    const cursorBinding = resolveLoginProfileBinding("cursor", "login", undefined);
+    expect(cursorBinding?.profileId).toBe("cursor-default");
+    const cursorRow = registry().find((p) => p.harness_id === "cursor");
+    expect(cursorBinding?.configDir).toBe(realpathSync(cursorRow!.isolation_locator!));
+
+    // (c) an explicit profile id resolves exactly as before — no bootstrap
+    // sugar, the binding is the registered profile's own scoped home.
+    const { profile } = registerConfigDirProfile({ harnessId: "codex", profileId: "work" });
+    expect(resolveLoginProfileBinding("codex", "login", "work")).toEqual({
+      profileId: "work",
+      configDir: realpathSync(profile.isolation_locator!),
+      credentialPolicy: {
+        identity_scope: "profile",
+        max_enabled_profiles: null,
+        cleanup_owner: "claudexor",
+      },
+    });
+  });
+
   it("binds a cursor profile login to its canonical Claudexor-owned HOME (valentine)", () => {
     process.env.CLAUDEXOR_CONFIG_DIR = join(root, "cfg");
     const { profile } = registerConfigDirProfile({ harnessId: "cursor", profileId: "valentine" });
@@ -2329,7 +2701,7 @@ describe("setup jobs for credential profiles (INV-135)", () => {
     );
     expect(await waitForTerminal(manager, job.jobId)).toBe("succeeded");
     expect(profileProbes).toEqual([["codex", "work"]]);
-    expect(invalidatedHarnesses).toEqual(["codex"]);
+    expect(invalidatedHarnesses).toEqual(["codex", "codex"]); // window entry + close
     // The smoke attests the DEFAULT route only — a scoped profile job must
     // not spend quota on it, and the lifecycle honestly stays disclosed.
     expect(capability.runs).toHaveLength(0);
@@ -2611,6 +2983,31 @@ describe("one-shot sign-in input (url_disclosure_with_input, owner directive 202
     await manager.shutdown();
   });
 
+  it("gives the token exchange its own window, so the clock cannot kill a delivered code", async () => {
+    // The vendor's window bounds how long the USER had to paste; the exchange
+    // that follows is a different thing. Without this the deadline monitor
+    // SIGKILLs the vendor mid-exchange — and against a sixty-second window the
+    // user is racing that clock, so a successful paste being cancelled is the
+    // COMMON case, not an edge one.
+    const manager = createSetupJobManager({
+      rootDir: join(root, "input-grace"),
+      platform: "darwin",
+      runnerPath: "/tmp/setup-login-runner.js",
+      openTerminal: fakeOpener,
+      loginTimeoutMs: 60_000,
+    });
+    await manager.start();
+    const job = manager.create(CLAUDE_LOGIN);
+    const before = Date.parse(job.deadlineAt!);
+    expect(before - Date.parse(job.createdAt)).toBeLessThanOrEqual(61_000);
+    const updated = manager.input({ jobId: job.jobId, value: "pasted-code-9" });
+    expect(Date.parse(updated.deadlineAt!)).toBeGreaterThan(before);
+    // And the extended deadline is no longer the vendor's own, so a surface
+    // may offer to extend it again rather than refusing.
+    expect(updated.deadlineFixed).toBe(false);
+    await manager.shutdown();
+  });
+
   it("rejects input for flows that do not take it (cursor url_disclosure, codex device-code)", async () => {
     const manager = createSetupJobManager({
       rootDir: join(root, "input-wrong-mode"),
@@ -2643,5 +3040,167 @@ describe("one-shot sign-in input (url_disclosure_with_input, owner directive 202
     expect(() => manager.input({ jobId: job.jobId, value: "y".repeat(2000) })).toThrow();
     expect(existsSync(manager._store.paths(job.jobId).runnerInput)).toBe(false);
     await manager.shutdown();
+  });
+});
+
+describe("setup credential-mutation window (#363)", () => {
+  const permitted = { permitIssuedAt: "2026-09-30T00:00:01.000Z" } as never;
+  it.each([
+    ["an active job before its permit", { state: "waiting_for_input" }, false],
+    ["an active job holding a permit", { state: "running", execution: permitted }, true],
+    ["a job that ended with proof", { state: "succeeded", execution: permitted }, false],
+    [
+      "an unconfirmed termination after a permit",
+      {
+        state: "failed",
+        execution: permitted,
+        outcome: { reason: "termination_unconfirmed" },
+      },
+      true,
+    ],
+    [
+      "an unconfirmed termination later proven empty",
+      {
+        state: "failed",
+        execution: permitted,
+        outcome: { reason: "termination_unconfirmed" },
+        terminationReconciliation: { status: "empty", observedAt: "2026-09-30T00:00:02.000Z" },
+      },
+      false,
+    ],
+    [
+      "an unconfirmed termination before any permit",
+      { state: "failed", outcome: { reason: "termination_unconfirmed" } },
+      false,
+    ],
+  ])("%s → open=%s", (_label, job, open) => {
+    expect(CredentialWindow.credentialMutationWindowOpenFor(job as never)).toBe(open);
+  });
+
+  function windowedManager(
+    rootDir: string,
+    group: ReturnType<typeof processGroupFixture>,
+    extra = {},
+  ) {
+    const bumps: string[] = [];
+    const manager = createSetupJobManager({
+      rootDir,
+      platform: "darwin",
+      runnerPath: "/tmp/setup-login-runner.js",
+      openTerminal: fakeOpener,
+      monitorPollMs: 1,
+      terminationGraceMs: 5,
+      processGroups: group.service,
+      onCredentialStateMayHaveChanged: (harness) => bumps.push(harness),
+      ...extra,
+    });
+    return { manager, bumps };
+  }
+
+  it("an unknown surviving vendor keeps the window open until a reconciliation proves it empty", async () => {
+    const leader = knownLeader(71);
+    const group = processGroupFixture({ leader });
+    const { manager, bumps } = windowedManager(join(root, "window-unconfirmed"), group);
+    await manager.start();
+    const job = manager.create(LOGIN_REQUEST);
+    expect(manager.credentialMutationOpen("codex")).toBe(false);
+    writeRunnerStateV2(manager, job.jobId, leader);
+    await waitForPhase(manager, job.jobId, "awaiting_user");
+    expect(manager.credentialMutationOpen("codex")).toBe(true);
+    expect(manager.credentialMutationOpen("cursor")).toBe(false);
+    expect(bumps).toEqual(["codex"]);
+    // The leader's identity can no longer be proven: nothing may be signalled
+    // and the group is not proven empty — the vendor may survive.
+    group.setObserved(knownLeader(71, "darwin:1710000009:000071"));
+    const stopped = await manager.cancel({ jobId: job.jobId });
+    expect(stopped.outcome?.reason).toBe("termination_unconfirmed");
+    expect(manager.credentialMutationOpen("codex")).toBe(true);
+    expect(bumps).toEqual(["codex"]);
+    expect(() => manager.reconcile({ jobId: job.jobId })).toThrow(/not proven empty/);
+    expect(manager.credentialMutationOpen("codex")).toBe(true);
+    group.setAlive(false);
+    manager.reconcile({ jobId: job.jobId });
+    expect(manager.credentialMutationOpen("codex")).toBe(false);
+    expect(bumps).toEqual(["codex", "codex"]);
+    await manager.shutdown();
+  });
+
+  it("a deadline never closes the window: an expired login whose termination is unproven stays open", async () => {
+    let nowMs = Date.parse("2026-09-30T00:00:00.000Z");
+    const leader = knownLeader(72);
+    const group = processGroupFixture({ leader });
+    const { manager, bumps } = windowedManager(join(root, "window-deadline"), group, {
+      now: () => new Date(nowMs),
+      loginTimeoutMs: 60_000,
+    });
+    await manager.start();
+    const job = manager.create(LOGIN_REQUEST);
+    writeRunnerStateV2(
+      manager,
+      job.jobId,
+      leader,
+      "awaiting_permit",
+      new Date(nowMs).toISOString(),
+    );
+    await waitForPhase(manager, job.jobId, "awaiting_user");
+    group.setObserved({
+      status: "unknown",
+      pid: 72,
+      platform: "darwin",
+      reason: "permission_denied",
+    });
+    nowMs = Date.parse(job.deadlineAt!) + 1;
+    expect(await waitForTerminal(manager, job.jobId)).toBe("failed");
+    expect(manager.status({ jobId: job.jobId }).outcome?.reason).toBe("termination_unconfirmed");
+    expect(manager.credentialMutationOpen("codex")).toBe(true);
+    expect(bumps).toEqual(["codex"]);
+    await manager.shutdown();
+  });
+
+  it("a restart that cannot re-prove the worker keeps the window open and invalidates nothing new", async () => {
+    const storeRoot = join(root, "window-restart");
+    const leader = knownLeader(73);
+    const group = processGroupFixture({ leader });
+    const first = windowedManager(storeRoot, group);
+    await first.manager.start();
+    const job = first.manager.create(LOGIN_REQUEST);
+    writeRunnerStateV2(first.manager, job.jobId, leader);
+    await waitForPhase(first.manager, job.jobId, "awaiting_user");
+    expect(first.bumps).toEqual(["codex"]);
+    group.setObserved({
+      status: "unknown",
+      pid: 73,
+      platform: "darwin",
+      reason: "permission_denied",
+    });
+    await first.manager.shutdown();
+    first.manager._store.journal.close();
+    const successor = windowedManager(storeRoot, group);
+    await successor.manager.start();
+    expect(successor.manager.status({ jobId: job.jobId }).outcome?.reason).toBe(
+      "termination_unconfirmed",
+    );
+    expect(successor.manager.credentialMutationOpen("codex")).toBe(true);
+    expect(successor.bumps).toEqual([]);
+    await successor.manager.shutdown();
+  });
+
+  it("an unreadable setup journal proves nothing closed: every harness reads open", () => {
+    const storeRoot = join(root, "window-corrupt");
+    const store = new SetupJobStore(storeRoot);
+    store.journal.append("setup.job.saved", { job: { jobId: "not-a-valid-setup-job" } });
+    store.journal.close();
+    const reopened = new SetupJobStore(storeRoot);
+    expect(reopened.recoveryState().status).toBe("recovery_required");
+    expect(() => CredentialWindow.open(reopened, "cursor")).toThrow(/requires recovery/);
+    bindCredentialMutationWindow((harness) => CredentialWindow.open(reopened, harness));
+    try {
+      expect(credentialMutationWindowOpen("cursor")).toBe(true);
+      expect(credentialMutationWindowOpen()).toBe(true);
+    } finally {
+      bindCredentialMutationWindow(null);
+    }
+    expect(credentialMutationWindowOpen("cursor")).toBe(false);
+    reopened.journal.close();
   });
 });

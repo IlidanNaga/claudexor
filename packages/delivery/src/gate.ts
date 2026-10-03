@@ -6,8 +6,10 @@ import type {
   RunApplyState,
   WorkProduct,
   WorkState,
+  WorkspaceFilesManifest,
 } from "@claudexor/schema";
 import { parseUnifiedDiff } from "@claudexor/core";
+import { reviewAllowsApply } from "@claudexor/schema";
 import { pathGuard } from "@claudexor/policy";
 import { sha256 } from "@claudexor/util";
 
@@ -24,6 +26,8 @@ export interface ApplyGateInput {
   decision: DecisionRecord | null;
   workProduct: WorkProduct | null;
   patch: string;
+  filesManifest?: WorkspaceFilesManifest;
+  manifestSha256?: string;
   /** Repo root recorded by the run (contract/params); null when unknown. */
   originalRepoRoot: string | null;
   /** Repo the caller wants to apply into. */
@@ -34,10 +38,14 @@ export interface ApplyGateInput {
    * valid only when its recorded patch hash matches the artifact — a typed,
    * server-owned unblock, never client-faked state.
    */
-  operatorDecision?: { action: string; patch_sha256?: string } | null;
+  operatorDecision?: { action: string; patch_sha256?: string; manifest_sha256?: string } | null;
   /** Fresh verifier result for this delivery attempt. When omitted, the
    * persisted decision result is used for read-only eligibility projection. */
   finalVerify?: FinalVerifyRecord | null;
+  /** Thread contribution preflight precedes the aggregate patch's mandatory
+   * verifyAndDeliver. Defer only a missing saved verifier; never report it as
+   * passed or ignore an explicit fresh result or a recorded failed verifier. */
+  deferFinalVerify?: boolean;
   /**
    * The run's effective MUTABLE delivery/apply state (delivery_state overlay →
    * work_product snapshot), threaded in by the same owner that projects
@@ -87,6 +95,9 @@ function applyHint(decision: DecisionRecord | null, lifecycle: string | null): s
       // typed risk override; the fresh final check then runs at apply time.
       return "Accept the risk to apply it anyway (`claudexor decision <run> --accept-risk`).";
     }
+    if (facts.review === "not_run" && facts.review_requested === false) {
+      return "Inspect the patch and retry the final check before applying.";
+    }
     if (facts.review === "not_run" || facts.checks === "not_configured") {
       return "Add a test check or get a clean cross-family review, then re-run. (Accepting the risk only unblocks a change that was reviewed and blocked.)";
     }
@@ -131,8 +142,9 @@ function hasValidRiskOverride(input: ApplyGateInput): boolean {
     isNeedsDecision(input.decision) &&
     !!d &&
     (d.action === "accept_risk" || d.action === "override_needs_human") &&
-    typeof d.patch_sha256 === "string" &&
-    d.patch_sha256 === sha256(input.patch)
+    (input.workProduct?.kind === "files"
+      ? typeof d.manifest_sha256 === "string" && d.manifest_sha256 === input.manifestSha256
+      : typeof d.patch_sha256 === "string" && d.patch_sha256 === sha256(input.patch))
   );
 }
 
@@ -156,6 +168,7 @@ function isOverrideVerifyPending(input: ApplyGateInput): boolean {
 }
 
 export function validateApplyGate(input: ApplyGateInput): string | null {
+  if (input.applyState === "discarded") return "This result was discarded.";
   // An operator risk override is meaningful ONLY on a needs-decision run —
   // review blocked or checks failed (INV-111, Bible §11): the decision
   // endpoint records decisions exclusively for such runs, so any other
@@ -182,10 +195,9 @@ export function validateApplyGate(input: ApplyGateInput): string | null {
   if (workVeto === "incomplete") {
     return "This change can't be applied — the run reported the work is incomplete. Re-run until it finishes.";
   }
-  // Apply requires a succeeded lifecycle with an APPROVED review and checks
-  // not failed (INV-112 verification-basis rules unchanged).
+  // Review opt-out is frozen separately from its verdict (INV-112).
   const applyable =
-    facts?.lifecycle === "succeeded" && facts.review === "approved" && facts.checks !== "failed";
+    facts?.lifecycle === "succeeded" && reviewAllowsApply(facts) && facts.checks !== "failed";
   if (!applyable && !override) {
     // Jargon soup rewritten to plain language (F5). The raw axes (lifecycle,
     // review, checks) remain the machine detail on `decision.facts` and the
@@ -197,7 +209,9 @@ export function validateApplyGate(input: ApplyGateInput): string | null {
   // override can change that. Failed verify GATES may be overridden through
   // the same accept_risk path as any blocked run.
   const fv = input.finalVerify !== undefined ? input.finalVerify : input.decision.final_verify;
-  if (!fv?.attempted) {
+  const verifyDeferred =
+    input.deferFinalVerify === true && input.finalVerify === undefined && fv == null;
+  if (!fv?.attempted && !verifyDeferred) {
     // A blocked run authorized by a hash-bound override skips FinalVerifier by
     // construction; the read-only projection reports deliverable and the fresh
     // check runs at apply (QA-032). The apply path supplies `finalVerify` and so
@@ -205,7 +219,7 @@ export function validateApplyGate(input: ApplyGateInput): string | null {
     if (isOverrideVerifyPending(input)) return null;
     return "This change needs a fresh final check before it can be applied.";
   }
-  if (fv.attempted) {
+  if (fv?.attempted) {
     if (fv.applied_cleanly === false) {
       return `This change no longer applies onto a fresh copy of the code (${fv.reason ?? "conflict"}). Re-run the task.`;
     }
@@ -220,13 +234,23 @@ export function validateApplyGate(input: ApplyGateInput): string | null {
     }
   }
   if (!input.workProduct) return "work product is required before apply";
-  if (input.workProduct.kind !== "patch")
+  const files = input.workProduct.kind === "files";
+  if (
+    files &&
+    (input.filesManifest?.isolation !== "envelope" || input.filesManifest.complete !== true)
+  )
+    return "only a complete copied files result can be applied";
+  if (!files && input.workProduct.kind !== "patch")
     return `work product kind ${input.workProduct.kind} is not applyable as a patch`;
-  const recorded = input.workProduct.meta?.["patch_sha256"];
+  const recorded = input.workProduct.meta?.[files ? "manifest_sha256" : "patch_sha256"];
   if (typeof recorded !== "string" || recorded.length === 0)
-    return "work product patch hash is required before apply";
-  if (recorded !== sha256(input.patch))
-    return "patch artifact hash does not match the reviewed work product";
+    return files
+      ? "work product manifest hash is required before apply"
+      : "work product patch hash is required before apply";
+  if (recorded !== (files ? input.manifestSha256 : sha256(input.patch)))
+    return files
+      ? "manifest hash does not match the recorded work product"
+      : "patch artifact hash does not match the recorded work product";
   if (!input.originalRepoRoot) return "run original project is unknown; refusing apply";
   try {
     if (realpathSync(input.originalRepoRoot) !== realpathSync(input.targetRepoRoot)) {
@@ -235,6 +259,9 @@ export function validateApplyGate(input: ApplyGateInput): string | null {
   } catch {
     return "run original project cannot be verified; refusing apply";
   }
+  // Files use schema-relative paths and the file delivery owner's no-follow
+  // ancestor resolution. Unchanged baseline links are not mutations to fence.
+  if (files) return null;
   // Workspace confinement (defense-in-depth on top of `git apply`): every
   // patched path must resolve INSIDE the target repo root.
   for (const path of patchPaths(input.patch)) {
@@ -260,6 +287,13 @@ export function deriveApplyEligibility(input: ApplyGateInput): ApplyEligibility 
   // the review outcome for `applied_review_blocked` lives on the outcome banner
   // and the separate Revert affordance, not on this apply verdict.
   const applyState = input.applyState ?? null;
+  if (applyState === "discarded")
+    return {
+      eligible: false,
+      state: "discarded",
+      reason: "This result was discarded.",
+      requiredAction: null,
+    };
   if (applyState === "applied" || applyState === "applied_review_blocked") {
     return {
       eligible: false,

@@ -1,1 +1,1 @@
-{"type":"error","message":"Reconnecting... 4/5 (request timed out)"}
+{"type":"error","message":"Reconnecting... 4/5 (stream disconnected before completion: idle timeout waiting for SSE)"}

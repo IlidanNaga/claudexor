@@ -1,7 +1,18 @@
 import { type Server, type Socket, createServer } from "node:net";
-import { timingSafeEqual } from "node:crypto";
-import { chmodSync, lstatSync, unlinkSync } from "node:fs";
-import { createInterface } from "node:readline";
+
+import {
+  ControlRunStartRequest,
+  TurnEnqueueProblem,
+  type TurnEnqueueProblem as TurnEnqueueProblemValue,
+  delegatedParentOf,
+  resolveRunReviewRequested,
+  normalizeCancelReasonCode,
+  isTerminalLifecycle,
+  type CancelReasonCode,
+  type RuntimeConcurrencyCaps,
+} from "@claudexor/schema";
+import { daemonHealth, daemonConcurrencyLimit } from "./daemon-health.js";
+import { RpcFollowers } from "./rpc-followers.js";
 import {
   assertNoInlineSecretValues,
   errorCode,
@@ -21,10 +32,10 @@ import {
   findAcceptedCommand,
   publicAcceptedCommand,
 } from "./command-rpc.js";
-import { productCommandRecords, prunableCommandIds } from "./command-retention.js";
+import { prunableCommandIds, selectProductCommands } from "./command-retention.js";
+import { clearStaleUnixSocketPath, listenOnDaemonEndpoint } from "./daemon-listen.js";
 import {
   admitDelegatedRequest,
-  delegatedParentOf,
   isDelegatedChildRecord,
   type DelegationAdmissionAuthority,
 } from "./delegation-admission.js";
@@ -37,6 +48,12 @@ import {
   type JobRecord,
 } from "./job-record.js";
 import { settleJobError } from "./job-settlement.js";
+import {
+  daemonTokenMatches,
+  recoveryOnlyRefusal,
+  servingModeOf,
+  type DaemonServingModeSnapshot,
+} from "./serving-admission.js";
 import { socketAlive } from "./socket-probe.js";
 import { isWindowsPipePath } from "./token.js";
 import {
@@ -44,10 +61,6 @@ import {
   replacementRefusal,
   type RuntimeReplacementAuthority,
 } from "./daemon-shutdown-rpc.js";
-import {
-  TurnEnqueueProblem,
-  type TurnEnqueueProblem as TurnEnqueueProblemValue,
-} from "@claudexor/schema";
 export { JOB_STATES, jobStateFromResult, socketAlive, type JobRecord };
 
 export interface RunContext {
@@ -63,6 +76,8 @@ export interface DaemonOptions extends RuntimeReplacementAuthority {
   token: string;
   runner: RunnerFn;
   maxConcurrent?: number;
+  /** Startup-frozen strategy caps; absent embedders retain historical defaults. */
+  runtimeConcurrencyCaps?: RuntimeConcurrencyCaps;
   commands: CommandAuthority;
   delegationAuthority?: DelegationAdmissionAuthority;
   maxHistory?: number;
@@ -72,6 +87,8 @@ export interface DaemonOptions extends RuntimeReplacementAuthority {
    * used to drop pending interactions so a dead run never advertises
    * waiting_on_user. */
   onRunTerminal?: (runId: string, threadId?: string) => void;
+  /** Best-effort observer after a durable terminal; it must not throw. */
+  onCommandTerminal?: (record: JobRecord) => void;
   /** Called when a job that carried a pre-created thread turn (params.turnId)
    * settles failure-shaped WITHOUT ever binding a run — i.e. the refusal
    * happened before the run materialized (trust gate, preflight validation).
@@ -80,19 +97,19 @@ export interface DaemonOptions extends RuntimeReplacementAuthority {
   onTurnEnqueueFailed?: (turnId: string, problem: TurnEnqueueProblemValue) => void;
   onShutdownRequested?: () => Promise<void>;
   onRuntimeReplacementRequested?: () => Promise<void>;
+  /** Issue #165 D5 admission snapshot; absent embedders always serve normal. */
+  servingMode?: DaemonServingModeSnapshot;
   /** Test-only barriers around command authority acquisition. */
   startupBarrier?: (
     barrier: "before_registry_load" | "after_registry_load",
   ) => void | Promise<void>;
 }
 
-// Daemon job state is EXACTLY the run LIFECYCLE (D8): outcome quality
-// (checks/review/reason) lives on the run's facts, projected by the control
-// plane — the job state machine never re-encodes it.
-/** Unix-socket worker pool; scheduling stays in the injected Orchestrator. */
+/** Daemon scheduling uses run lifecycle (D8); outcome quality stays on RunFacts.
+ * The injected Orchestrator owns work within a job. */
 export class DaemonServer {
   private server?: Server;
-  private readonly sockets = new Set<Socket>();
+  private readonly followers = new RpcFollowers();
   private readonly queue: string[] = [];
   private readonly cancelled = new Set<string>();
   private readonly controllers = new Map<string, AbortController>();
@@ -108,7 +125,9 @@ export class DaemonServer {
     this.resolveShutdown = resolve;
   });
 
-  constructor(private readonly opts: DaemonOptions) {}
+  constructor(private readonly opts: DaemonOptions) {
+    this.maxConcurrent = daemonConcurrencyLimit(opts);
+  }
 
   async start(): Promise<void> {
     if (this.stopping) {
@@ -143,32 +162,16 @@ export class DaemonServer {
     }
     await this.opts.startupBarrier?.("before_registry_load");
     if (this.stopping) throw this.stoppingError("daemon startup was cancelled before listen");
-    commandStores(this.opts.commands);
+    // With product admission closed (issue #165 D5 stage 3) the command
+    // projections are not activated yet; the registry materializes (and its
+    // history is pruned) once normal admission opens — see pruneHistory().
+    if (servingModeOf(this.opts.servingMode) === "normal") this.pruneHistory();
     await this.opts.startupBarrier?.("after_registry_load");
     if (this.stopping) throw this.stoppingError("daemon startup was cancelled after registry load");
-    if (!pipeEndpoint && pathExists(this.opts.socketPath)) {
-      const stale = lstatSync(this.opts.socketPath);
-      if (!stale.isSocket() || (process.getuid && stale.uid !== process.getuid())) {
-        throw Object.assign(new Error(`refusing to replace non-owned Unix socket path`), {
-          code: "unsafe_daemon_socket_path",
-        });
-      }
-      unlinkSync(this.opts.socketPath);
-    }
+    if (!pipeEndpoint) clearStaleUnixSocketPath(this.opts.socketPath);
     if (this.stopping) throw this.stoppingError("daemon startup was cancelled before listen");
-    await new Promise<void>((resolve, reject) => {
-      this.server = createServer((sock) => this.onConnection(sock));
-      this.server.once("error", reject);
-      this.server.listen(this.opts.socketPath, () => {
-        if (pipeEndpoint) return resolve();
-        try {
-          chmodSync(this.opts.socketPath, 0o600);
-        } catch {
-          /* best-effort on exotic filesystems */
-        }
-        resolve();
-      });
-    });
+    this.server = createServer((sock) => this.onConnection(sock));
+    await listenOnDaemonEndpoint(this.server, this.opts.socketPath, pipeEndpoint);
   }
 
   stop(): Promise<void> {
@@ -180,7 +183,7 @@ export class DaemonServer {
   private async stopOnce(): Promise<void> {
     for (const controller of this.controllers.values()) {
       try {
-        controller.abort(new Error("daemon shutdown"));
+        controller.abort("host_cancelled" satisfies CancelReasonCode);
       } catch {
         /* already gone */
       }
@@ -228,7 +231,7 @@ export class DaemonServer {
 
     // Existing local RPC sockets can otherwise keep server.close() pending
     // forever. They are destroyed only after every accepted command settled.
-    for (const socket of this.sockets) socket.destroy();
+    this.followers.destroyAll();
     await serverClosed;
     this.resolveShutdown();
   }
@@ -239,21 +242,13 @@ export class DaemonServer {
   }
 
   private onConnection(sock: Socket): void {
-    this.sockets.add(sock);
-    const rl = createInterface({ input: sock });
-    rl.on("line", (line) => {
+    this.followers.attach(sock, (line) => {
       void this.handle(line, sock);
     });
-    sock.on("error", () => rl.close());
-    sock.on("close", () => this.sockets.delete(sock));
   }
 
   private send(sock: Socket, obj: unknown): void {
-    try {
-      sock.write(JSON.stringify(obj) + "\n");
-    } catch {
-      /* socket closed */
-    }
+    this.followers.send(sock, obj);
   }
 
   private async handle(line: string, sock: Socket): Promise<void> {
@@ -266,7 +261,7 @@ export class DaemonServer {
       return;
     }
     const { id, method, params, token } = msg;
-    if (!tokenMatches(typeof token === "string" ? token : "", this.opts.token)) {
+    if (!daemonTokenMatches(typeof token === "string" ? token : "", this.opts.token)) {
       this.send(sock, { id, error: { message: "unauthorized" } });
       return;
     }
@@ -282,7 +277,13 @@ export class DaemonServer {
           ...(err && typeof err === "object" && "status" in err
             ? { status: Number((err as { status: unknown }).status) }
             : {}),
-          ...(replacementRefusal(err) ? { retryable: true } : {}),
+          ...(err &&
+          typeof err === "object" &&
+          typeof (err as { retryable?: unknown }).retryable === "boolean"
+            ? { retryable: (err as { retryable: boolean }).retryable }
+            : replacementRefusal(err)
+              ? { retryable: true }
+              : {}),
         },
       });
     }
@@ -300,17 +301,23 @@ export class DaemonServer {
       this.opts.runtimeLeaseOwner,
     );
     if (shutdown) return shutdown;
+    const servingMode = servingModeOf(this.opts.servingMode);
+    if (method === "claudexor.health") {
+      return daemonHealth(
+        this.startedAt,
+        this.queue.length,
+        this.active,
+        servingMode === "normal" ? this.allRecords().length : 0,
+        this.stopping,
+        servingMode,
+        this.maxConcurrent,
+        this.opts.runtimeConcurrencyCaps,
+      );
+    }
+    // Issue #165 D5: with product admission closed, every product RPC gets
+    // one typed refusal; health above and the shutdown RPCs stay reachable.
+    if (servingMode !== "normal") throw recoveryOnlyRefusal(method);
     switch (method) {
-      case "claudexor.health":
-        return {
-          ok: true,
-          uptime_ms: Date.now() - this.startedAt,
-          queue: this.queue.length,
-          running: this.active > 0,
-          active: this.active,
-          jobs: this.allRecords().length,
-          stopping: this.stopping,
-        };
       case "claudexor.enqueue": {
         if (this.stopping) {
           throw Object.assign(new Error("daemon is stopping; retry after reconnect"), {
@@ -336,7 +343,14 @@ export class DaemonServer {
         // under the same key still conflicts inside find().
         const replay = findAcceptedCommand(this.opts.commands, envelope);
         if (replay) return commandAcceptanceReceipt(replay, true);
-        const request = this.admitDelegatedRequest(rawRequest, operation);
+        // Journal-owned belt admission spans retries/processes; ordinary
+        // parentRunId alone never establishes delegated lineage.
+        const request = admitDelegatedRequest(
+          rawRequest,
+          operation,
+          this.allRecords(),
+          this.opts.delegationAuthority,
+        );
         const delegatedFrom = delegatedParentOf(request);
         const accepted = this.acceptCommand(
           request,
@@ -361,9 +375,9 @@ export class DaemonServer {
         return publicAcceptedCommand(this.opts.commands, params);
       }
       case "claudexor.list":
-        return productCommandRecords(this.allRecords()).map(publicJobRecord);
+        return selectProductCommands(this.allRecords(), params?.query).map(publicJobRecord);
       case "claudexor.cancel": {
-        return this.cancelJob(String(params?.id));
+        return this.cancelJob(String(params?.id), normalizeCancelReasonCode(params?.reason_code));
       }
       case "claudexor.delegationFence": {
         const runId = String(params?.runId ?? "");
@@ -388,13 +402,11 @@ export class DaemonServer {
     }
   }
 
-  private get maxConcurrent(): number {
-    return this.opts.maxConcurrent ?? 4;
-  }
+  private readonly maxConcurrent: number;
 
   /** Daemon-owned cancellation primitive used by RPC and the Delegate drain
    * barrier. It is safe to repeat and preserves queued-admission cleanup. */
-  cancelJob(jid: string): { id: string; cancelled: true } {
+  cancelJob(jid: string, reasonCode?: CancelReasonCode): { id: string; cancelled: true } {
     const rec = this.getRecord(jid);
     if (!rec) throw new Error(`no such job: ${jid}`);
     this.cancelled.add(jid);
@@ -404,7 +416,10 @@ export class DaemonServer {
       if (delegatedFrom) this.opts.delegationAuthority?.cancelAcceptedChild(delegatedFrom, rec.id);
     }
     if (rec.runId) this.opts.delegationAuthority?.beginParentClose(rec.runId);
-    this.controllers.get(jid)?.abort();
+    // The abort reason is the one channel a cancel's provenance rides into
+    // the terminal writers. Only enum members reach this parameter: RunControl
+    // validates the HTTP boundary, normalizeCancelReasonCode the raw RPC.
+    this.controllers.get(jid)?.abort(reasonCode || undefined);
     return { id: jid, cancelled: true };
   }
 
@@ -412,7 +427,8 @@ export class DaemonServer {
     return Object.assign(new Error(message), { code: "daemon_stopping", status: 503 });
   }
 
-  private pruneHistory(): void {
+  /** Age/cap and params-byte command retention: at normal admission and after every terminal. */
+  pruneHistory(): void {
     const removed = prunableCommandIds(
       this.allRecords(),
       this.opts.maxHistory ?? 500,
@@ -433,29 +449,20 @@ export class DaemonServer {
     operation?: string,
   ) {
     const store = commandStoreForRequest(this.opts.commands, params);
+    const parsed = ControlRunStartRequest.safeParse(params);
+    const acceptedParams =
+      parsed.success && parsed.data.mode === "agent"
+        ? { ...(params as Record<string, unknown>), review: resolveRunReviewRequested(parsed.data) }
+        : params;
     return store.accept({
       id: newId("job"),
-      params,
+      params: acceptedParams,
       idempotencyKey,
       clientId,
-      idempotencyParams,
+      // Resolved defaults belong to accepted execution, never the wire digest.
+      idempotencyParams: idempotencyParams ?? params,
       operation,
     });
-  }
-
-  /**
-   * Atomic daemon-side admission for belt children. Every belt process has its
-   * own local ledger, so the durable daemon journal is the only place that can
-   * enforce the max-eight count across retries/attempts/processes. Ordinary
-   * parentRunId lineage never enters this rule.
-   */
-  private admitDelegatedRequest(request: unknown, operation?: string): unknown {
-    return admitDelegatedRequest(
-      request,
-      operation,
-      this.allRecords(),
-      this.opts.delegationAuthority,
-    );
   }
 
   private allRecords(): JobRecord[] {
@@ -469,7 +476,11 @@ export class DaemonServer {
   private updateRecord(record: JobRecord, patch: Partial<JobRecord>): JobRecord {
     const store = commandStoreForId(this.opts.commands, record.id);
     if (!store) throw new Error(`command authority lost job ${record.id}`);
-    return store.update(record.id, patch);
+    const next = store.update(record.id, patch);
+    if (isTerminalLifecycle(next.state) && !isTerminalLifecycle(record.state)) {
+      this.opts.onCommandTerminal?.(next);
+    }
+    return next;
   }
 
   private threadIdOf(rec: JobRecord): string | undefined {
@@ -616,12 +627,4 @@ export class DaemonServer {
       if (!this.stopping) this.drain();
     }
   }
-}
-
-/** Constant-time token comparison (parity with the HTTP control facade). */
-function tokenMatches(candidate: string, expected: string): boolean {
-  const a = Buffer.from(candidate);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
 }

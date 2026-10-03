@@ -78,6 +78,26 @@ const MCP_TO_CLI = {
   primaryHarness: { cli: "primary-harness" },
   model: { cli: "model" },
   effort: { cli: "effort" },
+  processingPreference: { cli: "processing" },
+  execution: {
+    cli: null,
+    reason:
+      "ControlRunStartRequest.execution groups isolation and directory geometry; validate each member below instead of exempting the object",
+    nested: {
+      isolation: { type: "string", booleanCli: "in-place" },
+      workspaceKind: { type: "string", cli: "workspace-kind" },
+      scopePaths: { type: "array", cli: "scope-path" },
+      delegated: {
+        type: "boolean",
+        reason: "external orchestrator workspace custody; public CLI starts its own managed runs",
+      },
+      workspaceRoot: {
+        type: "string",
+        reason:
+          "external delegated execution address; CLI executes in its cwd without a fabricated root",
+      },
+    },
+  },
   web: { cli: "web" },
   externalContextPolicy: { cli: "web", reason: "control-api parity alias of web" },
   n: { cli: "n" },
@@ -102,6 +122,12 @@ const MCP_TO_CLI = {
       "the CLI scalar projects to PaidBudget.finite; omission preserves the configured tagged budget",
   },
   access: { cli: "access" },
+  credentialProfileId: { cli: "profile" },
+  review: {
+    cli: null,
+    tools: AGENT_RUN_TOOL_NAMES,
+    reason: "boolean Agent review intent; CLI --review and --no-review preserve true and false",
+  },
   reviewerPanel: { cli: "reviewer-panel", tools: AGENT_RUN_TOOL_NAMES },
   reviewerModels: { cli: "reviewer-model", tools: AGENT_RUN_TOOL_NAMES },
   reviewerEfforts: { cli: "reviewer-effort", tools: AGENT_RUN_TOOL_NAMES },
@@ -117,6 +143,8 @@ const BOOLEAN_FLAG_MAP = {
   },
   "deep-scan": { mcp: "deepScan", reason: "ask-only deep-scan strategy" },
   council: { mcp: "council", reason: "plan-only council strategy" },
+  review: { mcp: "review", reason: "explicit Agent internal review opt-in" },
+  "no-review": { mcp: "review", reason: "explicit false Agent internal review intent" },
   "until-clean": { mcp: null, reason: "convergence strategy; not exposed one-shot (CLI/app only)" },
   create: { mcp: null, reason: "encoded in the claudexor_create TOOL NAME" },
   delegate: {
@@ -125,8 +153,8 @@ const BOOLEAN_FLAG_MAP = {
       "delegation belt (D32) is injected into a harness sandbox by the engine; the PUBLIC MCP surface has no delegate flag (the belt IS the scoped MCP surface)",
   },
   "in-place": {
-    mcp: null,
-    reason: "live-tree mutation is a CLI-only explicit opt-in (never a remote-ish surface default)",
+    mcp: "execution.isolation",
+    reason: "explicit live isolation; omission remains an envelope on public MCP",
   },
   json: { mcp: null, reason: "CLI output shaping, not a run control" },
   "json-stream": {
@@ -135,7 +163,7 @@ const BOOLEAN_FLAG_MAP = {
   },
   resume: {
     mcp: null,
-    reason: "CLI shorthand over --thread; thread continuation via MCP is deferred with it",
+    reason: "CLI shorthand over --thread; MCP continues threads through claudexor_thread_turn",
   },
   all: { mcp: null, reason: "subcommand scope flag, not a run control" },
   refresh: { mcp: null, reason: "quota subcommand operation, not a run control" },
@@ -150,6 +178,10 @@ const BOOLEAN_FLAG_MAP = {
   "accept-risk": { mcp: null, reason: "decision subcommand flag" },
   override: { mcp: null, reason: "decision subcommand flag" },
   revert: { mcp: null, reason: "decision subcommand flag" },
+  discard: {
+    mcp: null,
+    reason: "decision subcommand flag; public MCP has no result-disposition mutation tool",
+  },
   "accept-clean-patch": { mcp: null, reason: "decision subcommand flag" },
   rerun: { mcp: null, reason: "decision subcommand flag" },
   help: { mcp: null, reason: "CLI affordance" },
@@ -163,7 +195,7 @@ const CLI_ONLY_EXEMPT = {
     "embedder contract is CLI/HTTP-first (v2.1 W5, DECIDED_TRADEOFFS DT2.1-1); MCP exposure of per-run system instructions is deferred",
   "instructions-file": "file form of --instructions; MCP exposure deferred with it (DT2.1-1)",
   "max-seconds":
-    "wall-clock run deadline; embedder contract is CLI/HTTP-first, MCP exposure deferred (DT2.1-1)",
+    "wall-clock run deadline; exposed as maxSeconds on claudexor_thread_turn, not the one-shot run tools checked here",
   "deny-path":
     "per-run deny globs; embedder contract is CLI/HTTP-first, MCP exposure deferred (DT2.1-1)",
   "output-schema":
@@ -172,14 +204,16 @@ const CLI_ONLY_EXEMPT = {
     "models-subcommand credential-route filter (read-only listing), not a run-control knob; MCP has no models tool today",
   "delta-scope":
     "sealed-release operator flag (INV-125 second amendment): fail-closed outside sealed-packet review mode, driven only by the release operator's owner-review ceremony; exposing it over the MCP bridge would grow surface for a ceremony MCP callers never run",
+  "reviewer-panel-json":
+    "structured CLI spelling of reviewerPanel; MCP carries the same entries as JSON objects, including credentialProfileId, rather than exposing a second flag",
   "max-turns":
     "per-run turn cap; embedder contract is CLI/HTTP-first, MCP exposure deferred (DT2.1-1)",
-  profile:
-    "per-run credential profile (INV-135); embedder contract is CLI/HTTP-first, MCP exposure deferred with the other run knobs (DT2.1-1)",
   "prompt-file":
     "terminal input plumbing (file/stdin prompt sources); MCP callers pass the prompt inline",
+  target:
+    "harness-install destination; operator/embedder provisioning surface, while MCP exposes no harness-install tool",
   thread:
-    "thread continuation is a CLI/HTTP embedder handle routed through POST /threads/:id/turns (D10); MCP one-shot tools still have no thread surface (deferred with DT2.1-1)",
+    "thread continuation is a CLI/HTTP embedder handle routed through POST /threads/:id/turns (D10); MCP continues threads through claudexor_thread_turn, not a one-shot argument",
   mode: "MCP encodes the mode in the TOOL NAME (claudexor_ask/plan/run/best_of/...)",
   attempts: "convergence knob; MCP one-shot surface exposes race width (n) only today",
   synthesis: "race synthesis knob; not exposed one-shot (racers get the engine default)",
@@ -223,6 +257,27 @@ for (const arg of mcpArgs) {
       `MCP arg '${arg}' maps to CLI flag '--${mapping.cli}' which is not in VALUE_FLAGS`,
     );
   }
+  if (mapping.nested) {
+    for (const tool of runTools) {
+      const properties = tool.inputSchema.properties?.[arg]?.properties ?? {};
+      for (const field of Object.keys(properties)) {
+        if (!(field in mapping.nested))
+          failures.push(`MCP '${arg}.${field}' has no declared nested CLI mapping or reason`);
+      }
+      for (const [field, member] of Object.entries(mapping.nested)) {
+        if (properties[field]?.type !== member.type)
+          failures.push(`MCP '${tool.name}' must expose '${arg}.${field}' as ${member.type}`);
+        if (member.cli && !cliValueFlags.includes(member.cli))
+          failures.push(`MCP '${arg}.${field}' maps to missing CLI value flag '--${member.cli}'`);
+        if (member.booleanCli && !cliBooleanFlags.includes(member.booleanCli))
+          failures.push(
+            `MCP '${arg}.${field}' maps to missing CLI boolean flag '--${member.booleanCli}'`,
+          );
+        if (!member.cli && !member.booleanCli && !member.reason)
+          failures.push(`MCP '${arg}.${field}' has no CLI mapping or reason`);
+      }
+    }
+  }
   const expectedTools = mapping.tools ?? RUN_TOOL_NAMES;
   const actualTools = mcpArgTools.get(arg) ?? [];
   if (JSON.stringify(actualTools) !== JSON.stringify(expectedTools)) {
@@ -241,7 +296,10 @@ for (const declared of Object.keys(MCP_TO_CLI)) {
 
 const mappedCliFlags = new Set(
   Object.values(MCP_TO_CLI)
-    .map((m) => m.cli)
+    .flatMap((mapping) => [
+      mapping.cli,
+      ...Object.values(mapping.nested ?? {}).map((member) => member.cli),
+    ])
     .filter(Boolean),
 );
 for (const flag of cliValueFlags) {
@@ -288,14 +346,16 @@ for (const arg of mcpArgs) {
 
 // v2: tool-surface contract parity.
 // 1. Every tool declares MCP behavior annotations; a tool's read-only hint
-//    must match its actual nature (agent-mode run tools and explicitly
-//    destructive recovery are mutating; ask/plan are read-only).
+//    must match its actual nature (agent-mode run tools, thread create/turn and
+//    explicitly destructive recovery are mutating; ask/plan are read-only).
 // 2. Every prompt-taking run tool declares the structured outputSchema.
 // 3. The recovery tool set exists (hosts recover lost run handles).
 const MUTATING_TOOLS = new Set([
   "claudexor_run",
   "claudexor_best_of",
   "claudexor_create",
+  "claudexor_thread_create",
+  "claudexor_thread_turn",
   "claudexor_run_cancel",
   "claudexor_answer_interaction",
   "claudexor_quarantine_journal",

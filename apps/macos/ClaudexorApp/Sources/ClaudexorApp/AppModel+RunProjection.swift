@@ -60,6 +60,7 @@ extension AppModel {
         task.externalContextPolicy = summary.externalContextPolicy
         task.tests = summary.tests ?? []
         task.applyPaidBudget(summary.paidBudget)
+        task.reviewRequested = summary.review
         task.reviewerPanel = summary.reviewerPanel
         task.protectedPathApprovals = summary.protectedPathApprovals
         task.browserRequirementDetail = browserRequirementDetail(summary.requestRequirements)

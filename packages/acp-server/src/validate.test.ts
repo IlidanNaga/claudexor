@@ -2,6 +2,26 @@ import { describe, expect, it } from "vitest";
 import { validateRunControls } from "./validate.js";
 
 describe("ACP run-control applicability", () => {
+  it("accepts the shared execution object and validates its complete shape", () => {
+    expect(
+      validateRunControls({
+        mode: "agent",
+        processingPreference: "standard",
+        execution: { workspaceKind: "directory", scopePaths: ["data", "binary.dat"] },
+        reviewerPanel: [{ harness: "claude", processingPreference: "fast" }],
+      }),
+    ).toBeNull();
+    expect(validateRunControls({ processingPreference: "fastest" })?.message).toContain(
+      "processingPreference",
+    );
+    expect(validateRunControls({ execution: { workspaceKind: "folder" } })?.message).toContain(
+      "execution",
+    );
+    expect(
+      validateRunControls({ execution: { workspaceKind: "directory", scopePaths: ["../other"] } })
+        ?.message,
+    ).toContain("scopePaths");
+  });
   it.each(["ask", "plan"] as const)("rejects Agent-only controls on %s", (mode) => {
     expect(validateRunControls({ mode, reviewerPanel: [{ harness: "codex" }] })?.message).toMatch(
       /reviewerPanel.*Agent/i,
@@ -26,10 +46,17 @@ describe("ACP run-control applicability", () => {
     expect(
       validateRunControls({
         mode: "agent",
-        reviewerPanel: [{ harness: "codex" }],
+        reviewerPanel: [{ harness: "codex", credentialProfileId: "reviewer-a" }],
         protectedPathApprovals: [{ path: "test/**" }],
       }),
     ).toBeNull();
+  });
+
+  it("accepts a strict per-turn credentialProfileId and rejects a blank one", () => {
+    expect(validateRunControls({ mode: "ask", credentialProfileId: "work-secondary" })).toBeNull();
+    expect(validateRunControls({ credentialProfileId: "   " })?.message).toMatch(
+      /credentialProfileId.*non-empty/,
+    );
   });
 
   it("rejects inline secret fixtures with the typed ACP error code", () => {

@@ -13,8 +13,8 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { HarnessAdapter } from "@claudexor/core";
-import type { ProviderFamily } from "@claudexor/schema";
+import { credentialProfileUnpinned, type HarnessAdapter } from "@claudexor/core";
+import type { CredentialProfile, ProviderFamily } from "@claudexor/schema";
 import {
   ConformanceReport,
   ConvergencePredicate,
@@ -172,6 +172,212 @@ describe("reviewer progress event schema contract", () => {
 });
 
 describe("sealed release native reviewer contract", () => {
+  it("reviews explicit ordinary-folder postimages with an empty diff and no Git inventory", async () => {
+    const workspace = makeReviewWorkspace();
+    mkdirSync(join(workspace.cwd, "assets"));
+    writeFileSync(join(workspace.cwd, "assets", "result.bin"), Buffer.from([0, 255, 1]));
+    writeFileSync(join(workspace.cwd, "outside.txt"), "not selected");
+    let checked = false;
+    const reviewer = makeWorkspaceProbeReviewer("file-reviewer", (cwd) => {
+      expect([...readFileSync(join(cwd, "assets", "result.bin"))]).toEqual([0, 255, 1]);
+      expect(existsSync(join(cwd, "outside.txt"))).toBe(false);
+      checked = true;
+    });
+    await reviewCandidate({
+      candidateLabel: "Folder result",
+      diff: "",
+      candidatePaths: ["assets/result.bin"],
+      ...workspace,
+      reviewers: [reviewer],
+    });
+    expect(checked).toBe(true);
+    expect(existsSync(join(workspace.cwd, ".git"))).toBe(false);
+  });
+  it("enforces the existing panel cap on streamed unknown premium amount and retains partial money", async () => {
+    const reviewer = makeReviewer("premium-budget", "anthropic", []);
+    let continued = false;
+    reviewer.adapter.run = async function* (spec) {
+      const common = {
+        session_id: spec.session_id,
+        ts: new Date().toISOString(),
+        credential_route: "vendor_native" as const,
+        processing_cost_basis: {
+          kind: "paid_credits" as const,
+          nativeMode: "fast",
+          source: "fixture",
+        },
+      };
+      yield { ...common, type: "started" as const };
+      yield {
+        ...common,
+        type: "usage" as const,
+        usage: { cost_usd: 2, cost_basis: { kind: "unknown" as const, source: "fixture" } },
+      };
+      continued = true;
+      yield { ...common, type: "message" as const, text: "```json\n[]\n```" };
+    };
+    const amounts: number[] = [];
+    const result = await reviewCandidate({
+      candidateLabel: "Candidate",
+      diff: "diff --git a/a b/a\n",
+      ...makeReviewWorkspace(),
+      reviewers: [reviewer],
+      onUsageCost: (usd) => {
+        amounts.push(usd);
+        return usd >= 1;
+      },
+    });
+    expect(amounts).toEqual([2]);
+    expect(continued).toBe(false);
+    expect(result).toMatchObject({
+      reviewSpendUsd: 2,
+      reviewCashUsd: 0,
+      reviewCashKnowledge: "unknown",
+      reviewUnknownUsd: 2,
+    });
+  });
+
+  it("reports cumulative panel spend across simultaneous reviewer indexes", async () => {
+    const reviewers = ["a", "b"].map((id) => {
+      const reviewer = makeReviewer(id, "anthropic", []);
+      reviewer.adapter.run = async function* (spec) {
+        const common = {
+          session_id: spec.session_id,
+          ts: new Date().toISOString(),
+          credential_route: "managed_api_key" as const,
+        };
+        yield { ...common, type: "started" as const };
+        yield { ...common, type: "usage" as const, usage: { cost_usd: 0.6 } };
+        yield { ...common, type: "message" as const, text: "```json\n[]\n```" };
+      };
+      return reviewer;
+    });
+    const amounts: number[] = [];
+    const result = await reviewCandidate({
+      candidateLabel: "Candidate",
+      diff: "diff --git a/a b/a\n",
+      ...makeReviewWorkspace(),
+      reviewers,
+      onUsageCost: (usd) => {
+        amounts.push(usd);
+        return usd >= 1;
+      },
+    });
+    expect(amounts).toEqual([0.6, 1.2]);
+    expect(result.reviewCashUsd).toBe(1.2);
+  });
+  it.each([
+    {
+      mode: "standard",
+      kind: "included",
+      amount: "unknown",
+      cash: "exact",
+      valuation: 0,
+      unknown: 2,
+    },
+    {
+      mode: "fast",
+      kind: "paid_credits",
+      amount: "unknown",
+      cash: "unknown",
+      valuation: 0,
+      unknown: 2,
+    },
+    {
+      mode: "fast",
+      kind: "paid_credits",
+      amount: "valuation",
+      cash: "unknown",
+      valuation: 2,
+      unknown: 0,
+    },
+  ] as const)(
+    "separates reviewer processing $mode / $amount amount from tariff billing",
+    async ({ mode, kind, amount, cash, valuation, unknown }) => {
+      const reviewer = makeReviewer("processing-reviewer", "anthropic", []);
+      reviewer.adapter.run = async function* (spec) {
+        const common = {
+          session_id: spec.session_id,
+          ts: new Date().toISOString(),
+          credential_route: "vendor_native" as const,
+          processing: {
+            requested: mode,
+            submitted: mode,
+            submittedNative: mode,
+            observed: "unknown" as const,
+            observedNative: [],
+            reason: null,
+            source: "fixture",
+          },
+          processing_cost_basis: { kind, nativeMode: mode, source: "fixture" },
+        };
+        yield { ...common, type: "started" as const };
+        yield {
+          ...common,
+          type: "usage" as const,
+          usage: { cost_usd: 2, cost_basis: { kind: amount, source: "fixture" } },
+        };
+        yield { ...common, type: "message" as const, text: "```json\n[]\n```" };
+        yield { ...common, type: "completed" as const };
+      };
+      const result = await reviewCandidate({
+        candidateLabel: "Candidate",
+        diff: "diff --git a/a b/a\n",
+        ...makeReviewWorkspace(),
+        reviewers: [reviewer],
+      });
+      expect(result).toMatchObject({
+        reviewCashUsd: 0,
+        reviewCashKnowledge: cash,
+        reviewValuationUsd: valuation,
+        reviewUnknownUsd: unknown,
+      });
+    },
+  );
+  it.each([false, true])(
+    "admits the exact prepared reviewer before native dispatch (refused=%s)",
+    async (refused) => {
+      const reviewer = makeReviewer("processing-admission-reviewer", "anthropic", []);
+      reviewer.processingPreference = "fast";
+      reviewer.adapter.prepareProcessing = async () => ({
+        model: null,
+        receipt: {
+          requested: "fast",
+          submitted: "fast",
+          submittedNative: "priority",
+          observed: "unknown",
+          observedNative: [],
+          reason: null,
+          source: "fixture",
+        },
+        costBasis: { kind: "paid_credits", nativeMode: "priority", source: "fixture" },
+      });
+      const order: string[] = [];
+      reviewer.adapter.run = async function* (spec) {
+        order.push("native");
+        yield {
+          type: "message",
+          session_id: spec.session_id,
+          ts: new Date().toISOString(),
+          text: "```json\n[]\n```",
+        };
+      };
+      await reviewCandidate({
+        candidateLabel: "Candidate",
+        diff: "diff --git a/a b/a\n",
+        ...makeReviewWorkspace(),
+        reviewers: [reviewer],
+        onBeforeDispatch: (index, actual) => {
+          expect(index).toBe(0);
+          expect(actual.processing_cost_basis?.kind).toBe("paid_credits");
+          expect(actual.processing?.submittedNative).toBe("priority");
+          order.push("admission");
+          if (refused) throw new Error("fixture budget admission refused");
+        },
+      });
+      expect(order).toEqual(refused ? ["admission"] : ["admission", "native"]);
+    },
+  );
   it("keeps the release transport schema provider-strict and semantic-free", () => {
     expect(strictifyForStructuredOutput(SEALED_REVIEW_OUTPUT_SCHEMA)).toEqual(
       SEALED_REVIEW_OUTPUT_SCHEMA,
@@ -801,7 +1007,9 @@ describe("gates", () => {
 
   it("revokes a package-manager command when package.json changes", async () => {
     const cwd = reapMk(join(tmpdir(), "claudexor-gate-package-script-"));
-    const invocation = { program: "pnpm", args: ["test"], envAllowlist: [] };
+    // Use the package manager shipped with Node so the trust test does not ask
+    // an unpinned Corepack shim to select a host-global pnpm release.
+    const invocation = { program: "npm", args: ["test"], envAllowlist: [] };
     writeFileSync(
       join(cwd, "package.json"),
       JSON.stringify({ scripts: { test: 'node -e "process.exit(0)"' } }),
@@ -826,12 +1034,45 @@ describe("gates", () => {
 
 describe("route proof", () => {
   it("verified with observed model, unverified without", () => {
+    const observed = buildRouteProof(
+      {
+        harness_id: "x",
+        provider_family: "openai",
+        credential_profile_id: "review-a",
+      },
+      {
+        model_id: "gpt",
+        credential_profile_id: "review-a",
+        evidence_source: "stream_event",
+      },
+    );
+    expect(observed.status).toBe("verified");
+    expect(observed.requested.credential_profile_id).toBe("review-a");
+    expect(observed.observed.credential_profile_id).toBe("review-a");
     expect(
       buildRouteProof(
-        { harness_id: "x", provider_family: "openai" },
+        {
+          harness_id: "x",
+          provider_family: "openai",
+          credential_profile_id: "review-a",
+        },
         { model_id: "gpt", evidence_source: "stream_event" },
       ).status,
-    ).toBe("verified");
+    ).toBe("unverified");
+    expect(
+      buildRouteProof(
+        {
+          harness_id: "x",
+          provider_family: "openai",
+          credential_profile_id: "review-a",
+        },
+        {
+          model_id: "gpt",
+          credential_profile_id: "other-profile",
+          evidence_source: "stream_event",
+        },
+      ).status,
+    ).toBe("unverified");
     expect(
       buildRouteProof(
         { harness_id: "x", provider_family: "openai" },
@@ -1838,6 +2079,7 @@ describe("reviewEngine", () => {
 
   it("times out a stalled reviewer and forwards abort to the adapter", async () => {
     let childSignal: AbortSignal | undefined;
+    let scratchHome = "";
     const artifactsDir = reapMk(join(tmpdir(), "claudexor-review-artifacts-"));
     const adapter: HarnessAdapter = {
       id: "stalled-reviewer",
@@ -1858,6 +2100,7 @@ describe("reviewEngine", () => {
         });
       },
       async *run(spec) {
+        scratchHome = spec.env?.HOME ?? "";
         const ts = new Date().toISOString();
         yield { type: "started", session_id: spec.session_id, ts, observed_model: "stalled-model" };
         const signal = spec.extra["abortSignal"] as AbortSignal | undefined;
@@ -1880,6 +2123,8 @@ describe("reviewEngine", () => {
       artifactsDir,
     });
     expect(childSignal?.aborted).toBe(true);
+    expect(scratchHome).not.toBe("");
+    expect(existsSync(scratchHome)).toBe(false);
     expect(res.findings[0]?.severity).toBe("INSUFFICIENT_EVIDENCE");
     expect(res.findings[0]?.claim).toContain("timed out");
     expect(res.routeProofs[0]?.status).toBe("verified");
@@ -3526,6 +3771,238 @@ describe("reviewEngine", () => {
       "utf8",
     );
     expect(transcript).not.toContain("[auth]");
+  });
+
+  it("gives parallel pinned reviewer slots distinct scratch homes and preserves profile identity", async () => {
+    const { cwd: candidateRoot, evidenceDir } = makeReviewWorkspace(
+      "claudexor-review-profile-isolation-candidate-",
+    );
+    const artifactsDir = reapMk(join(tmpdir(), "claudexor-review-artifacts-"));
+    const homes = new Map<string, string>();
+    const unpinned = new Map<string, boolean>();
+    const profile = (id: string, harness: string): CredentialProfile => ({
+      profile_id: id,
+      harness_id: harness,
+      display_name: id,
+      credential_kind: "config_dir_login",
+      isolation_locator: `/tmp/${harness}-${id}`,
+      secret_ref: null,
+      enabled: true,
+      created_at: null,
+    });
+    const reviewer = (
+      id: string,
+      family: ProviderFamily,
+      pinned: CredentialProfile,
+      selection: Pick<ReviewerSpec, "profilePinned"> = {},
+    ): ReviewerSpec => {
+      const adapter: HarnessAdapter = {
+        id,
+        async discover() {
+          return HarnessManifest.parse({
+            id,
+            display_name: id,
+            kind: "local_cli",
+            provider_family: family,
+            capabilities: { review: true, structured_output: true },
+          });
+        },
+        async doctor() {
+          return ConformanceReport.parse({
+            harness_id: id,
+            status: "ok",
+            enabled_intents: ["review"],
+          });
+        },
+        async *run(spec) {
+          homes.set(id, spec.env?.HOME ?? "");
+          unpinned.set(id, credentialProfileUnpinned(spec));
+          expect(spec.credential_profile?.profile_id).toBe(pinned.profile_id);
+          const ts = new Date().toISOString();
+          yield {
+            type: "started",
+            session_id: spec.session_id,
+            ts,
+            observed_model: `${id}-model`,
+            credential_profile_id: pinned.profile_id,
+          };
+          yield { type: "message", session_id: spec.session_id, ts, text: "[]\n" };
+          yield { type: "completed", session_id: spec.session_id, ts };
+        },
+      };
+      return { adapter, providerFamily: family, credentialProfile: pinned, ...selection };
+    };
+
+    const res = await reviewCandidate({
+      candidateLabel: "Candidate A",
+      diff: "diff --git a/x.ts b/x.ts\n@@ -1 +1 @@\n-old\n+new\n",
+      evidenceDir,
+      artifactsDir,
+      cwd: candidateRoot,
+      reviewers: [
+        reviewer("profile-review-a", "openai", profile("a", "profile-review-a")),
+        reviewer("profile-review-b", "anthropic", profile("b", "profile-review-b"), {
+          profilePinned: false,
+        }),
+      ],
+    });
+
+    expect(res.findings).toEqual([]);
+    // #363: only a pool-chosen seat reaches its adapter as unpinned; a seat
+    // with no pin fact keeps the strict pin contract.
+    expect(unpinned.get("profile-review-a")).toBe(false);
+    expect(unpinned.get("profile-review-b")).toBe(true);
+    expect(homes.get("profile-review-a")).toBeTruthy();
+    expect(homes.get("profile-review-b")).toBeTruthy();
+    expect(homes.get("profile-review-a")).not.toBe(homes.get("profile-review-b"));
+    expect(res.routeProofs[0]?.observed.credential_profile_id).toBe("a");
+    expect(res.routeProofs[1]?.observed.credential_profile_id).toBe("b");
+    const metadataA = readFileSync(
+      join(artifactsDir, "01-profile-review-a", "metadata.json"),
+      "utf8",
+    );
+    const metadataB = readFileSync(
+      join(artifactsDir, "02-profile-review-b", "metadata.json"),
+      "utf8",
+    );
+    expect(metadataA).toContain('"credential_profile_id": "a"');
+    expect(metadataB).toContain('"credential_profile_id": "b"');
+  });
+
+  it("isolates duplicate same-harness slots and cleans a failed sibling independently", async () => {
+    const { cwd: candidateRoot, evidenceDir } = makeReviewWorkspace(
+      "claudexor-review-duplicate-isolation-candidate-",
+    );
+    const artifactsDir = reapMk(join(tmpdir(), "claudexor-review-artifacts-"));
+    const profile = (id: string): CredentialProfile => ({
+      profile_id: id,
+      harness_id: "same-harness-reviewer",
+      display_name: id,
+      credential_kind: "config_dir_login",
+      isolation_locator: `/tmp/same-harness-${id}`,
+      secret_ref: null,
+      enabled: true,
+      created_at: null,
+    });
+    const seen = new Map<
+      string,
+      { home: string; claudeConfig: string; cwd: string; profile: string }
+    >();
+    let failReady!: () => void;
+    const failedReviewerReady = new Promise<void>((resolve) => {
+      failReady = resolve;
+    });
+    let failRelease!: () => void;
+    const allowFailedReviewerToExit = new Promise<void>((resolve) => {
+      failRelease = resolve;
+    });
+    let failedCleanupObservedWhileSuccessRunning = false;
+    const adapter: HarnessAdapter = {
+      id: "same-harness-reviewer",
+      async discover() {
+        return HarnessManifest.parse({
+          id: "same-harness-reviewer",
+          display_name: "same harness",
+          kind: "local_cli",
+          provider_family: "openai",
+          capabilities: { review: true, structured_output: true },
+        });
+      },
+      async doctor() {
+        return ConformanceReport.parse({
+          harness_id: "same-harness-reviewer",
+          status: "ok",
+          enabled_intents: ["review"],
+        });
+      },
+      async *run(spec) {
+        const profileId = spec.credential_profile?.profile_id ?? "missing";
+        const home = spec.env?.HOME ?? "";
+        const claudeConfig = spec.env?.CLAUDE_CONFIG_DIR ?? "";
+        seen.set(profileId, {
+          home,
+          claudeConfig,
+          cwd: spec.cwd,
+          profile: spec.credential_profile?.isolation_locator ?? "",
+        });
+        const ts = new Date().toISOString();
+        yield {
+          type: "started",
+          session_id: spec.session_id,
+          ts,
+          observed_model: `same-harness-${profileId}`,
+          credential_profile_id: profileId,
+        };
+        if (profileId === "failed") {
+          failReady();
+          await allowFailedReviewerToExit;
+          throw new Error("intentional sibling failure");
+        }
+
+        await failedReviewerReady;
+        failRelease();
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          const failed = seen.get("failed");
+          if (
+            failed &&
+            !existsSync(failed.home) &&
+            !existsSync(failed.cwd) &&
+            existsSync(home) &&
+            existsSync(spec.cwd)
+          ) {
+            failedCleanupObservedWhileSuccessRunning = true;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        yield {
+          type: "message",
+          session_id: spec.session_id,
+          ts: new Date().toISOString(),
+          text: "[]\n",
+        };
+        yield { type: "completed", session_id: spec.session_id, ts: new Date().toISOString() };
+      },
+    };
+
+    const res = await reviewCandidate({
+      candidateLabel: "Candidate A",
+      diff: "diff --git a/x.ts b/x.ts\n@@ -1 +1 @@\n-old\n+new\n",
+      evidenceDir,
+      artifactsDir,
+      cwd: candidateRoot,
+      reviewers: [
+        { adapter, providerFamily: "openai", credentialProfile: profile("failed") },
+        { adapter, providerFamily: "openai", credentialProfile: profile("successful") },
+      ],
+      transientRetryPolicy: { maxRetries: 0, initialDelayMs: 0, maxDelayMs: 0 },
+    });
+
+    const failed = seen.get("failed");
+    const successful = seen.get("successful");
+    expect(failed).toBeDefined();
+    expect(successful).toBeDefined();
+    expect(failed?.home).not.toBe(successful?.home);
+    expect(failed?.claudeConfig).not.toBe(successful?.claudeConfig);
+    expect(failed?.cwd).not.toBe(successful?.cwd);
+    expect(failed?.profile).not.toBe(successful?.profile);
+    expect(failedCleanupObservedWhileSuccessRunning).toBe(true);
+    expect(existsSync(failed?.home ?? "")).toBe(false);
+    expect(existsSync(failed?.cwd ?? "")).toBe(false);
+    expect(existsSync(successful?.home ?? "")).toBe(false);
+    expect(existsSync(successful?.cwd ?? "")).toBe(false);
+    expect(res.findings).toHaveLength(1);
+    expect(res.findings[0]?.severity).toBe("INSUFFICIENT_EVIDENCE");
+    expect(res.findings[0]?.claim).toContain("intentional sibling failure");
+    expect(res.routeProofs[0]?.requested.credential_profile_id).toBe("failed");
+    expect(res.routeProofs[1]?.observed.credential_profile_id).toBe("successful");
+    expect(res.healthyProviders).toEqual(["openai"]);
+    expect(
+      readFileSync(join(artifactsDir, "01-same-harness-reviewer", "metadata.json"), "utf8"),
+    ).toContain('"reviewer_workspace_cleanup": "removed"');
+    expect(
+      readFileSync(join(artifactsDir, "02-same-harness-reviewer", "metadata.json"), "utf8"),
+    ).toContain('"reviewer_workspace_cleanup": "removed"');
   });
 
   it("does not persist evidence symlinks that resolve outside the source evidence dir", async () => {

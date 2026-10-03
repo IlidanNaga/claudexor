@@ -7,6 +7,7 @@ import { DecisionRecord } from "./decision.js";
 import { WorkProduct } from "./workproduct.js";
 import { ReviewFinding } from "./review.js";
 import { RunFacts } from "./run-facts.js";
+import { AttemptExecutionEvidence } from "./attempt-execution.js";
 import {
   ControlArtifactInfo,
   ControlBudgetSnapshot,
@@ -20,7 +21,16 @@ import { RunFailure } from "./control-run-failure.js";
 export const ControlPrimaryOutput = z
   .object({
     kind: z
-      .enum(["answer", "report", "plan", "summary", "patch", "diagnostic", "structured_output"])
+      .enum([
+        "answer",
+        "report",
+        "plan",
+        "summary",
+        "patch",
+        "files",
+        "diagnostic",
+        "structured_output",
+      ])
       .describe(
         "What kind of output this is: answer, report, plan, summary, patch, diagnostic, or structured_output (schema-conformant final/output.json).",
       ),
@@ -35,21 +45,16 @@ export const ControlPrimaryOutput = z
   .describe("The run's primary user-facing output artifact.");
 export type ControlPrimaryOutput = z.infer<typeof ControlPrimaryOutput>;
 
-/**
- * The applied filesystem boundary of one attempt, as its CALLER sees it.
- *
- * `proven` is the only question a consumer should ask, and it is answered by
- * the one shared owner (`confinementBoundaryProven`): a mechanism NAME without
- * the path it was shown to deny is a promise, and a promise is exactly what
- * this block replaces. `mechanism` is opaque — never branch on its value, and
- * never infer it from the platform.
- */
+/** Historical-name projection for an attempt's outer-boundary evidence.
+ * Old attempts may prove an applied boundary; current delegated attempts
+ * deliberately record its absence. Consumers must not infer native harness
+ * permissions from this block. */
 export const ControlCandidateConfinement = z
   .object({
     proven: z
       .boolean()
       .describe(
-        "Whether a boundary was actually enforced for this attempt: a named mechanism AND the path it was proven to deny. The only field a consumer should branch on.",
+        "Whether a historical outer boundary was proven by a named mechanism, digest, and denied path; false for current native-access attempts.",
       ),
     mechanism: z
       .string()
@@ -63,10 +68,12 @@ export const ControlCandidateConfinement = z
       .string()
       .nullable()
       .describe(
-        "Why this attempt ran with NO boundary; null when one was applied. Present exactly when proven is false for a run that asked for a boundary.",
+        "Why no additional outer boundary was applied; current delegated attempts carry the schema-owned deliberate-absence reason.",
       ),
   })
-  .describe("Applied OS filesystem boundary for one attempt, or the stated reason there was none.");
+  .describe(
+    "Historical outer-boundary proof for one attempt, or the deliberate reason current native-access execution applied none.",
+  );
 export type ControlCandidateConfinement = z.infer<typeof ControlCandidateConfinement>;
 
 /** Per-candidate evidence card for a race run (projected from
@@ -147,16 +154,12 @@ export const ControlCandidate = z
       .describe(
         "This candidate's ranking-scorecard axis values (from decision.ranking_scorecard); null when no arbitration ran.",
       ),
-    /**
-     * What this attempt's harness process ACTUALLY ran inside — the caller's
-     * copy of the applied fact, so an external orchestrator that asked for a
-     * confined run reads a field instead of digging through run artifacts.
-     * Null for a run that never asked for a boundary.
-     */
+    /** Historical wire name retained so old callers can inspect prior proofs;
+     * new delegated attempts use it to disclose deliberate absence. */
     confinement: ControlCandidateConfinement.nullable()
       .default(null)
       .describe(
-        "Applied OS boundary for this attempt; null when the run never asked for one (every non-delegated run).",
+        "Historical outer-boundary evidence or current deliberate-absence evidence; null when the attempt has neither.",
       ),
   })
   .describe(
@@ -166,6 +169,7 @@ export type ControlCandidate = z.infer<typeof ControlCandidate>;
 
 export const ControlRunDetail = z
   .object({
+    attemptExecution: z.array(AttemptExecutionEvidence).optional(),
     summary: ControlRunSummary,
     children: z
       .array(ControlRunSummary)

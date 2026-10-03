@@ -1,3 +1,4 @@
+import { HARNESS_COMMAND_SPECS } from "./harness-command-specs.js";
 import { REMOTE_COMMAND_SPECS } from "./remote-command-specs.js";
 import { RETRY_COMMAND_SPECS } from "./retry-command-specs.js";
 import {
@@ -100,7 +101,7 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
     id: "agent",
     positionalPatterns: [{ min: 0, max: null }],
     usageArgs: '"<prompt>" [opts]',
-    summary: "Run a task (default mode: agent)",
+    summary: "Run a task (default mode: agent; internal model review is opt-in)",
     flags: [...RUN_FLAGS, "mode"],
     mutability: "write",
     stability: "stable",
@@ -119,7 +120,7 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
   {
     id: "plan",
     positionalPatterns: [{ min: 0, max: null }],
-    usageArgs: '"<prompt>" [--council [--n 2..4]]',
+    usageArgs: '"<prompt>" [--council [--n N]]',
     summary: "Read-only planning report (--council: multi-harness drafts merged into one plan)",
     flags: [...RUN_FLAGS_BY_MODE.plan],
     mutability: "read",
@@ -140,7 +141,15 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
     positionalPatterns: [{ min: 0, max: 0 }],
     usageArgs: "--diff <file> | --evidence-dir <path> --artifacts-dir <path> ...",
     summary: "Reviewer-panel review of a diff or sealed frozen packet",
-    flags: ["diff", "intent", "tests", ...FROZEN_REVIEW_FLAG_NAMES, "reviewer-panel", "json"],
+    flags: [
+      "diff",
+      "intent",
+      "tests",
+      ...FROZEN_REVIEW_FLAG_NAMES,
+      "reviewer-panel",
+      "reviewer-panel-json",
+      "json",
+    ],
     mutability: "read",
     stability: "stable",
   },
@@ -180,11 +189,12 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
     positionalPatterns: [{ min: 1, max: 1 }],
     usageArgs: "<run_id> <action-flags>",
     summary:
-      'Decide a blocked run: --accept-risk|--override|--revert|--accept-clean-patch [--apply-mode m]|--rerun --feedback "<text>"',
+      'Record a run decision: --accept-risk|--override|--revert|--discard|--accept-clean-patch [--apply-mode m]|--rerun --feedback "<text>"',
     flags: [
       "accept-risk",
       "override",
       "revert",
+      "discard",
       "accept-clean-patch",
       "rerun",
       "apply-mode",
@@ -231,19 +241,7 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
     mutability: "ops",
     stability: "stable",
   },
-  {
-    id: "harness",
-    positionalPatterns: [
-      { prefix: ["list"], min: 1, max: 1 },
-      { prefix: ["install"], min: 2, max: 2 },
-    ],
-    usageArgs: "list [--all] | install <claude|codex|cursor|opencode> [--dry-run] [--yes]",
-    summary: "List harnesses, or install one pinned vendor CLI after disclosure",
-    flags: ["all", "dry-run", "yes", "json"],
-    subcommandFlags: { list: ["all"], install: ["dry-run", "yes"] },
-    mutability: "ops",
-    stability: "stable",
-  },
+  ...HARNESS_COMMAND_SPECS,
   {
     id: "models",
     positionalPatterns: [{ min: 0, max: 0 }],

@@ -35,4 +35,21 @@ import Testing
         #expect(draft.approvalWireText == "test/**:requested")
         #expect(!draft.hasIncompleteRows)
     }
+
+    @Test func structuredPinnedReviewerRemainsTheRawSourceOfTruth() {
+        let draft = ComposerReviewDraft(
+            reviewerText: "[{\"credentialProfileId\":\"review-cursor\",\"harness\":\"cursor\"}]",
+            pickerHarness: "claude",
+            pickerModel: "opus"
+        )
+        #expect(draft.hasPinnedReviewerJSON)
+    }
+
+    @Test func validPinnedReviewerJSONOwnsSendValidityDespiteCommas() {
+        let draft = ComposerReviewDraft(
+            reviewerText: "[{\"harness\":\"claude\",\"model\":\"claude-opus-5\",\"credentialProfileId\":\"review-a\"}]",
+            pickerModel: "stale-picker-value"
+        )
+        #expect(draft.hasValidReviewerJSON)
+    }
 }

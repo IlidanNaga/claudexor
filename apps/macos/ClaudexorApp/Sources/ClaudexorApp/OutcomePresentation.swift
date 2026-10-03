@@ -65,6 +65,8 @@ enum OutcomePresentation {
         if result?.applyState != "applied_review_blocked" {
             switch reviewVerdict {
             case .findings: facts.append(("Needs review", .warning))
+            case .notRun where phase == .succeeded && result?.kind == "patch" && result?.applyState != "reverted":
+                facts.append(("not reviewed", .neutral))
             default: break
             }
         }

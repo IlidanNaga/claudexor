@@ -1,5 +1,5 @@
 import { isAbsolute } from "node:path";
-import { runCapture } from "@claudexor/core";
+import { composeBaseEnv, runCapture } from "@claudexor/core";
 import { HarnessUnavailableError } from "@claudexor/core";
 import { ConformanceReport as ConformanceReportSchema } from "@claudexor/schema";
 import type { ConformanceReport } from "@claudexor/schema";
@@ -8,12 +8,12 @@ export const BIN = process.env.CLAUDEXOR_CODEX_BIN || "codex";
 
 /**
  * Effective environment for a doctor probe: the scoped DoctorSpec.env is a
- * PATCH over the inherited process env with the same semantics runCapture
+ * PATCH over the normalized host env with the same semantics runCapture
  * applies when spawning (null/undefined deletes) — so the broken-install
  * advisory diagnoses exactly the env the version probe spawned in (INV-067).
  */
 export function probeEnv(patch?: Record<string, string | null | undefined>): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env };
+  const env = composeBaseEnv("mirror_native");
   for (const [key, value] of Object.entries(patch ?? {})) {
     if (value === undefined || value === null) delete env[key];
     else env[key] = value;

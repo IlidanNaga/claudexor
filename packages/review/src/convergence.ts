@@ -28,6 +28,11 @@ export function evaluateConvergence(input: ConvergenceInput): ConvergenceResult 
   const p = input.predicate;
   const openBlockers = input.findings.filter((f) => isBlocking(f));
 
+  // Zero configured gates satisfies require_tests_pass vacuously ON PURPOSE:
+  // a contract with no deterministic gates has nothing to fail here, and the
+  // final verifier separately reports the honest "no deterministic gates
+  // configured" (gates_passed: null). Blocking convergence on an empty set
+  // would refuse every gate-less contract that opted into the predicate.
   if (p.require_tests_pass && !gatesPassed(input.gates)) {
     reasons.push("required gates are not all passing");
   }

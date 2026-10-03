@@ -34,8 +34,8 @@
             "readonly",
             "workspace_write",
             "full",
-            "external_sandbox_full",
-            "inherit_native"
+            "inherit_native",
+            "external_sandbox_full"
           ],
           "description": "Access profile the caller requested."
         },
@@ -45,10 +45,10 @@
             "readonly",
             "workspace_write",
             "full",
-            "external_sandbox_full",
-            "inherit_native"
+            "inherit_native",
+            "external_sandbox_full"
           ],
-          "description": "Access profile actually enforced by the engine."
+          "description": "Access profile enforced by the engine."
         },
         "external_context_policy": {
           "type": "string",
@@ -73,7 +73,7 @@
         "web_required": {
           "type": "boolean",
           "default": false,
-          "description": "Whether the run required web evidence."
+          "description": "Explicit stored web requirement."
         },
         "final_attempt_id": {
           "anyOf": [
@@ -95,7 +95,7 @@
             "required": {
               "type": "boolean",
               "default": false,
-              "description": "Whether the run required web evidence."
+              "description": "Explicit stored web requirement."
             },
             "policy": {
               "type": "string",
@@ -121,7 +121,7 @@
             "satisfied": {
               "type": "boolean",
               "default": false,
-              "description": "Whether the web-evidence requirement was satisfied."
+              "description": "Completed without a typed failure; verification records retrieval-proof strength."
             },
             "status": {
               "type": "string",
@@ -132,7 +132,7 @@
                 "failed",
                 "unverified"
               ],
-              "description": "Web-evidence verdict for an attempt/run: none (no web activity), attempted, satisfied (required evidence produced), failed, or unverified.",
+              "description": "Observed web activity: none, attempted, satisfied, failed, or unverified.",
               "default": "none"
             },
             "verification": {
@@ -143,7 +143,7 @@
                 "none"
               ],
               "default": "none",
-              "description": "Retrieval strength of the web evidence: verified (typed retrieval), dispatched (completed but no typed outcome), or none."
+              "description": "Retrieval-proof strength of observed web activity: verified (typed successful retrieval; content proven), dispatched (operation completed but no typed retrieval outcome; content not proven), or none."
             },
             "tool": {
               "type": [
@@ -178,6 +178,324 @@
           "items": {
             "type": "object",
             "properties": {
+              "request_refusal": {
+                "type": "object",
+                "properties": {
+                  "scope": {
+                    "type": "string",
+                    "const": "turn_text",
+                    "description": "All text input items in one native turn; separate instructions are excluded."
+                  },
+                  "unit": {
+                    "type": "string",
+                    "const": "unicode_scalars"
+                  },
+                  "limit": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "minimum": -9007199254740991,
+                        "maximum": 9007199254740991
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "source": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "kind": {
+                    "type": "string",
+                    "const": "input_too_large"
+                  },
+                  "actual": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": -9007199254740991,
+                        "maximum": 9007199254740991
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "native_code": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "scope",
+                  "unit",
+                  "limit",
+                  "source",
+                  "kind",
+                  "actual",
+                  "native_code"
+                ],
+                "additionalProperties": false,
+                "description": "Vendor-typed physical input refusal; the same input cannot be repaired by changing this harness's account or model."
+              },
+              "effort_resolution": {
+                "type": "object",
+                "properties": {
+                  "requested": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "\\S",
+                        "description": "User-supplied string that must contain visible content, not just whitespace."
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Original effort preference before adaptation; null when none was requested."
+                  },
+                  "submitted": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/RunTelemetry/properties/attempts/items/properties/effort_resolution/properties/requested/anyOf/0"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Native option prepared for transport; null means omitted, never the explicit token none. Not proof of dispatch."
+                  },
+                  "resolution": {
+                    "type": "string",
+                    "enum": [
+                      "exact",
+                      "downward",
+                      "floor",
+                      "omitted",
+                      "unverifiable",
+                      "rejected"
+                    ]
+                  },
+                  "source": {
+                    "type": "string",
+                    "enum": [
+                      "account_catalog",
+                      "live_probe",
+                      "versioned_snapshot",
+                      "adapter"
+                    ]
+                  },
+                  "parameter": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/RunTelemetry/properties/attempts/items/properties/effort_resolution/properties/requested/anyOf/0"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Native carrier, such as reasoning.effort, model_reasoning_effort or --effort; null when no separate knob is carried."
+                  },
+                  "observed": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/RunTelemetry/properties/attempts/items/properties/effort_resolution/properties/requested/anyOf/0"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Provider-reported effort only; null when unobserved, never copied from submission."
+                  },
+                  "observedSource": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/RunTelemetry/properties/attempts/items/properties/effort_resolution/properties/requested/anyOf/0"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Provider event/field that reported observed effort; null when unobserved."
+                  },
+                  "reason": {
+                    "$ref": "#/definitions/RunTelemetry/properties/attempts/items/properties/effort_resolution/properties/requested/anyOf/0",
+                    "description": "Diagnostic explanation; consumers branch on resolution, never prose."
+                  }
+                },
+                "required": [
+                  "requested",
+                  "submitted",
+                  "resolution",
+                  "source",
+                  "parameter",
+                  "observed",
+                  "observedSource"
+                ],
+                "additionalProperties": false
+              },
+              "processing": {
+                "type": "object",
+                "properties": {
+                  "requested": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "standard",
+                          "fast",
+                          "economy"
+                        ],
+                        "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
+                  },
+                  "submitted": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/RunTelemetry/properties/attempts/items/properties/processing/properties/requested/anyOf/0"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
+                  },
+                  "submittedNative": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/RunTelemetry/properties/attempts/items/properties/effort_resolution/properties/requested/anyOf/0"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "User-supplied string that must contain visible content, not just whitespace."
+                  },
+                  "observed": {
+                    "type": "string",
+                    "enum": [
+                      "standard",
+                      "fast",
+                      "economy",
+                      "mixed",
+                      "unknown"
+                    ]
+                  },
+                  "observedNative": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/definitions/RunTelemetry/properties/attempts/items/properties/effort_resolution/properties/requested/anyOf/0"
+                    }
+                  },
+                  "reason": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/RunTelemetry/properties/attempts/items/properties/effort_resolution/properties/requested/anyOf/0"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "User-supplied string that must contain visible content, not just whitespace."
+                  },
+                  "source": {
+                    "$ref": "#/definitions/RunTelemetry/properties/attempts/items/properties/effort_resolution/properties/requested/anyOf/0"
+                  }
+                },
+                "required": [
+                  "requested",
+                  "submitted",
+                  "submittedNative",
+                  "observed",
+                  "observedNative",
+                  "reason",
+                  "source"
+                ],
+                "additionalProperties": false,
+                "description": "Requested intent, submitted native control, and observed execution are independent facts. A submitted flag never proves observed service; mixed or missing session observations remain explicit."
+              },
+              "processing_cost_basis": {
+                "type": "object",
+                "properties": {
+                  "nativeMode": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/RunTelemetry/properties/attempts/items/properties/effort_resolution/properties/requested/anyOf/0"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "User-supplied string that must contain visible content, not just whitespace."
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "included",
+                      "paid_credits",
+                      "cash",
+                      "valuation",
+                      "unknown"
+                    ]
+                  },
+                  "source": {
+                    "$ref": "#/definitions/RunTelemetry/properties/attempts/items/properties/effort_resolution/properties/requested/anyOf/0"
+                  }
+                },
+                "required": [
+                  "nativeMode",
+                  "kind",
+                  "source"
+                ],
+                "additionalProperties": false,
+                "description": "Mode-qualified billing evidence for an existing cost record. Authentication alone does not establish included premium service; credits, cash, and token valuation stay distinct."
+              },
+              "usage_cost": {
+                "type": "object",
+                "properties": {
+                  "cashUsd": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "valuationUsd": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "unknownUsd": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "cashKnowledge": {
+                    "type": "string",
+                    "enum": [
+                      "exact",
+                      "estimated",
+                      "unknown"
+                    ],
+                    "description": "Quality of incremental-cash cost evidence for an operation."
+                  },
+                  "valuationKnowledge": {
+                    "$ref": "#/definitions/RunTelemetry/properties/attempts/items/properties/usage_cost/properties/cashKnowledge"
+                  }
+                },
+                "required": [
+                  "cashUsd",
+                  "valuationUsd",
+                  "unknownUsd",
+                  "cashKnowledge",
+                  "valuationKnowledge"
+                ],
+                "additionalProperties": false,
+                "description": "Observed usage components. An amount of unknown meaning is not charged cash; separately proven included service can still establish exact zero incremental cash."
+              },
               "attempt_id": {
                 "type": "string",
                 "minLength": 1,
@@ -756,10 +1074,55 @@
                       }
                     ],
                     "default": null
+                  },
+                  "input_token_usage": {
+                    "type": "object",
+                    "properties": {
+                      "total_tokens": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "cache_read_tokens": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "cache_write_tokens": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "total_tokens",
+                      "cache_read_tokens",
+                      "cache_write_tokens"
+                    ],
+                    "additionalProperties": false,
+                    "description": "Complete reported input total, including cache reads/writes, and its separately measured cache subsets. Null means unknown, never zero or a partial sum."
                   }
                 },
                 "additionalProperties": false,
-                "description": "Token usage summed from harness usage events; money is tracked separately in the budget ledger, not here. Each field is null until a harness reports it (cursor reports cost only; raw-api has no cached), so unreported never reads as 0. Do NOT sum into a grand total: codex cached is a subset of input while claude cached is disjoint from input.",
+                "description": "Token usage summed from harness usage events; money is tracked separately in the budget ledger, not here. Each field is null until a harness reports it, so unreported never reads as 0. The relation between cached_input_tokens and input_tokens is harness-specific; do not derive a grand total.",
                 "default": {}
               }
             },
@@ -846,7 +1209,7 @@
         "usage_totals": {
           "$ref": "#/definitions/RunTelemetry/properties/attempts/items/properties/usage",
           "default": {},
-          "description": "Token usage summed from harness usage events; money is tracked separately in the budget ledger, not here. Each field is null until a harness reports it (cursor reports cost only; raw-api has no cached), so unreported never reads as 0. Do NOT sum into a grand total: codex cached is a subset of input while claude cached is disjoint from input."
+          "description": "Token usage summed from harness usage events; money is tracked separately in the budget ledger, not here. Each field is null until a harness reports it, so unreported never reads as 0. The relation between cached_input_tokens and input_tokens is harness-specific; do not derive a grand total."
         },
         "auth_route": {
           "anyOf": [
@@ -1150,7 +1513,10 @@
                       "description": "Terminal lifecycle of the run."
                     },
                     "noChanges": {
-                      "type": "boolean",
+                      "type": [
+                        "boolean",
+                        "null"
+                      ],
                       "default": false,
                       "description": "True when the run finished without changing any files (the ex no_op fact)."
                     },
@@ -1174,6 +1540,10 @@
                       "description": "Review axis: approved (clean cross-family verified review), blocked (open accepted findings), or not_run.",
                       "default": "not_run"
                     },
+                    "review_requested": {
+                      "type": "boolean",
+                      "description": "Frozen model-review intent. False permits an honestly unreviewed result; absent historical records retain the review requirement."
+                    },
                     "reason": {
                       "anyOf": [
                         {
@@ -1190,6 +1560,8 @@
                             "stuck_no_progress",
                             "wall_clock_exceeded",
                             "user_cancelled",
+                            "host_cancelled",
+                            "owner_task_gone",
                             "crash_interrupted",
                             "workspace_unavailable",
                             "input_required",
@@ -1233,6 +1605,7 @@
                             "report",
                             "plan",
                             "patch",
+                            "files",
                             "structured_output"
                           ]
                         },
@@ -1293,6 +1666,7 @@
                                 "report",
                                 "plan",
                                 "patch",
+                                "files",
                                 "structured_output",
                                 "diagnostic"
                               ],

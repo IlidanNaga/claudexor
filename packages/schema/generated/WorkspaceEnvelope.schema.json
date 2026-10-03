@@ -24,8 +24,11 @@
           "description": "Absolute path of the source repository root."
         },
         "base_ref": {
-          "type": "string",
-          "description": "Git ref the checkout was created from."
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Git base ref; null for directory execution."
         },
         "base_sha": {
           "type": [
@@ -37,11 +40,28 @@
         },
         "worktree_path": {
           "type": "string",
-          "description": "Absolute path of the isolated Git checkout."
+          "description": "Absolute actual execution directory, whether Git-backed or plain."
         },
         "branch_name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Clone-local branch; null for directory execution."
+        },
+        "workspace_kind": {
           "type": "string",
-          "description": "Clone-local branch created for the checkout."
+          "enum": [
+            "git",
+            "directory"
+          ]
+        },
+        "scope_paths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         },
         "home_dir": {
           "type": "string",
@@ -87,7 +107,7 @@
         "created_at"
       ],
       "additionalProperties": false,
-      "description": "An isolated execution envelope: a private Git checkout plus scoped env/HOME/harness-config isolation."
+      "description": "Execution directory and scoped HOME/configs. Git checkouts retain their Git identity; directory execution uses a selected copy or the live source without Git initialization."
     }
   },
   "$schema": "http://json-schema.org/draft-07/schema#"

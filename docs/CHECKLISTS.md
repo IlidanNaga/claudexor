@@ -28,7 +28,7 @@ Use this before committing documentation changes.
   packet names, local absolute paths, raw planning prompts, transcript-style
   review verdicts, and token-like values.
 
-## Design Discipline (locked owner directives)
+## Design Discipline (locked operator directives)
 
 These are LOCKED rules for all future work. Do not re-litigate them.
 
@@ -38,7 +38,12 @@ These are LOCKED rules for all future work. Do not re-litigate them.
   hardcoded enums-in-logic, so new values / harnesses / modes work without
   re-patching. Reference example: the effort-ladder normalizer — adapters declare
   their `effort_levels`, a shared normalizer clamps to them, and no per-level value
-  is hardcoded in logic.
+  is hardcoded in logic. Generalization is earned, not automatic: before adding
+  a restriction, name the demonstrated marginal danger, affected common path,
+  and why existing trust, review, custody, and rollback controls are insufficient.
+  If a restriction touches a supported path, its acceptance proof includes a
+  positive production-shaped E2E of the promised capability, not only a denial
+  or policy-shape assertion; capability loss blocks the restriction.
 - **Staged-field rule.** A schema field ships only WITH a real producer AND a real
   consumer in the SAME change; otherwise it is deleted, never left as a dead or
   fake knob. This is exactly what `pnpm knip` plus the docs-truth gate enforce.
@@ -77,9 +82,19 @@ pnpm test
   the daemon/Control API. UI code may display or copy the returned allowlisted
   command and guide, but must not construct or execute harness login/install
   commands locally.
+- Effective setup-login capability is projected from the adapter's managed-login
+  declaration, exact vendor binary, and the same bounded terminal resolver the
+  runner calls immediately before spawn. Assert own-property `setupLogin` on
+  every current harness/catalog row, legacy omission compatibility, and
+  `external_terminal` rather than false `in_app` when the daemon backend is not
+  ready. Request/profile/cardinality validation must precede helper probing and
+  durable creation; rejected requests make zero helper/vendor calls and zero
+  mutations.
 - Native login must use the shared absolute binary + argv spec and a
   provider-secret-scrubbed environment; no `sh -c`, OAuth callback broker, or
-  copied Terminal output.
+  copied Terminal output. The manifest owns exactly one `managed_login.stdin`
+  declaration per setup command; command flow/window/argv stay in the command
+  registry and input class is not re-authored there.
 - Cancel/timeout/restart must stop only an identity-proven process group (TERM,
   bounded KILL fallback) and reach terminal state only after death proof. Test
   PID reuse, missing/corrupt sidecars, and `termination_unconfirmed`.
@@ -102,17 +117,48 @@ pnpm test
   terminal.
 - Run success/no-op semantics must be evidence-based: auth/API/harness failures
   are failed diagnostics, not empty-diff `no_op`.
+- For directory execution, exercise both direct and copied ordinary folders with
+  no source Git initialization and no strategy substitution. Prove complete
+  selected inputs and binary/large/file-only outputs survive capture and disposal;
+  preview limits and an empty text patch must not erase a result. Direct execution
+  must not require a whole-tree baseline or claim full rollback. Copied delivery
+  must verify retained bytes and per-file target preimages, preserve unrelated
+  edits, record partial paths, and retain remaining custody until apply or discard.
+  Portable filesystem tests do not certify a native harness or Windows acceptance.
+- Processing follows the [single rule](DEVELOPMENT.md#processing-preference).
+  Check request/submitted/observed evidence independently through helpers, reviewer
+  slots, retries and Exact Retry. Prove ordinary included billing survives,
+  premium service is not made free by native authentication, list-price amounts
+  are not cash, and existing finite/no-paid limits still govern dispatch and
+  streamed usage. A typed no-generation HTTP refusal may permit a new Standard
+  request/reservation; physical dispatch stays recorded and unknown outcomes do
+  not authorize it. Include positive native execution for supported controls.
+- Account catalog views must be negotiated through the operation catalog. Check
+  strict legacy shapes, all enabled account inventories, exact pins, independent
+  failures, and original observation/provenance. A union must not manufacture a
+  maximum capability or weaken fresh execution admission.
 - Tool success, web evidence, and tmp/workspace claims must be evidence-based:
   preserve redacted tool error detail; `tool_result.is_error === true` blocks
   claimed success unless verified recovery exists; absolute `/tmp/...` is not
   project diff evidence.
 - No regex governance for risk, permissions, tool success, web-required
   detection, winners, or tests-passed.
-- If a native surface is discovered but not wired to active runs, expose it as a
-  capability note only; do not enable live input/steering controls.
-- Treat manifest auth sources as source availability only. Readiness, run
-  routing, Auth UI status, and reviewer eligibility must come from doctor status,
-  enabled intents, and smoke/conformance checks.
+- Live input into active runs ships only as a declared per-adapter channel
+  (`capability_profile.live_input`, projected as the catalog row's `liveInput`)
+  with journaled typed delivery: `message.accepted` before any native dispatch,
+  then `message.delivered` (a correlated consumption echo) or `message.refused`
+  with `outcome` and `reason`; an `accepted` receipt writes no second row and
+  consumption surfaces as the adapter's status event. An
+  adapter without a truthful channel declares `none` and answers `unsupported`
+  with no native write. If a native surface is discovered but not wired to
+  active runs, expose it as a capability note only; do not enable live
+  input/steering controls for that lane.
+- Treat manifest auth sources as source availability only. Aggregate/default
+  readiness and Auth UI default status come from doctor status, enabled intents,
+  and smoke/conformance checks; a selected account route comes from its exact
+  Accounts row plus profile probe. Run and reviewer pools may consider a
+  doctor-OK default route or a harness with enabled account rows, but the chosen
+  route must pass its corresponding readiness proof before spawn.
 - Fixture rule: when an adapter's native stream parsing changes, refresh or add
   a recorded fixture under `packages/harness-<id>/fixtures/` and keep the
   conformance parity test green (typed tool_call/tool_result with status,
@@ -236,149 +282,83 @@ pnpm test
   vendor state remains scoped, default and profile logins both work, and a
   missing bridge refuses with the real cause + Native setup remedy. A green
   host doctor with a red scoped-env probe is a finding, not a flake.
+- **CONCEPT-CHANGE(INV-067, INV-135):** test the effective platform policy,
+  not a universal "profile HOME equals credential identity" assumption.
+  Windows Antigravity permits one enabled OS-user-scoped binding: create and
+  enable enforce the bound atomically, disable remains the recovery action,
+  over-cap legacy state fails routing/setup/quota with
+  `credential_profile_ambiguous` and zero probes, and disabled rows sharing
+  that OS-user credential are never probed. Disabled rows backed by
+  profile-isolated credentials remain non-routable but retain readiness probes.
+  Deletion removes Claudexor-owned state while the receipt explicitly
+  reports the vendor OS-user credential left unchanged.
 - Versioned repo config must never self-grant sensitive powers.
 - Run a targeted search for token-like values when touching auth, secrets,
   artifact writing, or logging.
 
 ## Release
 
-- `git status --short` reviewed.
-- Public docs and app README are aligned with current behavior.
-- `pnpm release:verify` passes.
-- Node 20.19.0 and the current pinned Node CI lanes pass; both clean npm install
-  smokes must complete before the GitHub Release is published.
-- `pnpm release:workflow:check` passes: every action is full-SHA pinned,
-  workflow inputs are projected through environment variables rather than
-  interpolated into shell, and unsigned/clobber fallbacks are absent.
-- Schema generated diff is clean.
-- `node scripts/docs-truth-check.mjs` passes (endpoints, mode ids, CLI flags
-  match docs).
-- `pnpm knip` passes (no unused exports/files; dead code is deleted, not
-  allowlisted, unless a justified baseline entry explains why).
-- When runtime/harness resilience changes, the fixed real-harness battery
-  (`pnpm battery:real`) is rerun or explicitly waived with the ENV/network
-  evidence that made it inconclusive. Release acceptance uses the credentialed
-  disposable-VM existing-default lane from `docs/DEVELOPMENT.md`, without a
-  phase filter: its forced uncached build and receipt must bind the launched
-  daemon entry digest to the exact candidate handshake, prove the default config
-  remained byte-identical, prove every durable route interval in every Codex and
-  Claude task attempt stayed on a disclosed native session, and report
-  `FAIL=0 ENV=0 SKIP=0`. A scratch or partial run is diagnostic evidence, not
-  this acceptance gate.
-- New terminal states, retry events, or telemetry fields are documented in
-  architecture/development docs and have generated schema updates.
-- Swift tests/build pass.
-- Live native-login acceptance passes for Codex, Claude, and Cursor: observe
-  awaiting_user -> verifying -> succeeded, typed auth status, background
-  recovery, and duplicate-create suppression without logout or credential reads.
-- Packaged app/ZIP/DMG and the npm CLI package contain the setup-login runner;
-  the bundle boot smoke starts both the daemon and helper with bundled Node.
-- The signed candidate executes the exact packaged daemon `--probe` with its
-  bundled Node before notarization and again after ZIP extraction; direct-entry
-  proof must survive canonical macOS `/tmp`/`/var` path aliases and still reject
-  a different existing file with the same basename.
-- When Delegate surfaces change, exact-candidate UI acceptance proves the
-  healthy `requested/effective/used/reason` receipt, child/parent lineage, and a
-  `waitingOnUser` child answered from its inline card. Detail failure must show
-  its cause plus Retry instead of an endless spinner. Run this in the isolated
-  macOS VM with real HID clicks and screenshot evidence, not UI automation alone.
-- Review gate: the Release review protocol (see the section below) — optional
-  pre-freeze internal critics, then one parallel full-context wave with
-  the exact reviewer pair the Release review protocol section defines
-  (2026-08-06: Cursor operator subagents), one
-  adjudication, one batched correction commit, and one confirmation wave
-  focused on that delta while both lanes retain the full candidate context.
-- Local unsigned app packages are smoke artifacts only. Final DMG/ZIP assets
-  come from GitHub Actions `candidate` then `publish` mode; missing signing or
-  notarization credentials block publication. Publish promotes the exact
-  twelve-asset candidate set byte-for-byte (DMG, ZIP, app SBOM, SHA256SUMS,
-  engine closure + unsigned runtime manifest, the four remote SSH runtime
-  archives, the unsigned remote manifest, and the remote SBOM), verifying every
-  promoted asset in ONE early provenance loop before any use; only the two
-  owner-signed manifests (`runtime_manifest_b64` and
-  `remote_runtime_manifest_b64`, sealed offline via `pnpm sign:runtime-manifest`
-  / `pnpm sign:remote-runtime-manifest`). The required `candidate_run_id`
-  selects the candidate workflow run whose exact artifacts are promoted; only
-  those manifests, the review attestation, and the final checksum set are
-  assembled in the publish run. The remote SBOM is regenerated
-  from the promoted unsigned manifest and must `cmp` byte-identical to the
-  candidate SBOM before the candidate bytes ship.
-- The shared engine closure remains one artifact and one signed authority for
-  app updates and host embedding. Its archive entries are only regular files
-  or directories; internal dependency links are materialized with their
-  expected bytes, escaping links/special files/`.node` addons are refused, Node
-  and CLI are absent, and the daemon's `--probe` identity still matches the
-  publication manifest or its derived reviewed host pin. Portable extraction
-  is not evidence of feature parity for every harness/login path on that OS.
-  Embedded start/handshake/stop use one exact config root/socket and one tested
-  Node version; a Windows support claim has a native
-  extract/probe/handshake/graceful-stop smoke receipt.
-- The publish input is an annotated stable tag on exact `origin/main` plus a
-  signed schema-v6 attestation. It binds the candidate SHA/tree/version, exact
-  full-gate receipt, sealed evidence manifest/diff/wave, and the two required
-  operator reviewer reports (digests + model slugs) with non-blocking verdicts
-  (see the Release review protocol). Verify the Ed25519 signature against the
-  tracked pinned public key before semantic validation. Reject non-v6,
-  unsigned, unknown-key, tampered, substituted, or incomplete publish inputs;
-  schema v2-v5 stays signature-verifiable only as archived evidence.
-- Verify app, ZIP-contained app, and DMG signatures, notarization tickets,
-  staples, checksums, SBOM, and GitHub provenance. Do not upload stale local
-  `apps/macos/dist` artifacts.
-- DMG quarantine smoke before publish: download the candidate DMG/ZIP asset,
-  verify its sha256 against SHA256SUMS, confirm the downloaded file carries
-  `com.apple.quarantine`, run `codesign --verify --deep --strict` and
-  `spctl --assess` on the app, and boot the quarantined (translocated) app.
-- npm packages publish with provenance in dependency order. Existing versions
-  are retryable only when local tarball integrity and published provenance
-  match; any mismatch blocks as a version collision.
-- Two dist-tags move, and only one of them moves by itself. `npm publish` runs
-  with no `--tag`, so npm moves `latest` — which the provenance check then
-  REQUIRES to have moved, so do not add `--tag` to that publish. `next` is moved
-  separately, by `moveNextChannel` after the signature audit, because preview
-  consumers resolve that channel deliberately and must not stay on stale bytes
-  after a stable promotion. Ouroboros runtime delivery is exact-archive pinned;
-  it does not resolve either npm tag. After a release, confirm both:
-  `npm view claudexor dist-tags`.
-- Release assets are uploaded without `--clobber`; a same-name differing asset
-  blocks. Publish the draft last and never edit its tag/assets afterward. This
-  is workflow-enforced immutability, not a claim about GitHub repository settings.
-- GitHub release notes summarize shipped behavior; they do not publish private
-  planning notes or review scratch.
-- Pre-release immune scan (MANDATORY, no cron): an autonomous read-only audit
-  of the WHOLE tree against `CLAUDEXOR_BIBLE.md` — not just the release diff.
-  The auditor reads the Bible end-to-end, then verifies each invariant's
-  `verify:` note against current code/docs/gates, hunting the boiled-frog
-  drift per-commit diffs cannot show. Output is a findings list (file/line
-  evidence, invariant id, severity) — tickets or fixes BEFORE the tag, never
-  silent edits during the scan. Blocking bar: any invariant whose verify note
-  is no longer true, any gate that no longer runs where its invariant says it
-  does, any doc claim contradicting shipped behavior.
-- Fixture freshness at release grade: `node scripts/fixture-freshness-check.mjs
-  --strict` — recorded adapter fixtures must match the installed vendor CLI
-  versions (drift fails strict; re-record when stale). Synthetic-only
-  harnesses are disclosure NOTES, never strict failures — recording is gated
-  on live route availability, not the release calendar. The strict leg runs
-  HERE (operator machine, via `pnpm release:verify`); the tag workflow runs
-  the STRUCTURE check only because the GitHub runner has no vendor CLIs and
-  a missing CLI with recorded fixtures is strict-fatal by design.
-- Cursor E2E when MCP/plugin surfaces changed: `node scripts/cursor-itest.mjs`
-  (scripted phases A/C/D + failure modes) passes, then the two MANUAL phases:
-  - Phase B (Cursor discovery): `claudexor plugin repair cursor`, reload
-    Cursor, then verify the project-scoped descriptor store
-    (`~/.cursor/projects/<proj>/mcps/plugin-claudexor-claudexor/tools/*.json`)
-    exposes the CURRENT tool schemas (spot-check `claudexor_run` has
-    `model`/`effort`/`web`/`reviewerPanel`) — Cursor refreshes tool schemas
-    only on reconnect (no listChanged support), so a stale cache after an
-    upgrade is the expected failure mode this step catches.
-  - Phase E (agent-in-the-loop): in Cursor, in a fixture workspace, prompt
-    "Use the claudexor skill to check harness status, then get a read-only
-    plan for fixing add()" — the agent must call `claudexor_status` then
-    `claudexor_plan` with an explicit `repoPath`, and the run dir must appear
-    in the fixture repo (not Cursor's cwd).
-  - When no human operator is available for the MANUAL phases, they are
-    recorded as an explicitly-waived `docs/FEATURES.md` row naming the
-    untested surface, and the release report calls the waiver out — never
-    silently skipped, never replaced with "equivalent" scripted checks.
+- Review the clean candidate identity, cumulative diff and accepted intent.
+- `pnpm release:verify` passes; relevant platform checks pass in CI, including
+  the Node compatibility floor, Swift build/tests, native Darwin/Windows helpers,
+  installed packages and exact assembled runtime smokes. No local Mac or Cursor
+  installation is required of a contributor.
+- Generated schemas, docs truth, invariant/concept gates, dead-code, complexity,
+  fixture structure and release-workflow checks pass. Strict installed-vendor
+  freshness is available through `pnpm release:verify:vendors`; unavailable
+  vendor CLIs are disclosed, not a mandatory local-machine gate.
+- Apply the Release review protocol below. Record a complete independent report,
+  dispositions and the responsible maintainer's confirmation for the exact
+  candidate. A designated coding agent can be that maintainer. Do not publish
+  private dialogue or operator scratch to satisfy a release field.
+- Exercise the actual affected user paths. Auth/transport changes need positive
+  same-profile/access capability evidence, not only denial fixtures or process
+  exit. Use managed disposable fixtures; never copy host credentials. The
+  existing real-harness battery is available when its full matrix is relevant;
+  targeted affected-path evidence and explicit unavailable-platform residuals
+  are valid review inputs, not fabricated all-platform acceptance.
+- Match evidence to the changed path: a daemon handshake does not prove a
+  native login, a helper fixture does not prove vendor credential transport,
+  and codesign/spctl checks do not boot a quarantined/translocated GUI app.
+  Changes to those paths retain their respective positive checks; record any
+  unavailable execution and its maintainer disposition explicitly. The shared
+  candidate review checks the relevant invariant owners across the whole tree;
+  this does not introduce a second immune-scan or review wave.
+- UI changes receive visual checks of the affected flows. Native Mac keyboard,
+  VoiceOver, quarantine/translocation and host-plugin discovery checks above are
+  useful manual supplements when relevant; automated substitutes must state what
+  they did and did not prove. Lack of a local Mac/Cursor alone is not a release
+  blocker. Confirmed regressions of supported paths still block.
+- The candidate CI run signs/notarizes/staples/verifies the app and DMG, verifies
+  ZIP-extracted bytes, setup runner, offline Browser MCP and daemon probe, and
+  exercises platform-native helper transport. Signing/notary failures block.
+- Publish only an annotated stable tag on exact `origin/main` with the successful
+  candidate run id, `review_url`, and `review_confirmed: true`. The report may
+  live in the ordinary PR or private CI evidence. The dispatcher confirms its
+  completeness, independent execution, dispositions and exact candidate scope;
+  CI does not infer those facts from prose or model brands.
+- Preserve exact candidate promotion: the twelve-asset internal candidate set,
+  source-SHA/workflow-bound GitHub provenance before use, checksums, and app/ZIP/
+  SBOM/runtime byte identity. Publish builds no substitute app/engine artifact.
+- Both offline-signed runtime manifests remain mandatory. Verify their pinned
+  Ed25519 authority, exact candidate fields and promoted archive digests before
+  publishing them; never ship unsigned candidate manifests under release names.
+  Old publication waivers and review attestations are historical only.
+- Keep the shared engine closure's existing archive layout and trust authority.
+  Internal links materialize into regular files; escaping links, special files
+  and native Node addons refuse. Node remains host-owned. Compare app/closure
+  engine bytes; verify daemon/CLI stamps and native helper custody.
+- Windows and Linux CI exercise the actual assembled archive, not merely source
+  compilation. Extract/probe/handshake/graceful-stop identity is bound to the
+  same isolated root. Feature parity still needs its own affected-path evidence.
+- npm packages publish in dependency order with provenance. Existing versions
+  require exact tag/commit/source/digest proof; differing bytes are collisions.
+  Clean installed-package smokes pass on the supported Node floor and pin.
+- Confirm npm `latest` and `next` point to the published version. Exact-pinned
+  embedding hosts do not follow those tags.
+- Asset upload never clobbers. The remote asset set is checked before/after
+  upload; publish the draft last and never edit a published tag/assets.
+- Release notes describe shipped behavior, not private review scratch.
 
 ## Review Protocol
 
@@ -393,27 +373,33 @@ pnpm test
 - Treat every reviewer finding and proposed patch as a hypothesis. Before
   accepting it, reproduce the behavior, identify the root cause and canonical
   owner/SSOT, search sibling surfaces and other instances of the same failure
-  class, and check the governing invariant or owner criterion. Repair the class
+  class, and check the governing invariant or operator-approved criterion. Repair the class
   only when multiple surfaces or a broken SSOT boundary prove it; otherwise
   prefer the smallest local correction. Investigate over believe; generalize
   over overfit; meta over patch.
 - Reject scope drift and overengineering that does not serve the accepted user
   intent.
-- Before release, run the local multi-review protocol and Claudexor dogfood
-  review when available; if reviewer output is empty, erroneous, or reads the
-  wrong tree, treat the review gate as failed rather than ceremonial.
+- Use the release protocol below for this repository. An empty, erroneous, or
+  wrong-tree review is not evidence; obtain a complete independent review.
 - If a change intentionally edits existing protected gate/test files, record the
   approval through the typed run surface (`--allow-protected-path` or
   `protectedPathApprovals`) instead of relying on prompt prose or repo config.
 - When the required review gate names exact reviewers or repeated models from
   the same harness, use the explicit `reviewerPanel` / `--reviewer-panel` path
-  and verify the per-reviewer telemetry records every requested entry separately.
+  (use `--reviewer-panel-json` when a slot carries `credentialProfileId`) and
+  verify the per-reviewer telemetry records every requested/effective profile,
+  any harness-reported profile id, and model separately. A named profile must
+  fail before spawn if it is
+  unknown, disabled, unready, or quota-blocked; an unpinned slot may use the
+  canonical pool only when its selected identity is disclosed.
 - Reviewer panels and protected-path approvals are Agent-only. Ask and Plan
   must reject them at the schema boundary; use Council when a Plan needs
   multi-harness critique, never the retired standalone Plan-review path.
-- Review-panel spend is route-scoped: native subscription reviewers settle to
-  valuation, API-key reviewers to cash. Verify mixed panels preserve both
-  totals and never debit the aggregate as cash.
+- Review-panel spend is event- and Processing-scoped. Verify cash, valuation and
+  unknown amounts retain independent evidence through mixed sessions, retries,
+  streaming cap cancellation and final settlement. A prospective paid-credit
+  tariff is not an actual debit receipt; preserve proven ordinary inclusion
+  without reclassifying premium or unknown amounts as free.
 - Reviewers must inspect the complete Git-visible candidate and read file-backed
   evidence (`DIFF.patch`, user dialogue, decided tradeoffs, tests, gate receipt)
   from the sealed evidence directory. Do not divide the repository into tiny
@@ -421,15 +407,16 @@ pnpm test
   The native harness reads files directly and may use the internet where source
   verification is useful.
 - Reviewer workspaces must project one frozen source inventory: Git-visible
-  files plus exact diff-touched paths, or diff-touched postimages only when no
-  Git inventory exists. Prove that unrelated ignored local instructions and an
-  ignored sibling beside a diff-touched file are absent, while explicit evidence
-  remains available through its separate packet boundary.
+  files plus exact diff-touched paths, or the explicit complete selected postimage
+  manifest for directory work. The legacy no-inventory path remains diff-only.
+  Prove unrelated local files stay absent while every selected file, including
+  unchanged inputs and generated binary paths, remains available with an empty
+  text diff. Explicit evidence keeps its separate packet boundary.
 - Synthesis follows the same argv-size law: candidate diffs/findings are a
   temporary file inside the synthesis envelope, never concatenated into the
   process prompt. Verify the file is recreated on retry and removed before
   diff/gate/review; a race with large/binary diffs must not fail `spawn E2BIG`.
-- When a candidate answer links generated screenshots, verify bounded raster
+- For Git patch candidates, when an answer links generated screenshots, verify bounded raster
   copies survive envelope disposal in the run-artifact plane and the winner's
   relative markdown links resolve; do not claim dead worktree paths.
 - Cursor parser fixtures must cover `{failure:{exitCode}}` tool results as
@@ -450,7 +437,7 @@ pnpm test
   durably invalidate dependencies.
 - Retry accounting: fixtures must switch native→API-key within one candidate
   and one reviewer; each usage event settles by its own/current typed route,
-  never the attempt's first route.
+  and amount basis, never the attempt's first route or a blanket native-is-free assumption.
 - Synthesis staging must restore a pre-existing sentinel byte/mode-identically
   and refuse live or dangling symlinks using no-follow creation; success/retry/
   failure must leave no staging diff or host-side target.
@@ -463,162 +450,44 @@ pnpm test
   model/source, route proof, start/first-event/completion-or-timeout timestamps,
   duration, raw normalized stream or transcript, parsed JSON blocks, and parse
   errors.
-- Bind every required reviewer to the same external sealed evidence directory
-  (`FREEZE.json`, complete `MANIFEST.sha256`, exact `DIFF.patch`, and
-  `USER_DIALOGUE.md`) and exact clean candidate SHA/tree. Start both native
-  reviewers at one concurrency boundary in fresh read-only workspaces; a
-  missing packet, worktree, manifest match, or exact route fails before either
-  slot can count. Each wave uses a new external output directory; existing
-  reviewer artifacts are never overwritten.
+- Bind each reviewer to the exact candidate and complete evidence (diff,
+  accepted intent, decisions and tests). Keep private dialogue in a separate
+  private packet. Use new output locations for independent executions; never
+  overwrite a prior report. Concurrent execution is optional, not review proof.
 - Emit reviewer progress events (`reviewer.started`, `reviewer.first_event`,
   `reviewer.completed`, `reviewer.timed_out`, `reviewer.failed`) so a concurrent
   panel is diagnosable and does not look like a hang.
 
-### Release review protocol (v6, owner-locked — INV-125/INV-139)
+### Release review protocol (INV-125/INV-139)
 
-This is the ONLY release review protocol. History for context: the 2.1.0
-release ran 18 wave rounds without converging (~40% of findings re-surfaced
-earlier "accepted" fixes; ~26% of the release diff was authored by the loop
-itself). This protocol bounds the loop mechanically while preserving the full
-repository context that small review packets lost.
+This protocol governs development and releases of this repository. It does not
+change the product's internal reviewer selection, cross-family verification,
+arbitration or user-configured review policy.
 
-> **Owner amendment 2026-08-06 (panel/transport).** By explicit owner decision
-> («не надо вообще codex использовать… Используй своих субагентов, ты же
-> можешь у себя разные модели вызывать так как ты cursor»), the formal
-> reviewer pair executes as **Cursor operator subagents**, not as native
-> Claude Code/Cursor CLI runs through Claudexor: slot `fable` = one slug from
-> the owner-approved tier set {`claude-fable-5-thinking-max`,
-> `claude-fable-5-thinking-medium`, `claude-fable-5-thinking-high`} with the
-> full context, slot `sol` = one
-> slug from {`gpt-5.6-sol-xhigh`, `gpt-5.6-sol-max`,
-> `gpt-5.6-sol-medium`}. The tier sets are an
-> operator decision of 2026-08-06 ~08:29 MSK under the owner authorization of
-> 08:04 MSK («меня удовлетворяют модели fable-5 и gpt-5.6-sol», given after
-> the sol max tier disappeared from the subagent model catalog): two catalog
-> flaps within one hour showed that a hard single-tier pin would block the
-> formal pair on a frozen SHA. The actually used slug is recorded in the
-> slot metadata and the signed entry; a slug outside the slot's set refuses
-> fail-closed. The 2026-08-07 operator addendum admits the same-family `xhigh` Sol tier
-> after the live subagent catalog exposed only that tier; the 2026-08-10
-> operator addendum likewise admits the same-family `high` Fable tier after
-> the live catalog exposed only that Fable tier — ratified explicitly by the
-> owner the same day (verbatim «согласен с рекоментадцией. Продолжай»,
-> 2026-08-10 ~20:46 MSK, after the constitutional gap was surfaced); no other
-> family is admitted. Each slot's sealed artifact is its markdown report plus metadata
-> (model slug, exact ISO-8601 start/finish, `pass|warn` verdict,
-> mandatory `review_scope: "full"`, report SHA-256), and the two executions
-> must genuinely overlap. The slot metadata — model, intervals, verdict,
-> scope — is a set of operator-attested statements: the new transport
-> produces no independent session or event proof of the subagent executions,
-> an accepted property of this owner decision. The signed
-> attestation is schema v6 (`cursor-operator-fable-sol-v1`); it still binds
-> the exact candidate SHA/tree/version, full-gate receipt, sealed evidence
-> manifest/diff/wave, and now both reports' digests and model slugs. Schema
-> v5 joins v2-v4 as archive-signature-only. The bullets below state the v6
-> transport directly; wave discipline, the sealed packet, the blocker
-> contract, adjudication, and the ship rule are unchanged.
-
-> **Historical, non-executable.** The retired v5 native-harness mechanics —
-> vendor-native Claude Code/Cursor CLI sessions with hard-pinned models,
-> observed stream models and route proofs, per-reviewer session identities,
-> frozen `external_context_policy=live` review specs, running the review
-> through the receipt-bound copied packaged CLI, the sol confirmation delta
-> scope, and the schema-v5 signature — are recorded in the CHANGELOG and the
-> INV-125 decision trail. None of them is a step of this protocol; do not
-> execute or re-create them.
-
-- **One wave, in parallel, on a frozen candidate SHA**: exactly two formal
-  full-context reviewers, executed as Cursor operator subagents per the
-  owner-approved panel (`OWNER_REVIEW_PANEL` in
-  `scripts/lib/release-review-contract.mjs`): slot `fable` = one slug from
-  {`claude-fable-5-thinking-max`, `claude-fable-5-thinking-medium`,
-  `claude-fable-5-thinking-high`}, slot
-  `sol` = one slug from {`gpt-5.6-sol-xhigh`, `gpt-5.6-sol-max`,
-  `gpt-5.6-sol-medium`}. Each
-  reviewer receives the complete Git-visible candidate repository, complete
-  diff, the same sealed evidence, owner dialogue/decisions, and tests, and may
-  use live internet access where source verification is useful. No substitute
-  model, API-key fallback, packet split, or extra critic can fill either
-  slot; a slug outside a slot's tier set refuses fail-closed.
-- **One sealed packet** for every reviewer: `MANIFEST.sha256`,
-  `FREEZE.json`, `DIFF.patch` + digest, `TESTS.txt`, the decision registry
-  (change → D#/invariant mapping), `FORBIDDEN_FINDINGS.md`,
-  `DECLINED_FINDINGS.md` (previously rejected findings with reasons), and
-  `BLOCKER_FILTER.md` (the blocker contract below) — present from wave 1.
-- **Blocker contract (INV-139)**: a blocking finding must cite a violated
-  invariant or owner-accepted criterion, carry reproducible evidence, and
-  be reachable in the default configuration. Reachability caps severity at
-  WARN otherwise. Reviewer `proposed_fix` is advisory. A finding that
-  re-litigates a recorded owner decision is out-of-scope by construction —
-  ledgered, never fixed.
-- **One adjudication → one batched fix commit.** Only findings passing the
-  blocker contract earn fixes; everything else becomes a `docs/FEATURES.md`
-  row, a BACKLOG entry, or a DECLINED ledger row in the same commit. No
-  "while I'm here" fixes inside the batch. EVERY finding gets exactly one
-  row in `docs/reference/review-ledger.md` (the findings ledger); its
-  declined rows are the next wave's `DECLINED_FINDINGS.md`.
-- **One confirmation wave**, focused on the fix diff and every file it
-  touched — both lanes still review in the same full context:
-  `review_scope: "full"` is the only value the v6 contract accepts, and the
-  retired sol delta scope can no longer satisfy any slot. A confirmation
-  blocker on unchanged code without new evidence is invalid.
-- **Stop.** New proven blockers after confirmation get a fix + targeted
-  re-check of exactly those findings. Anything beyond that requires an
-  explicit owner decision — the protocol never self-extends.
-- **Ship rule**: confirmation pass + every open finding at WARN-or-below
-  (each with its FEATURES/BACKLOG/DECLINED row) is releasable. A perfectly
-  clean board is not required.
-- **Reviewer liveness**: a slot counts only with a complete markdown report,
-  a `pass|warn` verdict, and a recorded duration of at least one second, and
-  the two executions must genuinely overlap in wall time; the two reports
-  must be byte-distinct. Models, intervals, verdicts, and scope are
-  operator-attested statements — this transport produces no independent
-  session or event proof (an accepted property of the owner decision above).
-  An empty or instant execution is an infrastructure failure. Frozen slots
-  have no internal transient retry; an operator retry uses fresh artifacts
-  and a fresh review wave on the same still-clean SHA. A failed required
-  slot blocks sealing.
-- **Review-contract self-test**: the schema-v6 contract and sealer
-  validators are exercised in CI against hostile fixtures (missing, extra,
-  or mismatched metadata fields, out-of-set model slugs, implausible or
-  non-overlapping timing, duplicate reports, tampered signatures). Two
-  identical failures from different models mean the PROTOCOL is wrong, not
-  the models.
-- **Evidence completeness is deterministic.** The sealed evidence packet owns
-  the complete binary `DIFF.patch`, complete manifest, frozen SHA/tree and wave,
-  full-gate receipt, and `USER_DIALOGUE.md`. Both reviewer subagents read that
-  same evidence plus the complete candidate repository. Missing, changed,
-  ignored-only, or secret-bearing evidence fails
-  before a review can count; no omission note or partial pack substitutes for
-  access to the whole tree.
-- **Attestation:** `scripts/run-full-gate-receipt.mjs` runs exact
-  `pnpm release:verify` on the clean candidate into a required external output
-  directory, builds one small self-contained
-  verifier from exact tracked HEAD sources, copies the packaged app's
-  self-contained `claudexor.bundle.cjs`, and hashes both into the receipt. The
-  operator transport never executes that copied CLI; it travels only as
-  receipt-bound bytes. After both review subagents complete, the operator
-  writes one external review-artifacts directory with exactly two reviewer
-  directories (`01-fable/`, `02-sol/`), each holding `report.md` (the
-  reviewer's complete markdown report) and an exact-shape `metadata.json`
-  binding the slot, the actually used model slug, the candidate SHA and tree,
-  the packet manifest digest, the review wave UUID, the `sha256:`-prefixed
-  diff digest, exact ISO-8601 start/finish, a `pass|warn` verdict, the
-  mandatory `review_scope: "full"`, and the report's SHA-256.
-  `scripts/seal-owner-review-attestation.mjs --full-gate-receipt <file>
-  --evidence-dir <dir> --review-artifacts <dir> --private-key <file>
-  --authority release/review-attestation-authority.json --out <file>` imports
-  the receipt-bound verifier bytes only after that exact gate passed,
-  re-verifies the sealed packet and recomputes every evidence and artifact
-  digest from regular non-symlink files, checks that `DIFF.patch` is the
-  exact base..candidate diff and that the packet carries the byte-identical
-  gate receipt, and refuses a missing, extra, malformed, or mismatched
-  metadata field, a slug outside its slot's tier set, implausible or
-  non-overlapping timing, duplicate report bytes, secret-like tokens, or any
-  verdict outside `pass|warn`. It signs schema v6 (contract `owner-review-v6`,
-  protocol `cursor-operator-fable-sol-v1`) offline with the same Ed25519
-  review key, only for the final confirmation pair; the initial review and
-  adjudication remain in the ledger and sealed evidence, not a second signed
-  graph. `verify-release-input.mjs` verifies
-  the signature before semantic validation. Schema v2-v5 remains
-  signature-verifiable only for archived releases and cannot publish now.
+1. Freeze the exact candidate and give an independent human or AI reviewer the
+   complete Git-visible tree, cumulative diff, accepted plan and decisions, and
+   test evidence. Use file-backed context and disclose omissions. Any model or
+   harness is eligible; one complete independent adversarial report is sufficient.
+   Extra critics are useful only when they add a genuinely different check.
+2. Read the full report. Give every finding a disposition: accepted, rejected,
+   duplicate, deferred or out of scope, with evidence and rationale. INV-139 is
+   the blocker filter: reproduce a violated invariant/accepted criterion on a
+   reachable supported path; model consensus and proposed fixes are not authority.
+3. Batch accepted fixes. Test and independently review the delta, preserving
+   access to the full context. An unchanged finding without new evidence does not
+   restart the loop. A second full wave is justified only by a material change
+   to architecture or authority; before a third, ask the owner with an explicit
+   time/cost/scope checkpoint. Minor residuals need honest disposition, not an
+   endless search for a perfectly empty board.
+4. The responsible maintainer (human or explicitly authorized coding agent)
+   confirms the full review and dispositions for the final candidate. Store the
+   report/dispositions in ordinary PR or CI evidence and supply its stable link
+   plus `review_confirmed` to publication. Review quality and independence are
+   this maintainer's responsibility; a signature over self-authored metadata or
+   a stopwatch cannot prove them. Private dialogue need not become public.
+5. CI binds publication to the exact successful candidate and its provenance-
+   checked bytes. Changes after review receive proportional delta verification;
+   a changed candidate still needs matching final CI/artifact identity. Historical
+   signed review envelopes remain verifiable archives, never an alternative
+   current publication route. There is no mandatory family pair, named model,
+   execution overlap, local Mac, local Cursor or signed-review ceremony.

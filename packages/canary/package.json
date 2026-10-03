@@ -1,11 +1,14 @@
 {
   "name": "@claudexor/canary",
-  "version": "3.3.15",
+  "version": "3.18.0",
   "license": "MIT",
   "private": true,
   "description": "Canary golden stories: user-level E2E smokes over the PUBLIC surfaces (built CLI + fake harnesses), pinned to Bible invariants. Run via `pnpm canary`.",
   "type": "module",
   "dependencies": {
     "yaml": "^2.6.1"
+  },
+  "devDependencies": {
+    "@claudexor/schema": "workspace:*"
   }
 }

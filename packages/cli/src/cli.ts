@@ -4,14 +4,18 @@ import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { ArtifactStore } from "@claudexor/artifact-store";
 import { CLAUDEXOR_VERSION, noProjectRepoRoot, readTextSafe, userConfigDir } from "@claudexor/util";
+import { resolveInstructions } from "./run-options.js";
 import { releaseCommand } from "./release-command.js";
 import { serveBeltBridge, serveMcpBridge } from "./bridge-serve.js";
 import { dispatchAcpCommand } from "./acp-auth-command.js";
 import { initProjectConfig } from "@claudexor/config";
 import {
   DecisionRecord,
+  AccessProfile,
   EFFORT_HINT_HELP,
   EffortHint,
+  ProcessingPreference,
+  RunExecution,
   ExternalContextPolicy,
   type ProtectedPathApproval,
   type ControlReviewerPanelEntry,
@@ -38,6 +42,7 @@ import {
   requiredStringFlagError,
   type ParsedArgs,
 } from "./args.js";
+import { exitAfterOutputFlush } from "./cli-io.js";
 import { print, printJson, printJsonLine, printUsageError, statusGlyph } from "./cli-io.js";
 import { controlProblemError, minIntError, renderCliFailure, usageError } from "./cli-error.js";
 import {
@@ -102,15 +107,18 @@ import { settingsCommand } from "./settings-command.js";
 import { quotaCommand } from "./quota-command.js";
 import { trustCommand } from "./trust-command.js";
 import { projectCommand } from "./project-command.js";
-import { remoteCommand, setupCommand } from "./remote-command.js";
+import { remoteCommand } from "./remote-command.js";
+import { setupCommand } from "./setup-attach-command.js";
 import { harnessCommand } from "./harness-command.js";
 import { runRepl } from "./repl.js";
 import {
+  stringFlagValues,
   parseProtectedPathApprovalFlags,
   parseTestCommandFlags,
   parseReviewerEffortFlags,
   parseReviewerModelFlags,
   parseReviewerPanelFlags,
+  parseReviewFlags,
 } from "./run-options.js";
 
 const CLI_VERSION = CLAUDEXOR_VERSION;
@@ -161,50 +169,14 @@ function protectedPathApprovals(args: ParsedArgs): ProtectedPathApproval[] | und
   return parseProtectedPathApprovalFlags(flagValues(args, "allow-protected-path"));
 }
 
-/**
- * Per-run system instructions from `--instructions "<text>"` or
- * `--instructions-file <path>` (mutually exclusive; the file form avoids
- * ARG_MAX and keeps long instructions out of the process argv / `ps`).
- */
-function resolveInstructions(args: ParsedArgs): string | undefined {
-  const inline = flagStr(args, "instructions");
-  const file = flagStr(args, "instructions-file");
-  if (inline !== undefined && file !== undefined) {
-    throw new Error("pass either --instructions or --instructions-file, not both");
-  }
-  if (file !== undefined) {
-    try {
-      return readFileSync(file, "utf8");
-    } catch (err) {
-      throw new Error(
-        `could not read --instructions-file ${file}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-  }
-  return inline;
-}
-
-const ACCESS_PROFILES = new Set([
-  "readonly",
-  "workspace_write",
-  "full",
-  "external_sandbox_full",
-  "inherit_native",
-]);
-
 /** Access profile from `--access`. Invalid profiles FAIL LOUDLY (a typo must never silently run with the default write profile). */
-function accessProfile(
-  args: ParsedArgs,
-):
-  "readonly" | "workspace_write" | "full" | "external_sandbox_full" | "inherit_native" | undefined {
+function accessProfile(args: ParsedArgs): AccessProfile | undefined {
   const v = flagStr(args, "access");
   if (v === undefined) return undefined;
-  if (!ACCESS_PROFILES.has(v)) {
-    throw new Error(
-      `invalid --access '${v}' (expected readonly|workspace_write|full|external_sandbox_full|inherit_native)`,
-    );
+  if (!AccessProfile.options.includes(v as AccessProfile)) {
+    throw new Error(`invalid --access '${v}' (expected ${AccessProfile.options.join("|")})`);
   }
-  return v as never;
+  return AccessProfile.parse(v);
 }
 
 function effortHint(args: ParsedArgs): EffortHint | undefined {
@@ -264,7 +236,8 @@ function reviewerEfforts(
 
 /** Ordered explicit reviewer panel from `--reviewer-panel "claude=claude-opus-4-8:max,cursor=gpt-5.5-extra-high"`. */
 function reviewerPanel(args: ParsedArgs): ControlReviewerPanelEntry[] | undefined {
-  return parseReviewerPanelFlags(flagValues(args, "reviewer-panel"));
+  // prettier-ignore
+  return parseReviewerPanelFlags(flagValues(args, "reviewer-panel"), flagValues(args, "reviewer-panel-json"));
 }
 
 async function orchestrate(
@@ -322,9 +295,12 @@ async function orchestrate(
   let reviewerEffortOverrides: Partial<Record<ProviderFamily, EffortHint>> | undefined;
   let resolvedReviewerModels: Partial<Record<ProviderFamily, string>> | undefined;
   let resolvedReviewerPanel: ControlReviewerPanelEntry[] | undefined;
+  let review: boolean | undefined;
   let resolvedWebPolicy: ReturnType<typeof webPolicy> = undefined;
   let resolvedAccess: ReturnType<typeof accessProfile> = undefined;
   let resolvedEffort: EffortHint | undefined;
+  let processingPreference: ProcessingPreference | undefined;
+  let execution: RunExecution;
   let paidBudget: PaidBudget | undefined;
   let nFlag: number | undefined;
   let attemptsFlag: number | undefined;
@@ -345,9 +321,23 @@ async function orchestrate(
     reviewerEffortOverrides = reviewerEfforts(args);
     resolvedReviewerModels = reviewerModels(args);
     resolvedReviewerPanel = reviewerPanel(args);
+    review = parseReviewFlags(
+      flagValues(args, "review"),
+      flagValues(args, "no-review"),
+      forced.race === true,
+    );
     resolvedWebPolicy = webPolicy(args);
     resolvedAccess = accessProfile(args);
     resolvedEffort = effortHint(args);
+    const processing = flagStr(args, "processing");
+    processingPreference =
+      processing === undefined ? undefined : ProcessingPreference.parse(processing);
+    const scopePaths = stringFlagValues(flagValues(args, "scope-path"), "scope-path");
+    execution = RunExecution.parse({
+      isolation: flagBool(args, "in-place") ? "live" : "envelope",
+      workspaceKind: flagStr(args, "workspace-kind"),
+      ...(scopePaths.length ? { scopePaths } : {}),
+    });
     resolvedHarnesses = harnessList(args);
     resolvedPrimaryHarness = flagStr(args, "primary-harness");
     resolvedModel = flagStr(args, "model");
@@ -409,6 +399,8 @@ async function orchestrate(
       primaryHarness: resolvedPrimaryHarness,
       model: resolvedModel,
       effort: resolvedEffort,
+      processingPreference,
+      review,
       reviewerPanel: resolvedReviewerPanel,
       reviewerModels: resolvedReviewerModels,
       reviewerEfforts: reviewerEffortOverrides,
@@ -454,6 +446,7 @@ async function orchestrate(
     paidBudget,
     routingGoal: routingGoal?.success ? routingGoal.data : undefined,
     credentialProfileId,
+    review,
     reviewerPanel: resolvedReviewerPanel,
     reviewerModels: resolvedReviewerModels,
     reviewerEfforts: reviewerEffortOverrides,
@@ -461,6 +454,8 @@ async function orchestrate(
     resolvedWebPolicy,
     resolvedAccess,
     resolvedEffort,
+    processingPreference,
+    execution,
     resolvedSynthesis,
     resolvedHarnesses,
     resolvedPrimaryHarness,
@@ -486,6 +481,7 @@ interface DaemonRunParams {
   paidBudget: PaidBudget | undefined;
   routingGoal: ReturnType<typeof RoutingGoal.parse> | undefined;
   credentialProfileId: string | undefined;
+  review: boolean | undefined;
   reviewerPanel: ControlReviewerPanelEntry[] | undefined;
   reviewerModels: Partial<Record<ProviderFamily, string>> | undefined;
   reviewerEfforts: Partial<Record<ProviderFamily, EffortHint>> | undefined;
@@ -493,6 +489,8 @@ interface DaemonRunParams {
   resolvedWebPolicy: ReturnType<typeof webPolicy>;
   resolvedAccess: ReturnType<typeof accessProfile>;
   resolvedEffort: EffortHint | undefined;
+  processingPreference: ProcessingPreference | undefined;
+  execution: RunExecution;
   resolvedSynthesis: ReturnType<typeof synthesisMode>;
   resolvedHarnesses: string[] | undefined;
   resolvedPrimaryHarness: string | undefined;
@@ -512,7 +510,6 @@ async function daemonRun(
   outputMode: CliOutputMode,
   p: DaemonRunParams,
 ): Promise<number> {
-  const inPlace = flagBool(args, "in-place");
   const json = outputModeIsMachine(outputMode);
   const jsonStream = outputModeIsStream(outputMode);
   let client: Awaited<ReturnType<typeof ensureDaemon>>["client"];
@@ -598,7 +595,7 @@ async function daemonRun(
     ...(p.delegate ? { delegate: true } : {}),
     ...(p.council ? { council: true } : {}),
     scope: { kind: "project", root: process.cwd() },
-    execution: { isolation: inPlace ? "live" : "envelope" },
+    execution: p.execution,
     ...(p.resolvedHarnesses ? { harnesses: p.resolvedHarnesses } : {}),
     ...(p.resolvedPrimaryHarness ? { primaryHarness: p.resolvedPrimaryHarness } : {}),
     ...(p.routingGoal ? { routingGoal: p.routingGoal } : {}),
@@ -616,6 +613,8 @@ async function daemonRun(
     ...(p.resolvedWebPolicy ? { web: p.resolvedWebPolicy } : {}),
     ...(p.resolvedModel ? { model: p.resolvedModel } : {}),
     ...(p.resolvedEffort ? { effort: p.resolvedEffort } : {}),
+    ...(p.processingPreference ? { processingPreference: p.processingPreference } : {}),
+    ...(p.review !== undefined ? { review: p.review } : {}),
     ...(p.reviewerPanel ? { reviewerPanel: p.reviewerPanel } : {}),
     ...(p.reviewerModels ? { reviewerModels: p.reviewerModels } : {}),
     ...(p.reviewerEfforts ? { reviewerEfforts: p.reviewerEfforts } : {}),
@@ -713,17 +712,17 @@ async function daemonRun(
     if (exitCodeForState(status) === 0) {
       // Plan runs: server-derived readiness (D17) + interactive answer loop.
       if (p.mode === "plan") {
-        // Council disclosure (INV-031): membership + merge, projected by the
-        // server (never a client re-derivation).
         if (p.council) {
           const council = await fetchCouncil(addr, started.runId);
           if (council) {
             print(
-              `  council: merged by ${council.mergedBy ?? "(none)"} from ${council.drafted} of ${council.requested} member(s)${council.degraded ? " (degraded)" : ""}`,
+              `  council: merged by ${council.mergedBy ?? "(none)"}; ${council.drafted} of ${council.requested} contract-accepted draft(s)${council.degraded ? " (degraded)" : ""}`,
             );
             const failed = council.members.filter((m) => m.status === "failed");
             if (failed.length > 0) {
-              print(`  council failures: ${failed.map((m) => m.harnessId).join(", ")}`);
+              print(
+                `  council failures: ${failed.map((m) => `${m.harnessId}: ${m.error ?? "draft failed"}`).join("; ")}`,
+              );
             }
           }
         }
@@ -1094,11 +1093,14 @@ async function dispatch(args: ParsedArgs, outputMode: CliOutputMode): Promise<nu
           ...(runFacts?.presentation ? { presentation: runFacts.presentation } : {}),
         },
       );
-      const toolErrors = telemetry
+      const inspectToolRecords = telemetry
         ? telemetry.attempts.flatMap((a) =>
             a.tool_errors
-              .filter((e) => !e.recovered && e.kind === "web")
+              .filter((e) => !e.recovered)
               .map((e) => ({
+                blocking:
+                  (a.outcome.status === "blocked" || a.outcome.status === "failed") &&
+                  !(e.kind === "web" && !a.web.required),
                 attemptId: a.attempt_id,
                 tool: e.tool,
                 target: e.target ?? undefined,
@@ -1106,18 +1108,12 @@ async function dispatch(args: ParsedArgs, outputMode: CliOutputMode): Promise<nu
               })),
           )
         : [];
-      const toolWarnings = telemetry
-        ? telemetry.attempts.flatMap((a) =>
-            a.tool_errors
-              .filter((e) => !e.recovered && e.kind !== "web")
-              .map((e) => ({
-                attemptId: a.attempt_id,
-                tool: e.tool,
-                target: e.target ?? undefined,
-                summary: e.summary,
-              })),
-          )
-        : [];
+      const toolErrors = inspectToolRecords
+        .filter((record) => record.blocking)
+        .map(({ attemptId, tool, target, summary }) => ({ attemptId, tool, target, summary }));
+      const toolWarnings = inspectToolRecords
+        .filter((record) => !record.blocking)
+        .map(({ attemptId, tool, target, summary }) => ({ attemptId, tool, target, summary }));
       const artifacts = listCliArtifacts(paths.root).filter((p) => !p.endsWith("/"));
       const outputReadyState =
         runFacts?.presentation?.state ??
@@ -1176,7 +1172,7 @@ async function dispatch(args: ParsedArgs, outputMode: CliOutputMode): Promise<nu
       print(`output: ${outputReadyState}${primary ? ` ${primary.path}` : ""}`);
       if (failure) {
         print(
-          `failure: ${failure.category}${failure.code ? `/${failure.code}` : ""} phase=${failure.phase}${failure.harnessId ? ` harness=${failure.harnessId}` : ""}`,
+          `failure: ${failure.category}${failure.code ? `/${failure.code}` : ""} phase=${failure.phase}${failure.harnessId ? ` harness=${failure.harnessId}` : ""}${failure.vendorFailure?.code ? ` vendor_code=${failure.vendorFailure.code} (${failure.vendorFailure.source})` : ""}`,
         );
         print(`failure message: ${failure.safeMessage}`);
         for (const action of failure.nextActions) print(`next action: ${action}`);
@@ -1435,10 +1431,9 @@ async function dispatch(args: ParsedArgs, outputMode: CliOutputMode): Promise<nu
   }
 }
 
-// The ONE top-level result/error projector (D-7, GH #28): any throw from any
-// command path is rendered by renderCliFailure (see cli-error.ts) into exactly
-// one JSON envelope or one stderr line, via the central category->exit-code
-// table. Commands that already print and return a code are unaffected.
+// The ONE top-level result/error projector (D-7, GH #28): render any command throw
+// as one JSON envelope or stderr line via the central category->exit-code table.
+// Commands that already print and return a code are unaffected.
 async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
   if (flagBool(args, "version")) {
@@ -1454,7 +1449,7 @@ async function main(): Promise<number> {
 }
 
 main()
-  .then((code) => process.exit(code))
+  .then(exitAfterOutputFlush)
   .catch((err: unknown) => {
     // Last-resort projector: infer the complete mode even if parsing itself threw.
     const json = process.argv.includes("--json");
@@ -1466,5 +1461,5 @@ main()
       : stream
         ? "json-stream"
         : "human";
-    process.exit(renderOutputFailure(outputMode, err));
+    exitAfterOutputFlush(renderOutputFailure(outputMode, err));
   });

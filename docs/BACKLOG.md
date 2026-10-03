@@ -1,5 +1,30 @@
 # Backlog
 
+## 3.8.0 agy private-keychain review advisories (2026-08-22)
+
+These items were independently reproduced during the exact-candidate review.
+They are deliberately outside the correction batch because they are rare
+lifecycle/readability follow-ups, not default-reachable blockers.
+
+- Keychain setup memo identity: configuredKeychains is keyed by path, so an
+  external same-path inode replacement can skip set-keychain-settings until
+  the next creation or failure clears the memo. Profile deletion itself clears
+  the owned directory and the creation path resets the entry. Re-key the memo
+  by inode only at the next keychain touch.
+- Crash-only bootstrap residue: a process dying after the neutral bootstrap is
+  hard-linked to login.keychain-db but before the source unlink can leave a
+  harmless validated alias. Add narrowly scoped cleanup on a later keychain
+  touch; never broaden symlink acceptance.
+- Adoption-race coverage: add a deterministic test for the peer-adopts-and
+  removes-the-bootstrap interleaving (D-AGY-6), while preserving the current
+  no-replace hard-link protocol.
+- Keychain helper readability: simplify the duplicated unlock branch and remove
+  the dead neutral-name substring guard when the next touch can do so without
+  changing call ordering.
+- Capability-gate convergence: the adapter route derives the private-keychain
+  decision from the capability profile, while the lower-level helper's
+  platform guard is intentionally independent. Unify those seams only when
+  the capability owner can be passed without creating a package cycle.
 Explicitly deferred work with a recorded owner decision. Rule: an item leaves
 this file only by shipping or by an owner decision recorded in its row.
 Silent drops are the failure mode this file exists to prevent — the 2.1.0
@@ -128,8 +153,8 @@ deferred; they are recorded here now.
   `claudexor release check` still collapses every failure — typed handshake
   refusals and a corrupt pointer included — to "engine unknown" (read-only by
   design); `claudexor daemon start` human wording ("socket is alive but its
-  control API is not ready" / "did not become ready within 15s") predates
-  typed refusals, though the refusal itself now propagates typed;
+  control API is not ready" / "did not become ready within <start budget>s")
+  predates typed refusals, though the refusal itself now propagates typed;
   `daemonReachable`'s socket-RPC health() still flattens every socket-level
   failure to "not reachable" (a diverged future socket protocol would
   auto-start into the singleton guard — same class, different transport); MCP
@@ -288,10 +313,11 @@ deferred; they are recorded here now.
 - W-d: redaction straddle — a secret split exactly at the 4096/4000 tail
   boundaries escapes prefix-anchored rules; consider redacting pre-slice or
   overlap-aware slicing.
-- W-f: `claudexor profiles login` runs the vendor login outside the daemon,
-  so noteCredentialChange never fires and a previously logged-out subject's
-  quota can stay absent for up to 15 minutes; expose a credential-changed
-  nudge on the control API and call it after a verified profile login.
+- W-f: Claude/AGY `profiles login` retains its direct scoped vendor terminal
+  path. It does not notify the daemon of credential changes, so old readiness,
+  quota absence and refusal evidence can survive a successful or interrupted
+  login. A future migration must preserve their input and vendor-window
+  behavior through the existing setup owner; Cursor already uses that owner.
 - W-e: Bible INV-137 note wording — the a-b-a continuity proof lives in a
   pnpm-test suite, not the canary golden-story home the note implies.
 - Q-b: quota sources (`claude-oauth-usage.ts`, `codex-quota-source.ts`) live in
@@ -602,9 +628,100 @@ authoritative for each exact disposition.
   canonicalization through such a layout would still fail. Unreachable through
   the default roots; tighten `contains()` to reject only the parent forms
   (`..`, `../…`) at the next confinement touch.
-- Scoped-home ancestors get no metadata carve-out: a future harness that
-  canonicalizes its scoped `$HOME` at startup would hit the same EPERM class
-  the CODEX_HOME fix closed. Unreachable today (codex canonicalizes only
-  CODEX_HOME; claude does not canonicalize at startup); the failure direction
-  is a loud crash, never a weakened boundary. Extend the ancestor chain to the
-  scoped home when a real harness pulls the requirement.
+
+## 3.6.0 formal-review advisories (2026-08-18)
+
+From the 3.6.0 formal INV-125 wave (ledger rows in
+`docs/reference/review-ledger.md`, 3.6.0 block). The first is the binding
+fix-forward follow-up to the owner's VM-acceptance waiver for this release.
+
+- **Daemon-launch flake disclosure row (fable F2).** The full-suite
+  machine-load flake in `packages/cli/src/daemon-launch.test.ts` (3/3 green
+  solo) is disclosed only in operator evidence; add one durable disclosure
+  row here or in FEATURES if it recurs.
+- **Pool-exhaustion diagnostics wording (sol S-1, adjudicated accepted).**
+  `credentialPoolExhausted` renders every non-structural reason as "the
+  default credentials hit a vendor limit", including pools whose candidates
+  are all `disabled`/`not_ready`/`credential_unusable`; correct the
+  human-facing sentence to name the actual candidate classes (the typed
+  terminal and pool event are already correct).
+- **3.5.0-wave ledger backfill (fable F4).** The 3.5.0 release waves'
+  findings live in PR bodies and operator plans; backfill their rows into
+  `docs/reference/review-ledger.md`.
+
+## 3.4.2 formal-review advisories (2026-08-16)
+
+From the 3.4.2 formal initial wave (ledger rows in
+`docs/reference/review-ledger.md`, 3.4.2 block). The first is not
+default-reachable; the second's shape is reachable but already covered by the
+union's construction. Both belong to the next confinement touch.
+
+- Self-defeating-layout refusal and exact equality (SOL-342-W01): the
+  `applyConfinement` refusal flags an own root that strictly CONTAINS a denied
+  path but not one exactly EQUAL to it, so a hand-crafted input whose own root
+  equals a denied path would re-open that path via the own-roots allow. The
+  engine never derives such roots and v2 registration refuses runtime-tree
+  roots; tighten the check to include equality at the next confinement touch.
+- Worktree-chain traversal test (SOL-342-W02): the own-roots union is pinned
+  under a real sandbox-exec for the scoped-home and native-root arms; the
+  worktree arm rides the identical loop and IS reachable today (a delegated
+  mutating one-shot without `isolation: live` gets an isolated envelope whose
+  worktree lives under the runtime root, INV-072) — the union covers it by
+  construction; add the direct worktree-inside-runtime-root canonicalize case
+  at the next confinement touch.
+
+## 3.4.1 Windows-lane residuals (2026-08-15)
+
+From the PR #189 review waves and the first required windows-latest CI runs
+(ledger rows in `docs/reference/review-ledger.md` 3.4.1 block). Neither is a
+default-reachable regression on a supported platform.
+
+- Journal atomic replace on Windows (issue #190): compaction and the
+  crash-repair rewrite `rename` over the journal's own open handle, which
+  Windows refuses (`EPERM`). Fix must keep the fsync-before-ACK discipline and
+  un-skip the four `itPosixReplace` cases on the Windows lane as its proof.
+- npm shim spawning on Windows (issue #191): default npm installs ship
+  `codex.cmd`/sh shims with no `.exe`, so ordinary runs and login refuse with
+  the typed shim advisory. The managed local Codex installer proves the
+  package-native `codex.exe` inside the pinned platform package; both x64
+  Windows CI legs proved this path in PR #352 (run 36075171287). Still open for an
+  operator's own ambient npm install (any prefix Claudexor did not lay out)
+  and for claude/opencode, whose platform-package layouts are not verified;
+  the remaining candidate fix is unchanged (spawn the shim's JS entry on
+  `process.execPath` at the single resolver owner, schema-first).
+
+## 3.4.0 operator-subagent panel advisories (2026-08-15)
+
+Adjudicated backlog rows from the 3.4.0 release wave (owner-excepted
+operator-subagent panel; ledger rows in `docs/reference/review-ledger.md`
+3.4.0 wave). None are default-reachable regressions.
+
+- Per-package changelogs stay thin relative to the root CHANGELOG narrative
+  (3.3.16 FBL-2, carried): decide a per-package depth convention at the next
+  changelog touch instead of duplicating the root story ad hoc.
+- Reopen-path duty hygiene (P-S1): when `onNormalAdmission` throws mid-reopen
+  after `openNormal`, log truthfully (admission IS normal) and let the
+  remaining normal-plane duties (ghost quarantine, retention) rerun instead
+  of being skipped for the process life. Fault-injection-only today.
+- Type `staleReplacementFailed` (P-S2) with a machine code like
+  `daemon_replacement_failed` so operator tooling can distinguish contention
+  outcomes the way it can for `daemon_writer_busy`.
+- Operator docs note (P-S3): a downgrade below the serving floor surfaces as
+  `root_authority_floor_regression` by design — document so support does not
+  misread it as corruption.
+- ARCHITECTURE.md optional-web sentence (G-S2): split the clause that names a
+  web-policy value (`off`) and an access-profile value (`inherit_native`)
+  together so the two enums cannot be misread as one.
+- `ensureDaemon` deadline message (F-S3): add a died-mid-wait hint when the
+  last handshake identity is stale because the daemon disappeared during the
+  bounded recovery wait.
+- `SetupLifecycleBinding.start()` unwind (F-S4, pre-existing): bind `active`
+  only after `handle.start()` resolves (mirror `replaceAfter`'s unwind) so a
+  start throw cannot leave a half-started handle bound.
+- Model-scoped quota windows (V-3, issue #187): the codex quota source
+  publishes every window with `applies_to_models=null`, so an exhausted
+  account-wide window blocks models whose own vendor window still has
+  headroom. Bind per-model windows (or derive scoping from window metadata)
+  so weak-model routing stays possible; keep failing closed when no scoping
+  evidence exists. Also blocks the "battery on a weak model" operational
+  scenario; the 3.4.0 battery ran post-factum under an owner waiver.

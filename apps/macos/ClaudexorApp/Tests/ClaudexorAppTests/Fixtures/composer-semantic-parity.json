@@ -1,5 +1,56 @@
 {
-  "generatedBy": ["runControlApplicability", "RequestRequirementsResolver"],
+  "generatedBy": [
+    "runControlApplicability",
+    "resolveRunReviewRequested",
+    "RequestRequirementsResolver"
+  ],
+  "reviewCases": [
+    {
+      "name": "single-default",
+      "swiftMode": "agent",
+      "mode": "agent",
+      "review": false,
+      "attempts": 3,
+      "requested": false
+    },
+    {
+      "name": "single-auto-review",
+      "swiftMode": "agent",
+      "mode": "agent",
+      "review": true,
+      "attempts": 3,
+      "requested": true
+    },
+    {
+      "name": "single-explicit-panel",
+      "swiftMode": "agent",
+      "mode": "agent",
+      "reviewerPanel": [{ "harness": "codex" }],
+      "requested": true
+    },
+    { "name": "best-of", "swiftMode": "bestOfN", "mode": "agent", "n": 2, "requested": true },
+    {
+      "name": "until-clean",
+      "swiftMode": "agent",
+      "mode": "agent",
+      "untilClean": true,
+      "requested": true
+    },
+    {
+      "name": "explicit-attempts",
+      "swiftMode": "maxAttempts",
+      "mode": "agent",
+      "attempts": 3,
+      "requested": true
+    },
+    {
+      "name": "create-default",
+      "swiftMode": "create",
+      "mode": "agent",
+      "review": false,
+      "requested": false
+    }
+  ],
   "runControls": [
     {
       "name": "agent",

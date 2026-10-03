@@ -6,6 +6,7 @@ export const DeliveryReceipt = z
   .object({
     mode: z.enum(["apply", "branch", "commit", "pr"]),
     applied: z.boolean(),
+    appliedPaths: z.array(z.string()).optional(),
     branch: z.string().optional(),
     commit: z.string().optional(),
     prUrl: z.string().optional(),

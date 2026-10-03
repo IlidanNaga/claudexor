@@ -7,10 +7,10 @@ import {
   writeFileSync,
   writeSync,
 } from "node:fs";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DurableJournal,
   JournalAppendUncertainError,
@@ -20,7 +20,10 @@ import {
 let root: string;
 
 beforeEach(() => {
-  root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-journal-")));
+  // `.native` matters on Windows: the plain resolver keeps the 8.3 short
+  // form of %TEMP% (`RUNNER~1`), which the daemon's canonical-directory
+  // guard rightly refuses.
+  root = realpathSync.native(mkdtempSync(join(tmpdir(), "claudexor-journal-")));
 });
 
 afterEach(() => {
@@ -45,18 +48,132 @@ function overwrite(path: string, mutate: (bytes: Buffer) => void): Buffer {
 }
 
 describe("DurableJournal", () => {
-  it("keeps a healthy partition readable when a compacted snapshot cannot fit one frame", () => {
+  it.each([
+    [18, "base64 envelope"],
+    [24, "compressed output"],
+  ] as const)(
+    "keeps acknowledged history appendable when the %s-record %s exceeds the frame cap",
+    (count, _boundary) => {
+      const journal = openJournal();
+      journal.appendBatch(
+        Array.from({ length: count }, (_, index) => ({
+          type: "large.logical.history",
+          payload: { index, bytes: randomBytes(768 * 1024).toString("base64") },
+        })),
+      );
+      const before = createHash("sha256").update(readFileSync(journal.path)).digest("hex");
+      const cursor = journal.currentCursor();
+      expect(journal.compact()).toBeNull();
+      expect(createHash("sha256").update(readFileSync(journal.path)).digest("hex")).toBe(before);
+      expect(journal.state().status).toBe("ready");
+      expect(journal.sequenceAfter(cursor)).toBe(count);
+      expect(journal.append("after.failed.compaction", { retained: true }).seq).toBe(count + 1);
+      journal.close();
+
+      const reopened = openJournal();
+      expect(reopened.records().map((record) => record.seq)).toEqual(
+        Array.from({ length: count + 1 }, (_, index) => index + 1),
+      );
+      expect(reopened.records(count)[0]?.payload).toEqual({ retained: true });
+      expect(reopened.state().status).toBe("ready");
+      reopened.close();
+    },
+  );
+
+  it("keeps a ready journal when compacted snapshot serialization hits the string limit", () => {
     const journal = openJournal();
     const internals = journal as unknown as {
       entries: Array<{ time: string; type: string; payload: unknown }>;
+      knownFileBytes: number;
     };
     internals.entries.push({
       time: "2026-01-01T00:00:00.000Z",
-      type: "large.logical.history",
-      payload: { bytes: randomBytes(18 * 1024 * 1024).toString("base64") },
+      type: "oversized.history",
+      payload: { value: 1 },
     });
-    expect(journal.compact()).toBeNull();
-    expect(journal.state().status).toBe("ready");
+    internals.knownFileBytes = Number.MAX_SAFE_INTEGER;
+    const before = readFileSync(journal.path);
+    const originalStringify = JSON.stringify;
+    const stringify = vi.spyOn(JSON, "stringify").mockImplementation((value, replacer, space) => {
+      if (
+        Array.isArray(value) &&
+        value.length === 1 &&
+        (value[0] as { type?: unknown } | undefined)?.type === "oversized.history"
+      ) {
+        throw new RangeError("Invalid string length");
+      }
+      return originalStringify(value, replacer, space);
+    });
+    try {
+      expect(journal.compact()).toBeNull();
+      expect(readFileSync(journal.path)).toEqual(before);
+      expect(journal.state()).toMatchObject({ status: "ready" });
+    } finally {
+      stringify.mockRestore();
+    }
+    journal.close();
+  });
+
+  it("keeps a ready journal when one logical payload cannot be cloned", () => {
+    const journal = openJournal();
+    const internals = journal as unknown as {
+      entries: Array<{ time: string; type: string; payload: unknown }>;
+      knownFileBytes: number;
+    };
+    internals.entries.push({
+      time: "2026-01-01T00:00:00.000Z",
+      type: "oversized.payload",
+      payload: { capacityMarker: true },
+    });
+    internals.knownFileBytes = Number.MAX_SAFE_INTEGER;
+    const before = readFileSync(journal.path);
+    const originalStringify = JSON.stringify;
+    const stringify = vi.spyOn(JSON, "stringify").mockImplementation((value, replacer, space) => {
+      if (
+        value !== null &&
+        typeof value === "object" &&
+        !Array.isArray(value) &&
+        (value as { capacityMarker?: unknown }).capacityMarker === true
+      ) {
+        throw new RangeError("Invalid string length");
+      }
+      return originalStringify(value, replacer, space);
+    });
+    try {
+      expect(journal.compact()).toBeNull();
+      expect(readFileSync(journal.path)).toEqual(before);
+      expect(journal.state()).toMatchObject({ status: "ready" });
+    } finally {
+      stringify.mockRestore();
+    }
+    journal.close();
+  });
+
+  it("keeps a ready journal when compacted payload materialization hits the string limit", () => {
+    const journal = openJournal();
+    const internals = journal as unknown as {
+      entries: Array<{ time: string; type: string; payload: unknown }>;
+      knownFileBytes: number;
+    };
+    internals.entries.push({
+      time: "2026-01-01T00:00:00.000Z",
+      type: "oversized.compacted.payload",
+      payload: { capacityMarker: true },
+    });
+    internals.knownFileBytes = Number.MAX_SAFE_INTEGER;
+    const before = readFileSync(journal.path);
+    const originalToString = Buffer.prototype.toString;
+    Buffer.prototype.toString = function (encoding?: BufferEncoding, start?: number, end?: number) {
+      if (encoding === "base64") throw new RangeError("Invalid string length");
+      return originalToString.call(this, encoding, start, end);
+    };
+    try {
+      expect(journal.compact()).toBeNull();
+      expect(readFileSync(journal.path)).toEqual(before);
+      expect(journal.state()).toMatchObject({ status: "ready" });
+    } finally {
+      Buffer.prototype.toString = originalToString;
+    }
     journal.close();
   });
 
@@ -106,6 +223,31 @@ describe("DurableJournal", () => {
     ]);
     reopened.close();
   });
+
+  it("addresses partition entries with the platform separator, not a literal slash", () => {
+    // Read-only preparation walks the partition and keys its file map by path.
+    // A `${dir}/${name}` key never matched the `join()`-built path the caller
+    // looks up on Windows, so a reopened daemon read its own journal as
+    // missing and demanded recovery. This suite runs on the Windows lane,
+    // which is the only place the two spellings differ.
+    // Its own root: preparation refuses a journal root whose parent is
+    // world-writable, and the system temp dir is exactly that on Linux.
+    const rootDir = join(root, "separator");
+    const seeded = new DurableJournal({ rootDir, partition: "global" });
+    seeded.append("accepted", { value: 1 });
+    seeded.close();
+
+    const prepared = (
+      DurableJournal as unknown as {
+        prepare(options: { rootDir: string; partition: string }): DurableJournal;
+      }
+    ).prepare({ rootDir, partition: "global" });
+    expect(prepared.state().status).toBe("ready");
+    expect(prepared.records().map((record) => record.type)).toEqual(["accepted"]);
+    prepared.close();
+  });
+
+  const itPosixReplace = it.runIf(process.platform !== "win32");
 
   it("discards a complete first frame when a batch stops before its second frame", () => {
     const crashed = openJournal((fd, batch) => {
@@ -218,56 +360,62 @@ describe("DurableJournal", () => {
     journal.close();
   });
 
-  it("atomically compacts frames, invalidates the old epoch cursor, and remains appendable", () => {
-    const journal = openJournal();
-    for (let index = 0; index < 100; index += 1) {
-      journal.append("probe.saved", { index, repeated: "same-value".repeat(20) });
-    }
-    const cursor = journal.currentCursor();
-    const before = journal.physicalBytes();
-    const compacted = journal.compact();
-    expect(compacted).toMatchObject({ beforeBytes: before, records: 100 });
-    expect(compacted!.afterBytes).toBeLessThan(before);
-    expect(() => journal.sequenceAfter(cursor)).toThrow(/stale epoch/);
-    expect(journal.append("probe.saved", { index: 100 }).seq).toBe(101);
-    journal.close();
+  itPosixReplace(
+    "atomically compacts frames, invalidates the old epoch cursor, and remains appendable",
+    () => {
+      const journal = openJournal();
+      for (let index = 0; index < 100; index += 1) {
+        journal.append("probe.saved", { index, repeated: "same-value".repeat(20) });
+      }
+      const cursor = journal.currentCursor();
+      const before = journal.physicalBytes();
+      const compacted = journal.compact();
+      expect(compacted).toMatchObject({ beforeBytes: before, records: 100 });
+      expect(compacted!.afterBytes).toBeLessThan(before);
+      expect(() => journal.sequenceAfter(cursor)).toThrow(/stale epoch/);
+      expect(journal.append("probe.saved", { index: 100 }).seq).toBe(101);
+      journal.close();
 
-    const reopened = openJournal();
-    expect(reopened.records()).toHaveLength(101);
-    expect(reopened.records()[0]?.payload).toMatchObject({ index: 0 });
-    expect(reopened.records()[100]?.payload).toMatchObject({ index: 100 });
-    reopened.close();
-  });
+      const reopened = openJournal();
+      expect(reopened.records()).toHaveLength(101);
+      expect(reopened.records()[0]?.payload).toMatchObject({ index: 0 });
+      expect(reopened.records()[100]?.payload).toMatchObject({ index: 100 });
+      reopened.close();
+    },
+  );
 
-  it("reopens a compacted grown history without spreading records over the call stack", () => {
-    const logicalRecordCount = 176_345;
-    const journal = openJournal();
-    const internals = journal as unknown as {
-      entries: Array<{ time: string; type: string; payload: unknown }>;
-      knownFileBytes: number;
-    };
-    for (let index = 0; index < logicalRecordCount; index += 1) {
-      internals.entries.push({
-        time: "2026-01-01T00:00:00.000Z",
-        type: "grown.history",
-        payload: { index },
+  itPosixReplace(
+    "reopens a compacted grown history without spreading records over the call stack",
+    () => {
+      const logicalRecordCount = 176_345;
+      const journal = openJournal();
+      const internals = journal as unknown as {
+        entries: Array<{ time: string; type: string; payload: unknown }>;
+        knownFileBytes: number;
+      };
+      for (let index = 0; index < logicalRecordCount; index += 1) {
+        internals.entries.push({
+          time: "2026-01-01T00:00:00.000Z",
+          type: "grown.history",
+          payload: { index },
+        });
+      }
+      // The production trigger is a physically grown journal. Setting only the
+      // size comparison avoids manufacturing 176k fsynced frames in this unit
+      // test while exercising the exact compact + replay logical-record paths.
+      internals.knownFileBytes = Number.MAX_SAFE_INTEGER;
+
+      expect(journal.compact()).toMatchObject({ records: logicalRecordCount });
+      expect(journal.currentSequence()).toBe(logicalRecordCount);
+      journal.close();
+
+      const reopened = openJournal();
+      expect(reopened.state().status).toBe("ready");
+      expect(reopened.currentSequence()).toBe(logicalRecordCount);
+      expect(reopened.records(logicalRecordCount - 1)[0]?.payload).toEqual({
+        index: logicalRecordCount - 1,
       });
-    }
-    // The production trigger is a physically grown journal. Setting only the
-    // size comparison avoids manufacturing 176k fsynced frames in this unit
-    // test while exercising the exact compact + replay logical-record paths.
-    internals.knownFileBytes = Number.MAX_SAFE_INTEGER;
-
-    expect(journal.compact()).toMatchObject({ records: logicalRecordCount });
-    expect(journal.currentSequence()).toBe(logicalRecordCount);
-    journal.close();
-
-    const reopened = openJournal();
-    expect(reopened.state().status).toBe("ready");
-    expect(reopened.currentSequence()).toBe(logicalRecordCount);
-    expect(reopened.records(logicalRecordCount - 1)[0]?.payload).toEqual({
-      index: logicalRecordCount - 1,
-    });
-    reopened.close();
-  });
+      reopened.close();
+    },
+  );
 });

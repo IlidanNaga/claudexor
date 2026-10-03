@@ -2,6 +2,7 @@ import { z } from "zod/v3";
 import { BillingKnowledge, CostKnowledge } from "./auth.js";
 import { Id, Intent } from "./primitives.js";
 import { EffortHint, SignalQuality } from "./harness.js";
+import { ProcessingCostBasis } from "./processing.js";
 
 export const PaidBudget = z
   .discriminatedUnion("kind", [
@@ -13,6 +14,7 @@ export type PaidBudget = z.infer<typeof PaidBudget>;
 
 export const CostEvidence = z
   .object({
+    processing: ProcessingCostBasis.optional(),
     knowledge: CostKnowledge,
     billing: BillingKnowledge,
     source: z.string().min(1),
@@ -22,6 +24,20 @@ export const CostEvidence = z
   .strict()
   .describe("Incremental-cash cost knowledge with its source and evidence provenance.");
 export type CostEvidence = z.infer<typeof CostEvidence>;
+
+export const UsageCostSummary = z
+  .object({
+    cashUsd: z.number().nonnegative(),
+    valuationUsd: z.number().nonnegative(),
+    unknownUsd: z.number().nonnegative(),
+    cashKnowledge: CostKnowledge,
+    valuationKnowledge: CostKnowledge,
+  })
+  .strict()
+  .describe(
+    "Observed usage components. An amount of unknown meaning is not charged cash; separately proven included service can still establish exact zero incremental cash.",
+  );
+export type UsageCostSummary = z.infer<typeof UsageCostSummary>;
 
 export const AuthMode = z
   .enum(["local_session", "api_key", "unknown"])
@@ -181,6 +197,12 @@ export const BudgetObservation = z
       .optional()
       .describe(
         "Canonical model ids/aliases this quota observation applies to; omitted/null means every model.",
+      ),
+    applies_to_unspecified_model: z
+      .boolean()
+      .optional()
+      .describe(
+        "Whether a model-scoped observation also governs a run that names no model; carried alongside applies_to_models so the scope survives this projection.",
       ),
     used_ratio: z.number().min(0).max(1).nullable().optional(),
     window_seconds: z.number().positive().nullable().optional(),

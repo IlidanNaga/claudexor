@@ -503,7 +503,7 @@ public struct ThreadTurnRequest: Codable, Sendable {
     public var create: Bool?
     /// Plan strategy (D31/INV-031): N harnesses draft plans in parallel, the
     /// primary merges into one plan + one question set. Plan mode only; `n`
-    /// (2..4) sets the member count.
+    /// sets the member count (at least two, up to the daemon's effective cap).
     public var council: Bool?
     /// Agent delegation belt toggle (D32). Agent-only: injects the scoped
     /// Claudexor MCP belt so the harness can spawn bounded isolated sub-runs.
@@ -520,6 +520,8 @@ public struct ThreadTurnRequest: Codable, Sendable {
     public var models: [String: String]?
     /// Explicit reviewer panel for this turn. Mirrors StartRunRequest/control DTO
     /// so thread turns can exercise the same CLI-first review route.
+    /// Optional internal model-review intent; explicit panels also enable review.
+    public var review: Bool?
     public var reviewerPanel: [ReviewerPanelEntry]?
     public var reviewerModels: [String: String]?
     public var reviewerEfforts: [String: String]?
@@ -552,7 +554,7 @@ public struct ThreadTurnRequest: Codable, Sendable {
                 create: Bool? = nil, council: Bool? = nil, delegate: Bool? = nil,
                 paidBudget: PaidBudget? = nil, primaryHarness: String? = nil, model: String? = nil,
                 models: [String: String]? = nil,
-                reviewerPanel: [ReviewerPanelEntry]? = nil,
+                review: Bool? = nil, reviewerPanel: [ReviewerPanelEntry]? = nil,
                 reviewerModels: [String: String]? = nil, reviewerEfforts: [String: String]? = nil,
                 access: String? = nil, web: String? = nil, browser: Bool? = nil, planRunId: String? = nil,
                 overridePlanReadiness: Bool? = nil, attachments: [ResourceAttachmentRef]? = nil,
@@ -574,6 +576,7 @@ public struct ThreadTurnRequest: Codable, Sendable {
         self.primaryHarness = primaryHarness
         self.model = model
         self.models = models
+        self.review = review
         self.reviewerPanel = reviewerPanel
         self.reviewerModels = reviewerModels
         self.reviewerEfforts = reviewerEfforts

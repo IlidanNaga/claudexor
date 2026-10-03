@@ -12,7 +12,9 @@ describe("codex pricing", () => {
     for (const k of ENV_KEYS) delete process.env[k];
   });
 
-  it("estimates cost from token usage for a gpt-5-codex model", () => {
+  it("estimates cost from token usage and explicitly configured rates", () => {
+    process.env.CLAUDEXOR_CODEX_PRICE_INPUT = "1.25";
+    process.env.CLAUDEXOR_CODEX_PRICE_OUTPUT = "10";
     const usd = estimateCodexCostUsd("gpt-5-codex", {
       input_tokens: 1_000_000,
       output_tokens: 1_000_000,
@@ -29,6 +31,8 @@ describe("codex pricing", () => {
   });
 
   it("does not double-count cached tokens (cached is a subset of input)", () => {
+    process.env.CLAUDEXOR_CODEX_PRICE_INPUT = "1.25";
+    process.env.CLAUDEXOR_CODEX_PRICE_CACHED = "0.125";
     // input 1M total, 400k of it cached. non-cached 600k * $1.25/M + cached 400k * $0.125/M = 0.75 + 0.05.
     const usd = estimateCodexCostUsd("gpt-5-codex", {
       input_tokens: 1_000_000,
@@ -41,6 +45,7 @@ describe("codex pricing", () => {
   });
 
   it("clamps cached tokens that exceed input", () => {
+    process.env.CLAUDEXOR_CODEX_PRICE_CACHED = "0.125";
     const usd = estimateCodexCostUsd("gpt-5-codex", {
       input_tokens: 100,
       output_tokens: 0,
@@ -60,9 +65,30 @@ describe("codex pricing", () => {
     expect(usd).toBeCloseTo(22, 5);
   });
 
-  it("falls back to a default price for unknown models", () => {
-    const p = priceForModel("some-unknown-model");
-    expect(p.input).toBeGreaterThan(0);
-    expect(p.output).toBeGreaterThan(0);
+  it.each(["gpt-6-astra", "gpt-5.6-sol", "gpt-5-codex", "future-mini"])(
+    "keeps %s cost unknown without configured rates",
+    (model) => {
+      expect(priceForModel(model)).toEqual({
+        input: undefined,
+        output: undefined,
+        cached: undefined,
+      });
+      expect(
+        estimateCodexCostUsd(model, { input_tokens: 1000, output_tokens: 10 }),
+      ).toBeUndefined();
+    },
+  );
+
+  it("requires a cached-input rate only when cached tokens were used", () => {
+    process.env.CLAUDEXOR_CODEX_PRICE_INPUT = "2";
+    expect(estimateCodexCostUsd("gpt-6-astra", { input_tokens: 1000 })).toBeCloseTo(0.002);
+    expect(
+      estimateCodexCostUsd("gpt-6-astra", { input_tokens: 1000, cached_input_tokens: 100 }),
+    ).toBeUndefined();
+  });
+
+  it.each(["", "-1", "2USD", "NaN", "Infinity"])("rejects invalid configured rate %s", (rate) => {
+    process.env.CLAUDEXOR_CODEX_PRICE_INPUT = rate;
+    expect(estimateCodexCostUsd("gpt-6-astra", { input_tokens: 1000 })).toBeUndefined();
   });
 });

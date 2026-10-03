@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { packWithSourceModes } from "./lib/pack-with-modes.mjs";
 import { pathToFileURL } from "node:url";
 
 const root = resolve(import.meta.dirname, "..");
@@ -30,9 +31,13 @@ async function main() {
   const repository = process.env.GITHUB_REPOSITORY ?? "";
   const ref = process.env.GITHUB_REF ?? "";
   const releaseVersion = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
+  const win32ConptySha256 = process.env.CLAUDEXOR_WIN32_CONPTY_SHA256 ?? "";
   if (!/^[0-9a-f]{40}$/.test(candidateSha)) fail("GITHUB_SHA must be an exact commit SHA");
   if (repository !== "razzant/claudexor") fail("GITHUB_REPOSITORY is not the release repository");
   if (ref !== `refs/tags/v${releaseVersion}`) fail("GITHUB_REF must be the exact release tag");
+  if (!/^[0-9a-f]{64}$/.test(win32ConptySha256)) {
+    fail("CLAUDEXOR_WIN32_CONPTY_SHA256 must bind the promoted candidate helper");
+  }
 
   rmSync(out, { recursive: true, force: true });
   mkdirSync(out, { recursive: true });
@@ -43,7 +48,13 @@ async function main() {
     if (pkg.name === "@claudexor/core") {
       run(
         process.execPath,
-        [resolve(root, "scripts/verify-npm-darwin-package.mjs"), "--tarball", tarball],
+        [
+          resolve(root, "scripts/verify-npm-darwin-package.mjs"),
+          "--tarball",
+          tarball,
+          "--win32-helper-sha256",
+          win32ConptySha256,
+        ],
         root,
       );
     }
@@ -203,11 +214,13 @@ function topological(packagesByName) {
 }
 
 function pack(pkg) {
-  const before = new Set(readdirSync(out));
-  run("pnpm", ["pack", "--pack-destination", out], pkg.directory);
-  const created = readdirSync(out).filter((file) => file.endsWith(".tgz") && !before.has(file));
-  if (created.length !== 1) fail(`expected one tarball for ${pkg.name}, got ${created.join(", ")}`);
-  return join(out, created[0]);
+  // pnpm pack (workspace: specs rewritten) + source-mirrored executable bits —
+  // neither tool alone provides both; see scripts/lib/pack-with-modes.mjs.
+  try {
+    return packWithSourceModes(pkg.directory, out);
+  } catch (error) {
+    fail(`packing ${pkg.name}: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 function view(spec) {

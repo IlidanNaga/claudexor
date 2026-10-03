@@ -1,5 +1,12 @@
 import Foundation
 
+@usableFromInline
+enum LocalDaemonBootPolicy {
+    /// A large recovered journal can keep the daemon below handshake readiness
+    /// for more than 30 seconds even though startup is making healthy progress.
+    @usableFromInline static let handshakeTimeout: TimeInterval = 90
+}
+
 enum LocalDaemonReconciliationDeferral: Sendable, Equatable {
     case busy
     case activityUnknown
@@ -28,6 +35,9 @@ enum LocalDaemonReconciliationResult: Sendable, Equatable {
         target: RuntimeClosureIdentity)
     case deferredForLifecycle
     case failed(LocalDaemonReconciliationFailure)
+    /// The requesting connection generation retired before destructive
+    /// lifecycle admission. No stop or start was attempted.
+    case supersededBeforeLifecycle
 }
 
 /// The AppModel-facing policy for a reconciliation result. Keeping this
@@ -43,6 +53,11 @@ enum LocalDaemonReconciliationPolicy: Sendable, Equatable {
     /// A lifecycle transition began but did not finish with the exact target.
     /// The previous client is no longer safe to use.
     case failOffline(notice: String)
+    /// A coalesced older generation retired before lifecycle admission. The
+    /// current caller should re-probe without launching a fallback.
+    case retry
+    /// A newer connection generation owns every subsequent publication.
+    case superseded
 
     init(_ result: LocalDaemonReconciliationResult) {
         switch result {
@@ -79,6 +94,8 @@ enum LocalDaemonReconciliationPolicy: Sendable, Equatable {
         case .failed(.postStartUnreachable):
             self = .failOffline(
                 notice: "The refreshed engine did not come online. Reconnecting.")
+        case .supersededBeforeLifecycle:
+            self = .retry
         }
     }
 }
@@ -106,7 +123,7 @@ actor LocalDaemonReconciler {
             DaemonLauncher.resolvedRuntime()
         },
         handshakePollInterval: TimeInterval = 0.5,
-        handshakePollTimeout: TimeInterval = 30
+        handshakePollTimeout: TimeInterval = LocalDaemonBootPolicy.handshakeTimeout
     ) {
         self.daemon = daemon
         self.lifecycleOwner = lifecycleOwner
@@ -118,8 +135,12 @@ actor LocalDaemonReconciler {
     /// `serving` should normally be the identity from the handshake that made
     /// the app consider the local daemon connected. Passing nil asks the port to
     /// re-read discovery and handshake; inability to prove it fails closed.
-    func reconcile(serving: RuntimeClosureIdentity? = nil) async -> LocalDaemonReconciliationResult {
+    func reconcile(
+        serving: RuntimeClosureIdentity? = nil,
+        isCurrent: @escaping @Sendable () async -> Bool = { true }
+    ) async -> LocalDaemonReconciliationResult {
         if let inFlight { return await inFlight.value }
+        guard await isCurrent() else { return .supersededBeforeLifecycle }
         // Exact session admission precedes target resolution and the first await.
         // It excludes RuntimeInstallCoordinator's independent actor from the same
         // stop/start lifecycle rather than relying on a sampled UI boolean.
@@ -134,7 +155,8 @@ actor LocalDaemonReconciler {
         let task = Task {
             await Self.perform(
                 daemon: daemon, targetClosure: targetClosure, serving: serving,
-                handshakePollInterval: pollInterval, handshakePollTimeout: pollTimeout)
+                handshakePollInterval: pollInterval, handshakePollTimeout: pollTimeout,
+                isCurrent: isCurrent)
         }
         inFlight = task
         let result = await task.value
@@ -148,7 +170,8 @@ actor LocalDaemonReconciler {
         targetClosure: @Sendable () -> LocalRuntimeClosureSelection?,
         serving suppliedServing: RuntimeClosureIdentity?,
         handshakePollInterval: TimeInterval,
-        handshakePollTimeout: TimeInterval
+        handshakePollTimeout: TimeInterval,
+        isCurrent: @escaping @Sendable () async -> Bool
     ) async -> LocalDaemonReconciliationResult {
         guard let selected = targetClosure() else { return .failed(.targetScriptUnavailable) }
         let expected: RuntimeClosureIdentity?
@@ -194,6 +217,13 @@ actor LocalDaemonReconciler {
         case false:
             break
         }
+
+        // Everything above this point is side-effect-free observation. This is
+        // the generation-bound admission point for the destructive lifecycle:
+        // a request superseded before it stops the daemon performs no mutation.
+        // Once stop is invoked the exact stop/start/proof transaction must run
+        // to a safe terminal state even if a newer connect begins meanwhile.
+        guard await isCurrent() else { return .supersededBeforeLifecycle }
 
         do {
             try await daemon.stopForRuntimeReplacement(expectedIdentity: serving)

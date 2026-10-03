@@ -1,21 +1,22 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
-import {
-  decodeReviewUtf8,
-  validateReleaseAttestation,
-  validateReleaseInput,
-} from "./lib/release-review-contract.mjs";
-
-const reviewAuthority = JSON.parse(
-  readFileSync(new URL("../release/review-attestation-authority.json", import.meta.url), "utf8"),
-);
+import { validateReleaseInput } from "./lib/release-review-contract.mjs";
 
 const mode = process.env.RELEASE_MODE_INPUT ?? "";
 const ref = process.env.RELEASE_REF_INPUT ?? "";
 const input = validateReleaseInput(mode, ref);
 if (!input.ok) fail(input.reasons);
 
+// Retired publication waivers are not a second route into the current policy.
+for (const name of ["SKIP_CUSTOM_ED25519_INPUT", "WAIVE_CURSOR_REVIEW_INPUT"]) {
+  if (process.env[name] && process.env[name] !== "false") {
+    fail([`${name} is retired; publish requires review confirmation and signed runtime manifests`]);
+  }
+}
+if (process.env.REVIEW_ATTESTATION_B64_INPUT) {
+  fail(["signed review attestations are historical evidence, not current publish input"]);
+}
 if (process.argv.includes("--syntax-only")) process.exit(0);
 
 const git = (...args) => execFileSync("git", args, { encoding: "utf8" }).trim();
@@ -49,31 +50,32 @@ const manifest = JSON.parse(readFileSync("package.json", "utf8"));
 const version = manifest.version;
 if (mode === "publish" && tag !== `v${version}`)
   fail(["publish tag does not match package.json version"]);
-
-let attestationText = "";
 if (mode === "publish") {
-  const encoded = process.env.REVIEW_ATTESTATION_B64_INPUT ?? "";
-  if (!encoded || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) {
-    fail(["publish mode requires a base64-encoded review attestation"]);
+  // GitHub authenticates the workflow dispatcher. This records that person's
+  // responsibility for reading the full independent report and its disposition;
+  // it does not pretend to cryptographically prove review quality or identity.
+  if (process.env.REVIEW_CONFIRMED_INPUT !== "true") {
+    fail(["publish requires the responsible maintainer's review_confirmed confirmation"]);
   }
+  const reviewUrl = process.env.REVIEW_URL_INPUT ?? "";
+  let url;
   try {
-    attestationText = decodeReviewUtf8(Buffer.from(encoded, "base64"), "review attestation");
-    const attestation = JSON.parse(attestationText);
-    const reviewed = validateReleaseAttestation(attestation, reviewAuthority, {
-      candidateSha,
-      candidateTree,
-      candidateVersion: version,
-    });
-    if (!reviewed.ok) fail(reviewed.reasons);
-  } catch (error) {
-    fail([
-      `review attestation is invalid: ${error instanceof Error ? error.message : String(error)}`,
-    ]);
+    url = new URL(reviewUrl);
+  } catch {
+    fail(["publish requires a review_url"]);
   }
-  if (process.env.REVIEW_ATTESTATION_PATH) {
-    writeFileSync(process.env.REVIEW_ATTESTATION_PATH, `${attestationText.trim()}\n`, {
-      mode: 0o600,
-    });
+  if (url.protocol !== "https:" || url.username || url.password) {
+    fail(["review_url must be an HTTPS evidence reference without embedded credentials"]);
+  }
+  for (const name of ["RUNTIME_MANIFEST_B64_INPUT", "REMOTE_RUNTIME_MANIFEST_B64_INPUT"]) {
+    if (
+      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
+        process.env[name] ?? "",
+      ) ||
+      !process.env[name]
+    ) {
+      fail([`publish requires base64-encoded ${name}`]);
+    }
   }
 }
 

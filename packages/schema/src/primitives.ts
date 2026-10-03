@@ -36,17 +36,27 @@ export const RiskLevel = z
 export type RiskLevel = z.infer<typeof RiskLevel>;
 
 export const AccessProfile = z
-  .enum(["readonly", "workspace_write", "full", "external_sandbox_full", "inherit_native"])
+  .enum(["readonly", "workspace_write", "full", "inherit_native"])
   .describe(
-    "Filesystem/command access profile for a run: readonly (no writes), workspace_write (writes inside the workspace only), full (unrestricted; requires the per-repo trust allow), external_sandbox_full (the harness stands its native sandbox down; the engine applies its own OS boundary only on delegated runs — requested directly this is unrestricted, and not behind the trust allow), inherit_native (defer to the harness's own native sandbox settings).",
+    "Active filesystem/command access profile for a run: readonly (no writes), workspace_write (use the harness's native workspace-write policy), full (unrestricted; requires the per-repo trust allow for a run an operator starts at a surface, not for an execution.delegated run), inherit_native (defer to the harness's own native settings).",
   );
 export type AccessProfile = z.infer<typeof AccessProfile>;
+
+/** Retired access literal retained only for immutable historical artifacts.
+ * New requests, configuration, manifests and run specs MUST use AccessProfile. */
+export const RETIRED_EXTERNAL_SANDBOX_FULL = "external_sandbox_full" as const;
+export const RecordedAccessProfile = z
+  .enum([...AccessProfile.options, RETIRED_EXTERNAL_SANDBOX_FULL])
+  .describe(
+    "Access profile recorded by an immutable historical artifact. external_sandbox_full is retired and cannot be requested by active surfaces.",
+  );
+export type RecordedAccessProfile = z.infer<typeof RecordedAccessProfile>;
 
 /** External context policy is separate from process/network sandboxing. */
 export const ExternalContextPolicy = z
   .enum(["off", "auto", "cached", "live"])
   .describe(
-    "External web/context policy for a run: off (no external context), auto (engine decides), cached (cached sources only), live (live web access). Separate from process/network sandboxing.",
+    "External web/context policy for a run: off (strictly disable external context), auto (optional, engine decides), cached (optional cached-source preference), live (optional live-web preference). Separate from process/network sandboxing.",
   );
 export type ExternalContextPolicy = z.infer<typeof ExternalContextPolicy>;
 

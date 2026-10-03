@@ -1,11 +1,14 @@
 import type { HarnessCapabilityProfile } from "@claudexor/schema";
 import { HarnessCapabilityProfile as HarnessCapabilityProfileSchema } from "@claudexor/schema";
-import { CLAUDE_VENDOR_CLI_VERSION } from "./vendor-cli-version.js";
+
+/** One manifest-owned declaration of the managed login's stdin contract. */
+export const CLAUDE_MANAGED_LOGIN = { stdin: "pipe" } as const;
 
 /**
- * Manifest model truth source (strict model-truth validation: an explicit
- * model outside this list is refused, never forwarded to die as a native
- * error). Stable aliases plus current full ids; verified against the vendor
+ * Manifest model hint list: the frozen floor every `models()` answer carries
+ * (`origin: "hint"`), judged under the adapter's ADVISORY declaration — an
+ * explicit model outside it is forwarded to the vendor with a note, never
+ * refused (INV-104). Stable aliases plus current full ids; verified against the vendor
  * model-config docs and the INSTALLED CLI recorded in
  * `CLAUDE_KNOWN_MODELS_VERIFIED_AGAINST`.
  */
@@ -15,6 +18,9 @@ export const CLAUDE_KNOWN_MODELS: readonly string[] = [
   "haiku",
   "fable",
   "best",
+  // Fable 5.1 requires Claude Code >= 2.1.251. Re-verified through the
+  // then-pinned 2.1.261 CLI with observed_model claude-fable-5-1.
+  "claude-fable-5-1",
   "claude-fable-5",
   "claude-sonnet-5",
   "claude-opus-5",
@@ -44,11 +50,15 @@ export function claudeQuotaModelAliases(displayName: string): string[] {
   return [...new Set([...(aliases.length > 0 ? aliases : [family]), "best"])];
 }
 
-/** Installed vendor CLI the known-model list above was last live-verified
- * against (the strict freshness gate compares this against the live CLI).
- * Aliases the per-package vendor-version SSOT so the freshness gate and the
- * remote installer's pin read the SAME value (vendor-cli-version.ts). */
-export const CLAUDE_KNOWN_MODELS_VERIFIED_AGAINST: string = CLAUDE_VENDOR_CLI_VERSION;
+/**
+ * Installed vendor CLI the known-model list above was last ACTUALLY verified
+ * against. A frozen literal on purpose, no longer an alias of the installer pin
+ * (vendor-cli-version.ts): aliasing let a pin bump silently re-stamp this list
+ * as "verified on the new CLI" when nobody re-checked it. The list is now a
+ * hint seed behind the live `models()` producer (model-probe.ts), it never
+ * grows again, and its stamp only moves when someone re-verifies the ids.
+ */
+export const CLAUDE_KNOWN_MODELS_VERIFIED_AGAINST: string = "2.1.261";
 
 export const CLAUDE_CAPABILITY_PROFILE: HarnessCapabilityProfile =
   HarnessCapabilityProfileSchema.parse({
@@ -61,8 +71,9 @@ export const CLAUDE_CAPABILITY_PROFILE: HarnessCapabilityProfile =
         { source: "oauth_token_env", kind: "oauth_token_env", relocatable_by: ["ENV"] },
         { source: "api_key_env", kind: "env_var", relocatable_by: ["ENV"] },
       ],
+      managed_login: CLAUDE_MANAGED_LOGIN,
     },
-    access_control: { readonly_mechanism: "tool_allowlist" },
+    access_control: { readonly_mechanism: "tool_allowlist", write_mechanism: "tool_policy" },
     isolation: {
       supported_containment: ["scoped_home_keychain_bridge", "env_or_file_injection"],
     },
@@ -70,6 +81,12 @@ export const CLAUDE_CAPABILITY_PROFILE: HarnessCapabilityProfile =
     // Claude does not sandbox its MCP servers, so the belt reaches the daemon at
     // workspace_write — no full-access requirement (contrast codex).
     mcp_injection_requires_full_access: false,
+    // Live input rides the native stdin queue (live-input.ts): a user frame
+    // written while a tool runs is queued at once and consumed inside the same
+    // turn right after the current tool batch; one that arrives during the
+    // final text runs as the next native turn of the same process. Recorded on
+    // Claude Code 2.1.283 (fixtures/stream-json/recorded-live-*-2.1.283.jsonl).
+    live_input: "next_tool_boundary",
     attachment_inputs: [
       {
         kind: "image",

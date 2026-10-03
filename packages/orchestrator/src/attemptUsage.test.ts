@@ -5,11 +5,15 @@ import {
   AttemptPostStreamError,
   attemptFailureCost,
   attemptFailureRecord,
+  newAttemptUsageCost,
+  observeAttemptUsageEvent,
   settleGrantedAttemptLease,
   withAttemptFailureCost,
 } from "./attemptUsageCost.js";
 import { createAttemptTelemetry, observeAttemptTelemetry } from "./attemptTelemetry.js";
 import { appliedAttemptFacts } from "./delegatedHome.js";
+import { attemptTelemetryRecord } from "./attemptTelemetry.js";
+import { AttemptTelemetryRecord, HarnessEvent } from "@claudexor/schema";
 
 const usageEvent = (estimated: boolean) =>
   ({
@@ -20,6 +24,73 @@ const usageEvent = (estimated: boolean) =>
   }) as const;
 
 describe("processAttemptUsage", () => {
+  it.each(["included", "paid_credits"] as const)(
+    "keeps %s processing unknown amount honest in stream guard, settlement and telemetry",
+    (kind) => {
+      const telemetry = createAttemptTelemetry("auto", false);
+      const mode = kind === "included" ? "standard" : "fast";
+      const common = {
+        session_id: "s",
+        ts: new Date().toISOString(),
+        credential_route: "vendor_native" as const,
+        processing: {
+          requested: mode,
+          submitted: mode,
+          submittedNative: mode,
+          observed: "unknown",
+          observedNative: [],
+          reason: null,
+          source: "fixture",
+        },
+        processing_cost_basis: { kind, nativeMode: mode, source: "fixture" },
+      };
+      observeAttemptTelemetry(telemetry, HarnessEvent.parse({ ...common, type: "started" }));
+      const usage = HarnessEvent.parse({
+        ...common,
+        type: "usage",
+        usage: {
+          cost_usd: 2,
+          cost_basis: { kind: "unknown", source: "native-scalar-without-proof" },
+        },
+      });
+      observeAttemptTelemetry(telemetry, usage);
+      const guard = vi.fn(() => true),
+        cancel = vi.fn();
+      const streamed = processAttemptUsage({
+        event: usage,
+        telemetry,
+        harnessId: "claude",
+        attemptId: "a",
+        cost: 0,
+        costEstimated: false,
+        budgetGuard: guard,
+        cancel,
+      });
+      expect(streamed.hardCapReached).toBe(kind === "paid_credits");
+      expect(cancel).toHaveBeenCalledTimes(kind === "paid_credits" ? 1 : 0);
+      observeAttemptTelemetry(telemetry, HarnessEvent.parse({ ...common, type: "completed" }));
+      const stored = AttemptTelemetryRecord.parse(
+        JSON.parse(JSON.stringify(attemptTelemetryRecord("a", "claude", telemetry))),
+      );
+      expect(stored.usage_cost).toEqual({
+        cashUsd: 0,
+        valuationUsd: 0,
+        unknownUsd: 2,
+        cashKnowledge: kind === "included" ? "exact" : "unknown",
+        valuationKnowledge: "unknown",
+      });
+      const settlement = attemptUsageCostSettlement(
+        2,
+        false,
+        "a",
+        "claude",
+        "local_session",
+        telemetry.usageCost,
+      );
+      expect(settlement.cashUsd).toBe(0);
+      expect(settlement.cashKnowledge).toBe(kind === "included" ? "exact" : "unknown");
+    },
+  );
   it("carries route-specific settlement when post-stream persistence throws", () => {
     const settlement = attemptUsageCostSettlement(1, false, "a01", "claude", "local_session", {
       cashUsd: 0.25,
@@ -90,8 +161,7 @@ describe("processAttemptUsage", () => {
           {
             isolated: true,
             homeDir: "/scoped",
-            confinement: null,
-            confinementUnavailableReason: null,
+            outerBoundaryUnavailableReason: null,
           },
           "workspace_write",
           "prof-1",
@@ -210,6 +280,58 @@ describe("processAttemptUsage", () => {
       ),
     );
     expect(ledger.spend()).toBe(0.37);
+    expect(ledger.terminal()).toBeNull();
+  });
+
+  it("settles an explicit zero-cost managed API receipt with exact cash knowledge", () => {
+    const usageCost = newAttemptUsageCost();
+    const ts = new Date().toISOString();
+    let authMode: "local_session" | "api_key" | null = null;
+
+    authMode = observeAttemptUsageEvent(
+      usageCost,
+      {
+        type: "started",
+        session_id: "s",
+        ts,
+        credential_route: "managed_api_key",
+      },
+      authMode,
+    );
+    authMode = observeAttemptUsageEvent(
+      usageCost,
+      {
+        type: "usage",
+        session_id: "s",
+        ts,
+        credential_route: "managed_api_key",
+        usage: { cost_usd: 0 },
+      },
+      authMode,
+    );
+    authMode = observeAttemptUsageEvent(
+      usageCost,
+      { type: "completed", session_id: "s", ts },
+      authMode,
+    );
+
+    expect(usageCost.cashUsd).toBe(0);
+    expect(usageCost.cashEstimated).toBe(false);
+    expect(usageCost.cashKnowledge).toBe("exact");
+
+    const settlement = attemptUsageCostSettlement(0, false, "a01", "raw-api", authMode, usageCost);
+    expect(settlement.cashUsd).toBe(0);
+    expect(settlement.cashKnowledge).toBe("exact");
+
+    const ledger = new BudgetLedger({ kind: "finite", maxUsd: 1 });
+    const lease = ledger.reserve({
+      taskId: "exact-zero-api-receipt",
+      intent: "explain",
+      harnessId: "raw-api",
+    }).lease!;
+    ledger.settle(lease.lease_id, settlement);
+
+    expect(ledger.spend()).toBe(0);
     expect(ledger.terminal()).toBeNull();
   });
 

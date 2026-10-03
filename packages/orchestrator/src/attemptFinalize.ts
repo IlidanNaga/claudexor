@@ -103,8 +103,13 @@ export function resolveWorkReportEnvelope(opts: {
   const callerStrict = hasCallerSchema
     ? strictifyOutputSchema(opts.callerSchema as Record<string, unknown>)
     : null;
-  // claude's `--json-schema` × interactive stream-json is an unverified combo:
-  // disclose the WorkReport transport as unsupported for that lane (§1).
+  // `--json-schema` × interactive stream-json is live-verified (claude
+  // 2.1.221) and CALLER schemas now ride interactive lanes (the DT2.1-16
+  // refusal is gone). The WorkReport side_tool envelope stays gated on
+  // interactive lanes as a DELIBERATE scope choice: arming a work-report
+  // tool on every interactive run is a behavior change with its own
+  // verification debt, not implied by the caller-schema verification. The
+  // inactive branch below still carries the caller schema through.
   const interactiveGated = opts.channel === "side_tool" && opts.interactive;
 
   // `validated` transport (cursor): no native schema constrains the output —
@@ -183,6 +188,8 @@ export interface UnwrappedAnswer {
   source: WorkReportSource;
   /** Non-null when an active route failed to carry a valid WorkReport. */
   contractViolation: string | null;
+  /** Parsed model claim retained as evidence only; never a valid WorkReport. */
+  reportProblem?: { kind: "completed_with_required_inputs"; reported: WorkReport };
 }
 
 /** The `output` slot of a constrained `{work_report, output}` envelope (or a
@@ -386,6 +393,7 @@ function validateWorkReport(
       workReport: null,
       source,
       contractViolation: "a completed work_report must not list required_inputs",
+      reportProblem: { kind: "completed_with_required_inputs", reported: report },
     };
   }
   if (report.state === "needs_input" && report.required_inputs.length === 0) {
@@ -528,9 +536,10 @@ export function finalizeAttempt(input: FinalizeAttemptInput): FinalizeAttemptRes
  * `deliverableEvidence` MUST be the same raw evidence boolean `finalizeAttempt`
  * folds — the unwrapped D-16 deliverable, never the pre-envelope answer text —
  * so the WorkReport contract stays the one owner of what "delivered" means.
- * This decides ONLY the tool-error axis: required-but-unsatisfied web evidence
- * keeps its own hard gate, and the finalizer's contract-failure and interrupted
- * classes still outrank whatever this returns.
+ * This decides ONLY the non-web tool-error axis: optional web failures never
+ * determine terminal state, while an explicitly required-but-unsatisfied web
+ * contract keeps its separate hard gate. The finalizer's contract-failure and
+ * interrupted classes still outrank whatever this returns.
  *
  * Returns the harness-error message to escalate, or null to leave the errors as
  * warning evidence.
@@ -540,7 +549,7 @@ export function unrecoveredToolErrorFailure(
   deliverableEvidence: boolean,
 ): string | null {
   if (deliverableEvidence) return null;
-  const first = unrecovered[0];
+  const first = unrecovered.find((error) => error.kind !== "web");
   return first ? `${first.tool} failed without recovery: ${first.summary}` : null;
 }
 

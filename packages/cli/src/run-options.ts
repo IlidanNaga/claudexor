@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { flagStr, type ParsedArgs } from "./args.js";
 import type {
   ControlReviewerPanelEntry,
   EffortHint,
@@ -11,6 +13,7 @@ import {
   parseReviewerEffortMap,
   parseReviewerModelMap,
   parseReviewerPanel,
+  parseReviewerPanelJson,
 } from "./reviewer-options.js";
 
 /**
@@ -91,8 +94,19 @@ export function parseTestCommandFlags(
 
 export function parseReviewerPanelFlags(
   values: Array<string | boolean>,
+  jsonValues: Array<string | boolean> = [],
 ): ControlReviewerPanelEntry[] | undefined {
   const strings = stringFlagValues(values, "reviewer-panel");
+  const structured = stringFlagValues(jsonValues, "reviewer-panel-json");
+  if (strings.length > 0 && structured.length > 0) {
+    throw new Error("--reviewer-panel and --reviewer-panel-json cannot be used together");
+  }
+  if (structured.length > 0) {
+    if (structured.length !== 1) {
+      throw new Error("invalid --reviewer-panel-json value (provide exactly one JSON array)");
+    }
+    return parseReviewerPanelJson(structured[0]);
+  }
   return parseReviewerPanel(
     strings.length > 0 ? strings.join(",") : undefined,
     snapshotAdvertisedEfforts(),
@@ -111,4 +125,47 @@ export function parseReviewerEffortFlags(
 ): Partial<Record<ProviderFamily, EffortHint>> | undefined {
   const strings = stringFlagValues(values, "reviewer-effort");
   return parseReviewerEffortMap(strings.length > 0 ? strings.join(",") : undefined);
+}
+
+/** Preserve omitted, enabled, and disabled review intent through CLI booleans. */
+export function parseReviewFlags(
+  reviewValues: Array<string | boolean>,
+  noReviewValues: Array<string | boolean>,
+  bestOf = false,
+): boolean | undefined {
+  if (reviewValues.length && noReviewValues.length)
+    throw new Error("--review and --no-review cannot be combined");
+  const values = reviewValues.length ? reviewValues : noReviewValues;
+  for (const value of values) {
+    if (![true, false, "true", "false"].includes(value))
+      throw new Error("--review and --no-review accept only true or false");
+  }
+  const last = values.at(-1);
+  const enabled = last === true || last === "true";
+  const review = values.length ? (reviewValues.length ? enabled : !enabled) : undefined;
+  if (bestOf && review === false) throw new Error("Best-of includes review; remove --no-review");
+  return review ?? (bestOf ? true : undefined);
+}
+
+/**
+ * Per-run system instructions from `--instructions "<text>"` or
+ * `--instructions-file <path>` (mutually exclusive; the file form avoids
+ * ARG_MAX and keeps long instructions out of the process argv / `ps`).
+ */
+export function resolveInstructions(args: ParsedArgs): string | undefined {
+  const inline = flagStr(args, "instructions");
+  const file = flagStr(args, "instructions-file");
+  if (inline !== undefined && file !== undefined) {
+    throw new Error("pass either --instructions or --instructions-file, not both");
+  }
+  if (file !== undefined) {
+    try {
+      return readFileSync(file, "utf8");
+    } catch (err) {
+      throw new Error(
+        `could not read --instructions-file ${file}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+  return inline;
 }

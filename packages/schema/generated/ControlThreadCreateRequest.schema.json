@@ -111,7 +111,6 @@
             "readonly",
             "workspace_write",
             "full",
-            "external_sandbox_full",
             "inherit_native"
           ],
           "description": "Sticky write scope for the thread's write turns; omit = the repo trust default."

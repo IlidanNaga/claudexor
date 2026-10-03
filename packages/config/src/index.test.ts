@@ -19,6 +19,10 @@ describe("loadConfig", () => {
   ): void {
     const prev = process.env.CLAUDEXOR_CONFIG_DIR;
     const prevReviewerTimeout = process.env.CLAUDEXOR_REVIEWER_TIMEOUT_MS;
+    const prevMaxConcurrent = process.env.CLAUDEXOR_MAX_CONCURRENT;
+    const prevMaxParallelCandidates = process.env.CLAUDEXOR_MAX_PARALLEL_CANDIDATES;
+    const prevMaxDeepScanWidth = process.env.CLAUDEXOR_MAX_DEEP_SCAN_WIDTH;
+    const prevMaxCouncilMembers = process.env.CLAUDEXOR_MAX_COUNCIL_MEMBERS;
     const prevRetryMax = process.env.CLAUDEXOR_TRANSIENT_RETRY_MAX;
     const prevRetryInitialDelay = process.env.CLAUDEXOR_TRANSIENT_RETRY_INITIAL_DELAY_MS;
     const prevRetryMaxDelay = process.env.CLAUDEXOR_TRANSIENT_RETRY_MAX_DELAY_MS;
@@ -29,6 +33,10 @@ describe("loadConfig", () => {
     mkdirSync(configDir, { recursive: true });
     process.env.CLAUDEXOR_CONFIG_DIR = configDir;
     delete process.env.CLAUDEXOR_REVIEWER_TIMEOUT_MS;
+    delete process.env.CLAUDEXOR_MAX_CONCURRENT;
+    delete process.env.CLAUDEXOR_MAX_PARALLEL_CANDIDATES;
+    delete process.env.CLAUDEXOR_MAX_DEEP_SCAN_WIDTH;
+    delete process.env.CLAUDEXOR_MAX_COUNCIL_MEMBERS;
     delete process.env.CLAUDEXOR_TRANSIENT_RETRY_MAX;
     delete process.env.CLAUDEXOR_TRANSIENT_RETRY_INITIAL_DELAY_MS;
     delete process.env.CLAUDEXOR_TRANSIENT_RETRY_MAX_DELAY_MS;
@@ -39,6 +47,15 @@ describe("loadConfig", () => {
       else process.env.CLAUDEXOR_CONFIG_DIR = prev;
       if (prevReviewerTimeout === undefined) delete process.env.CLAUDEXOR_REVIEWER_TIMEOUT_MS;
       else process.env.CLAUDEXOR_REVIEWER_TIMEOUT_MS = prevReviewerTimeout;
+      if (prevMaxConcurrent === undefined) delete process.env.CLAUDEXOR_MAX_CONCURRENT;
+      else process.env.CLAUDEXOR_MAX_CONCURRENT = prevMaxConcurrent;
+      if (prevMaxParallelCandidates === undefined)
+        delete process.env.CLAUDEXOR_MAX_PARALLEL_CANDIDATES;
+      else process.env.CLAUDEXOR_MAX_PARALLEL_CANDIDATES = prevMaxParallelCandidates;
+      if (prevMaxDeepScanWidth === undefined) delete process.env.CLAUDEXOR_MAX_DEEP_SCAN_WIDTH;
+      else process.env.CLAUDEXOR_MAX_DEEP_SCAN_WIDTH = prevMaxDeepScanWidth;
+      if (prevMaxCouncilMembers === undefined) delete process.env.CLAUDEXOR_MAX_COUNCIL_MEMBERS;
+      else process.env.CLAUDEXOR_MAX_COUNCIL_MEMBERS = prevMaxCouncilMembers;
       if (prevRetryMax === undefined) delete process.env.CLAUDEXOR_TRANSIENT_RETRY_MAX;
       else process.env.CLAUDEXOR_TRANSIENT_RETRY_MAX = prevRetryMax;
       if (prevRetryInitialDelay === undefined)
@@ -58,6 +75,10 @@ describe("loadConfig", () => {
       expect(cfg.global.routing.goal).toBe("auto");
       expect(cfg.global.routing.paid_fallback).toBe("when_unavailable");
       expect(cfg.global.runtime.reviewer_timeout_ms).toBe(600_000);
+      expect(cfg.global.runtime.max_concurrent).toBe(24);
+      expect(cfg.global.runtime.max_parallel_candidates).toBe(4);
+      expect(cfg.global.runtime.max_deep_scan_width).toBe(8);
+      expect(cfg.global.runtime.max_council_members).toBe(4);
       expect(cfg.global.runtime.transient_retry.max_retries).toBe(2);
     });
   });
@@ -65,12 +86,31 @@ describe("loadConfig", () => {
   it("honors runtime env overrides and validates them loudly", () => {
     withTempConfig(({ repo }) => {
       process.env.CLAUDEXOR_REVIEWER_TIMEOUT_MS = "700000";
+      process.env.CLAUDEXOR_MAX_CONCURRENT = "30";
+      process.env.CLAUDEXOR_MAX_PARALLEL_CANDIDATES = "6";
+      process.env.CLAUDEXOR_MAX_DEEP_SCAN_WIDTH = "10";
+      process.env.CLAUDEXOR_MAX_COUNCIL_MEMBERS = "5";
       process.env.CLAUDEXOR_TRANSIENT_RETRY_MAX = "3";
       const cfg = loadConfig(repo);
       expect(cfg.global.runtime.reviewer_timeout_ms).toBe(700_000);
+      expect(cfg.global.runtime.max_concurrent).toBe(30);
+      expect(cfg.global.runtime.max_parallel_candidates).toBe(6);
+      expect(cfg.global.runtime.max_deep_scan_width).toBe(10);
+      expect(cfg.global.runtime.max_council_members).toBe(5);
       expect(cfg.global.runtime.transient_retry.max_retries).toBe(3);
       process.env.CLAUDEXOR_TRANSIENT_RETRY_MAX = "-1";
       expect(() => loadConfig(repo)).toThrow(ConfigParseError);
+      process.env.CLAUDEXOR_TRANSIENT_RETRY_MAX = "3";
+      for (const name of [
+        "CLAUDEXOR_MAX_CONCURRENT",
+        "CLAUDEXOR_MAX_PARALLEL_CANDIDATES",
+        "CLAUDEXOR_MAX_DEEP_SCAN_WIDTH",
+        "CLAUDEXOR_MAX_COUNCIL_MEMBERS",
+      ]) {
+        process.env[name] = "0";
+        expect(() => loadConfig(repo)).toThrow(ConfigParseError);
+        delete process.env[name];
+      }
     });
   });
 
@@ -333,6 +373,141 @@ describe("trust config enumeration", () => {
       updateTrustConfig(repoA, (cfg) => ({ ...cfg, allow_full_access: false }));
       const after = listTrustConfigs().find((e) => e.config.repo_root === repoA);
       expect(after?.config.allow_full_access).toBe(false);
+    } finally {
+      if (prev === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("A6 limit_action serialize rule (never persist auto)", () => {
+  const withConfigDir = (fn: (dir: string) => void) => {
+    const dir = mkdtempSync(join(tmpdir(), "claudexor-limit-action-"));
+    const prev = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = dir;
+    try {
+      fn(dir);
+    } finally {
+      if (prev === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  /** The pre-A6 installed engine's enum: rollback must parse today's file. */
+  const baseEnumParses = (yamlText: string) => {
+    const raw = yamlParse(yamlText) as {
+      harnesses?: Record<string, { profile_policy?: { limit_action?: unknown } }>;
+    };
+    for (const harness of Object.values(raw.harnesses ?? {})) {
+      const action = harness.profile_policy?.limit_action;
+      if (action !== undefined) {
+        expect(["fail", "ask", "rotate"]).toContain(action);
+      }
+    }
+  };
+
+  it("an identity write on a config with materialized auto strips limit_action from the yaml", () => {
+    withConfigDir((dir) => {
+      // A file that already carries the materialized default (the pre-fix bug shape).
+      writeFileSync(
+        join(dir, "config.yaml"),
+        "harnesses:\n  claude:\n    profile_policy:\n      limit_action: auto\n",
+      );
+      const { path, config } = updateGlobalConfig((cfg) => cfg);
+      // The in-memory config still resolves the default...
+      expect(config.harnesses["claude"]?.profile_policy.limit_action).toBe("auto");
+      // ...but the durable file never spells it: absent means auto.
+      const written = readFileSync(path, "utf8");
+      expect(written).not.toContain("limit_action");
+      baseEnumParses(written);
+      // And the next load still resolves auto from absence.
+      const reloaded = loadConfig(dir);
+      expect(reloaded.global.harnesses["claude"]?.profile_policy.limit_action).toBe("auto");
+    });
+  });
+
+  it("explicit fail/ask/rotate round-trip untouched and stay base-enum-parseable", () => {
+    withConfigDir((dir) => {
+      const { path } = updateGlobalConfig((cfg) => ({
+        ...cfg,
+        harnesses: {
+          ...cfg.harnesses,
+          claude: {
+            ...(cfg.harnesses["claude"] ?? {
+              enabled: true,
+              native_credentials_enabled: true,
+              default_model: null,
+              effort: null,
+              max_turns: null,
+              max_rounds: null,
+              profile_policy: {
+                limit_action: "auto",
+                rotation_eligible: [],
+                headroom_threshold: 0.9,
+              },
+              tools_allow: [],
+              tools_deny: [],
+              fallback_model: null,
+              web: "auto",
+              auth_preference: "auto",
+            }),
+            profile_policy: {
+              limit_action: "rotate",
+              rotation_eligible: [],
+              headroom_threshold: 0.9,
+            },
+          },
+        },
+      }));
+      const written = readFileSync(path, "utf8");
+      expect(written).toContain("limit_action: rotate");
+      baseEnumParses(written);
+      expect(loadConfig(dir).global.harnesses["claude"]?.profile_policy.limit_action).toBe(
+        "rotate",
+      );
+    });
+  });
+});
+
+describe("concurrency default serialization", () => {
+  it("does not materialize new default caps into a durable config", () => {
+    const dir = mkdtempSync(join(tmpdir(), "claudexor-concurrency-defaults-"));
+    const prev = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = dir;
+    try {
+      const { path } = updateGlobalConfig((cfg) => cfg);
+      const written = readFileSync(path, "utf8");
+      expect(written).not.toContain("max_concurrent:");
+      expect(written).not.toContain("max_parallel_candidates:");
+      expect(written).not.toContain("max_deep_scan_width:");
+      expect(written).not.toContain("max_council_members:");
+    } finally {
+      if (prev === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("persists explicit non-default caps and reloads them", () => {
+    const dir = mkdtempSync(join(tmpdir(), "claudexor-concurrency-explicit-"));
+    const prev = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = dir;
+    try {
+      const { path } = updateGlobalConfig((cfg) => ({
+        ...cfg,
+        runtime: {
+          ...cfg.runtime,
+          max_concurrent: 30,
+          max_parallel_candidates: 6,
+          max_deep_scan_width: 10,
+          max_council_members: 5,
+        },
+      }));
+      const written = readFileSync(path, "utf8");
+      expect(written).toContain("max_concurrent: 30");
+      expect(loadConfig(dir).global.runtime.max_council_members).toBe(5);
     } finally {
       if (prev === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
       else process.env.CLAUDEXOR_CONFIG_DIR = prev;

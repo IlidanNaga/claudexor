@@ -13,7 +13,7 @@ import {
 import { EventEmitter } from "node:events";
 import { PassThrough, Writable } from "node:stream";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -121,15 +121,38 @@ function issuePermit(spec: SetupLoginManifest, issuedAt = new Date().toISOString
 }
 
 describe("setup-login sidecar protocol v2", () => {
-  it("passes the disposable native-store selector from Terminal runner to its worker", async () => {
+  it("passes the complete safe bootstrap environment to the detached worker", async () => {
     const { manifestPath } = prepare("#!/bin/sh\nexit 0\n");
-    const previous = process.env.CLAUDEXOR_CODEX_NATIVE_HOME;
-    process.env.CLAUDEXOR_CODEX_NATIVE_HOME = join(root, "disposable-codex-home");
+    const safeEnvironment = {
+      CLAUDEXOR_CODEX_NATIVE_HOME: join(root, "disposable-codex-home"),
+      TERM: "xterm-256color",
+      COLORTERM: "truecolor",
+      LC_CTYPE: "en_US.UTF-8",
+      NO_COLOR: "1",
+      SHELL: "/bin/zsh",
+      all_proxy: "socks5://proxy.test:1080",
+    };
+    const secrets = {
+      OPENAI_API_KEY: "provider-secret",
+      ANTHROPIC_API_KEY: "provider-secret",
+      GOOGLE_API_KEY: "provider-secret",
+      CLAUDEXOR_DAEMON_TOKEN: "control-secret",
+    };
+    const changed = { ...safeEnvironment, ...secrets };
+    const previous = new Map(Object.keys(changed).map((key) => [key, process.env[key]] as const));
+    Object.assign(process.env, changed);
     let workerEnvironment: NodeJS.ProcessEnv | undefined;
+    let workerCommand: string | undefined;
+    let workerArgs: readonly string[] | undefined;
+    let workerOptions: SpawnOptions | undefined;
     const child = new EventEmitter() as ChildProcess;
     try {
       const result = runSetupLogin(manifestPath, {
-        spawnProcess: ((_command: string, _args: readonly string[], options: SpawnOptions) => {
+        runnerPath: "/runtime/setup-login-runner.js",
+        spawnProcess: ((command: string, args: readonly string[], options: SpawnOptions) => {
+          workerCommand = command;
+          workerArgs = args;
+          workerOptions = options;
           workerEnvironment = options.env;
           // waitForExit settles on `close` now (wave-1: `exit` can race the
           // final piped chunks) — a real child emits both, so the fake must too.
@@ -141,12 +164,27 @@ describe("setup-login sidecar protocol v2", () => {
         }) as never,
       });
       await expect(result).resolves.toBe(0);
-      expect(workerEnvironment?.CLAUDEXOR_CODEX_NATIVE_HOME).toBe(
-        join(root, "disposable-codex-home"),
-      );
+      expect(workerCommand).toBe(process.execPath);
+      expect(workerArgs).toEqual([
+        "/runtime/setup-login-runner.js",
+        "--worker",
+        resolve(manifestPath),
+      ]);
+      expect(workerOptions).toMatchObject({
+        cwd: join(root, "setup-protocol"),
+        windowsHide: true,
+        detached: true,
+        stdio: "inherit",
+      });
+      expect(workerEnvironment).toMatchObject(safeEnvironment);
+      for (const key of Object.keys(secrets)) {
+        expect(workerEnvironment).not.toHaveProperty(key);
+      }
     } finally {
-      if (previous === undefined) delete process.env.CLAUDEXOR_CODEX_NATIVE_HOME;
-      else process.env.CLAUDEXOR_CODEX_NATIVE_HOME = previous;
+      for (const [key, value] of previous) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
     }
   });
 

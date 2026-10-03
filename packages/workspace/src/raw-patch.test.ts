@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { RawContextPacket, RawGitPatchEnvelope } from "@claudexor/schema";
+import { RawContextPacket, RawGitPatchEnvelope, type RawPatchRefusalCode } from "@claudexor/schema";
 import { sha256 } from "@claudexor/util";
 import { consumeRawPatchEnvelope, RawPatchRefusalError } from "./raw-patch.js";
 import { rmSync as __rmSyncReap } from "node:fs";
@@ -91,6 +91,73 @@ async function refusalCode(input: ReturnType<typeof fixture>): Promise<string | 
   }
   return undefined;
 }
+
+const refusalCases: Array<{
+  name: string;
+  expected: RawPatchRefusalCode;
+  mutate(input: ReturnType<typeof fixture>): void;
+}> = [
+  {
+    name: "stale preimage",
+    expected: "raw_patch_stale_preimage",
+    mutate: (input) => {
+      input.envelope = {
+        ...input.envelope,
+        touched_paths: [{ path: "a.txt", expected_blob_oid: "bad" }],
+      };
+    },
+  },
+  {
+    name: "missing evidence",
+    expected: "raw_patch_missing_evidence",
+    mutate: (input) => {
+      input.envelope = { ...input.envelope, touched_paths: [] };
+    },
+  },
+  {
+    name: "outside-scope",
+    expected: "raw_patch_outside_scope",
+    mutate: (input) => {
+      input.context = { ...input.context, editable_paths: [] };
+    },
+  },
+  {
+    name: "path traversal",
+    expected: "raw_patch_path_traversal",
+    mutate: (input) => {
+      input.envelope = {
+        ...input.envelope,
+        touched_paths: [{ path: "../a.txt", expected_blob_oid: input.blobOid }],
+      };
+    },
+  },
+  {
+    name: "binary",
+    expected: "raw_patch_binary_unsupported",
+    mutate: (input) => {
+      const patch = "diff --git a/a.txt b/a.txt\nBinary files a/a.txt and b/a.txt differ\n";
+      input.envelope = { ...input.envelope, patch, patch_hash: sha256(patch) };
+    },
+  },
+  {
+    name: "truncated",
+    expected: "raw_patch_truncated",
+    mutate: (input) => {
+      input.envelope = {
+        ...input.envelope,
+        patch: "not a diff",
+        patch_hash: sha256("not a diff"),
+      };
+    },
+  },
+  {
+    name: "live-tree",
+    expected: "raw_patch_requires_isolation",
+    mutate: (input) => {
+      input.worktreePath = input.repo;
+    },
+  },
+];
 
 describe("raw patch envelope consumer", () => {
   it("checks against the exact base and materializes only in the isolated worktree", async () => {
@@ -186,50 +253,15 @@ describe("raw patch envelope consumer", () => {
     expect(readFileSync(join(renamed.worktreePath, "b.txt"), "utf8")).toBe("old\n");
   });
 
-  it("refuses stale, missing, outside-scope, traversal, binary, truncated, and live-tree patches", async () => {
-    const stale = fixture();
-    stale.envelope = {
-      ...stale.envelope,
-      touched_paths: [{ path: "a.txt", expected_blob_oid: "bad" }],
-    };
-    expect(await refusalCode(stale)).toBe("raw_patch_stale_preimage");
-
-    const missing = fixture();
-    missing.envelope = { ...missing.envelope, touched_paths: [] };
-    expect(await refusalCode(missing)).toBe("raw_patch_missing_evidence");
-
-    const outside = fixture();
-    outside.context = { ...outside.context, editable_paths: [] };
-    expect(await refusalCode(outside)).toBe("raw_patch_outside_scope");
-
-    const traversal = fixture();
-    traversal.envelope = {
-      ...traversal.envelope,
-      touched_paths: [{ path: "../a.txt", expected_blob_oid: traversal.blobOid }],
-    };
-    expect(await refusalCode(traversal)).toBe("raw_patch_path_traversal");
-
-    const binary = fixture();
-    const binaryPatch = "diff --git a/a.txt b/a.txt\nBinary files a/a.txt and b/a.txt differ\n";
-    binary.envelope = {
-      ...binary.envelope,
-      patch: binaryPatch,
-      patch_hash: sha256(binaryPatch),
-    };
-    expect(await refusalCode(binary)).toBe("raw_patch_binary_unsupported");
-
-    const truncated = fixture();
-    truncated.envelope = {
-      ...truncated.envelope,
-      patch: "not a diff",
-      patch_hash: sha256("not a diff"),
-    };
-    expect(await refusalCode(truncated)).toBe("raw_patch_truncated");
-
-    const live = fixture();
-    live.worktreePath = live.repo;
-    expect(await refusalCode(live)).toBe("raw_patch_requires_isolation");
-  }, 15000);
+  it.each(refusalCases)(
+    "refuses $name patches",
+    async ({ expected, mutate }) => {
+      const input = fixture();
+      mutate(input);
+      expect(await refusalCode(input)).toBe(expected);
+    },
+    15_000,
+  );
 
   it("refuses a wrong-base or dirty isolated worktree before applying", async () => {
     const wrongBase = fixture();

@@ -278,6 +278,7 @@ extension AppModel {
                 attachmentInputs: attachmentInputs,
                 acceptsBrowser: acceptsBrowser,
                 delegation: status.delegation,
+                setupLogin: status.setupLogin,
                 effortLevels: effortLevels,
                 modelEffortLevels: modelEffortLevels)
         }
@@ -296,6 +297,13 @@ extension AppModel {
     /// Refresh the exact credential store an AuthSheet represents. Default login
     /// sheets use the source-targeted probe; profile sheets consume the profile
     /// snapshot's own doctor result and never let default-route failure overwrite it.
+    ///
+    /// A family with NO default credential store (agy: every account is a named
+    /// profile, INV-135 / Л-4) has no source to probe at all. Reporting `false`
+    /// there announced the failure of a check that never ran — the sheet then
+    /// blamed the engine right after a successful login. The accounts/profiles
+    /// projection IS this family's readiness truth, so refresh THAT and report
+    /// its real outcome.
     @discardableResult
     func refreshCredentialReadiness(
         for family: HarnessFamily,
@@ -303,7 +311,21 @@ extension AppModel {
         after job: SetupJob?
     ) async -> Bool {
         guard let profileId else {
-            return await refreshAuthReadinessAfterSetupLifecycle(for: family, job: job)
+            guard family.authReadinessRequest(after: job) != nil else {
+                return await refreshAccounts() == nil
+            }
+            let refreshed = await refreshAuthReadinessAfterSetupLifecycle(for: family, job: job)
+            // A profile-less job is the BOOTSTRAP login (K.4): its credential
+            // lands on the `<harness>-default` REGISTRY row, which the exact
+            // source probe and harness refresh above never re-read — so a
+            // fresh/cold row stayed invisible ("No accounts yet") until a
+            // manual popover Refresh, right after a successful login. Re-read
+            // the registry too, through the same mutation-fenced reload the
+            // exact-profile (cursor) lane already performs.
+            if job != nil, AccountsPresentation.supportsBootstrapLogin(family) {
+                await refreshCredentialProfilesAfterMutation()
+            }
+            return refreshed
         }
         return await refreshExactCredentialProfile(
             harnessID: family.setupHarnessId, profileID: profileId) != nil

@@ -867,7 +867,7 @@ describe("RunFacts invariant validator (GH #29)", () => {
     ).toThrow(/required actions remain/);
   });
 
-  it("allows positive apply eligibility only for an agent patch deliverable", () => {
+  it("allows positive apply eligibility only for agent patch or files deliverables", () => {
     const eligibility = {
       eligible: true as const,
       state: "ok" as const,
@@ -893,7 +893,14 @@ describe("RunFacts invariant validator (GH #29)", () => {
         },
         apply: { eligibility, operator_decision_present: false },
       }),
-    ).toThrow(/only for a patch deliverable/);
+    ).toThrow(/only for a patch or files deliverable/);
+    const files = validAgentPatch();
+    expect(() =>
+      validateRunFactsInvariants({
+        ...files,
+        deliverable: { ...files.deliverable, kind: "files", path: "final/files/manifest.json" },
+      }),
+    ).not.toThrow();
   });
 
   it("accepts hash-bound risk eligibility only on a needs-decision outcome", () => {
@@ -952,6 +959,17 @@ describe("RunFacts invariant validator (GH #29)", () => {
       required_actions: requiredActionsFor(cleanOutcome, false),
     };
     expect(validateRunFactsInvariants(clean).apply.eligibility?.eligible).toBe(true);
+
+    const unreviewed = {
+      ...clean,
+      outcome: makeOutcomeFacts("succeeded", { review: "not_run", review_requested: false }),
+      review: { state: "not_run", blocker_ids: [], blockers: 0 },
+    };
+    expect(validateRunFactsInvariants(unreviewed).apply.eligibility?.eligible).toBe(true);
+    // Request intent survives a durable wire roundtrip separately from verdict.
+    expect(
+      validateRunFactsInvariants(JSON.parse(JSON.stringify(unreviewed))).outcome,
+    ).toMatchObject({ review: "not_run", review_requested: false });
 
     expect(() =>
       validateRunFactsInvariants({

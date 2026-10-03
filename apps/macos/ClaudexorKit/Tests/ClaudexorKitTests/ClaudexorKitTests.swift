@@ -34,13 +34,14 @@ import Testing
     }
 
     @Test func runAgainDraftPreservesEveryUnknownAndNestedRunField() throws {
-        let json = #"{"sourceRunId":"run-1","request":{"prompt":"retry","mode":"agent","attachments":[{"kind":"file","mime":"text/plain","name":"a.txt","data":null,"path":"/tmp/a.txt"}],"effort":"xhigh","synthesis":"always","browser":true,"externalContextPolicy":"live","specId":"spec-1","autonomy":"auto_safe","maxToolCalls":12,"futureControl":{"enabled":true}},"differences":[]}"#
+        let json = #"{"sourceRunId":"run-1","request":{"prompt":"retry","mode":"agent","attachments":[{"kind":"file","mime":"text/plain","name":"a.txt","data":null,"path":"/tmp/a.txt"}],"effort":"xhigh","synthesis":"always","browser":true,"externalContextPolicy":"live","specId":"spec-1","autonomy":"auto_safe","maxToolCalls":12,"futureControl":{"enabled":true}},"accessChoice":{"required":false},"differences":[]}"#
         let draft = try JSONDecoder().decode(RunAgainDraft.self, from: Data(json.utf8))
         #expect(draft.request["attachments"] != nil)
         #expect(draft.request["effort"]?.stringValue == "xhigh")
         #expect(draft.request["browser"]?.boolValue == true)
         #expect(draft.request["maxToolCalls"]?.doubleValue == 12)
         #expect(draft.request["futureControl"]?["enabled"]?.boolValue == true)
+        #expect(draft.accessChoice.required == false)
         let encoded = try JSONEncoder().encode(draft)
         let roundTrip = try JSONDecoder().decode(RunAgainDraft.self, from: encoded)
         #expect(roundTrip.request == draft.request)
@@ -172,6 +173,24 @@ import Testing
             ReviewerPanelEntry(harness: "claude", model: "opus", effort: "max"),
             ReviewerPanelEntry(harness: "codex"),
         ]) == "claude=opus:max, codex")
+    }
+
+    @Test func structuredReviewerPanelJSONRoundTripsCredentialPins() throws {
+        let entries = [
+            ReviewerPanelEntry(
+                harness: "cursor", model: "grok-4.6", credentialProfileId: "review-cursor"),
+            ReviewerPanelEntry(harness: "claude", effort: "high"),
+        ]
+        let raw = try #require(ComposerOptionParser.reviewerPanelJSON(entries))
+        #expect(raw.contains("credentialProfileId"))
+        #expect(ComposerOptionParser.parseReviewerPanelJSON(raw) == entries)
+        #expect(ComposerOptionParser.parseReviewerPanelJSON("[{bad json") == nil)
+        #expect(ComposerOptionParser.parseReviewerPanelJSON(
+            "[{\"harness\":\"cursor\",\"credential_profile_id\":\"review-cursor\"}]"
+        ) == nil)
+        #expect(ComposerOptionParser.parseReviewerPanelJSON(
+            "[{\"harness\":\"cursor\",\"unexpected\":true}]"
+        ) == nil)
     }
 
     @Test func approvalListEditorBuildsEntries() throws {
@@ -398,6 +417,30 @@ import Testing
         #expect(legacyStatus.routableIntents.isEmpty)
         #expect(legacyStatus.disabledIntents.isEmpty)
         #expect(legacyStatus.checks.isEmpty)
+        #expect(legacyStatus.setupLogin == .legacyAbsent)
+
+        let unavailable = try JSONDecoder().decode(
+            HarnessStatus.self,
+            from: Data(#"{"id":"agy","status":"unavailable","setupLogin":null}"#.utf8))
+        #expect(unavailable.setupLogin == .unavailable)
+        let inApp = try JSONDecoder().decode(
+            HarnessStatus.self,
+            from: Data(#"{"id":"claude","status":"ok","setupLogin":{"mode":"in_app"}}"#.utf8))
+        #expect(inApp.setupLogin == .inApp)
+        let terminal = try JSONDecoder().decode(
+            HarnessStatus.self,
+            from: Data(#"{"id":"cursor","status":"ok","setupLogin":{"mode":"external_terminal"}}"#.utf8))
+        #expect(terminal.setupLogin == .externalTerminal)
+        #expect(throws: DecodingError.self) {
+            _ = try JSONDecoder().decode(
+                HarnessStatus.self,
+                from: Data(#"{"id":"x","status":"ok","setupLogin":{"mode":"automatic"}}"#.utf8))
+        }
+        #expect(throws: DecodingError.self) {
+            _ = try JSONDecoder().decode(
+                HarnessStatus.self,
+                from: Data(#"{"id":"x","status":"ok","setupLogin":{"mode":"in_app","junk":true}}"#.utf8))
+        }
     }
 
     @Test func harnessModelsResponseDecodesEnumerationAndNoneFallback() throws {
@@ -1067,6 +1110,31 @@ import Testing
     #expect(b.diffstat == nil)
 }
 
+@Test func setupExecutableEvidenceMirrorsTheSharedAbsolutePathRule() throws {
+    // Mirrors ABSOLUTE_PATH_PATTERN in @claudexor/schema: POSIX, drive-rooted
+    // and UNC paths decode; drive-relative and root-relative ones do not.
+    let digest = String(repeating: "a", count: 64)
+    func evidence(_ realpath: String) throws -> Data {
+        try JSONSerialization.data(withJSONObject: [
+            "realpath": realpath, "sha256": digest, "size": 1,
+            "mode": 493, "device": "1", "inode": "2",
+        ])
+    }
+    for accepted in ["/usr/bin/true", "C:\\Program Files\\Codex\\codex.exe", "C:/codex/codex.exe",
+                     "\\\\server\\share\\jobDir"] {
+        let data = try evidence(accepted)
+        #expect(throws: Never.self) {
+            try JSONDecoder().decode(SetupExecutableEvidence.self, from: data)
+        }
+    }
+    for refused in ["relative/path", "./codex.exe", "C:relative\\codex.exe", "\\Windows\\codex.exe"] {
+        let data = try evidence(refused)
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(SetupExecutableEvidence.self, from: data)
+        }
+    }
+}
+
 @Suite(.serialized) struct SetupLifecycleTests {
     @Test func setupJobRejectsDeadFieldsAndUnknownV2Enums() throws {
         let legacy = """
@@ -1335,6 +1403,55 @@ import Testing
         }
     }
 
+    @Test func terminalTransportReceiptCodesMatchCommandStartBoundary() throws {
+        let digest = String(repeating: "a", count: 64)
+        var receipt: [String: Any] = [
+            "executionId": "exec-terminal-1",
+            "commandDigest": digest,
+            "manifestDigest": String(repeating: "b", count: 64),
+            "permitIssuedAt": NSNull(),
+            "commandStarted": false,
+            "exitCode": NSNull(),
+            "signal": NSNull(),
+            "finishedAt": "2026-08-19T00:00:00Z"
+        ]
+        let beforeVendor: [(String, SetupNativeCommandErrorCode)] = [
+            ("terminal_transport_unavailable", .terminalTransportUnavailable),
+            ("terminal_transport_unsupported", .terminalTransportUnsupported),
+            ("terminal_transport_probe_failed", .terminalTransportProbeFailed)
+        ]
+        for (raw, expected) in beforeVendor {
+            receipt["errorCode"] = raw
+            let data = try JSONSerialization.data(withJSONObject: receipt)
+            let decoded = try JSONDecoder().decode(SetupNativeCommandReceipt.self, from: data)
+            #expect(decoded.errorCode == expected)
+
+            var contradicted = receipt
+            contradicted["commandStarted"] = true
+            contradicted["permitIssuedAt"] = "2026-08-18T23:59:59Z"
+            #expect(throws: DecodingError.self) {
+                try JSONDecoder().decode(
+                    SetupNativeCommandReceipt.self,
+                    from: JSONSerialization.data(withJSONObject: contradicted))
+            }
+        }
+
+        // A relay/control break may occur before or after the helper's validated
+        // started frame; only the ordinary started-command permit rule applies.
+        receipt["errorCode"] = "terminal_transport_failed"
+        let preStart = try JSONDecoder().decode(
+            SetupNativeCommandReceipt.self,
+            from: JSONSerialization.data(withJSONObject: receipt))
+        #expect(preStart.errorCode == .terminalTransportFailed)
+
+        receipt["commandStarted"] = true
+        receipt["permitIssuedAt"] = "2026-08-18T23:59:59Z"
+        let postStart = try JSONDecoder().decode(
+            SetupNativeCommandReceipt.self,
+            from: JSONSerialization.data(withJSONObject: receipt))
+        #expect(postStart.errorCode == .terminalTransportFailed)
+    }
+
     @Test func authCapabilityReceiptPreservesRequiredNullableFields() throws {
         let digest = String(repeating: "c", count: 64)
         let json = """
@@ -1367,6 +1484,41 @@ import Testing
         #expect(makeSetupJob(id: "launching", state: "waiting_for_input", phase: .launching).canExtend)
         #expect(makeSetupJob(id: "waiting", state: "waiting_for_input", phase: .awaitingUser).canExtend)
         #expect(!makeSetupJob(id: "verifying", state: "running", phase: .verifying).canExtend)
+    }
+
+    /// A VENDOR-owned sign-in window cannot be extended by anyone: Antigravity
+    /// waits exactly 60 s for its pasted code and offers no way to lengthen it,
+    /// so the daemon refuses the extend and the client must not offer the
+    /// button. Absent (older daemon) still means the engine owns the window.
+    @Test func vendorOwnedLoginWindowIsNotExtendable() {
+        #expect(!makeSetupJob(id: "agy-wait", state: "waiting_for_input", phase: .awaitingUser,
+                              harness: .agy, deadlineFixed: true).canExtend)
+        #expect(!makeSetupJob(id: "agy-launch", state: "waiting_for_input", phase: .launching,
+                              harness: .agy, deadlineFixed: true).canExtend)
+        #expect(makeSetupJob(id: "agy-engine-window", state: "waiting_for_input",
+                             phase: .awaitingUser, harness: .agy, deadlineFixed: false).canExtend)
+        #expect(makeSetupJob(id: "agy-legacy", state: "waiting_for_input",
+                             phase: .awaitingUser, harness: .agy).canExtend)
+    }
+
+    /// `SetupJob` decodes STRICTLY (unknown keys are fatal), so the daemon
+    /// publishing `deadlineFixed` must be a key this client knows — otherwise
+    /// every setup screen stops decoding the moment the field ships.
+    @Test func vendorWindowFlagSurvivesTheStrictWire() throws {
+        let job = makeSetupJob(id: "agy-wire", state: "waiting_for_input", phase: .awaitingUser,
+                               harness: .agy, deadlineFixed: true)
+        let data = try JSONEncoder().encode(job)
+        let wire = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(wire["deadlineFixed"] as? Bool == true)
+        let decoded = try JSONDecoder().decode(SetupJob.self, from: data)
+        #expect(decoded.deadlineFixed == true)
+        #expect(!decoded.canExtend)
+        // Absent stays absent: an older daemon's body must not gain the key.
+        let legacy = try JSONEncoder().encode(
+            makeSetupJob(id: "legacy", state: "waiting_for_input", phase: .awaitingUser))
+        let legacyWire = try #require(JSONSerialization.jsonObject(with: legacy) as? [String: Any])
+        #expect(legacyWire["deadlineFixed"] == nil)
+        #expect(try JSONDecoder().decode(SetupJob.self, from: legacy).canExtend)
     }
 
     @Test func terminationUnconfirmedIsNotSafeForCancelAndClose() {
@@ -1900,6 +2052,77 @@ import Testing
         }
     }
 
+    /// The one-shot sign-in input (`POST /v2/setup/jobs/:id/input`) must land on
+    /// the job it was typed for, carry the value as the wire body and nothing
+    /// else, and refuse a response describing a DIFFERENT job — the same
+    /// identity pin every other setup point response gets.
+    @Test func gatewaySendsSignInInputToItsOwnJobAndRejectsAForeignResponse() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [RequestStubURLProtocol.self]
+        let session = URLSession(configuration: config)
+        let client = GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "t", session: session)
+        defer { RequestStubURLProtocol.handler = nil }
+
+        let waiting = makeSetupJob(id: "login-1", state: "waiting_for_input", phase: .awaitingUser)
+        let waitingData = try JSONEncoder().encode(waiting)
+        nonisolated(unsafe) var seen: (path: String?, method: String?, auth: String?, body: Data?)
+        RequestStubURLProtocol.handler = { request in
+            seen = (request.url?.path, request.httpMethod,
+                    request.value(forHTTPHeaderField: "Authorization"), testRequestBody(request))
+            return (Self.response(for: request), waitingData)
+        }
+
+        #expect(try await client.submitSetupJobInput(jobId: "login-1", value: "PASTE-42") == waiting)
+        #expect(seen.path == "/v2/setup/jobs/login-1/input")
+        #expect(seen.method == "POST")
+        #expect(seen.auth == "Bearer t")
+        let body = try #require(seen.body)
+        #expect(try JSONDecoder().decode(SetupJobInputRequest.self, from: body).value == "PASTE-42")
+        // The body is EXACTLY the one wire field — no job/profile echo riding along.
+        #expect(try #require(JSONSerialization.jsonObject(with: body) as? [String: Any]).count == 1)
+
+        await #expect(throws: GatewayError.self) {
+            try await client.submitSetupJobInput(jobId: "another", value: "PASTE-42")
+        }
+    }
+
+    /// A daemon refusal of the pasted code (409: wrong phase, or a value already
+    /// delivered) is DEFINITIVE server state: the reason must reach the card and
+    /// the observation must keep running, never collapse into streamLost — which
+    /// would strand the live login behind a reconnect it does not need.
+    @Test func controllerReportsSignInInputRefusalWithoutLosingTheLiveLogin() async {
+        let awaiting = makeSetupJob(id: "login", state: "waiting_for_input", phase: .awaitingUser)
+        let disclosure = SetupDeviceCodeDisclosure(
+            flow: .oauthUrlInput, verificationUrl: "https://accounts.google.com/o/oauth2/auth?x=1",
+            userCode: "")
+
+        let accepting = FakeSetupGateway(
+            listResult: [awaiting], snapshots: [awaiting, awaiting],
+            streams: [.pending, .pending], deviceCode: disclosure)
+        let accepted = SetupLifecycleController(gateway: accepting, reconnectDelays: [.zero])
+        let disclosed = await accepted.updates()
+        await accepted.recoverActiveJob(harness: "claude")
+        #expect(await firstSnapshot(in: disclosed) { $0.deviceCode == disclosure } != nil)
+        #expect(await accepted.submitInput("PASTE-42") == nil)
+        #expect(accepting.inputCount == 1)
+        let afterAccept = await accepted.snapshot()
+        #expect(afterAccept.connection != .streamLost)
+        // The link stays on screen while the vendor finishes with the code.
+        #expect(afterAccept.deviceCode == disclosure)
+
+        let refusing = FakeSetupGateway(
+            listResult: [awaiting], snapshots: [awaiting, awaiting],
+            streams: [.pending, .pending], deviceCode: disclosure,
+            inputRefusal: GatewayError.http(
+                status: 409, body: #"{"detail":"sign-in input was already submitted for this login"}"#))
+        let refused = SetupLifecycleController(gateway: refusing, reconnectDelays: [.zero])
+        await refused.recoverActiveJob(harness: "claude")
+        #expect(await refused.submitInput("PASTE-42")
+                == "sign-in input was already submitted for this login")
+        #expect(await refused.snapshot().connection != .streamLost)
+    }
+
     @Test func gatewaySetupSSEFailsVisiblyOnUnknownMalformedMismatchedEOFAndOverflow() async throws {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [RequestStubURLProtocol.self]
@@ -2102,6 +2325,49 @@ import Testing
         let noEngine = try await client.handshake()
         #expect(noEngine.ok)
         #expect(noEngine.engine == nil)
+    }
+
+    @Test func gatewayHandshakeCarriesServingModeAndRecoveryOnlyFact() async throws {
+        // Issue #165 D5: a recovery-only daemon reports servingMode in the
+        // handshake so the app can stay in Connecting instead of adopting a
+        // client whose product routes are typed-refused. Absent servingMode
+        // (older daemons) must keep meaning normal admission.
+        defer { RequestStubURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [RequestStubURLProtocol.self]
+        let client = GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "t",
+            session: URLSession(configuration: config)
+        )
+        func stub(handshakeBody: String) {
+            RequestStubURLProtocol.handler = { request in
+                switch (request.httpMethod, request.url?.path) {
+                case ("GET", "/healthz"):
+                    return (Self.response(for: request), Data(#"{"ok":true}"#.utf8))
+                case ("POST", "/v2/handshake"):
+                    return (Self.response(for: request), Data(handshakeBody.utf8))
+                default:
+                    throw TestTransportError.badRequest(request.url?.absoluteString ?? "nil")
+                }
+            }
+        }
+
+        stub(handshakeBody: #"{"protocolMajor":3,"compatible":true,"operationsPath":"/v2/operations","servingMode":"recovery_only"}"#)
+        let recovering = try await client.handshake()
+        #expect(recovering.ok)
+        #expect(recovering.servingMode == "recovery_only")
+        #expect(recovering.recoveryOnly)
+
+        stub(handshakeBody: #"{"protocolMajor":3,"compatible":true,"operationsPath":"/v2/operations","servingMode":"normal"}"#)
+        let serving = try await client.handshake()
+        #expect(serving.servingMode == "normal")
+        #expect(!serving.recoveryOnly)
+
+        // Pre-#165 daemons omit the field entirely: normal admission.
+        stub(handshakeBody: #"{"protocolMajor":3,"compatible":true,"operationsPath":"/v2/operations"}"#)
+        let legacy = try await client.handshake()
+        #expect(legacy.servingMode == nil)
+        #expect(!legacy.recoveryOnly)
     }
 
     @Test func gatewayUploadsExactBytesAndFinalizesDigestBeforeReturningReference() async throws {
@@ -2331,9 +2597,13 @@ import Testing
         }
     }
 
-    // MARK: - V11b accounts authority
+    // MARK: - Account-pool authority (unified account model)
 
-    @Test func credentialProfilesResponseDecodesHarnessAccountsProjection() throws {
+    @Test func credentialProfilesResponseDecodesAccountPoolsAndIgnoresLegacyHarnessAccounts() throws {
+        // The unified-model engine emits `harnessAccounts: []` for wire compat
+        // and carries routing facts in `accountPools`. An OLD engine's populated
+        // harnessAccounts (with the retired `native` kind) must be IGNORED, not
+        // fail the decode — the pseudo-row class is retired client-side too.
         let json = #"""
         {
           "profiles": [
@@ -2345,9 +2615,13 @@ import Testing
              "identity":null}
           ],
           "harnessAccounts": [
-            {"harness_id":"claude","native_credentials_enabled":true,"native_login_detected":true,"identity":{"email":"native@example.test","plan":"claude_pro"},"next_up":{"kind":"profile","profileId":"work"}},
-            {"harness_id":"codex","native_credentials_enabled":false,"native_login_detected":false,"identity":null,"next_up":{"kind":"none","reason":"CLI login disabled"}},
             {"harness_id":"cursor","native_credentials_enabled":true,"native_login_detected":true,"next_up":{"kind":"native"}}
+          ],
+          "accountPools": [
+            {"harness_id":"claude","next_up":{"kind":"profile","profileId":"work"}},
+            {"harness_id":"codex","next_up":{"kind":"api_key_route"}},
+            {"harness_id":"cursor","next_up":{"kind":"none","reason":"no enabled account"}},
+            {"harness_id":"agy","next_up":{"kind":"future_kind","futureField":1}}
           ],
           "quotaEventCursor": "global-epoch-1:42",
           "quota": {"snapshots":[],"absences":[],"refreshed_at":"2026-07-28T00:00:00Z"}
@@ -2356,44 +2630,45 @@ import Testing
         let response = try JSONDecoder().decode(CredentialProfilesResponse.self, from: Data(json.utf8))
         #expect(response.profiles.count == 2)
         #expect(response.profiles[1].profile.enabled == false)
-        #expect(response.harnessAccounts.count == 3)
+        #expect(response.accountPools.count == 4)
         #expect(response.quota?.refreshedAt == "2026-07-28T00:00:00Z")
         #expect(response.quotaEventCursor == "global-epoch-1:42")
 
-        // Non-secret identity projection (INV-067): decoded on both the profile
-        // entry and the native-login account row; null/absent → nil.
+        // Non-secret identity projection (INV-067): decoded on the profile
+        // entry; null/absent → nil.
         #expect(response.profiles[0].identity == AccountIdentity(email: "work@example.test", plan: "claude_max"))
         #expect(response.profiles[1].identity == nil)
 
-        let claude = response.harnessAccounts.first { $0.harnessId == "claude" }
-        #expect(claude?.nativeCredentialsEnabled == true)
-        #expect(claude?.identity == AccountIdentity(email: "native@example.test", plan: "claude_pro"))
+        let claude = response.accountPools.first { $0.harnessId == "claude" }
         #expect(claude?.nextUp.isProfile("work") == true)
         #expect(claude?.nextUp.isProfile("spare") == false)
-        #expect(claude?.nextUp.isNative == false)
+        #expect(claude?.nextUp.isApiKeyRoute == false)
 
-        let codex = response.harnessAccounts.first { $0.harnessId == "codex" }
-        #expect(codex?.nativeCredentialsEnabled == false)
-        #expect(codex?.nativeLoginDetected == false)
-        #expect(codex?.identity == nil)
-        if case .some(.none(let reason)) = codex?.nextUp {
-            #expect(reason == "CLI login disabled")
+        let codex = response.accountPools.first { $0.harnessId == "codex" }
+        #expect(codex?.nextUp.isApiKeyRoute == true)
+
+        let cursor = response.accountPools.first { $0.harnessId == "cursor" }
+        if case .some(.none(let reason)) = cursor?.nextUp {
+            #expect(reason == "no enabled account")
         } else {
-            Issue.record("expected codex next-up identity to be .none")
+            Issue.record("expected cursor pool next-up to be .none")
         }
 
-        let cursor = response.harnessAccounts.first { $0.harnessId == "cursor" }
-        #expect(cursor?.nextUp.isNative == true)
-        // cursor omits `identity` entirely — an omitted field decodes to nil.
-        #expect(cursor?.identity == nil)
+        // Forward compatibility: an unknown kind decodes as .unknown instead of
+        // failing the whole accounts response (the legacy decoder's throw-on-
+        // unknown class is dead).
+        let agy = response.accountPools.first { $0.harnessId == "agy" }
+        #expect(agy?.nextUp == .unknown(kind: "future_kind"))
+        #expect(agy?.nextUp.isProfile("work") == false)
+        #expect(agy?.nextUp.isApiKeyRoute == false)
     }
 
-    @Test func credentialProfilesResponseDefaultsHarnessAccountsWhenAbsent() throws {
-        // A pre-V11b daemon omits the projection entirely — it must still decode.
+    @Test func credentialProfilesResponseDefaultsAccountPoolsWhenAbsent() throws {
+        // An older daemon omits the pool authority entirely — it must still decode.
         let response = try JSONDecoder().decode(
             CredentialProfilesResponse.self, from: Data(#"{"profiles":[]}"#.utf8))
         #expect(response.profiles.isEmpty)
-        #expect(response.harnessAccounts.isEmpty)
+        #expect(response.accountPools.isEmpty)
         #expect(response.quotaEventCursor == nil)
     }
 
@@ -2496,7 +2771,8 @@ private func makeSetupCapability(
 private func makeSetupJob(id: String, state: String,
                           phase: SetupJobPhase, outcome: SetupJobOutcome? = nil,
                           terminationReconciliation: SetupTerminationReconciliation? = nil,
-                          harness: SetupHarness = .claude) -> SetupJob {
+                          harness: SetupHarness = .claude,
+                          deadlineFixed: Bool? = nil) -> SetupJob {
     let typedState = SetupJobState(rawValue: state)!
     let terminal = typedState == .succeeded || typedState == .failed || typedState == .cancelled
         || typedState == .timedOut || typedState == .interruptedUnknown || typedState == .notSupported
@@ -2511,6 +2787,7 @@ private func makeSetupJob(id: String, state: String,
     }
     return SetupJob(jobId: id, harness: harness, action: .login, state: typedState, phase: phase,
              deadlineAt: state == "waiting_for_input" ? "2099-01-01T00:00:00Z" : nil,
+             deadlineFixed: deadlineFixed,
              outcome: outcome ?? defaultOutcome, message: state, createdAt: "2026-07-13T00:00:00Z",
              startedAt: typedState == .queued ? nil : "2026-07-13T00:00:01Z",
              finishedAt: terminal ? "2026-07-13T00:00:02Z" : nil,
@@ -2546,18 +2823,23 @@ private final class FakeSetupGateway: SetupJobGateway, @unchecked Sendable {
     private var cancelCountStorage = 0
     private var createFailuresRemaining: Int
     private var listFailuresRemaining: Int
+    private var inputSubmissionsStorage = 0
     /// D-17: transient device-code disclosure overlaid on every snapshot GET.
     private let deviceCode: SetupDeviceCodeDisclosure?
+    /// How the daemon refuses a sign-in input submission, when it should.
+    private let inputRefusal: GatewayError?
 
     init(listResult: [SetupJob], snapshots: [SetupJob], streams: [FakeStreamResult],
          createFailures: Int = 0, listFailures: Int = 0,
-         deviceCode: SetupDeviceCodeDisclosure? = nil) {
+         deviceCode: SetupDeviceCodeDisclosure? = nil,
+         inputRefusal: GatewayError? = nil) {
         self.listResultStorage = listResult
         self.snapshots = snapshots
         self.streams = streams
         self.createFailuresRemaining = createFailures
         self.listFailuresRemaining = listFailures
         self.deviceCode = deviceCode
+        self.inputRefusal = inputRefusal
     }
 
     var calls: [String] { lock.withLock { callsStorage } }
@@ -2566,6 +2848,7 @@ private final class FakeSetupGateway: SetupJobGateway, @unchecked Sendable {
     var getCount: Int { calls.filter { $0.hasPrefix("get:") }.count }
     var streamCount: Int { calls.filter { $0.hasPrefix("stream:") }.count }
     var cancelCount: Int { lock.withLock { cancelCountStorage } }
+    var inputCount: Int { lock.withLock { inputSubmissionsStorage } }
 
     func createSetupJob(_ body: SetupJobCreateRequest) async throws -> SetupJob {
         try lock.withLock {
@@ -2624,6 +2907,17 @@ private final class FakeSetupGateway: SetupJobGateway, @unchecked Sendable {
 
     func extendSetupJob(jobId: String) async throws -> SetupJob { try nextSetupJob(jobId: jobId) }
 
+    /// Counts submissions only. The pasted VALUE is deliberately never stored —
+    /// a double that retains a one-time secret is the same defect in miniature.
+    func submitSetupJobInput(jobId: String, value: String) async throws -> SetupJob {
+        try lock.withLock {
+            callsStorage.append("input:\(jobId)")
+            inputSubmissionsStorage += 1
+            if let inputRefusal { throw inputRefusal }
+        }
+        return try nextSetupJob(jobId: jobId)
+    }
+
     func setupJobEvents(jobId: String, lastEventId: String) -> AsyncThrowingStream<SetupJobEvent, Error> {
         let result: FakeStreamResult = lock.withLock {
             callsStorage.append("stream:\(jobId)")
@@ -2677,6 +2971,7 @@ private struct MutationRaceGateway: SetupJobGateway {
     func setupJobSnapshot(jobId: String) async throws -> SetupJobSnapshot { SetupJobSnapshot(job: active, cursor: "cursor", sequence: 1) }
     func extendSetupJob(jobId: String) async throws -> SetupJob { active }
     func reconcileSetupJob(jobId: String) async throws -> SetupJob { active }
+    func submitSetupJobInput(jobId: String, value: String) async throws -> SetupJob { active }
 
     func cancelSetupJob(jobId: String) async throws -> SetupJob {
         await cancelGate.wait()
@@ -2747,6 +3042,7 @@ extension ClaudexorKitTests {
         #expect(receipt.removed == true)
         #expect(receipt.credentialCleanup == "config_dir_removed")
         #expect(receipt.cleanupWarning == nil)
+        #expect(receipt.vendorCredentialDisposition == nil)
 
         let warned = """
         {"profile":{"profile_id":"w","harness_id":"codex","display_name":"w",
@@ -2759,6 +3055,16 @@ extension ClaudexorKitTests {
             DeleteCredentialProfileReceipt.self, from: Data(warned.utf8))
         #expect(disclosed.credentialCleanup == "none")
         #expect(disclosed.cleanupWarning?.contains("cleanup failed") == true)
+
+        let external = """
+        {"removed":true,"credentialCleanup":"none","vendorCredentialDisposition":{
+          "owner":"vendor","scope":"os_user","state":"left_unchanged"}}
+        """
+        let externalReceipt = try JSONDecoder().decode(
+            DeleteCredentialProfileReceipt.self, from: Data(external.utf8))
+        #expect(externalReceipt.vendorCredentialDisposition?.owner == .vendor)
+        #expect(externalReceipt.vendorCredentialDisposition?.scope == .osUser)
+        #expect(externalReceipt.vendorCredentialDisposition?.state == .leftUnchanged)
     }
 
     /// `verification_source` is what the `verification` verdict is WORTH:

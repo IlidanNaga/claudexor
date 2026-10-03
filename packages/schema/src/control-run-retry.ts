@@ -24,6 +24,12 @@ export function makeControlRunRetrySchemas<T extends z.ZodTypeAny>(runRequest: T
     .object({
       sourceRunId: Id,
       request: runRequest,
+      accessChoice: z
+        .object({
+          required: z.boolean(),
+        })
+        .strict()
+        .describe("Whether Run Again requires an explicit active access choice."),
       differences: z
         .array(
           z

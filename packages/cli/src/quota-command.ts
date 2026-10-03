@@ -41,6 +41,11 @@ export async function quotaCommand(args: ParsedArgs, json: boolean): Promise<num
 }
 
 function printQuota(value: ReturnType<typeof ControlQuotaResponse.parse>): void {
+  // Additive refresh disclosure: a vendor inside its poll rate-limit cooldown
+  // was served from last-known registry data instead of a fresh fan-out.
+  for (const skip of value.refresh_skipped ?? []) {
+    print(`${skip.vendor}: refresh skipped (rate-limit cooldown until ${skip.not_before})`);
+  }
   if (value.snapshots.length === 0 && value.absences.length === 0) {
     print("quota: unknown (no vendor-owned snapshot available)");
     return;
@@ -57,11 +62,14 @@ function printQuota(value: ReturnType<typeof ControlQuotaResponse.parse>): void 
       );
     }
   }
-  // Every registered subject reports either a snapshot above or a typed absence
-  // here — absence is stated, never silent emptiness (zen: absence ≠ empty).
+  // Typed observation gaps may accompany stale snapshots printed above.
   for (const absence of value.absences) {
     const subject = `${absence.subject.harness}/${absence.subject.subject_id ?? "default"}`;
+    const retryAfter =
+      absence.retry_after_ms === undefined
+        ? ""
+        : ` retry-after=${Math.ceil(absence.retry_after_ms / 1000)}s`;
     const detail = absence.detail ? ` (${absence.detail})` : "";
-    print(`${subject}: no snapshot — ${absence.reason}${detail}`);
+    print(`${subject}: no fresh snapshot — ${absence.reason}${retryAfter}${detail}`);
   }
 }

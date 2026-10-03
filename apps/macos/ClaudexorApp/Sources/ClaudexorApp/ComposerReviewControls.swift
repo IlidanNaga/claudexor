@@ -45,6 +45,16 @@ struct ComposerReviewDraft: Equatable {
 
     var hasIncompleteRows: Bool { reviewerPickerIncomplete || approvalRowsInvalid }
 
+    var hasPinnedReviewerJSON: Bool {
+        ComposerOptionParser.parseReviewerPanelJSON(reviewerText)?.contains {
+            $0.credentialProfileId != nil
+        } == true
+    }
+
+    var hasValidReviewerJSON: Bool {
+        ComposerOptionParser.parseReviewerPanelJSON(reviewerText) != nil
+    }
+
     var reviewerWireToken: String? {
         ComposerOptionParser.reviewerWireToken(
             harness: pickerHarness,
@@ -124,17 +134,17 @@ struct AdvancedReviewControls: View {
             }
             // Power syntax: multi-reviewer strings, prefilled from the picker.
             HStack(spacing: Theme.Spacing.xs) {
-                TextField("claude=opus:max, cursor", text: $draft.reviewerText)
+                TextField("claude=opus:max, cursor (or pinned JSON)", text: $draft.reviewerText)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(.caption, design: .monospaced))
-                    .help("Comma or newline entries: harness[=model[:effort]] or harness[:effort]")
+                    .help("Comma or newline entries: harness[=model[:effort]] or harness[:effort]. For a strict account pin, paste a JSON array with credentialProfileId.")
                 if reviewerRawInvalid {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange).font(.caption)
-                        .help("Reviewer entries need harness[=model[:effort]] or harness[:effort]; supported effort values come from each harness manifest.")
+                        .help("Reviewer entries need harness[=model[:effort]] or harness[:effort]; supported effort values come from each harness manifest. Pinned entries use a JSON array with credentialProfileId.")
                 }
             }
-            Text("Empty = automatic cross-family review panel.")
+            Text("An explicit panel enables review. Leave empty to use automatic reviewers when Review changes is on.")
                 .font(.caption2).foregroundStyle(.secondary)
         }
     }
@@ -143,6 +153,10 @@ struct AdvancedReviewControls: View {
     /// raw SSOT (the common single-reviewer case). An unchosen harness leaves the
     /// raw string untouched so a hand-typed multi-reviewer string is not clobbered.
     private func writeReviewerToken() {
+        // The compact picker grammar has no place for a profile id. Preserve a
+        // pasted structured pin rather than silently changing the account when
+        // a picker callback fires while the raw JSON remains the source of truth.
+        guard !draft.hasPinnedReviewerJSON else { return }
         guard let token = draft.reviewerWireToken else { return }
         draft.reviewerText = token
     }

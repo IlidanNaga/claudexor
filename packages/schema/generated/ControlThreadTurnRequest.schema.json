@@ -11,7 +11,7 @@
         },
         "instructions": {
           "type": "string",
-          "description": "System-level instructions layered onto every task-producing lane; delivered natively (append-system-prompt / developer_instructions) or as a delimited prompt prefix."
+          "description": "System-level instructions layered onto every task-producing lane; delivered natively (append-system-prompt-file / developer_instructions) or as a delimited prompt prefix."
         },
         "attachments": {
           "type": "array",
@@ -39,8 +39,7 @@
             "plan",
             "agent"
           ],
-          "description": "Canonical run mode: ask and plan are read-only, agent writes. Strategy controls are separate schema-owned fields, never modes.",
-          "default": "agent"
+          "description": "Turn mode override; omission inherits the thread's default mode."
         },
         "harnesses": {
           "type": "array",
@@ -87,6 +86,15 @@
           "pattern": "^[a-z0-9]+(?:[_-][a-z0-9]+)*$",
           "description": "Requested reasoning effort."
         },
+        "processingPreference": {
+          "type": "string",
+          "enum": [
+            "standard",
+            "fast",
+            "economy"
+          ],
+          "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
+        },
         "efforts": {
           "type": "object",
           "additionalProperties": {
@@ -97,6 +105,10 @@
             "pattern": "\\S"
           },
           "description": "Harness-scoped effort map (harness id to effort); an entry here wins over the scalar effort and the per-harness settings default."
+        },
+        "review": {
+          "type": "boolean",
+          "description": "Agent model review: ordinary runs default off; true selects an automatic panel. Explicit reviewer controls, best-of and untilClean request review. Capped attempts default to review unless explicitly false."
         },
         "reviewerModels": {
           "type": "object",
@@ -138,6 +150,8 @@
         },
         "n": {
           "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991,
           "exclusiveMinimum": 0,
           "description": "Race width: number of best-of-N candidates."
         },
@@ -220,7 +234,6 @@
             "readonly",
             "workspace_write",
             "full",
-            "external_sandbox_full",
             "inherit_native"
           ],
           "description": "Requested access profile; effective access is derived by the engine and never client-supplied."
@@ -330,16 +343,24 @@
               "effort": {
                 "$ref": "#/definitions/ControlThreadTurnRequest/properties/effort",
                 "description": "Per-reviewer effort hint, passed to that harness only."
+              },
+              "credentialProfileId": {
+                "$ref": "#/definitions/ControlThreadTurnRequest/properties/harnesses/items",
+                "description": "Per-reviewer credential profile id; explicit pins are strict and never fall back."
+              },
+              "processingPreference": {
+                "$ref": "#/definitions/ControlThreadTurnRequest/properties/processingPreference",
+                "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
               }
             },
             "required": [
               "harness"
             ],
             "additionalProperties": false,
-            "description": "One reviewer of an explicit reviewer panel — a harness plus optional model and effort. The CLI spells one entry `harness=model:effort` (e.g. `claude=claude-opus-4-8:max`)."
+            "description": "One reviewer of an explicit reviewer panel — a harness plus optional model, effort, and strict credentialProfileId. Compact entries are unpinned; structured JSON carries pins."
           },
           "minItems": 1,
-          "description": "Explicit Agent reviewer panel — who reviews the change, one entry per reviewer as `harness=model:effort` (CLI `--reviewer-panel \"claude=claude-opus-4-8:max,cursor=gemini-3.1-pro\"`). Duplicate harness entries are kept so one provider can review through several models; overrides the legacy reviewerModels/reviewerEfforts maps."
+          "description": "Explicit Agent reviewer panel — who reviews the change, one entry per reviewer as `harness=model:effort` (CLI `--reviewer-panel`, unpinned) or structured `--reviewer-panel-json` with optional strict credentialProfileId. Duplicate harness entries are kept so one provider can review through several models; overrides the legacy reviewerModels/reviewerEfforts maps."
         },
         "authPreference": {
           "type": "string",
@@ -389,6 +410,38 @@
           "type": "integer",
           "exclusiveMinimum": 0,
           "description": "Per-run turn cap (beats per-harness settings)."
+        },
+        "execution": {
+          "type": "object",
+          "properties": {
+            "workspaceKind": {
+              "type": "string",
+              "enum": [
+                "git",
+                "directory"
+              ],
+              "description": "Explicit directory execution needs no Git initialization; omission preserves existing clients."
+            },
+            "scopePaths": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "description": "Agent-selected input footprint. Directory copies materialize this entire selection; direct runs need no whole-tree baseline."
+            },
+            "isolation": {
+              "type": "string",
+              "enum": [
+                "envelope",
+                "live"
+              ],
+              "default": "envelope",
+              "description": "Run isolation: envelope (isolated worktree in the external per-project runtime namespace, the default) or live (the project tree itself)."
+            }
+          },
+          "additionalProperties": false,
+          "description": "Directory geometry for this turn; project identity and execution root remain thread-owned."
         },
         "answersPlanRunId": {
           "$ref": "#/definitions/ControlThreadTurnRequest/properties/planRunId",

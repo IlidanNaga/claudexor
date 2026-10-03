@@ -1,37 +1,51 @@
 import type { DurableJournal } from "@claudexor/journal";
-import { hashJson } from "@claudexor/util";
+import { hashJson, sha256 } from "@claudexor/util";
 import {
   ControlQuotaResponse,
   HarnessEvent,
+  QUOTA_GAP_ABSENCE_REASONS,
   QuotaAbsence as QuotaAbsenceSchema,
   QuotaSnapshot as QuotaSnapshotSchema,
+  REACTIVE_COOLDOWN_SOURCE,
   type CredentialRoute,
   type QuotaAbsence,
-  type QuotaConstraint,
   type QuotaSnapshot,
   type QuotaSubject,
 } from "@claudexor/schema";
-import { QuotaPollPacer } from "./quota-poll-pacer.js";
+import {
+  legacyV320Snapshot,
+  reactiveCooldownSnapshot,
+  sameQuotaEvidence,
+  snapshotKey,
+  staleAt,
+  withoutExpiredScopedCooldowns,
+} from "./quota-registry-support.js";
+import {
+  buildRefresherLanes,
+  derivePollPacedRows,
+  foldAbsenceClaims,
+  laneDemand,
+  performPollSweep,
+  recomputeScopeFor,
+  selectCycleEntries,
+  subjectCoverSets,
+  type PacingLane,
+  type QuotaRefresher,
+  type QuotaVendorRefresher,
+  type RefresherLanes,
+} from "./quota-poll-lanes.js";
+import type { QuotaPacerStateStore } from "./quota-poll-pacer.js";
 import { QuotaRefreshCoordinator } from "./quota-refresh-coordinator.js";
-import { quotaSubjectIdentity, remainingQuotaRefreshDemand } from "./quota-refresh-demand.js";
+import { quotaSubjectIdentity } from "./quota-refresh-demand.js";
 
 const UPSERTED = "quota.snapshot.upserted";
 const SCOPED_PREPARED = "quota.snapshot.scoped_prepared";
 const REMOVED = "quota.subject.removed";
 const PROJECTION_UPDATED = "quota.projection.updated";
+const REPLAY_TYPES = [SCOPED_PREPARED, UPSERTED, REMOVED, PROJECTION_UPDATED];
 /** Snapshots older than this are pruned from every projection read (W17):
  * a day-old observation is not quota truth, just footer clutter. */
 const MAX_SNAPSHOT_AGE_MS = 24 * 60 * 60_000;
-
-/** One refresh cycle's fruit: the snapshots a source observed, plus the typed
- * absences it CLAIMS for subjects it tried and could not observe. Absence is
- * stated by the source, never inferred from an empty snapshot list. */
-export interface QuotaRefreshResult {
-  snapshots: QuotaSnapshot[];
-  absences?: QuotaAbsence[];
-}
-
-export type QuotaRefresher = () => Promise<QuotaRefreshResult>;
 
 /** The registered subject UNIVERSE: every subject the daemon expects to hear
  * about, so a subject with neither snapshot nor a source claim still surfaces
@@ -52,17 +66,22 @@ export class QuotaRegistry {
   private readonly refreshCoordinator = new QuotaRefreshCoordinator<
     Awaited<ReturnType<QuotaRegistry["performRefreshCycle"]>>
   >();
-  private readonly pollPacer: QuotaPollPacer;
+  private readonly refresherLanes: RefresherLanes;
+  private pollSweepInFlight: Promise<boolean> | null = null;
+  private recoveryMarkerPending = false;
 
   constructor(
     private readonly journal: DurableJournal,
-    private readonly refreshers: readonly QuotaRefresher[] = [],
+    refreshers: readonly (QuotaRefresher | QuotaVendorRefresher)[] = [],
     private readonly now: () => Date = () => new Date(),
     private readonly subjects?: QuotaSubjectUniverse,
+    pacerStore?: QuotaPacerStateStore,
   ) {
     let rawMutationAfterMarker = false;
-    let pendingScoped: { baseHash: string; snapshot: QuotaSnapshot } | null = null;
-    for (const record of journal.records()) {
+    let pendingScoped: { seq: number; baseHash: string; snapshot: QuotaSnapshot } | null = null;
+    for (const record of journal.records(0, REPLAY_TYPES)) {
+      // Filtering must not make a formerly interrupted pair adjacent.
+      if (pendingScoped && record.seq !== pendingScoped.seq + 1) pendingScoped = null;
       if (record.type === SCOPED_PREPARED) {
         const payload =
           typeof record.payload === "object" &&
@@ -78,6 +97,7 @@ export class QuotaRegistry {
         pendingScoped =
           payload.version === 1 && typeof payload.base_hash === "string" && snapshot.success
             ? {
+                seq: record.seq,
                 baseHash: payload.base_hash,
                 snapshot: snapshot.data,
               }
@@ -126,18 +146,15 @@ export class QuotaRegistry {
     // projection marker. Replaying that state without a new marker would leave
     // already-subscribed clients permanently behind. Close the recovered
     // commit boundary synchronously before the projection becomes available.
-    if (rawMutationAfterMarker) {
-      this.appendProjectionMarker("recovery", this.now().toISOString());
-    }
-    this.pollPacer = new QuotaPollPacer({
-      now: this.now,
-      publishClockTransition: () => this.publishClockTransitionIfNeeded(),
-      hasDemand: (now) =>
-        remainingQuotaRefreshDemand(this.activeSnapshots(now), this.subjects?.()).size > 0,
-      refresh: async () => {
-        await this.refreshCycle(false);
-      },
-    });
+    this.recoveryMarkerPending = rawMutationAfterMarker;
+    this.refresherLanes = buildRefresherLanes(refreshers, pacerStore);
+  }
+
+  /** Publish the recovered projection boundary only after bootstrap activation. */
+  recoverAfterStartup(): void {
+    if (!this.recoveryMarkerPending) return;
+    this.appendProjectionMarker("recovery", this.now().toISOString());
+    this.recoveryMarkerPending = false;
   }
 
   read() {
@@ -183,25 +200,42 @@ export class QuotaRegistry {
     return { response, quotaEventCursor };
   }
 
-  /** One coalesced atomic refresh cycle shared by foreground and background
-   * callers; poll pacing derives from post-cycle demand, never shared counters. */
+  /** One coalesced atomic refresh cycle; a poll passes its lane so only that
+   * vendor's refreshers run. Join semantics are asymmetric on purpose: a poll
+   * joining a foreground FULL cycle keeps its (superset) result, but a FULL
+   * caller that joined a lane-SCOPED poll cycle re-runs a full cycle once it
+   * completes — an explicit refresh must not silently return with sibling
+   * vendors unre-fetched and undisclosed. Bounded retry; on exhaustion the
+   * last (complete-projection) result serves. */
   private async refreshCycle(
     followCredentialChanges = true,
-  ): ReturnType<QuotaRegistry["performRefreshCycle"]> {
-    return this.refreshCoordinator.run(
-      (credentialGeneration) => this.performRefreshCycle(credentialGeneration),
-      followCredentialChanges,
-    );
+    scope?: PacingLane,
+  ): Promise<Awaited<ReturnType<QuotaRegistry["performRefreshCycle"]>>> {
+    for (let attempt = 0; ; attempt += 1) {
+      const cycle = await this.refreshCoordinator.run(
+        (credentialGeneration) => this.performRefreshCycle(credentialGeneration, scope ?? null),
+        followCredentialChanges,
+      );
+      if (scope !== undefined || !cycle.scoped || attempt > this.refresherLanes.lanes.length)
+        return cycle;
+    }
   }
 
-  private async performRefreshCycle(credentialGeneration: number) {
-    if (this.refreshers.length === 0) {
+  private async performRefreshCycle(credentialGeneration: number, scope: PacingLane | null) {
+    if (this.refresherLanes.entries.length === 0) {
       throw Object.assign(new Error("no live vendor-owned quota refresh source is available"), {
         code: "quota_refresh_unavailable",
         status: 503,
       });
     }
-    const settled = await Promise.allSettled(this.refreshers.map(async (refresher) => refresher()));
+    // Foreground cycles honor each vendor lane's rate-limit cooldown; the
+    // skips serve last-known registry data and are disclosed additively.
+    const { running, skipped } = selectCycleEntries(
+      this.refresherLanes,
+      scope,
+      this.now().getTime(),
+    );
+    const settled = await Promise.allSettled(running.map(async ({ refresh }) => refresh()));
     const batches: Array<{ snapshots: QuotaSnapshot[]; absences: QuotaAbsence[] } | null> = [];
     const failures: string[] = [];
     // Validate EVERY fulfilled source batch before the first durable write.
@@ -227,7 +261,10 @@ export class QuotaRegistry {
         batches.push(null);
       }
     }
-    if (batches.every((batch) => batch === null)) {
+    // An all-cooled full cycle (running empty, skips disclosed) is a served
+    // last-known response, not a failure; only attempted-and-failed sources
+    // make the cycle unavailable.
+    if (running.length > 0 && batches.every((batch) => batch === null)) {
       throw Object.assign(new Error(`quota refresh failed: ${failures.join("; ")}`), {
         code: "quota_refresh_unavailable",
         status: 503,
@@ -250,32 +287,61 @@ export class QuotaRegistry {
       claims.push(...batch.absences);
     }
     const now = this.now().getTime();
-    this.recomputeAbsences(claims, now);
+    if (running.length > 0) this.recomputeAbsences(claims, now, recomputeScopeFor(running));
+    // A typed rate_limited absence is PACING evidence (owner decision 7=A):
+    // arm the vendor lane's persisted floor — foreground cycles included, so
+    // an explicit refresh that got throttled also cools later fan-outs — and
+    // never journal it as a quota cooldown.
+    for (const claim of claims) {
+      if (claim.reason !== "rate_limited") continue;
+      const lane = this.refresherLanes.lanes.find((item) => item.vendor === claim.subject.harness);
+      lane?.pacer.noteRateLimited(now, claim.retry_after_ms ?? null);
+    }
     const refreshedAt = this.now().toISOString();
     const response = ControlQuotaResponse.parse({
       snapshots: this.activeSnapshots(now),
       absences: this.activeAbsences(now),
       refreshed_at: refreshedAt,
+      ...(skipped.length > 0 ? { refresh_skipped: skipped } : {}),
     });
     // No await may appear between response construction and this marker/cursor.
     // The marker makes absence-only and identical refreshes observable; its own
     // cursor is the exact last event represented by this response.
     const quotaEventCursor = this.appendProjectionMarker("refresh", refreshedAt, response);
-    return { response, quotaEventCursor };
+    // scoped: an unscoped joiner re-runs a full cycle on it (join semantics).
+    return { response, quotaEventCursor, scoped: scope !== null };
   }
 
-  /** Aggregate one cycle's snapshots + absence claims against the subject
-   * universe (V11a): a fresh-or-stale snapshot from ANY source means no
-   * absence; else the first refresher-claimed absence wins; neither =>
-   * "no_source". Identity is (harness, subject_id); route/source never split
-   * a subject. */
-  private recomputeAbsences(claims: readonly QuotaAbsence[], now: number): void {
+  /** Fold claims against (harness, subject_id): fresh snapshots silence
+   * refresh gaps; stale snapshots retain their explanations. Other claims
+   * keep their existing precedence and retirement rules; no evidence yields
+   * "no_source". Route/source never split a subject.
+   *
+   * `scope` (a vendor-lane cycle) rebuilds only that vendor's rows plus every
+   * REFRESHERLESS harness's rows (those can only ever be `no_source`, and
+   * skipping them would leave e.g. a cursor subject silently unstated until
+   * the next full cycle); other vendors' claimed rows are preserved so a
+   * claude-only poll cannot degrade codex's typed reasons to no_source.
+   * `null` scope (a full cycle, or an anonymous-lane cycle whose coverage is
+   * unknowable) keeps the pre-existing full rebuild. */
+  private recomputeAbsences(
+    claims: readonly QuotaAbsence[],
+    now: number,
+    scope: ReadonlySet<string> | null = null,
+  ): void {
+    const laneVendors = new Set(
+      this.refresherLanes.lanes.map((lane) => lane.vendor).filter((vendor) => vendor !== null),
+    );
+    const rebuilt = (harness: string): boolean =>
+      scope === null || scope.has(harness) || !laneVendors.has(harness);
     // Every other reason answers "why is there no snapshot", so a snapshot
-    // silences it. `auth_revoked` says the vendor REJECTED the credential the
-    // snapshot was read with: the window is no longer spendable, and leaving
-    // it would report a dead profile as verified for up to 24h.
+    // silences it. `auth_revoked` says the vendor rejected the credential;
+    // `credential_profile_ambiguous` says current platform policy forbids
+    // choosing the subject at all. Both authoritatively retire cached derived
+    // evidence before their typed absence is projected.
     for (const claim of claims) {
-      if (claim.reason !== "auth_revoked") continue;
+      if (claim.reason !== "auth_revoked" && claim.reason !== "credential_profile_ambiguous")
+        continue;
       const { harness, subject_id } = claim.subject;
       const present = [...this.snapshots.values()].some(
         (s) => s.subject.harness === harness && s.subject.subject_id === subject_id,
@@ -287,54 +353,63 @@ export class QuotaRegistry {
       this.journal.append(REMOVED, { harness, subject_id });
       this.remove(harness, subject_id);
     }
-    const covered = new Set(
-      this.activeSnapshots(now).map((snapshot) => quotaSubjectIdentity(snapshot.subject)),
-    );
-    const result: QuotaAbsence[] = [];
-    const claimed = new Set<string>();
-    for (const claim of claims) {
-      const key = quotaSubjectIdentity(claim.subject);
-      if (covered.has(key) || claimed.has(key)) continue;
-      claimed.add(key);
-      result.push(claim);
-    }
-    for (const subject of this.subjects?.() ?? []) {
-      const key = quotaSubjectIdentity(subject);
-      if (covered.has(key) || claimed.has(key)) continue;
-      claimed.add(key);
-      result.push({
-        subject,
-        reason: "no_source",
-        detail: null,
-        observed_at: new Date(now).toISOString(),
-      });
-    }
-    this.absences = result;
+    const { covered, freshCovered } = subjectCoverSets(this.activeSnapshots(now));
+    this.absences = foldAbsenceClaims({
+      claims,
+      prior: this.absences,
+      rebuilt,
+      covered,
+      freshCovered,
+      subjects: this.subjects?.() ?? [],
+      now,
+    });
   }
 
-  /** Absences whose subject is not (any longer) covered by an active snapshot —
-   * a snapshot arriving via ingest between cycles silences its absence at once,
-   * so read() never shows a subject with both a snapshot and an absence. */
+  /** Refresh gaps coexist with stale snapshots and are silenced by fresh ones.
+   * Other absences require no active snapshot. Floor-suppressed subjects gain
+   * derived `poll_paced` rows (see derivePollPacedRows). */
   private activeAbsences(now: number): QuotaAbsence[] {
-    const covered = new Set(
-      this.activeSnapshots(now).map((snapshot) => quotaSubjectIdentity(snapshot.subject)),
+    const { covered, freshCovered } = subjectCoverSets(this.activeSnapshots(now));
+    const rows = this.absences.filter(
+      (absence) =>
+        !(QUOTA_GAP_ABSENCE_REASONS.has(absence.reason) ? freshCovered : covered).has(
+          quotaSubjectIdentity(absence.subject),
+        ),
     );
-    return this.absences.filter((absence) => !covered.has(quotaSubjectIdentity(absence.subject)));
+    const subjects = this.subjects?.() ?? [];
+    const lanes = this.refresherLanes.lanes;
+    return rows.concat(derivePollPacedRows(lanes, subjects, rows, freshCovered, now));
   }
 
   /** Credential or routability state changed (login/profile/native/settings):
-   * drop absence backoff so the next poll observes the new subject universe
-   * instead of waiting out up to 15 minutes of old-state pacing. */
+   * drop the credential-demand backoff so the next poll observes the new
+   * subject universe instead of waiting out up to 15 minutes of old-state
+   * pacing. Each lane's vendor rate-limit floor deliberately survives — a
+   * login does not un-rate-limit the vendor endpoint. */
   noteCredentialChange(): void {
     this.refreshCoordinator.retireCredentialGeneration();
-    this.pollPacer.noteCredentialChange();
+    for (const lane of this.refresherLanes.lanes) lane.pacer.noteCredentialChange();
   }
 
-  /** Background official-source refresh for per-subject primary demand. The
-   * whole decision + refresh + pacing update is single-flight, independent of
-   * foreground refresh coalescing. */
+  /** Background official-source refresh for per-subject primary demand. One
+   * single-flight sweep drives every vendor lane in order; each eligible lane
+   * runs its own coalesced cycle, so one vendor's backoff never starves a
+   * sibling vendor's freshness. Resolves true when any lane refreshed. */
   pollStale(): Promise<boolean> {
-    return this.pollPacer.poll();
+    if (this.pollSweepInFlight) return this.pollSweepInFlight;
+    const sweep = performPollSweep(this.refresherLanes.lanes, {
+      now: this.now,
+      publishClockTransition: () => this.publishClockTransitionIfNeeded(),
+      laneDemand: (vendor, now, dueBefore, since) =>
+        laneDemand(vendor, this.activeSnapshots(now), this.subjects?.(), now, dueBefore, since),
+      currentGeneration: () => this.refreshCoordinator.currentGeneration(),
+      isCurrentGeneration: (generation) => this.refreshCoordinator.isCurrent(generation),
+      runLaneCycle: (lane) => this.refreshCycle(false, lane),
+    }).finally(() => {
+      if (this.pollSweepInFlight === sweep) this.pollSweepInFlight = null;
+    });
+    this.pollSweepInFlight = sweep;
+    return sweep;
   }
 
   ingest(harnessId: string, value: unknown): void {
@@ -351,7 +426,8 @@ export class QuotaRegistry {
           // Reconcile the subject with the event's Claudexor profile stamp
           // (round-17 #2): a profiled run's quota must never register as the
           // engine-default subject just because the vendor record carries no
-          // subject of its own. The profile stamp is the credential identity.
+          // subject of its own. The profile stamp is the binding key used for
+          // routing and quota attribution, not a claim about physical custody.
           subject_id: event.data.credential_profile_id ?? quota.subject_id ?? null,
         },
         constraints: quota.constraints,
@@ -360,7 +436,7 @@ export class QuotaRegistry {
         freshness: "fresh",
       });
     }
-    if (event.data.rate_limit && credentialRoute && ["codex", "claude"].includes(harnessId)) {
+    if (event.data.rate_limit && credentialRoute && harnessId in REACTIVE_COOLDOWN_SOURCE) {
       this.upsertCooldown(harnessId, credentialRoute, event.data);
     }
   }
@@ -372,16 +448,27 @@ export class QuotaRegistry {
 
   private recordUpsert(value: QuotaSnapshot): void {
     const snapshot = QuotaSnapshotSchema.parse(value);
+    // Upsert-on-change: a poll that re-observed unchanged evidence moves only
+    // the observation time, which stays live in memory (the projection marker
+    // still publishes it) without a journal frame. After a restart the replayed
+    // snapshot therefore carries the time of its last journaled change until
+    // the first admission poll re-observes it.
+    const current = this.snapshots.get(snapshotKey(snapshot));
+    if (current && sameQuotaEvidence(current, snapshot)) {
+      this.apply(snapshot);
+      return;
+    }
     // Runtime updates share this journal with the prior installed engine during
-    // rollback. v3.2.0's strict QuotaConstraint schema predates
-    // applies_to_models. Prepare the exact current snapshot under a new record
-    // type that an older runtime safely ignores, then commit it with the
-    // established, explicitly v3.2.0-shaped upsert. Current replay applies a
-    // prepare only when its matching base follows, so a stop between the two
-    // records loses neither the prior projection nor model scope: the journal
-    // appends the pair under one recovery intent and one fsync.
+    // rollback. v3.2.0's strict schemas predate applies_to_models AND the
+    // cursor_rate_limit source. Prepare the exact current snapshot under a new
+    // record type an older runtime safely ignores, then commit it with the
+    // established v3.2.0-shaped upsert; current replay applies a prepare only
+    // when its matching base follows (one recovery intent, one fsync).
     const legacy = legacyV320Snapshot(snapshot);
-    if (snapshot.constraints.some((constraint) => constraint.applies_to_models !== undefined)) {
+    if (
+      snapshot.constraints.some((constraint) => constraint.applies_to_models !== undefined) ||
+      legacy.source !== snapshot.source
+    ) {
       this.journal.appendBatch([
         {
           type: SCOPED_PREPARED,
@@ -399,12 +486,15 @@ export class QuotaRegistry {
     this.apply(snapshot);
   }
 
-  removeSubject(harness: string, subjectId: string): number {
+  /** `subjectId: null` retires a harness's legacy default/native subject —
+   * the unified-accounts migration's quota step (no replay alias: the new row
+   * refreshes fresh, legacy null evidence is removed here or ages out). */
+  removeSubject(harness: string, subjectId: string | null): number {
     // Fence held official work at the earliest credential-deletion boundary.
     this.noteCredentialChange();
     const removed = [...this.snapshots.values()].filter(
       (snapshot) =>
-        snapshot.subject.harness === harness && snapshot.subject.subject_id === subjectId,
+        snapshot.subject.harness === harness && (snapshot.subject.subject_id ?? null) === subjectId,
     ).length;
     this.journal.append(REMOVED, { harness, subject_id: subjectId });
     this.remove(harness, subjectId);
@@ -437,7 +527,10 @@ export class QuotaRegistry {
   private projectionSignature(response: ReturnType<QuotaRegistry["read"]>): string {
     // refreshed_at is request metadata, not projection identity. Snapshot
     // freshness and absence coverage are logical facts and remain included.
-    return JSON.stringify({ snapshots: response.snapshots, absences: response.absences });
+    // The marker carries the digest, never the projection: consumers only
+    // compare signatures for equality (a legacy JSON-string marker simply
+    // differs once, publishing one extra clock-transition marker).
+    return sha256(JSON.stringify({ snapshots: response.snapshots, absences: response.absences }));
   }
 
   validateProjection(): void {
@@ -449,20 +542,10 @@ export class QuotaRegistry {
     credentialRoute: CredentialRoute,
     event: ReturnType<typeof HarnessEvent.parse>,
   ): void {
-    const reset = event.rate_limit?.resets_at ?? null;
-    const delay = event.rate_limit?.retry_delay_ms ?? null;
-    const now = this.now();
-    const cooldownUntil =
-      reset ??
-      new Date(now.getTime() + (typeof delay === "number" ? delay : 5 * 60_000)).toISOString();
-    const source = harness === "claude" ? "claude_api_retry" : "codex_rollout";
-    // The event's profile stamp scopes the cooldown to ITS subject (release
-    // wave round-11): a profiled limit must never cool the default subject
-    // down (or vice versa), and two profiles never share one quota key.
+    const source = REACTIVE_COOLDOWN_SOURCE[harness] ?? "codex_rollout";
+    // The event's profile stamp scopes the cooldown to ITS subject (round-11):
+    // a profiled limit never cools the default subject down (or vice versa).
     const profileId = event.credential_profile_id ?? null;
-    const constraintId = event.rate_limit?.constraint_id
-      ? `cooldown:${event.rate_limit.constraint_id}`
-      : "cooldown";
     const existing = [...this.snapshots.values()].find(
       (snapshot) =>
         snapshot.subject.harness === harness &&
@@ -470,35 +553,9 @@ export class QuotaRegistry {
         (snapshot.subject.subject_id ?? null) === profileId &&
         snapshot.source === source,
     );
-    this.upsert({
-      subject: existing?.subject ?? {
-        harness,
-        credential_route: credentialRoute,
-        plan_label: null,
-        subject_id: profileId,
-      },
-      source,
-      observed_at: event.ts,
-      freshness: "fresh",
-      constraints: [
-        ...(existing?.constraints.filter(
-          (constraint) =>
-            constraint.id !== constraintId &&
-            !isExpiredScopedCooldown(source, constraint, now.getTime()),
-        ) ?? []),
-        {
-          id: constraintId,
-          label: "Cooldown",
-          ...(event.rate_limit?.applies_to_models !== undefined
-            ? { applies_to_models: event.rate_limit.applies_to_models }
-            : {}),
-          used_ratio: null,
-          window_seconds: null,
-          resets_at: reset,
-          cooldown_until: cooldownUntil,
-        },
-      ],
-    });
+    this.upsert(
+      reactiveCooldownSnapshot({ harness, credentialRoute, event, source, existing }, this.now()),
+    );
   }
 
   private apply(snapshot: QuotaSnapshot): void {
@@ -515,84 +572,4 @@ export class QuotaRegistry {
     }
     return removed;
   }
-}
-
-export function quotaProjection(
-  refreshers: readonly QuotaRefresher[] = [],
-  subjects?: QuotaSubjectUniverse,
-  now: () => Date = () => new Date(),
-) {
-  return {
-    name: "quota",
-    create: (journal: DurableJournal) => new QuotaRegistry(journal, refreshers, now, subjects),
-    validate: (registry: QuotaRegistry) => registry.validateProjection(),
-  };
-}
-
-function snapshotKey(snapshot: QuotaSnapshot): string {
-  const subject = snapshot.subject;
-  return [
-    subject.harness,
-    subject.credential_route,
-    subject.subject_id ?? "",
-    snapshot.source,
-  ].join("\0");
-}
-
-/** Exact durable payload accepted by the strict v3.2.0 quota schemas. Keep an
- * explicit allowlist at every nested level so a future additive field cannot
- * silently make updater rollback boot-incompatible again. */
-function legacyV320Snapshot(snapshot: QuotaSnapshot): QuotaSnapshot {
-  return {
-    subject: {
-      harness: snapshot.subject.harness,
-      credential_route: snapshot.subject.credential_route,
-      plan_label: snapshot.subject.plan_label,
-      subject_id: snapshot.subject.subject_id,
-    },
-    constraints: snapshot.constraints.map((constraint): QuotaConstraint => ({
-      id: constraint.id,
-      label: constraint.label,
-      used_ratio: constraint.used_ratio,
-      window_seconds: constraint.window_seconds,
-      resets_at: constraint.resets_at,
-      cooldown_until: constraint.cooldown_until,
-    })),
-    source: snapshot.source,
-    observed_at: snapshot.observed_at,
-    freshness: snapshot.freshness,
-  };
-}
-
-function staleAt(snapshot: QuotaSnapshot, now: number): QuotaSnapshot {
-  if (snapshot.freshness !== "fresh") return snapshot;
-  const observed = Date.parse(snapshot.observed_at);
-  const resetExpired = snapshot.constraints.some((constraint) => resetExpiredAt(constraint, now));
-  const tooOld = !Number.isFinite(observed) || now - observed > 5 * 60_000;
-  return resetExpired || tooOld ? { ...snapshot, freshness: "stale" } : snapshot;
-}
-
-function resetExpiredAt(constraint: Pick<QuotaConstraint, "resets_at">, now: number): boolean {
-  const reset = constraint.resets_at ? Date.parse(constraint.resets_at) : Number.NaN;
-  return Number.isFinite(reset) && reset <= now;
-}
-
-function isExpiredScopedCooldown(
-  source: QuotaSnapshot["source"],
-  constraint: QuotaConstraint,
-  now: number,
-): boolean {
-  return (
-    source === "claude_api_retry" &&
-    constraint.id.startsWith("cooldown:") &&
-    resetExpiredAt(constraint, now)
-  );
-}
-
-function withoutExpiredScopedCooldowns(snapshot: QuotaSnapshot, now: number): QuotaSnapshot | null {
-  const constraints = snapshot.constraints.filter(
-    (constraint) => !isExpiredScopedCooldown(snapshot.source, constraint, now),
-  );
-  if (constraints.length === snapshot.constraints.length) return snapshot;
-  return constraints.length === 0 ? null : { ...snapshot, constraints };
 }

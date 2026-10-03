@@ -1,5 +1,49 @@
 import Foundation
 
+public enum HarnessSetupLoginCapability: Sendable, Equatable, Hashable, Codable {
+    case legacyAbsent
+    case unavailable
+    case inApp
+    case externalTerminal
+
+    private struct Wire: Codable {
+        let mode: String
+
+        private enum CodingKeys: String, CodingKey, CaseIterable, StrictCodingKey {
+            case mode
+        }
+
+        init(mode: String) { self.mode = mode }
+
+        init(from decoder: Decoder) throws {
+            try rejectUnknownKeys(in: decoder, allowed: CodingKeys.self)
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            mode = try container.decode(String.self, forKey: .mode)
+        }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() { self = .unavailable; return }
+        switch try container.decode(Wire.self).mode {
+        case "in_app": self = .inApp
+        case "external_terminal": self = .externalTerminal
+        default:
+            throw DecodingError.dataCorruptedError(
+                in: container, debugDescription: "setupLogin.mode must be in_app or external_terminal")
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .legacyAbsent, .unavailable: try container.encodeNil()
+        case .inApp: try container.encode(Wire(mode: "in_app"))
+        case .externalTerminal: try container.encode(Wire(mode: "external_terminal"))
+        }
+    }
+}
+
 // MARK: - Harness status / auth-source / model DTOs
 //
 // Extracted from `Models.swift` so the harness readiness + model-truth DTOs
@@ -30,15 +74,18 @@ public struct HarnessStatus: Codable, Sendable, Identifiable, Equatable {
     public let readiness: [ReadinessCheck]
     /// The user's configured per-harness default model, if any.
     public let configuredModel: String?
-    /// Strict truth-source verdict for `configuredModel` ("ok"/"rejected" +
-    /// actionable message) — the UI renders the doctor's honesty.
+    /// Truth-source verdict for `configuredModel` under the harness's own declaration
+    /// ("ok" with a message = advisory admission; "rejected" + actionable message).
     public let configuredModelCheck: HarnessModelCheck?
     /// Engine-owned readiness for the selected runtime/harness Delegate belt.
     /// Absence means an older runtime and therefore fails closed in the UI.
     public let delegation: HarnessDelegationCapability?
+    /// Presence-aware engine fact: absent is a legacy daemon, explicit null
+    /// means no managed login, and the two objects select exact transport.
+    public let setupLogin: HarnessSetupLoginCapability
 
     enum CodingKeys: String, CodingKey {
-        case id, status, manifest, enabledIntents, routableIntents, disabledIntents, checks, reasons, authSources, readiness, configuredModel, configuredModelCheck, delegation
+        case id, status, manifest, enabledIntents, routableIntents, disabledIntents, checks, reasons, authSources, readiness, configuredModel, configuredModelCheck, delegation, setupLogin
     }
 
     public init(from decoder: Decoder) throws {
@@ -56,6 +103,13 @@ public struct HarnessStatus: Codable, Sendable, Identifiable, Equatable {
         configuredModel = try c.decodeIfPresent(String.self, forKey: .configuredModel)
         configuredModelCheck = try c.decodeIfPresent(HarnessModelCheck.self, forKey: .configuredModelCheck)
         delegation = try c.decodeIfPresent(HarnessDelegationCapability.self, forKey: .delegation)
+        if !c.contains(.setupLogin) {
+            setupLogin = .legacyAbsent
+        } else if try c.decodeNil(forKey: .setupLogin) {
+            setupLogin = .unavailable
+        } else {
+            setupLogin = try c.decode(HarnessSetupLoginCapability.self, forKey: .setupLogin)
+        }
     }
 }
 

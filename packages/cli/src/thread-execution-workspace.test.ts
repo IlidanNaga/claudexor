@@ -1,5 +1,8 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { SCHEMA_VERSION, Thread as ThreadSchema, type Thread } from "@claudexor/schema";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   resolveThreadExecutionWorkspace,
   threadExecutionRequiresWorktree,
@@ -7,7 +10,16 @@ import {
   type ThreadWorkspaceAuthority,
 } from "./thread-execution-workspace.js";
 
-function thread(mode: "in_place" | "isolated" = "in_place"): Thread {
+const roots: string[] = [];
+
+afterEach(() => {
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+function thread(
+  mode: "in_place" | "isolated" = "in_place",
+  worktreePath: string | null = null,
+): Thread {
   return ThreadSchema.parse({
     schema_version: SCHEMA_VERSION,
     id: "th-test",
@@ -18,7 +30,7 @@ function thread(mode: "in_place" | "isolated" = "in_place"): Thread {
     mode: "agent",
     workspace: {
       mode,
-      worktree_path: null,
+      worktree_path: worktreePath,
       base_sha: null,
       delivered_through_run_id: null,
     },
@@ -87,7 +99,7 @@ describe("resolveThreadExecutionWorkspace", () => {
           threads,
           ensureWorktree,
         }),
-      ).resolves.toEqual({ inPlace: true, promoted: false });
+      ).resolves.toEqual({ executionRoot: "/repo", inPlace: true, promoted: false });
       expect(ensureWorktree).not.toHaveBeenCalled();
     },
   );
@@ -154,14 +166,10 @@ describe("resolveThreadExecutionWorkspace", () => {
   });
 
   it.each(["ask", "plan"] as const)(
-    "resolves an isolated %s turn through the persistent thread worktree",
+    "reads the stable repo for an isolated %s turn that has no materialized worktree",
     async (mode) => {
       const threads = authority(thread("isolated"));
-      const ensureWorktree = vi.fn(async () => ({
-        path: "/runtime/thread/tree",
-        baseSha: "base-1",
-        created: false,
-      }));
+      const ensureWorktree = vi.fn();
       await expect(
         resolveThreadExecutionWorkspace({
           threadId: "th-test",
@@ -173,11 +181,65 @@ describe("resolveThreadExecutionWorkspace", () => {
           ensureWorktree,
         }),
       ).resolves.toEqual({
-        executionRoot: "/runtime/thread/tree",
+        executionRoot: "/repo",
         inPlace: true,
         promoted: false,
       });
-      expect(ensureWorktree).toHaveBeenCalledOnce();
+      expect(ensureWorktree).not.toHaveBeenCalled();
+    },
+  );
+
+  it("uses an existing isolated worktree directly for readonly without Git materialization", async () => {
+    const root = mkdtempSync(join(tmpdir(), "claudexor-readonly-thread-"));
+    roots.push(root);
+    const existing = join(root, "existing-worktree");
+    mkdirSync(existing);
+    const threads = authority(thread("isolated", existing));
+    const ensureWorktree = vi.fn();
+
+    await expect(
+      resolveThreadExecutionWorkspace({
+        threadId: "th-test",
+        repoRoot: "/repo",
+        mode: "agent",
+        access: "readonly",
+        requestedInPlace: false,
+        protectedPaths: ["protected/**"],
+        threads,
+        ensureWorktree,
+      }),
+    ).resolves.toEqual({ executionRoot: existing, inPlace: true, promoted: false });
+    expect(ensureWorktree).not.toHaveBeenCalled();
+    expect(threads.setThreadWorktree).not.toHaveBeenCalled();
+  });
+
+  it.each(["missing", "file"] as const)(
+    "refuses a readonly isolated thread whose recorded worktree is %s without recreating it",
+    async (kind) => {
+      const root = mkdtempSync(join(tmpdir(), "claudexor-stale-thread-"));
+      roots.push(root);
+      const recorded = join(root, kind);
+      if (kind === "file") writeFileSync(recorded, "not a directory\n", "utf8");
+      const threads = authority(thread("isolated", recorded));
+      const ensureWorktree = vi.fn();
+
+      await expect(
+        resolveThreadExecutionWorkspace({
+          threadId: "th-test",
+          repoRoot: "/repo",
+          mode: "ask",
+          requestedInPlace: false,
+          protectedPaths: [],
+          threads,
+          ensureWorktree,
+        }),
+      ).rejects.toMatchObject({
+        status: 409,
+        code: "isolated_worktree_unavailable",
+        retryable: false,
+      });
+      expect(ensureWorktree).not.toHaveBeenCalled();
+      expect(threads.setThreadWorktree).not.toHaveBeenCalled();
     },
   );
 });
@@ -236,25 +298,61 @@ describe("thread workspace Git admission", () => {
     ).toBe(false);
   });
 
-  it.each(["ask", "plan"] as const)(
-    "requires Git for an isolated %s turn because the resolver uses its worktree",
-    (mode) => {
-      const isolated = thread("isolated");
-      const request = {
-        prompt: "read",
-        mode,
-        scope: {
-          kind: "project" as const,
-          root: "/repo",
-          context: "auto" as const,
-          ephemeral: false,
-        },
-        execution: { isolation: "envelope" as const, delegated: false },
-      };
-      expect(threadExecutionRequiresWorktree({ thread: isolated, mode, protectedPaths: [] })).toBe(
-        true,
-      );
-      expect(threadRunStartRequiresGit(request, isolated, [])).toBe(true);
-    },
-  );
+  it.each(["ask", "plan"] as const)("does not require Git for an isolated %s turn", (mode) => {
+    const isolated = thread("isolated");
+    const request = {
+      prompt: "read",
+      mode,
+      scope: {
+        kind: "project" as const,
+        root: "/repo",
+        context: "auto" as const,
+        ephemeral: false,
+      },
+      execution: { isolation: "envelope" as const, delegated: false },
+    };
+    expect(threadExecutionRequiresWorktree({ thread: isolated, mode, protectedPaths: [] })).toBe(
+      false,
+    );
+    expect(threadRunStartRequiresGit(request, isolated, [])).toBe(false);
+  });
+
+  it("does not promote an explicit readonly agent turn for protected paths", async () => {
+    const inPlace = thread("in_place");
+    const threads = authority(inPlace);
+    const ensureWorktree = vi.fn();
+    const request = { ...liveConvergence, untilClean: undefined, access: "readonly" as const };
+
+    expect(threadRunStartRequiresGit(request, inPlace, ["protected/**"])).toBe(false);
+    await expect(
+      resolveThreadExecutionWorkspace({
+        threadId: inPlace.id,
+        repoRoot: "/repo",
+        mode: "agent",
+        access: "readonly",
+        requestedInPlace: true,
+        protectedPaths: ["protected/**"],
+        threads,
+        ensureWorktree,
+      }),
+    ).resolves.toEqual({ executionRoot: "/repo", inPlace: true, promoted: false });
+    expect(ensureWorktree).not.toHaveBeenCalled();
+  });
+
+  it("uses the repo access default when deciding Git admission", () => {
+    const isolated = thread("isolated");
+    const request = {
+      prompt: "read",
+      mode: "agent" as const,
+      scope: {
+        kind: "project" as const,
+        root: "/repo",
+        context: "auto" as const,
+        ephemeral: false,
+      },
+      execution: { isolation: "envelope" as const, delegated: false },
+    };
+    expect(threadRunStartRequiresGit(request, isolated, [], "readonly")).toBe(false);
+    expect(threadRunStartRequiresGit(request, isolated, [], "workspace_write")).toBe(true);
+  });
 });

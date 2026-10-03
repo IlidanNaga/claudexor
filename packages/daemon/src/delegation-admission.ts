@@ -1,3 +1,4 @@
+import { delegatedParentOf } from "@claudexor/schema";
 import type { JobRecord } from "./server.js";
 
 export interface DelegationAdmissionAuthority {
@@ -5,12 +6,6 @@ export interface DelegationAdmissionAuthority {
   noteChildAccepted(parentRunId: string, admissionId: string): void;
   cancelAcceptedChild(parentRunId: string, admissionId: string): void;
   beginParentClose(parentRunId: string): void;
-}
-
-export function delegatedParentOf(request: unknown): string | null {
-  if (!request || typeof request !== "object" || Array.isArray(request)) return null;
-  const value = (request as Record<string, unknown>)["delegatedFromRunId"];
-  return typeof value === "string" && value ? value : null;
 }
 
 export function isDelegatedChildRecord(record: JobRecord): boolean {

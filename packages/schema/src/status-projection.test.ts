@@ -32,6 +32,13 @@ describe("ACP stop-reason projection", () => {
     expect(acpStopReason("cancelled", null)).toBe("cancelled");
   });
 
+  it("never attributes a host/owner cancellation to the user (ACP cancelled = user)", () => {
+    // grok M2: daemon shutdown / MCP teardown / owner-task retirement are not
+    // the IDE user cancelling the turn — they must project as refusal.
+    expect(acpStopReason("cancelled", "host_cancelled")).toBe("refusal");
+    expect(acpStopReason("cancelled", "owner_task_gone")).toBe("refusal");
+  });
+
   it("preserves failed/interrupted refusal and successful end-turn buckets", () => {
     expect(acpStopReason("failed", null)).toBe("refusal");
     expect(acpStopReason("interrupted", null)).toBe("refusal");

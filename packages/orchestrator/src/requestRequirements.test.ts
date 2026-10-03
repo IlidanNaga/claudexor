@@ -9,6 +9,7 @@ describe("RequestRequirementsResolver browser preflight", () => {
       harnessId: "codex",
       requested: true,
       manifestCapable: true,
+      requiresFullAccess: true,
       webPolicy: "auto",
       access: "full",
     });
@@ -16,6 +17,7 @@ describe("RequestRequirementsResolver browser preflight", () => {
       harnessId: "cursor",
       requested: true,
       manifestCapable: false,
+      requiresFullAccess: false,
       webPolicy: "auto",
       access: "full",
     });
@@ -34,16 +36,17 @@ describe("RequestRequirementsResolver browser preflight", () => {
   });
 
   it.each([
-    ["manifest_unsupported", false, "auto", "full"],
-    ["web_policy_off", true, "off", "full"],
-    ["access_profile_incompatible", true, "auto", "workspace_write"],
+    ["manifest_unsupported", false, false, "auto", "full"],
+    ["web_policy_off", true, false, "off", "full"],
+    ["access_profile_incompatible", true, true, "auto", "workspace_write"],
   ] as const)(
     "refuses a zero-effective pool with typed reason %s",
-    (reason, capable, web, access) => {
+    (reason, capable, requiresFullAccess, web, access) => {
       const resolution = resolver.resolveBrowser({
         harnessId: "lane",
         requested: true,
         manifestCapable: capable,
+        requiresFullAccess,
         webPolicy: web,
         access,
       });
@@ -64,6 +67,7 @@ describe("RequestRequirementsResolver browser preflight", () => {
       harnessId: "codex",
       requested: true,
       manifestCapable: true,
+      requiresFullAccess: true,
       webPolicy: "auto",
       access: "full",
     });
@@ -72,6 +76,36 @@ describe("RequestRequirementsResolver browser preflight", () => {
       headless: false,
     });
     expect(resolver.browserSpec({ ...effective, effective: false }, "/tmp/browser")).toBeNull();
+  });
+
+  it("admits workspace-write Browser only when the adapter's native MCP policy permits it", () => {
+    const claude = resolver.resolveBrowser({
+      harnessId: "claude",
+      requested: true,
+      manifestCapable: true,
+      requiresFullAccess: false,
+      webPolicy: "auto",
+      access: "workspace_write",
+    });
+    const codex = resolver.resolveBrowser({
+      harnessId: "codex",
+      requested: true,
+      manifestCapable: true,
+      requiresFullAccess: true,
+      webPolicy: "auto",
+      access: "workspace_write",
+    });
+    const readonly = resolver.resolveBrowser({
+      harnessId: "claude",
+      requested: true,
+      manifestCapable: true,
+      requiresFullAccess: false,
+      webPolicy: "auto",
+      access: "readonly",
+    });
+    expect(claude).toMatchObject({ effective: true, reason: "effective" });
+    expect(codex).toMatchObject({ effective: false, reason: "access_profile_incompatible" });
+    expect(readonly).toMatchObject({ effective: false, reason: "access_profile_incompatible" });
   });
 
   it("returns the first finite attachment-limit refusal", () => {
@@ -208,28 +242,22 @@ describe("RequestRequirementsResolver Delegate preflight", () => {
   });
 });
 
-describe("adapterAccess under external confinement", () => {
+describe("adapterAccess native policy", () => {
   const resolver = new RequestRequirementsResolver();
 
-  it("hands the adapter external_sandbox_full so it stands its own sandbox down", () => {
-    // macOS refuses a nested seatbelt, so the engine's boundary and the
-    // harness's own are mutually exclusive. Stated as an ACCESS PROFILE, which
-    // every adapter already maps — never as a per-harness branch.
-    expect(resolver.adapterAccess("implement", "workspace", "workspace_write", true)).toBe(
-      "external_sandbox_full",
-    );
-    expect(resolver.adapterAccess("implement", "workspace", "full", true)).toBe(
-      "external_sandbox_full",
-    );
-  });
-
-  it("leaves an unconfined run and a read-only lane exactly as they were", () => {
-    expect(resolver.adapterAccess("implement", "workspace", "workspace_write", false)).toBe(
+  it("preserves requested native access", () => {
+    expect(resolver.adapterAccess("implement", "workspace", "workspace_write")).toBe(
       "workspace_write",
     );
-    expect(resolver.adapterAccess("implement", "workspace", "readonly", true)).toBe("readonly");
-    // A patch-envelope producer is pinned to readonly and keeps its own enforcement.
-    expect(resolver.adapterAccess("implement", "git_patch_envelope", "workspace_write", true)).toBe(
+    expect(resolver.adapterAccess("implement", "workspace", "full")).toBe("full");
+  });
+
+  it("retains the patch-envelope readonly clamp", () => {
+    expect(resolver.adapterAccess("implement", "workspace", "workspace_write")).toBe(
+      "workspace_write",
+    );
+    expect(resolver.adapterAccess("implement", "workspace", "readonly")).toBe("readonly");
+    expect(resolver.adapterAccess("implement", "git_patch_envelope", "workspace_write")).toBe(
       "readonly",
     );
   });

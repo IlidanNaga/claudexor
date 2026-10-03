@@ -26,6 +26,14 @@ import ClaudexorKit
         #expect(line.chips.isEmpty)
     }
 
+    @Test func unreviewedAppliedPatchKeepsBothFacts() throws {
+        let line = try #require(OutcomePresentation.line(
+            phase: .succeeded, reason: nil, result: patch(applyState: "applied"), reviewVerdict: .notRun))
+        #expect(line.headline == "Applied · not reviewed")
+        #expect(line.tone == .success)
+        #expect(ReviewVerdict.notRun.label == "Not reviewed")
+    }
+
     @Test func cleanAppliedLeadsWithApplyAndDemotesReviewToChip() throws {
         let line = try #require(OutcomePresentation.line(
             phase: .succeeded, reason: nil, result: patch(applyState: "applied"), reviewVerdict: .clean

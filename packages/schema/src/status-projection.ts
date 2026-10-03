@@ -70,7 +70,18 @@ export function runOutcomeLabel(facts: RunOutcomeFacts): string {
     case "failed":
       return facts.reason ? `Failed (${facts.reason.replaceAll("_", " ")})` : "Failed";
     case "cancelled":
-      return facts.reason === "wall_clock_exceeded" ? "Time limit reached" : "Cancelled";
+      // The new provenance must survive to the human label too, or the whole
+      // reason_code chain ends in a byte-identical "Cancelled".
+      switch (facts.reason) {
+        case "wall_clock_exceeded":
+          return "Time limit reached";
+        case "host_cancelled":
+          return "Stopped by host";
+        case "owner_task_gone":
+          return "Owner task gone";
+        default:
+          return "Cancelled";
+      }
     case "interrupted":
       return "Interrupted";
     case "succeeded":
@@ -84,6 +95,7 @@ export function runOutcomeLabel(facts: RunOutcomeFacts): string {
   if (facts.work_state?.state === "needs_input") return needsInputLabel(facts);
   if (facts.work_state?.state === "incomplete") return "Incomplete";
   if (facts.review === "blocked" || facts.checks === "failed") return "Needs review";
+  if (facts.review_requested === false && facts.review === "not_run") return "Done · not reviewed";
   if (facts.review === "not_run" || facts.checks === "not_configured") {
     return "Done · not verified";
   }
@@ -122,11 +134,15 @@ export function outcomeBanner(
   if (facts.lifecycle !== "succeeded") return runOutcomeLabel(facts);
   switch (delivery.applyState) {
     case "applied":
-      return "Applied";
+      return facts.review_requested === false && facts.review === "not_run"
+        ? "Applied · not reviewed"
+        : "Applied";
     case "applied_review_blocked":
       return "Applied · review blocked";
     case "reverted":
       return "Reverted — changes rolled back";
+    case "discarded":
+      return "Discarded — not applied";
     case "not_applied":
       break;
   }
@@ -141,14 +157,17 @@ export function outcomeBanner(
   if (vetoLabel) return delivery.hasApplyableChange ? `${vetoLabel} — NOT APPLIED` : vetoLabel;
   const needsReview = facts.review === "blocked" || facts.checks === "failed";
   const unverified = facts.review === "not_run" || facts.checks === "not_configured";
+  const notReviewed = facts.review_requested === false && facts.review === "not_run";
   // Nothing to apply (answer / plan / report / no changes): the quality alone.
   if (!delivery.hasApplyableChange) {
     if (needsReview) return "Needs review";
+    if (notReviewed) return "Done · not reviewed";
     if (unverified) return "Done · not verified";
     return "Done";
   }
   // A patch candidate exists but has NOT been applied — always disclose that.
   if (needsReview) return "Needs review — NOT APPLIED";
+  if (notReviewed) return "Candidate ready · not reviewed — NOT APPLIED";
   if (unverified) return "Candidate ready · not verified — NOT APPLIED";
   return "Candidate ready — NOT APPLIED";
 }
@@ -305,14 +324,23 @@ export function requiredActionsFor(
   return actions;
 }
 
-/** ACP stop-reason projection. A daemon-enforced hard time limit is a typed
- * refusal: the user did not cancel the turn. Legacy cancellations without a
- * reason remain cancelled because their initiator cannot be reconstructed. */
+/** ACP stop-reason projection. ACP `cancelled` means THE USER cancelled the
+ * turn; every cancellation the user did not initiate — the daemon's hard time
+ * limit, a host/daemon shutdown, the owning task disappearing — is a typed
+ * refusal, or the IDE attributes a host kill to its user. Legacy cancellations
+ * without a reason remain cancelled because their initiator cannot be
+ * reconstructed. */
 export function acpStopReason(
   lifecycle: string,
   reason: RunReason | null,
 ): "cancelled" | "refusal" | "end_turn" {
-  if (lifecycle === "cancelled") return reason === "wall_clock_exceeded" ? "refusal" : "cancelled";
+  if (lifecycle === "cancelled") {
+    const notUser =
+      reason === "wall_clock_exceeded" ||
+      reason === "host_cancelled" ||
+      reason === "owner_task_gone";
+    return notUser ? "refusal" : "cancelled";
+  }
   if (lifecycle === "failed" || lifecycle === "interrupted") return "refusal";
   return "end_turn";
 }
@@ -328,9 +356,12 @@ export function makeOutcomeFacts(
 ): RunOutcomeFacts {
   return {
     lifecycle,
-    noChanges: partial.noChanges ?? false,
+    noChanges: partial.noChanges === undefined ? false : partial.noChanges,
     checks: partial.checks ?? "not_configured",
     review: partial.review ?? "not_run",
+    ...(partial.review_requested !== undefined
+      ? { review_requested: partial.review_requested }
+      : {}),
     reason: partial.reason ?? null,
     ...(partial.work_state ? { work_state: partial.work_state } : {}),
   };

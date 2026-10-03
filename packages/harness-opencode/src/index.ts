@@ -14,6 +14,7 @@ import {
 } from "@claudexor/schema";
 import type { DoctorSpec, HarnessAdapter } from "@claudexor/core";
 import {
+  AccessProfileIncompatibleError,
   HarnessUnavailableError,
   promptWithInstructions,
   providerScrubEnv,
@@ -30,17 +31,13 @@ const BIN = process.env.CLAUDEXOR_OPENCODE_BIN || "opencode";
 function accessArgs(access: AccessProfile): string[] {
   switch (access) {
     case "full":
-    case "external_sandbox_full":
       return ["--dangerously-skip-permissions"];
     case "readonly":
     case "inherit_native":
       return [];
     case "workspace_write":
-      // Unreachable: runOpenCode rejects workspace_write up front (no proven
-      // scoped confinement). Returning the full-access flag here would silently
-      // upgrade the access, so refuse loudly instead.
-      throw new HarnessUnavailableError(
-        "opencode workspace_write has no conformance-proven scoped confinement; this profile is rejected before run",
+      throw new AccessProfileIncompatibleError(
+        "opencode workspace_write is unavailable because this adapter has no native scoped-write mode; choose a compatible workspace_write harness, or explicitly trust the repository and choose full",
       );
   }
 }
@@ -219,17 +216,12 @@ export function createOpenCodeAdapter(): HarnessAdapter {
           // HONEST access surface: the only permission flag the adapter drives
           // is `--dangerously-skip-permissions` (full access), so there is no
           // scoped readonly mechanism to declare (see access_profiles below).
-          access_control: { readonly_mechanism: "none" },
+          access_control: { readonly_mechanism: "none", write_mechanism: "none" },
           isolation: { supported_containment: ["env_or_file_injection"] },
           attachment_inputs: [],
         },
         auth_modes: authReady ? ["api_key"] : [],
-        // external_sandbox_full: opencode's permissions gate stands down
-        // (--dangerously-skip-permissions), the exact mapping accessArgs
-        // already implements; the engine applies its own OS boundary only on
-        // delegated runs. Only the manifest declaration was missing, so a
-        // delegated mutating opencode run on macOS was unroutable.
-        access_profiles_supported: ["full", "external_sandbox_full", "inherit_native"],
+        access_profiles_supported: ["full", "inherit_native"],
       });
     },
 
@@ -364,12 +356,11 @@ async function* runOpenCode(spec: HarnessRunSpec): AsyncIterable<HarnessEvent> {
     );
   }
   // The only permission flag the adapter drives is --dangerously-skip-permissions
-  // (full access). A workspace_write request has NO proven scoped confinement, so
-  // honoring it would SILENTLY grant full. Reject loudly instead of downgrading
-  // the access guarantee (manifest advertises full-only).
+  // (full access). It has no native scoped-write mode, so honoring
+  // workspace_write would silently grant full.
   if (spec.access === "workspace_write") {
-    throw new HarnessUnavailableError(
-      "opencode does not support a conformance-proven workspace_write (scoped) profile; it can only run with full access (--dangerously-skip-permissions). Use full access explicitly or another harness for confined writes.",
+    throw new AccessProfileIncompatibleError(
+      "opencode workspace_write is unavailable because this adapter has no native scoped-write mode; choose a compatible workspace_write harness, or explicitly trust the repository and choose full",
     );
   }
   const args = ["run", "--format", "json", ...accessArgs(spec.access)];

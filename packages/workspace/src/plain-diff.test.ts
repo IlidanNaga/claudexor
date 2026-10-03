@@ -1,7 +1,58 @@
 import { describe, expect, it } from "vitest";
-import { excludePlainDiffPathPrefix } from "./plain-diff.js";
+import { excludePlainDiffPathPrefix, relativizePlainDiffHeaders } from "./plain-diff.js";
 
 const ownedPrefix = ".claudexor-artifacts/run-1";
+
+describe("relativizePlainDiffHeaders", () => {
+  it("relativizes a bare GNU diff 3.8 binary record that follows a hunk with no `diff` echo (#252)", () => {
+    // diff 3.8 emits the binary stub straight after the previous file's
+    // hunks — no `diff -ruN …` command echo resets the parser state — while
+    // 3.10 echoes the command first. Both shapes must relativize, or the
+    // absolute paths escape the exact-prefix exclusion and every
+    // repo-relative policy glob.
+    const baseline = "/tmp/baseline";
+    const live = "/tmp/live";
+    const bare = [
+      `diff -ruN ${baseline}/a.txt ${live}/a.txt`,
+      `--- ${baseline}/a.txt\t2026-09-03 20:16:06.627019220 +0000`,
+      `+++ ${live}/a.txt\t2026-09-03 20:16:06.627019220 +0000`,
+      "@@ -1 +1 @@",
+      "-one",
+      "+two",
+      `Binary files ${baseline}/${ownedPrefix}/browser/shot.png and ${live}/${ownedPrefix}/browser/shot.png differ`,
+      "",
+    ].join("\n");
+
+    const relativized = relativizePlainDiffHeaders(bare, baseline, live);
+
+    expect(relativized).toContain(
+      `Binary files a/${ownedPrefix}/browser/shot.png and b/${ownedPrefix}/browser/shot.png differ`,
+    );
+    expect(relativized).not.toContain(baseline);
+    expect(relativized).not.toContain(live);
+    // …and the owned binary record is then excluded by exact prefix while the
+    // unrelated text record survives.
+    const filtered = excludePlainDiffPathPrefix(relativized, ownedPrefix);
+    expect(filtered).toContain("+two");
+    expect(filtered).not.toContain("shot.png");
+  });
+
+  it("still relativizes the diff 3.10 shape where a `diff` echo precedes the binary record", () => {
+    const baseline = "/tmp/baseline";
+    const live = "/tmp/live";
+    const echoed = [
+      `diff -ruN ${baseline}/user.bin ${live}/user.bin`,
+      `Binary files ${baseline}/user.bin and ${live}/user.bin differ`,
+      "",
+    ].join("\n");
+
+    expect(relativizePlainDiffHeaders(echoed, baseline, live)).toBe(
+      ["diff -ruN a/user.bin b/user.bin", "Binary files a/user.bin and b/user.bin differ", ""].join(
+        "\n",
+      ),
+    );
+  });
+});
 
 function textRecord(path: string, line: string): string {
   return [

@@ -155,6 +155,29 @@ describe("claudexor follow", () => {
     ).not.toContain("WARNING");
   });
 
+  it("renders zero configured gates as n/a, never a vacuous 'gates passed'", () => {
+    // gatesPassed([]) === true upstream, so the payload says passed: true —
+    // the wording must still not claim verification that never ran.
+    expect(
+      formatRunEventLine({
+        type: "gate.completed",
+        payload: { attempt_id: "a01", gates: [], passed: true },
+      }),
+    ).toBe("[a01] gates n/a (none configured)");
+    expect(
+      formatRunEventLine({
+        type: "gate.completed",
+        payload: { attempt_id: "a01", gates: [{ id: "tests", status: "passed" }], passed: true },
+      }),
+    ).toBe("[a01] gates passed");
+    expect(
+      formatRunEventLine({
+        type: "gate.completed",
+        payload: { attempt_id: "a01", gates: [{ id: "tests", status: "failed" }], passed: false },
+      }),
+    ).toBe("[a01] gates failed");
+  });
+
   it("renders an automatic interaction expiry as elapsed time", () => {
     expect(
       formatRunEventLine({
@@ -773,7 +796,11 @@ describe("handshake engine identity (v3.0.3 S4c)", () => {
         baseUrl: `http://127.0.0.1:${port}`,
         token: "t",
       });
-      expect(identity).toEqual({ engineVersion: CLAUDEXOR_VERSION, engineBuildSha: "unknown" });
+      expect(identity).toEqual({
+        engineVersion: CLAUDEXOR_VERSION,
+        engineBuildSha: "unknown",
+        servingMode: "normal",
+      });
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }

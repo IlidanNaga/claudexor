@@ -19,7 +19,7 @@
             },
             "instructions": {
               "type": "string",
-              "description": "System-level instructions layered onto every task-producing lane; delivered natively (append-system-prompt / developer_instructions) or as a delimited prompt prefix."
+              "description": "System-level instructions layered onto every task-producing lane; delivered natively (append-system-prompt-file / developer_instructions) or as a delimited prompt prefix."
             },
             "attachments": {
               "type": "array",
@@ -119,7 +119,27 @@
                 "delegated": {
                   "type": "boolean",
                   "default": false,
-                  "description": "Marks a run driven by an EXTERNAL orchestrator that owns the workspace, not by the operator at a surface. Such a run is confined to a scoped harness HOME even under isolation='live' (an in-place delegated attempt therefore cannot resume a native vendor session stored under the real HOME). Unrelated to the `delegate` belt flag and to `delegatedFromRunId` (belt-child provenance)."
+                  "description": "Marks a run driven by an EXTERNAL orchestrator that owns the workspace, not by the operator at a surface. Such a run uses a scoped harness HOME even under isolation='live' (an in-place delegated attempt therefore cannot resume a native vendor session stored under the real HOME). Unrelated to the `delegate` belt flag and to `delegatedFromRunId` (belt-child provenance)."
+                },
+                "workspaceRoot": {
+                  "type": "string",
+                  "description": "Absolute existing execution workspace for a project-scoped delegated agent live run. The stable project identity remains scope.root."
+                },
+                "workspaceKind": {
+                  "type": "string",
+                  "enum": [
+                    "git",
+                    "directory"
+                  ],
+                  "description": "Explicit directory execution needs no Git initialization; omission preserves existing clients."
+                },
+                "scopePaths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "description": "Agent-selected input footprint. Directory copies materialize this entire selection; direct runs need no whole-tree baseline."
                 }
               },
               "additionalProperties": false,
@@ -173,6 +193,15 @@
               "pattern": "^[a-z0-9]+(?:[_-][a-z0-9]+)*$",
               "description": "Requested reasoning effort."
             },
+            "processingPreference": {
+              "type": "string",
+              "enum": [
+                "standard",
+                "fast",
+                "economy"
+              ],
+              "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
+            },
             "efforts": {
               "type": "object",
               "additionalProperties": {
@@ -183,6 +212,10 @@
                 "pattern": "\\S"
               },
               "description": "Harness-scoped effort map (harness id to effort); an entry here wins over the scalar effort and the per-harness settings default."
+            },
+            "review": {
+              "type": "boolean",
+              "description": "Agent model review: ordinary runs default off; true selects an automatic panel. Explicit reviewer controls, best-of and untilClean request review. Capped attempts default to review unless explicitly false."
             },
             "reviewerModels": {
               "type": "object",
@@ -224,6 +257,8 @@
             },
             "n": {
               "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991,
               "exclusiveMinimum": 0,
               "description": "Race width: number of best-of-N candidates."
             },
@@ -306,7 +341,6 @@
                 "readonly",
                 "workspace_write",
                 "full",
-                "external_sandbox_full",
                 "inherit_native"
               ],
               "description": "Requested access profile; effective access is derived by the engine and never client-supplied."
@@ -458,16 +492,24 @@
                   "effort": {
                     "$ref": "#/definitions/ControlRunAgainDraft/properties/request/properties/effort",
                     "description": "Per-reviewer effort hint, passed to that harness only."
+                  },
+                  "credentialProfileId": {
+                    "$ref": "#/definitions/ControlRunAgainDraft/properties/request/properties/harnesses/items",
+                    "description": "Per-reviewer credential profile id; explicit pins are strict and never fall back."
+                  },
+                  "processingPreference": {
+                    "$ref": "#/definitions/ControlRunAgainDraft/properties/request/properties/processingPreference",
+                    "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
                   }
                 },
                 "required": [
                   "harness"
                 ],
                 "additionalProperties": false,
-                "description": "One reviewer of an explicit reviewer panel — a harness plus optional model and effort. The CLI spells one entry `harness=model:effort` (e.g. `claude=claude-opus-4-8:max`)."
+                "description": "One reviewer of an explicit reviewer panel — a harness plus optional model, effort, and strict credentialProfileId. Compact entries are unpinned; structured JSON carries pins."
               },
               "minItems": 1,
-              "description": "Explicit Agent reviewer panel — who reviews the change, one entry per reviewer as `harness=model:effort` (CLI `--reviewer-panel \"claude=claude-opus-4-8:max,cursor=gemini-3.1-pro\"`). Duplicate harness entries are kept so one provider can review through several models; overrides the legacy reviewerModels/reviewerEfforts maps."
+              "description": "Explicit Agent reviewer panel — who reviews the change, one entry per reviewer as `harness=model:effort` (CLI `--reviewer-panel`, unpinned) or structured `--reviewer-panel-json` with optional strict credentialProfileId. Duplicate harness entries are kept so one provider can review through several models; overrides the legacy reviewerModels/reviewerEfforts maps."
             },
             "authPreference": {
               "type": "string",
@@ -522,6 +564,19 @@
           "additionalProperties": false,
           "description": "Request body for POST /runs: prompt, mode, scope, routing, strategy flags, budget, policies, and thread linkage."
         },
+        "accessChoice": {
+          "type": "object",
+          "properties": {
+            "required": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "required"
+          ],
+          "additionalProperties": false,
+          "description": "Whether Run Again requires an explicit active access choice."
+        },
         "differences": {
           "type": "array",
           "items": {
@@ -552,7 +607,8 @@
       },
       "required": [
         "sourceRunId",
-        "request"
+        "request",
+        "accessChoice"
       ],
       "additionalProperties": false,
       "description": "Editable Run Again draft copied from a prior run with explicit omissions."

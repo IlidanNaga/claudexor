@@ -114,6 +114,20 @@ export const ReviewFinding = z
           .nullable()
           .default(null)
           .describe("Reasoning effort requested for the reviewer route."),
+        credential_profile_id: z
+          .string()
+          .nullable()
+          .optional()
+          .describe(
+            "Credential profile requested/effective for the reviewer route; absent = account pool/default.",
+          ),
+        observed_credential_profile_id: z
+          .string()
+          .nullable()
+          .optional()
+          .describe(
+            "Credential profile actually reported by the reviewer route; absent when undisclosed.",
+          ),
         observed_model: z
           .string()
           .nullable()

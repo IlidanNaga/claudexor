@@ -58,6 +58,52 @@ struct TurnStartAdmissionTests {
     }
 
     @MainActor
+    @Test func readOnlyAgentUsesReadOnlyApplicabilityAndOmitsConvergenceFields() async throws {
+        defer { TurnStartStubURLProtocol.handler = nil }
+        let model = turnStartModel(port: 12_374)
+        let target = TurnStartTarget.existing(
+            locationID: .local,
+            threadID: "thread-readonly",
+            repoRoot: "/tmp/readonly-agent",
+            workspaceMode: "in_place",
+            eligibleHarnesses: [])
+        model.runApplicabilityProjections[.local] = .ready(
+            try testRunApplicabilityResponse(
+                root: target.repoRoot,
+                inPlaceReadOnly: true,
+                inPlaceAgentConvergence: false,
+                inPlaceAgentOther: false))
+        let requests = TurnStartRecorder()
+        TurnStartStubURLProtocol.handler = { request in
+            requests.record(request)
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v2/threads/thread-readonly/turns"):
+                return turnStartResponse(request, status: 202,
+                    body: #"{"jobId":"job-readonly","state":"queued","error":null}"#)
+            case ("GET", "/v2/runs"):
+                return turnStartResponse(request, body: #"{"runs":[]}"#)
+            default:
+                throw TurnStartTestError.unexpectedRequest
+            }
+        }
+        var options = TurnOptions()
+        options.access = AccessProfile.readOnly.wire
+
+        #expect(await model.composerSend(
+            prompt: "Inspect only",
+            mode: .agent,
+            options: options,
+            target: target))
+        let request = try #require(requests.first(
+            method: "POST", path: "/v2/threads/thread-readonly/turns"))
+        let body = try #require(try turnStartRequestObject(request))
+        #expect(body["access"] as? String == "readonly")
+        #expect(body["review"] as? Bool == false)
+        #expect(body["attempts"] == nil)
+        #expect(body["untilClean"] == nil)
+    }
+
+    @MainActor
     @Test func blockedImplementPerformsNoTurnPost() async throws {
         defer { TurnStartStubURLProtocol.handler = nil }
         let model = turnStartModel(port: 12_342)
@@ -863,7 +909,7 @@ struct TurnStartAdmissionTests {
         model.remoteClients[remote] = turnStartClient(port: 12_351)
         let draft = try JSONDecoder().decode(
             RunAgainDraft.self,
-            from: Data(#"{"sourceRunId":"run-old","request":{"prompt":"old","mode":"ask"},"differences":[]}"#.utf8))
+            from: Data(#"{"sourceRunId":"run-old","request":{"prompt":"old","mode":"ask"},"accessChoice":{"required":false},"differences":[]}"#.utf8))
         let requests = TurnStartRecorder()
         TurnStartStubURLProtocol.handler = { request in
             requests.record(request)
@@ -881,6 +927,39 @@ struct TurnStartAdmissionTests {
     }
 
     @MainActor
+    @Test func retiredRunAgainRequiresAndSubmitsExplicitActiveAccess() async throws {
+        defer { TurnStartStubURLProtocol.handler = nil }
+        let model = turnStartModel(port: 12_365)
+        let draft = try JSONDecoder().decode(
+            RunAgainDraft.self,
+            from: Data(#"{"sourceRunId":"run-old","request":{"prompt":"old","mode":"agent","review":true},"accessChoice":{"required":true},"differences":[]}"#.utf8))
+        let requests = TurnStartRecorder()
+        TurnStartStubURLProtocol.handler = { request in
+            requests.record(request)
+            guard request.url?.port == 12_365,
+                  request.httpMethod == "POST",
+                  request.url?.path == "/v2/runs"
+            else { throw TurnStartTestError.unexpectedRequest }
+            return turnStartResponse(request, status: 202,
+                body: #"{"jobId":"job-again","state":"queued","error":null}"#)
+        }
+
+        #expect(await model.startRunAgain(
+            draft, prompt: "new", locationID: .local)
+            == "Run Again requires an explicit access choice.")
+        #expect(requests.count == 0)
+
+        #expect(await model.startRunAgain(
+            draft, prompt: "new", access: .workspaceWrite, locationID: .local) == nil)
+        let request = try #require(requests.first(method: "POST", path: "/v2/runs"))
+        let decoded = try turnStartRequestObject(request)
+        let object = try #require(decoded)
+        #expect(object["prompt"] as? String == "new")
+        #expect(object["access"] as? String == "workspace_write")
+        #expect(object["review"] as? Bool == true)
+    }
+
+    @MainActor
     @Test func clientReplacementAfterRunAgainPostCannotRouteOldRunID() async throws {
         defer { TurnStartStubURLProtocol.handler = nil }
         let firstClient = turnStartClient(port: 12_366)
@@ -889,7 +968,7 @@ struct TurnStartAdmissionTests {
             client: firstClient, requestNotificationAuthorization: false)
         let draft = try JSONDecoder().decode(
             RunAgainDraft.self,
-            from: Data(#"{"sourceRunId":"run-old","request":{"prompt":"old","mode":"ask"},"differences":[]}"#.utf8))
+            from: Data(#"{"sourceRunId":"run-old","request":{"prompt":"old","mode":"ask"},"accessChoice":{"required":false},"differences":[]}"#.utf8))
         let start = TurnStartRecorder()
         let release = DispatchSemaphore(value: 0)
         let requests = TurnStartRecorder()

@@ -16,6 +16,12 @@ export class QuotaRefreshCoordinator<T> {
     return credentialGeneration === this.credentialGeneration;
   }
 
+  /** The generation a caller should capture BEFORE a cycle to later ask
+   * whether a credential change intervened (per-lane pacing reads it). */
+  currentGeneration(): number {
+    return this.credentialGeneration;
+  }
+
   async run(
     start: (credentialGeneration: number) => Promise<T>,
     followCredentialChanges = true,

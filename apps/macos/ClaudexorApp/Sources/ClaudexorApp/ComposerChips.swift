@@ -9,9 +9,10 @@ import ClaudexorKit
 /// The combined Harness + Account chip (M9-UX item 2): ONE capsule with two
 /// menu segments — the harness (logo + name) and, when a concrete harness is
 /// chosen, a compact account segment. The account segment shows the thread's
-/// pinned account or the harness's Active default; picking pins the thread via
-/// the existing thread PATCH (`setThreadCredentialProfile`). This is the
-/// PER-THREAD account override; the popover owns the global routing default.
+/// pinned account, or the stable "Automatic" (the quota-aware pool of enabled
+/// accounts); picking pins the thread via the existing thread PATCH
+/// (`setThreadCredentialProfile`). This is the PER-THREAD account override;
+/// the popover's Enabled toggles own the global pool membership.
 struct HarnessAccountChip: View {
     @Environment(AppModel.self) private var model
     let current: HarnessFamily?
@@ -83,7 +84,7 @@ struct HarnessAccountChip: View {
             model: model, harnessId: harness.rawValue, pinnedProfileId: pinnedProfileId)
         return Menu {
             Button { onPickAccount(nil) } label: {
-                Label("Automatic (harness default)", systemImage: "wand.and.stars")
+                Label("Automatic (account pool)", systemImage: "wand.and.stars")
                 if pinnedProfileId == nil { Image(systemName: "checkmark") }
             }
             if !profiles.isEmpty {
@@ -112,28 +113,30 @@ struct HarnessAccountChip: View {
         .menuStyle(.borderlessButton)
         .fixedSize()
         .help(segment.pinned
-            ? "This thread is pinned to \(segment.label). Pick Automatic to follow the harness default (auto-balance across enabled accounts) instead."
-            : "Account for this thread: Automatic routing may rotate among enabled accounts at a quota limit. Pick a specific account to pin it to this thread.")
+            ? "This thread is pinned to \(segment.label). Pick Automatic to route through the quota-aware pool of enabled accounts instead."
+            : "Account for this thread: Automatic routes through the quota-aware pool of enabled accounts and may switch at a quota limit. Pick a specific account to pin it to this thread.")
     }
 }
 
 /// Composite Access chip (W19/R14): the per-turn write scope lives in the
 /// composer's MAIN controls row — no longer buried in the "⋯" popover — and
-/// appends " · Browser" while the agent browser is armed. Arming Browser
-/// derives Full access (codex's sandbox cancels navigation otherwise), so an
-/// access downgrade while armed is UNREPRESENTABLE: the menu disables instead
-/// of offering a contradiction.
+/// appends " · Browser" while the agent browser is armed. Browser never widens
+/// the selected filesystem access; the daemon validates native MCP support for
+/// the selected harness before launch.
 struct AccessChip: View {
-    /// User-selected sticky value. Browser derives a separate displayed/wire
-    /// Full value and never mutates this binding.
-    @Binding var access: AccessProfile
+    /// Active sticky value. nil is the deliberate historical-migration state,
+    /// never an instruction to display the repository default as already chosen.
+    let access: AccessProfile?
     let browserArmed: Bool
     /// Read-only intents never write — the chip disables, and the visible
     /// reason rides composerAccessHint below the row (not a hover-only tooltip).
     let writeDisabled: Bool
+    let onPick: (AccessProfile) -> Void
 
-    private var effectiveAccess: AccessProfile { browserArmed ? .full : access }
-    private var tint: Color { effectiveAccess == .full ? .orange : Theme.accent }
+    private var tint: Color {
+        guard let access else { return Theme.status(.caution) }
+        return access == .full ? .orange : Theme.accent
+    }
 
     // The chip is JUST the menu — its disable/armed reason rides a separate
     // full-width caption line below the controls row (composerAccessHint), so
@@ -145,14 +148,18 @@ struct AccessChip: View {
         ChipMenu(
             tint: tint,
             fill: .tinted(tint),
-            disabled: writeDisabled || browserArmed,
+            disabled: writeDisabled,
             help: chipHelp
         ) {
-            Image(systemName: effectiveAccess.glyph).imageScale(.small)
-            Text(browserArmed ? "\(effectiveAccess.label) · Browser" : effectiveAccess.label)
+            Image(systemName: access?.glyph ?? "exclamationmark.triangle.fill").imageScale(.small)
+            if let access {
+                Text(browserArmed ? "\(access.label) · Browser" : access.label)
+            } else {
+                Text(browserArmed ? "Choose access · Browser" : "Choose access")
+            }
         } menu: {
             ForEach(AccessProfile.composerCases) { profile in
-                Button { access = profile } label: {
+                Button { onPick(profile) } label: {
                     Label(profile.label, systemImage: profile.glyph)
                     if access == profile { Image(systemName: "checkmark") }
                 }
@@ -161,8 +168,11 @@ struct AccessChip: View {
     }
 
     private var chipHelp: String {
+        if access == nil {
+            return "This historical thread used a retired access profile. Choose an active profile to continue."
+        }
         if browserArmed {
-            return "Browser is armed, which requires Full access — disarm Browser (in ⋯) to change the write scope."
+            return "Browser keeps this access scope; unsupported harness combinations are refused before launch."
         }
         if writeDisabled { return "Read-only intents never write" }
         return "How much this turn may touch"
@@ -183,12 +193,16 @@ extension ThreadsScreen {
     /// shown for project threads (the chip itself only appears there).
     @ViewBuilder var composerAccessHint: some View {
         if threadHasProject {
-            if composerMode.isReadOnly {
+            if let blocker = threadAccessSelection.migrationBlocker {
+                Label(blocker, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption2).foregroundStyle(Theme.status(.caution))
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if composerMode.isReadOnly {
                 Text("\(composerMode.label) never writes — switch to Agent to change access")
                     .font(.caption2).foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             } else if effectiveBrowserArmed {
-                Text("Browser armed → Full (disarm in ⋯)")
+                Text("Browser keeps \(effectiveAccess.label); native support is checked per harness")
                     .font(.caption2).foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -224,7 +238,8 @@ extension ThreadsScreen {
         // intent can actually write. Ask/Plan are engine-clamped to Read-only, so
         // a sticky/stale Full beside them needs no grant — offering it invites a
         // durable unsandboxed authorization the read-only turn will never use.
-        if effectiveAccess == .full, !composerMode.isReadOnly,
+        if threadAccessSelection.activeAccess != nil,
+           effectiveAccess == .full, !composerMode.isReadOnly,
            let repoRoot = composerRepoRoot,
            !model.fullAccessGranted(repoRoot: repoRoot) {
             HStack(spacing: Theme.Spacing.sm) {

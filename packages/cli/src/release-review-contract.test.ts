@@ -17,6 +17,7 @@ import { describe, expect, it } from "vitest";
 import {
   ARCHIVED_OWNER_REVIEW_SCHEMA_VERSIONS,
   OWNER_REVIEW_ATTESTATION_SCHEMA_VERSION,
+  OWNER_REVIEW_MODEL_FAMILIES,
   OWNER_REVIEW_PANEL,
   OWNER_REVIEW_PROTOCOL,
   decodeReviewUtf8,
@@ -55,7 +56,9 @@ function fixture() {
   };
   const reviews = OWNER_REVIEW_PANEL.map((required, index) => ({
     slot: required.slot,
-    model: required.allowedModels[0],
+    modelFamily: index === 0 ? "grok-4.6" : "opus-5",
+    model: index === 0 ? "cursor-grok-4.6-xhigh" : "claude-opus-5",
+    harness: index === 0 ? "cursor" : "claude",
     startedAt: `2026-08-06T00:00:0${index}.000Z`,
     completedAt: `2026-08-06T00:00:0${index + 5}.000Z`,
     verdict: index === 0 ? "pass" : "warn",
@@ -64,7 +67,7 @@ function fixture() {
     metadataSha256: digest,
   }));
   const payload = {
-    contract: "owner-review-v6",
+    contract: "owner-review-v7",
     reviewProtocol: OWNER_REVIEW_PROTOCOL,
     candidateSha,
     candidateTree,
@@ -140,27 +143,16 @@ describe("operator owner-review publishing contract", () => {
     }
   });
 
-  it("freezes the exact two operator slots and accepts their signed v6 evidence", () => {
-    // Owner decision 2026-08-06 («не надо вообще codex использовать…
-    // Используй своих субагентов»): the formal pair runs as Cursor operator
-    // subagents. Operator decision 2026-08-06 ~08:29 (after two catalog
-    // flaps within one hour): each slot accepts one slug from its
-    // owner-approved tier set; the actually used slug is what gets sealed.
-    expect(OWNER_REVIEW_ATTESTATION_SCHEMA_VERSION).toBe(6);
-    expect(OWNER_REVIEW_PROTOCOL).toBe("cursor-operator-fable-sol-v1");
-    expect(OWNER_REVIEW_PANEL).toEqual([
-      {
-        slot: "fable",
-        allowedModels: [
-          "claude-fable-5-thinking-max",
-          "claude-fable-5-thinking-medium",
-          "claude-fable-5-thinking-high",
-        ],
-      },
-      {
-        slot: "sol",
-        allowedModels: ["gpt-5.6-sol-xhigh", "gpt-5.6-sol-max", "gpt-5.6-sol-medium"],
-      },
+  it("freezes two neutral slots and the owner-approved families in signed v7 evidence", () => {
+    expect(OWNER_REVIEW_ATTESTATION_SCHEMA_VERSION).toBe(7);
+    expect(OWNER_REVIEW_PROTOCOL).toBe("owner-review-two-model-families-v1");
+    expect(OWNER_REVIEW_PANEL).toEqual([{ slot: "reviewer-1" }, { slot: "reviewer-2" }]);
+    expect(OWNER_REVIEW_MODEL_FAMILIES).toEqual([
+      "grok-4.6",
+      "fable-5",
+      "opus-5",
+      "gpt-5.6-sol",
+      "kimi-k3",
     ]);
     const { attestation, authority } = fixture();
     expect(validateReleaseAttestation(attestation, authority, expected)).toEqual({
@@ -169,27 +161,44 @@ describe("operator owner-review publishing contract", () => {
     });
   });
 
-  it("accepts every owner-approved tier of each slot", () => {
-    // At least one non-default tier per slot: fable drops to medium, sol
-    // rises to max — both stay inside the owner-approved sets.
+  it("accepts any two distinct approved families with route-specific slugs on any harness", () => {
     const { attestation, authority, resign } = fixture();
-    const alternate = structuredClone(attestation);
-    alternate.payload.reviews[0].model = "claude-fable-5-thinking-medium";
-    alternate.payload.reviews[1].model = "gpt-5.6-sol-xhigh";
-    expect(validateReleaseAttestation(resign(alternate), authority, expected)).toEqual({
-      ok: true,
-      reasons: [],
-    });
+    for (const first of OWNER_REVIEW_MODEL_FAMILIES) {
+      for (const second of OWNER_REVIEW_MODEL_FAMILIES) {
+        if (first === second) continue;
+        const alternate = structuredClone(attestation);
+        for (const [index, modelFamily] of [first, second].entries()) {
+          Object.assign(alternate.payload.reviews[index], {
+            modelFamily,
+            model: `vendor/${modelFamily}-thinking-high`,
+            harness: "another-harness",
+          });
+        }
+        expect(validateReleaseAttestation(resign(alternate), authority, expected)).toEqual({
+          ok: true,
+          reasons: [],
+        });
+      }
+    }
   });
 
   it.each([
-    ["substituted model", (a: any) => (a.payload.reviews[0].model = "claude-opus-5")],
+    ["unapproved family", (a: any) => (a.payload.reviews[0].modelFamily = "other-model")],
+    ["missing family", (a: any) => delete a.payload.reviews[0].modelFamily],
     [
-      "same-family tier outside the owner-approved set",
-      (a: any) => (a.payload.reviews[1].model = "gpt-5.6-sol-high"),
+      "two tiers of the same family on different harnesses",
+      (a: any) => {
+        a.payload.reviews[1].modelFamily = "grok-4.6";
+        a.payload.reviews[1].model = "vendor/grok-4.6-high";
+      },
     ],
-    ["cross-slot model", (a: any) => (a.payload.reviews[0].model = "gpt-5.6-sol-medium")],
-    ["swapped slot label", (a: any) => (a.payload.reviews[1].slot = "fable")],
+    ["missing model", (a: any) => delete a.payload.reviews[0].model],
+    ["blank model", (a: any) => (a.payload.reviews[0].model = "  ")],
+    ["non-string model", (a: any) => (a.payload.reviews[0].model = false)],
+    ["missing harness", (a: any) => delete a.payload.reviews[0].harness],
+    ["blank harness", (a: any) => (a.payload.reviews[0].harness = "\n")],
+    ["non-string harness", (a: any) => (a.payload.reviews[0].harness = 1)],
+    ["swapped slot label", (a: any) => (a.payload.reviews[1].slot = "reviewer-1")],
     ["missing report digest", (a: any) => delete a.payload.reviews[0].reportSha256],
     ["malformed report digest", (a: any) => (a.payload.reviews[1].reportSha256 = "bad")],
     ["malformed metadata digest", (a: any) => (a.payload.reviews[0].metadataSha256 = "bad")],
@@ -244,7 +253,7 @@ describe("operator owner-review publishing contract", () => {
     expect(validateReleaseAttestation(resign(forged), authority, expected).ok).toBe(false);
   });
 
-  it("requires exactly the ordered Fable and Sol pair", () => {
+  it("requires exactly the two ordered independent reviewer slots", () => {
     const { attestation, authority, resign } = fixture();
     for (const reviews of [
       attestation.payload.reviews.slice(0, 1),
@@ -265,9 +274,9 @@ describe("operator owner-review publishing contract", () => {
     );
   });
 
-  it("verifies schemas 2-5 only as historical signed bytes and never publishes them", () => {
+  it("verifies schemas 2-6 only as historical signed bytes and never publishes them", () => {
     const { attestation, authority, resign } = fixture();
-    expect(ARCHIVED_OWNER_REVIEW_SCHEMA_VERSIONS).toEqual([2, 3, 4, 5]);
+    expect(ARCHIVED_OWNER_REVIEW_SCHEMA_VERSIONS).toEqual([2, 3, 4, 5, 6]);
     for (const schemaVersion of ARCHIVED_OWNER_REVIEW_SCHEMA_VERSIONS) {
       const archived = resign({ ...attestation, schemaVersion, payload: { historical: true } });
       expect(verifyArchivedReleaseAttestationSignature(archived, authority)).toEqual({
@@ -349,7 +358,7 @@ describe("operator owner-review publishing contract", () => {
 
 describe("operator owner-review sealer", () => {
   it("derives a signed pass/warn pair from clean on-disk artifacts", async () => {
-    const root = mkdtempSync(join(tmpdir(), "claudexor-v6-sealer-"));
+    const root = mkdtempSync(join(tmpdir(), "claudexor-v7-sealer-"));
     const candidate = join(root, "candidate");
     const evidence = join(root, "evidence");
     const artifacts = join(root, "artifacts");
@@ -434,16 +443,21 @@ describe("operator owner-review sealer", () => {
       const manifestSha256 = hash(readFileSync(join(evidence, "MANIFEST.sha256")));
       const diffSha256 = hash(diff);
 
-      // Operator subagent artifacts: one markdown report + metadata per slot,
-      // written by the Cursor operator after the two subagents completed.
-      const reviewerDirs = { fable: join(artifacts, "01-fable"), sol: join(artifacts, "02-sol") };
+      // Operator-attested artifacts preserve actual models/harnesses without
+      // making the sealer a vendor model inventory or execution verifier.
+      const reviewerDirs = {
+        fable: join(artifacts, "01-reviewer-1"),
+        sol: join(artifacts, "02-reviewer-2"),
+      };
       const reports = {
-        fable: "# Fable review\n\nNo blocking findings. PASS.\n",
-        sol: "# Sol review\n\nOne non-blocking observation. WARN.\n",
+        fable: "# First review\n\nNo blocking findings. PASS.\n",
+        sol: "# Second review\n\nOne non-blocking observation. WARN.\n",
       };
       const metadataFor = (slot: "fable" | "sol") => ({
-        slot,
+        slot: slot === "fable" ? "reviewer-1" : "reviewer-2",
+        model_family: slot === "fable" ? "fable-5" : "gpt-5.6-sol",
         model: slot === "fable" ? "claude-fable-5-thinking-max" : "gpt-5.6-sol-medium",
+        harness: slot === "fable" ? "cursor" : "codex",
         candidate_sha: sha,
         candidate_tree: tree,
         packet_manifest_sha256: manifestSha256,
@@ -496,22 +510,26 @@ describe("operator owner-review sealer", () => {
       expect(result.stderr).toBe("");
       expect(result.status).toBe(0);
       expect(JSON.parse(readFileSync(out, "utf8"))).toMatchObject({
-        schemaVersion: 6,
+        schemaVersion: 7,
         payload: {
           candidateSha: sha,
           candidateVersion: CLAUDEXOR_VERSION,
-          reviewProtocol: "cursor-operator-fable-sol-v1",
+          reviewProtocol: "owner-review-two-model-families-v1",
           reviews: [
             {
-              slot: "fable",
+              slot: "reviewer-1",
+              modelFamily: "fable-5",
               model: "claude-fable-5-thinking-max",
+              harness: "cursor",
               verdict: "pass",
               reviewScope: "full",
               reportSha256: hash(reports.fable),
             },
             {
-              slot: "sol",
+              slot: "reviewer-2",
+              modelFamily: "gpt-5.6-sol",
               model: "gpt-5.6-sol-medium",
+              harness: "codex",
               verdict: "warn",
               reviewScope: "full",
               reportSha256: hash(reports.sol),
@@ -591,12 +609,26 @@ describe("operator owner-review sealer", () => {
       expect(blockingRefused.status).toBe(1);
       expect(blockingRefused.stderr).toContain("is not pass or warn");
 
-      // A slug outside the owner-approved tier set refuses, even from the
-      // same model family: membership is fail-closed.
-      write(solMetadataPath, json({ ...metadataFor("sol"), model: "gpt-5.6-sol-high" }));
+      // A family outside the approved set refuses without guessing from slugs.
+      write(solMetadataPath, json({ ...metadataFor("sol"), model_family: "other-model" }));
       const substituteRefused = runSealer(join(root, "substitute-refused.json"));
       expect(substituteRefused.status).toBe(1);
-      expect(substituteRefused.stderr).toContain("outside the owner-approved tier set");
+      expect(substituteRefused.stderr).toContain("outside the owner-approved set");
+
+      write(
+        solMetadataPath,
+        json({ ...metadataFor("sol"), model_family: "fable-5", model: "vendor/fable-5" }),
+      );
+      const duplicateFamilyRefused = runSealer(join(root, "duplicate-family-refused.json"));
+      expect(duplicateFamilyRefused.status).toBe(1);
+      expect(duplicateFamilyRefused.stderr).toContain("model families must be distinct");
+
+      for (const field of ["model", "harness"] as const) {
+        write(solMetadataPath, json({ ...metadataFor("sol"), [field]: "  " }));
+        const blankRefused = runSealer(join(root, `blank-${field}-refused.json`));
+        expect(blankRefused.status).toBe(1);
+        expect(blankRefused.stderr).toContain(`${field} must be a nonempty string`);
+      }
 
       // Non-overlapping executions refuse: the pair must run concurrently.
       write(
@@ -650,23 +682,35 @@ describe("operator owner-review sealer", () => {
       expect(missingRefused.status).toBe(1);
       write(join(reviewerDirs.fable, "report.md"), reports.fable);
 
-      // The alternate owner-approved tier of each slot seals successfully,
-      // and the actually used slugs land in the signed entries.
+      // Different slugs, families and harnesses seal without an alias catalog.
       const fableMetadataPath = join(reviewerDirs.fable, "metadata.json");
       write(
         fableMetadataPath,
         json({ ...metadataFor("fable"), model: "claude-fable-5-thinking-medium" }),
       );
-      write(solMetadataPath, json({ ...metadataFor("sol"), model: "gpt-5.6-sol-max" }));
-      const alternateOut = join(root, "alternate-tier-attestation.json");
+      write(
+        solMetadataPath,
+        json({
+          ...metadataFor("sol"),
+          model_family: "kimi-k3",
+          model: "moonshot/kimi-k3",
+          harness: "another-harness",
+        }),
+      );
+      const alternateOut = join(root, "alternate-model-attestation.json");
       const alternateResult = runSealer(alternateOut);
       expect(alternateResult.stderr).toBe("");
       expect(alternateResult.status).toBe(0);
       expect(
-        JSON.parse(readFileSync(alternateOut, "utf8")).payload.reviews.map(
-          (review: any) => review.model,
-        ),
-      ).toEqual(["claude-fable-5-thinking-medium", "gpt-5.6-sol-max"]);
+        JSON.parse(readFileSync(alternateOut, "utf8")).payload.reviews.map((review: any) => [
+          review.modelFamily,
+          review.model,
+          review.harness,
+        ]),
+      ).toEqual([
+        ["fable-5", "claude-fable-5-thinking-medium", "cursor"],
+        ["kimi-k3", "moonshot/kimi-k3", "another-harness"],
+      ]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

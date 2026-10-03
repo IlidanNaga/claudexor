@@ -1,4 +1,9 @@
-import { FrozenTaskContractArtifact, type TaskContract } from "@claudexor/schema";
+import {
+  AccessProfile,
+  FrozenTaskContractArtifact,
+  TestCommandGrant,
+  type TaskContract,
+} from "@claudexor/schema";
 import type { verifyAndDeliver } from "@claudexor/delivery";
 import { parse as parseYaml } from "yaml";
 
@@ -16,16 +21,25 @@ export function requiredGateSpecsFromTaskArtifact(
   } catch {
     throw unverifiable("run task contract is malformed or unverifiable");
   }
-  return task.tests.commands.map((command) => ({
-    id: command.id,
-    program: command.program,
-    args: command.args,
-    cwd: command.cwd,
-    envAllowlist: command.envAllowlist,
-    trustRequired: command.trust_required,
-    trustGrant: command.trust_grant,
-    projectRoot: task.repo.root,
-    accessProfile: task.access.effective_profile,
-    required: command.required,
-  }));
+  const access = AccessProfile.safeParse(task.access.effective_profile);
+  if (!access.success) throw unverifiable("run task contract uses a retired access profile");
+  return task.tests.commands.map((command) => {
+    const grant =
+      command.trust_grant === null ? null : TestCommandGrant.safeParse(command.trust_grant);
+    if (grant !== null && !grant.success) {
+      throw unverifiable("run task contract contains a retired test-command grant");
+    }
+    return {
+      id: command.id,
+      program: command.program,
+      args: command.args,
+      cwd: command.cwd,
+      envAllowlist: command.envAllowlist,
+      trustRequired: command.trust_required,
+      trustGrant: grant === null ? null : grant.data,
+      projectRoot: task.repo.root,
+      accessProfile: access.data,
+      required: command.required,
+    };
+  });
 }

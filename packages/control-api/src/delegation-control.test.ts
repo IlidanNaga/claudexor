@@ -101,3 +101,43 @@ describe("cancelDelegationFamily", () => {
     expect(cancelled).toEqual(["job-parent"]);
   });
 });
+
+describe("cancel reason forwarding (X-5)", () => {
+  it("forwards the typed reasonCode to every family member's cancel", async () => {
+    const cancelled: Array<[string, string | undefined]> = [];
+    const daemon = {
+      status: async (id: string) => ({ id, state: "cancelled" }),
+      cancel: async (id: string, reasonCode?: string) => {
+        cancelled.push([id, reasonCode]);
+      },
+      fenceDelegationParent: async () => {},
+    };
+    await cancelDelegationFamily({
+      daemon,
+      parent: { id: "p1", state: "running" },
+      descendantsAfterFence: async () => [{ id: "c1", state: "running" }],
+      pollMs: 1,
+      reasonCode: "owner_task_gone",
+    });
+    expect(cancelled).toContainEqual(["p1", "owner_task_gone"]);
+    expect(cancelled).toContainEqual(["c1", "owner_task_gone"]);
+  });
+
+  it("an absent reasonCode still cancels (wire compatibility)", async () => {
+    const cancelled: Array<[string, string | undefined]> = [];
+    const daemon = {
+      status: async (id: string) => ({ id, state: "cancelled" }),
+      cancel: async (id: string, reasonCode?: string) => {
+        cancelled.push([id, reasonCode]);
+      },
+      fenceDelegationParent: async () => {},
+    };
+    await cancelDelegationFamily({
+      daemon,
+      parent: { id: "p2", state: "running" },
+      descendantsAfterFence: async () => [],
+      pollMs: 1,
+    });
+    expect(cancelled).toContainEqual(["p2", undefined]);
+  });
+});

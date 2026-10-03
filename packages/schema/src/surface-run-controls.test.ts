@@ -2,7 +2,16 @@ import { describe, expect, it } from "vitest";
 import { validateSurfaceRunControls } from "./surface-run-controls.js";
 
 describe("surface run-control applicability", () => {
+  it("validates model-review opt-in and contradictions through the shared owner", () => {
+    expect(validateSurfaceRunControls({ review: "false" })).toMatch(/boolean/);
+    expect(validateSurfaceRunControls({ review: false, attempts: 3 })).toBeNull();
+    expect(validateSurfaceRunControls({ review: true })).toBeNull();
+    expect(
+      validateSurfaceRunControls({ review: false, reviewerPanel: [{ harness: "codex" }] }),
+    ).toMatch(/conflicts/);
+  });
   it.each(["ask", "plan"] as const)("rejects Agent-only controls on %s", (mode) => {
+    expect(validateSurfaceRunControls({ mode, review: false })).toMatch(/review only applies/);
     expect(validateSurfaceRunControls({ mode, reviewerPanel: [{ harness: "codex" }] })).toMatch(
       /reviewerPanel.*Agent/i,
     );
@@ -27,5 +36,20 @@ describe("surface run-control applicability", () => {
         protectedPathApprovals: [{ path: "test/**" }],
       }),
     ).toBeNull();
+  });
+
+  it("accepts and validates the optional strict reviewer profile identity", () => {
+    expect(
+      validateSurfaceRunControls({
+        mode: "agent",
+        reviewerPanel: [{ harness: "cursor", credentialProfileId: "work" }],
+      }),
+    ).toBeNull();
+    expect(
+      validateSurfaceRunControls({
+        mode: "agent",
+        reviewerPanel: [{ harness: "cursor", credentialProfileId: "   " }],
+      }),
+    ).toMatch(/credentialProfileId.*non-empty/i);
   });
 });

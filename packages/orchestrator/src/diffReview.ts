@@ -11,7 +11,7 @@ import type { AuthPreference, ProviderFamily, ReviewFinding } from "@claudexor/s
 import { HarnessUnavailableError, runCapture, runCaptureRaw } from "@claudexor/core";
 import { revalidateFindings, type ReviewerSpec, type reviewCandidate } from "@claudexor/review";
 import { verifySealedEvidencePacket, writeEvidencePacket } from "@claudexor/context";
-import { containsSecretLikeToken, redactSecrets } from "@claudexor/util";
+import { containsSecretLikeToken, ensureDir, redactSecrets, writeJson } from "@claudexor/util";
 
 export interface FrozenDiffReviewInput {
   evidenceDir: string;
@@ -48,11 +48,16 @@ export interface DiffReviewResult {
   reviewCashUsd: number;
   reviewValuationUsd: number;
   reviewUnknownUsd: number;
+  ignoredSettings: string[];
   artifactsDir: string;
 }
 
 export interface DiffReviewDeps {
-  resolveReviewers: (repoRoot: string, authPreference?: AuthPreference) => Promise<ReviewerSpec[]>;
+  resolveReviewers: (
+    repoRoot: string,
+    authPreference?: AuthPreference,
+    onIgnoredSetting?: (detail: string) => void,
+  ) => Promise<ReviewerSpec[]>;
   reviewScoped: (
     input: Omit<Parameters<typeof reviewCandidate>[0], "env">,
   ) => ReturnType<typeof reviewCandidate>;
@@ -90,7 +95,11 @@ export async function runDiffReview(
       );
     }
   }
-  const reviewers = await deps.resolveReviewers(input.repoRoot, input.authPreference);
+  const ignoredSettings: string[] = [];
+  const reviewers = await deps.resolveReviewers(input.repoRoot, input.authPreference, (detail) => {
+    if (!ignoredSettings.includes(detail)) ignoredSettings.push(detail);
+    input.onReviewerEvent?.({ type: "review.preflight", ignored_settings: [detail] });
+  });
   if (reviewers.length === 0) {
     throw new HarnessUnavailableError(
       "no eligible reviewers (doctor-OK, review-capable) are available",
@@ -136,6 +145,12 @@ export async function runDiffReview(
       ? (event) => input.onReviewerEvent?.({ ...event })
       : undefined,
   });
+  if (ignoredSettings.length > 0) {
+    ensureDir(artifactsDir);
+    writeJson(join(artifactsDir, "ignored-settings.json"), {
+      ignored_settings: ignoredSettings,
+    });
+  }
   if (input.frozen) {
     await verifyFrozenReviewPacket(input.repoRoot, input.frozen, false);
   }
@@ -153,6 +168,7 @@ export async function runDiffReview(
     reviewCashUsd: result.reviewCashUsd,
     reviewValuationUsd: result.reviewValuationUsd,
     reviewUnknownUsd: result.reviewUnknownUsd,
+    ignoredSettings,
     artifactsDir,
   };
 }

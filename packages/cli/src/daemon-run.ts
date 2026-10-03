@@ -1,6 +1,4 @@
 import process from "node:process";
-import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
   DaemonClient,
@@ -13,6 +11,11 @@ import {
 import { harnessRuntimeEnv } from "@claudexor/core";
 import { hashJson } from "@claudexor/util";
 import { CliError, controlProblemError } from "./cli-error.js";
+import {
+  CLI_DAEMON_LAUNCH_SOURCES,
+  launchDetachedDaemon,
+  type DetachedDaemonLaunch,
+} from "./daemon-launch.js";
 import { recordEngineSkew, type EngineIdentity } from "./engine-skew.js";
 import {
   controlApiAddress,
@@ -25,6 +28,19 @@ export { projectOutcomeBanner } from "./run-detail-projections.js";
 export { projectRunOutcomeFacts, mergeDaemonRunOutcome } from "./daemon-outcome.js";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+// A real journal-heavy default data root can spend tens of seconds replaying
+// and recovering before the socket and control API are ready. Both explicit
+// `daemon start` and acting-command auto-start use this one bounded budget so
+// neither reports a false failure while the detached daemon is still starting.
+export const DAEMON_START_READY_TIMEOUT_MS = 90_000;
+
+// The bounded TAIL of that fresh-start budget spent waiting for the control
+// API after the daemon socket already answers (C10): the pointer file lands
+// as soon as the control transport binds — on the recovery plane too — so
+// this tail covers only bind/pointer-write latency, never journal replay
+// (that part is behind the socket wait above).
+export const DAEMON_CONTROL_API_FRESH_START_TAIL_MS = 10_000;
 
 /** Is something accepting on the daemon socket right now? (cheap reachability probe). */
 async function daemonReachable(client: DaemonClientType): Promise<boolean> {
@@ -74,11 +90,16 @@ async function controlApiReachable(): Promise<{
  * race to a foreign daemon (macOS app relaunch) this CLI then handshakes (#93).
  */
 export async function ensureDaemon(
-  timeoutMs = 30_000,
+  timeoutMs = DAEMON_START_READY_TIMEOUT_MS,
 ): Promise<{ client: DaemonClientType; addr: ControlApiAddress; engine: EngineIdentity }> {
   const token = ensureToken();
   const socketPath = defaultSocketPath();
   let client = new DaemonClient(socketPath, token);
+  let launch: DetachedDaemonLaunch | null = null;
+  // ONE shared budget for the whole readiness sequence (socket, pointer,
+  // normal admission): a journal-heavy startup may spend most of it in any
+  // single phase, and stacking per-phase budgets would multiply the worst case.
+  const overallDeadline = Date.now() + timeoutMs;
 
   const ok = await daemonReachable(client);
   if (!ok) {
@@ -86,21 +107,14 @@ export async function ensureDaemon(
     const daemonScript =
       process.env["CLAUDEXOR_DAEMON_ENTRY"] ??
       fileURLToPath(new URL("./claudexord.js", import.meta.url));
-    if (!existsSync(daemonScript)) {
-      throw new Error(
-        `cannot auto-start the daemon: entry not found at ${daemonScript} (run \`pnpm build\`)`,
-      );
-    }
-    const child = spawn(process.execPath, [daemonScript], {
-      detached: true,
-      stdio: "ignore",
+    launch = launchDetachedDaemon({
+      entryPath: daemonScript,
+      launchSource: CLI_DAEMON_LAUNCH_SOURCES.ensureDaemon,
       env: harnessRuntimeEnv(),
     });
-    child.unref();
     // Wait for the socket to accept connections (health round-trip).
-    const deadline = Date.now() + timeoutMs;
     let started = false;
-    while (Date.now() < deadline) {
+    while (Date.now() < overallDeadline) {
       await sleep(150);
       // Re-read the token: ensureToken() above generated it before spawn, and the
       // daemon reuses the same per-user token file, so this client stays valid.
@@ -109,27 +123,62 @@ export async function ensureDaemon(
         started = true;
         break;
       }
+      if (launch.failure()) throw launch.callerError("socket_wait", timeoutMs);
     }
-    if (!started) {
-      throw new Error(
-        `daemon did not come up within ${Math.round(timeoutMs / 1000)}s after auto-start (socket ${socketPath}); check \`claudexor daemon logs\``,
-      );
-    }
+    if (!started) throw launch.callerError("socket_wait", timeoutMs);
   }
 
   // The control API (HTTP/SSE viewport over the daemon) is what streams events
   // and resolves the run for apply/decision. Wait for its pointer to be written.
   let reached = await controlApiReachable();
   if (!reached) {
-    const deadline = Date.now() + 10_000;
+    const deadline = Date.now() + DAEMON_CONTROL_API_FRESH_START_TAIL_MS;
     while (Date.now() < deadline && !reached) {
       await sleep(150);
       reached = await controlApiReachable();
+      if (!reached && launch?.failure()) {
+        throw launch.callerError("control_api_wait", DAEMON_CONTROL_API_FRESH_START_TAIL_MS);
+      }
     }
   }
   if (!reached) {
+    if (launch)
+      throw launch.callerError("control_api_wait", DAEMON_CONTROL_API_FRESH_START_TAIL_MS);
     throw new Error(
       `daemon is up but its control API is not reachable (no ${daemonDir()}/control-api.json); it may be disabled by CLAUDEXOR_NO_CONTROL_API=1`,
+    );
+  }
+  launch?.markReady();
+  // C7d × D5: the daemon binds its transport and writes the pointer in
+  // startup stage 3 with product admission still CLOSED (handshake reports
+  // recovery_only), and only stage 4 — journal revalidation, crash-GC, the
+  // full recover(), activation — opens normal admission. On journal-heavy
+  // roots stage 4 takes the tens of seconds this shared start budget exists
+  // for, so a recovery_only handshake here is AMBIGUOUS between "still
+  // starting" and "genuinely blocked". Keep re-handshaking until the budget
+  // expires; a genuinely blocked root never opens normal and still gets the
+  // typed error below (the macOS app connect loop waits the same way).
+  while (reached.engine.servingMode !== "normal" && Date.now() < overallDeadline) {
+    await sleep(150);
+    if (launch?.failure()) throw launch.callerError("normal_admission_wait", timeoutMs);
+    // Absence mid-wait (daemon died or is restarting) keeps the last observed
+    // identity: the loop stays bounded and the deadline names the state.
+    reached = (await controlApiReachable()) ?? reached;
+  }
+  // C7d: acting paths must not proceed into a wall of daemon_recovery_only
+  // route refusals — name the recovery state once, typed and retryable.
+  if (reached.engine.servingMode !== "normal") {
+    throw new CliError(
+      "operational",
+      "daemon is serving recovery only; product routes are closed until journal recovery completes",
+      {
+        code: "daemon_recovery_only",
+        retryable: true,
+        requiredActions: [
+          "inspect `claudexor daemon logs` and the /recovery control surface",
+          "retry after journal recovery completes",
+        ],
+      },
     );
   }
   return { client, addr: reached.addr, engine: reached.engine };
@@ -147,6 +196,9 @@ export async function ensureDaemon(
 export async function connectDaemonIfRunning(): Promise<{
   client: DaemonClientType;
   addr: ControlApiAddress;
+  /** Handshake identity incl. servingMode (C7): read-only paths stay
+   * connectable to a recovery-only daemon and report the mode honestly. */
+  engine: EngineIdentity;
 } | null> {
   const token = readToken();
   if (!token) return null;
@@ -154,7 +206,7 @@ export async function connectDaemonIfRunning(): Promise<{
   if (!(await daemonReachable(client))) return null;
   const reached = await controlApiReachable();
   if (!reached) return null;
-  return { client, addr: reached.addr };
+  return { client, addr: reached.addr, engine: reached.engine };
 }
 
 /**
@@ -164,13 +216,23 @@ export async function connectDaemonIfRunning(): Promise<{
  * propagates — waiting cannot fix an incompatible daemon (#93).
  */
 export async function waitForDaemonReady(
-  timeoutMs = 15_000,
-): Promise<{ client: DaemonClientType; addr: ControlApiAddress } | null> {
+  timeoutMs = DAEMON_START_READY_TIMEOUT_MS,
+  abort?: () => Error | null,
+): Promise<{ client: DaemonClientType; addr: ControlApiAddress; engine: EngineIdentity } | null> {
   const deadline = Date.now() + timeoutMs;
+  // D5: a reachable daemon may still be mid-startup (stage 3 binds the
+  // transport recovery-only; stage 4 opens normal admission after journal
+  // recovery). Report the TERMINAL mode, not the transient stage-3 value:
+  // keep polling a recovery_only handshake until it opens normal or the
+  // budget expires — a genuinely blocked root is then reported honestly.
+  let last: Awaited<ReturnType<typeof connectDaemonIfRunning>> = null;
   for (;;) {
     const conn = await connectDaemonIfRunning();
-    if (conn) return conn;
-    if (Date.now() >= deadline) return null;
+    if (conn?.engine.servingMode === "normal") return conn;
+    last = conn ?? last;
+    const failure = abort?.();
+    if (failure) throw failure;
+    if (Date.now() >= deadline) return last;
     await sleep(150);
   }
 }
@@ -272,7 +334,13 @@ export async function enqueueAndAwait(
     void controlApiFetch(addr, `/runs/${encodeURIComponent(jobId)}/control`, {
       method: "POST",
       headers: { Authorization: `Bearer ${addr.token}`, "content-type": "application/json" },
-      body: JSON.stringify({ control: { kind: "cancel", reason: "ctrl-c on the waiting CLI" } }),
+      body: JSON.stringify({
+        control: {
+          kind: "cancel",
+          reason: "ctrl-c on the waiting CLI",
+          reason_code: "user_cancelled",
+        },
+      }),
     })
       .then(async (res) => {
         if (!res.ok) {

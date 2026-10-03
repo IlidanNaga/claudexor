@@ -62,7 +62,12 @@ describe("release SPDX SBOM", () => {
           .filter((relationship: any) => relationship.relationshipType === "CONTAINS")
           .map((relationship: any) => relationship.relatedSpdxElement),
       );
-      const runtimeNames = ["@playwright/mcp", "claudexor-process-identity", "Node.js runtime"];
+      const runtimeNames = [
+        "@playwright/mcp",
+        "claudexor-conpty-helper",
+        "claudexor-process-identity",
+        "Node.js runtime",
+      ];
       for (const name of runtimeNames) {
         const runtime = document.packages.find((pkg: any) => pkg.name === name);
         expect(runtime, name).toBeDefined();
@@ -209,11 +214,13 @@ function appFixture(packagedBrowserVersion = browserVersion) {
       "cli.js",
     ),
     "claudexor-process-identity": join(resources, "native", "claudexor-process-identity"),
+    "claudexor-conpty-helper": join(resources, "native", "claudexor-conpty-helper.exe"),
     "Node.js runtime": join(resources, "node"),
   };
   const contents = {
     "@playwright/mcp": "fixture:@playwright/mcp",
     "claudexor-process-identity": "fixture:claudexor-process-identity",
+    "claudexor-conpty-helper": fakePe(),
     "Node.js runtime": `#!/bin/sh\nprintf 'v${nodeVersion}\\n'\n`,
   };
   for (const [name, path] of Object.entries(files)) {
@@ -245,4 +252,16 @@ function appFixture(packagedBrowserVersion = browserVersion) {
       ]),
     ),
   };
+}
+
+function fakePe(): Buffer {
+  const bytes = Buffer.alloc(512);
+  bytes.write("MZ", 0, "ascii");
+  bytes.writeUInt32LE(0x80, 0x3c);
+  bytes.write("PE\0\0", 0x80, "ascii");
+  bytes.writeUInt16LE(0x8664, 0x84);
+  bytes.writeUInt16LE(0xf0, 0x94);
+  bytes.writeUInt16LE(0x0002, 0x96);
+  bytes.writeUInt16LE(0x020b, 0x98);
+  return bytes;
 }

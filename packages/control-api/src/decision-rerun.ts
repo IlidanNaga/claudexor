@@ -2,6 +2,7 @@ import type { ServerResponse } from "node:http";
 import {
   ControlRunDecisionResponse,
   ControlRunStartRequest,
+  restoreRecordedRunReviewRequest,
   type ControlRunDecisionRequest,
 } from "@claudexor/schema";
 import type {
@@ -57,11 +58,13 @@ export async function rerunWithFeedback(
   let params: ControlRunStartRequest;
   try {
     params = runStart.normalizeRunStart(
-      ControlRunStartRequest.parse({
-        ...original,
-        prompt: `${originalPrompt}\n\n## Reviewer feedback to address (operator decision)\n${body.feedback}`,
-        parentRunId: rec.runId ?? rec.id,
-      }),
+      restoreRecordedRunReviewRequest(
+        ControlRunStartRequest.parse({
+          ...original,
+          prompt: `${originalPrompt}\n\n## Reviewer feedback to address (operator decision)\n${body.feedback}`,
+          parentRunId: rec.runId ?? rec.id,
+        }),
+      ),
     );
   } catch (error) {
     return ctx.json(res, 400, {

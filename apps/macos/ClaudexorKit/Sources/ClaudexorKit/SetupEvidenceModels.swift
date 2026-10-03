@@ -19,9 +19,11 @@ public struct SetupProcessIdentityKnown: Codable, Sendable, Equatable {
         source = try container.decode(String.self, forKey: .source)
         startToken = try container.decode(String.self, forKey: .startToken)
         processGroupId = try container.decode(Int.self, forKey: .processGroupId)
-        try require(status == "known" && pid > 0 && ["linux", "darwin"].contains(platform)
-                    && ["procfs_stat", "proc_pidinfo"].contains(source) && !startToken.isEmpty
-                    && processGroupId > 0, decoder: decoder, "Invalid known process identity")
+        try require(status == "known" && pid > 0
+                    && ["linux", "darwin", "win32"].contains(platform)
+                    && ["procfs_stat", "proc_pidinfo", "win32_process_times"].contains(source)
+                    && !startToken.isEmpty && processGroupId > 0,
+                    decoder: decoder, "Invalid known process identity")
     }
 }
 
@@ -95,7 +97,7 @@ public struct SetupExecutableEvidence: Codable, Sendable, Equatable {
         mode = try container.decode(Int.self, forKey: .mode)
         device = try container.decode(String.self, forKey: .device)
         inode = try container.decode(String.self, forKey: .inode)
-        try require(realpath.hasPrefix("/") && isSHA256(sha256) && size >= 0 && mode >= 0
+        try require(isAbsolutePath(realpath) && isSHA256(sha256) && size >= 0 && mode >= 0
                     && isUnsignedDecimal(device) && isUnsignedDecimal(inode), decoder: decoder,
                     "Invalid setup executable evidence")
     }
@@ -130,6 +132,10 @@ public enum SetupNativeCommandErrorCode: String, Codable, Sendable {
     case permitTimeout = "permit_timeout"
     case spawnFailed = "spawn_failed"
     case deviceAuthUnsupported = "device_auth_unsupported"
+    case terminalTransportUnavailable = "terminal_transport_unavailable"
+    case terminalTransportUnsupported = "terminal_transport_unsupported"
+    case terminalTransportProbeFailed = "terminal_transport_probe_failed"
+    case terminalTransportFailed = "terminal_transport_failed"
 }
 
 public struct SetupNativeCommandReceipt: Codable, Sendable, Equatable {
@@ -192,6 +198,12 @@ public struct SetupNativeCommandReceipt: Codable, Sendable, Equatable {
         if errorCode == .deviceAuthUnsupported {
             try require(!commandStarted, decoder: decoder,
                         "Device auth unsupported means the vendor command was never started")
+        }
+        if let errorCode,
+           [.terminalTransportUnavailable, .terminalTransportUnsupported,
+            .terminalTransportProbeFailed].contains(errorCode) {
+            try require(!commandStarted, decoder: decoder,
+                        "Preflight terminal transport failure cannot claim command start")
         }
     }
 

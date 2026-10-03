@@ -8,6 +8,8 @@ export const QuotaSource = z
     "claude_statusline",
     "claude_api_retry",
     "claude_oauth_usage",
+    "agy_command_usage",
+    "cursor_rate_limit",
   ])
   .describe("Machine-readable source of quota evidence, classified by schema-owned traits.");
 export type QuotaSource = z.infer<typeof QuotaSource>;
@@ -21,7 +23,7 @@ export interface QuotaSourceTraits {
   readonly vendorAuthenticated: boolean;
   /** A missing/stale primary observation from this harness creates daemon
    * refresh demand. Reactive and spool sources deliberately use null. */
-  readonly refreshDemandHarness: "claude" | "codex" | null;
+  readonly refreshDemandHarness: "claude" | "codex" | "agy" | null;
   /** At least one registered top-level quota refresher can produce this
    * source. This is independent of whether it satisfies refresh demand. */
   readonly producedByRefresher: boolean;
@@ -53,18 +55,59 @@ export const QUOTA_SOURCE_TRAITS = {
     refreshDemandHarness: "claude",
     producedByRefresher: true,
   },
+  agy_command_usage: {
+    // agy's `/quota` print-mode command is authenticated with the profile's
+    // own token, produced by a top-level refresher, and creates refresh demand
+    // for agy (its profiles only — agy has no default subject, PLAN Л-4).
+    vendorAuthenticated: true,
+    refreshDemandHarness: "agy",
+    producedByRefresher: true,
+  },
+  cursor_rate_limit: {
+    // Reactive spool evidence classified from cursor-agent's vendor-limit
+    // prose (A1/A4): cursor exposes no quota API, so no refresher can produce
+    // or refresh this source — like claude_api_retry it exists only while a
+    // typed `rate_limit` event's cooldown does.
+    vendorAuthenticated: false,
+    refreshDemandHarness: null,
+    producedByRefresher: false,
+  },
 } as const satisfies Record<QuotaSource, QuotaSourceTraits>;
 
 export function quotaSourceTraits(source: QuotaSource): QuotaSourceTraits {
   return QUOTA_SOURCE_TRAITS[source];
 }
 
-export function quotaRefreshDemandHarnesses(): Array<"claude" | "codex"> {
+/** Harness → source label for reactive `rate_limit` cooldown evidence. This
+ * map IS the daemon's cooldown-ingest allowlist and its expiry-predicate
+ * scope: agy stays deliberately absent because its adapter emits no
+ * `rate_limit` event, and a branch with no producer is a dead knob
+ * (INV-022/023) — a harness joins in the same change that makes its adapter
+ * emit one (cursor joined with the A1 retry-signals classifier). */
+export const REACTIVE_COOLDOWN_SOURCE: Partial<Record<string, QuotaSource>> = {
+  codex: "codex_rollout",
+  claude: "claude_api_retry",
+  cursor: "cursor_rate_limit",
+};
+
+/** Durable-journal source label the strict v3.2.0 rollback runtime can parse.
+ * `cursor_rate_limit` postdates that enum, so a base upsert record carrying it
+ * would crash a rolled-back engine's replay; the base record carries the
+ * nearest v3.2.0 vocabulary instead (claude_api_retry has the same
+ * reactive-spool trait row), while the paired scoped-prepare record preserves
+ * the true source for current runtimes. `agy_command_usage` also postdates
+ * v3.2.0 but predates this mapping: remapping it now would orphan its already
+ * journaled prepare/commit hashes, so it stays a disclosed rollback residual. */
+export function legacyV320QuotaSource(source: QuotaSource): QuotaSource {
+  return source === "cursor_rate_limit" ? "claude_api_retry" : source;
+}
+
+export function quotaRefreshDemandHarnesses(): Array<"claude" | "codex" | "agy"> {
   return [
     ...new Set(
       Object.values(QUOTA_SOURCE_TRAITS)
         .map((traits) => traits.refreshDemandHarness)
-        .filter((harness): harness is "claude" | "codex" => harness !== null),
+        .filter((harness): harness is "claude" | "codex" | "agy" => harness !== null),
     ),
   ].sort();
 }
@@ -107,6 +150,16 @@ export const QuotaConstraint = z
      * list is the producer's canonical model-id/alias scope, so a
      * model-specific cap never cools a different model on the same subject. */
     applies_to_models: z.array(Id).nullable().optional(),
+    /**
+     * Whether this MODEL-SCOPED window also governs a run that names no model.
+     * Default (absent) is the conservative answer: a scoped window cannot
+     * refuse a route whose concrete model is unknowable before spawn. A source
+     * sets it when the vendor's unspecified-model route provably consumes THIS
+     * window — the case where every window is scoped, so the conservative
+     * default would leave an exhausted subscription unrefusable and its
+     * profile rotation unreachable.
+     */
+    applies_to_unspecified_model: z.boolean().optional(),
     used_ratio: z.number().min(0).max(1).nullable(),
     window_seconds: z.number().positive().nullable(),
     resets_at: z.string().datetime({ offset: true }).nullable(),
@@ -142,9 +195,45 @@ export const QuotaAbsenceReason = z
      * network) and from `not_logged_in` (there IS a stored login): the local
      * store looks healthy while the token behind it is no longer honored. */
     "auth_revoked",
+    /** The vendor rate-limited the QUOTA POLL itself (429). The credential is
+     * not dead and the plan window is not proven spent — this is poll-pacing
+     * evidence only and must never be journaled as a quota cooldown (a
+     * throttled poll is not an exhausted window). The row carries
+     * `retry_after_ms` when the vendor sent a parseable Retry-After. */
+    "rate_limited",
+    /** A SIBLING candidate's probe hit the vendor rate limit in this same
+     * cycle, so this candidate was not probed at all (short-circuit: keeping
+     * on probing would hammer the endpoint that just said stop). Distinct
+     * from `rate_limited` — this subject's own state is honestly unknown,
+     * never fabricated from a sibling's 429. */
+    "probe_skipped_rate_limited",
+    /** The subject was not re-probed because its vendor's poll rate-limit
+     * cooldown is active: the POLL is paused, not the plan window. A derived
+     * gap row so a suppressed vendor's subjects never fall silent — surfaces
+     * can say "data is stale, polling paused until T", and exhaustion
+     * readers stay fail-open instead of promoting a stale spent window into
+     * "window exhausted". */
+    "poll_paced",
+    /** The current platform policy allows only one enabled binding, but the
+     * persisted registry contains several. No row was selected or probed. */
+    "credential_profile_ambiguous",
   ])
-  .describe("Why a registered subject has no quota snapshot, in the source's own vocabulary.");
+  .describe(
+    "Why a registered subject has no fresh quota snapshot, in the source's own vocabulary.",
+  );
 export type QuotaAbsenceReason = z.infer<typeof QuotaAbsenceReason>;
+
+/** Refresh-gap reasons may coexist with a STALE snapshot: the last-known
+ * data stays visible alongside a failed, skipped, or paced refresh.
+ * A FRESH snapshot still silences these reasons. Credential rejection
+ * and platform ambiguity retain their separate evidence-retirement rules. */
+export const QUOTA_GAP_ABSENCE_REASONS: ReadonlySet<QuotaAbsenceReason> =
+  new Set<QuotaAbsenceReason>([
+    "refresh_failed",
+    "rate_limited",
+    "probe_skipped_rate_limited",
+    "poll_paced",
+  ]);
 
 export const QuotaAbsence = z
   .object({
@@ -152,9 +241,16 @@ export const QuotaAbsence = z
     reason: QuotaAbsenceReason,
     detail: z.string().nullable().default(null),
     observed_at: z.string().datetime({ offset: true }),
+    /** For `rate_limited` only: the vendor's Retry-After translated to
+     * milliseconds from `observed_at`. Present only when the header arrived
+     * and parsed (Anthropic does not always send it); absent = no vendor
+     * floor is known and pacing falls back to its own exponential backoff. */
+    retry_after_ms: z.number().int().nonnegative().optional(),
   })
   .strict()
-  .describe("A registered subject's typed missing-snapshot — absence is stated, never inferred.");
+  .describe(
+    "A registered subject's typed quota observation gap; may accompany stale last-known data.",
+  );
 export type QuotaAbsence = z.infer<typeof QuotaAbsence>;
 
 export const QuotaAvailabilityState = z
@@ -172,7 +268,7 @@ export const QuotaModelScopedExhaustion = z
   })
   .strict()
   .describe(
-    "A spent or cooling window that applies only to the named models. Without a requested model it never sets the whole subject exhausted; when the request names a model it covers, it blocks that request too (and is then also listed in blocking_constraints). resets_at is its earliest known release instant (null = unknown).",
+    "A spent or cooling window that applies only to the named models. Without a requested model only a window that DECLARES it governs the unspecified-model route can exhaust the subject; when the request names a model it covers, it blocks that request too (and is then also listed in blocking_constraints). resets_at is its earliest known release instant (null = unknown).",
   );
 export type QuotaModelScopedExhaustion = z.infer<typeof QuotaModelScopedExhaustion>;
 
@@ -224,6 +320,17 @@ export const ControlQuotaRefreshRequest = z
   );
 export type ControlQuotaRefreshRequest = z.infer<typeof ControlQuotaRefreshRequest>;
 
+export const QuotaRefreshSkipped = z
+  .object({
+    vendor: Id,
+    not_before: z.string().datetime({ offset: true }),
+  })
+  .strict()
+  .describe(
+    "One vendor lane a refresh cycle did not re-fetch because its poll rate-limit cooldown is active; its snapshots/absences in the same response are last-known registry data.",
+  );
+export type QuotaRefreshSkipped = z.infer<typeof QuotaRefreshSkipped>;
+
 export const ControlQuotaResponse = z
   .object({
     snapshots: z.array(ControlQuotaSnapshot),
@@ -231,9 +338,14 @@ export const ControlQuotaResponse = z
       .array(QuotaAbsence)
       .default([])
       .describe(
-        "Every registered subject reports either a snapshot or a typed absence — absence is never silent emptiness (zen: absence ≠ empty).",
+        "Every registered subject reports a snapshot or a typed absence; a refresh gap may coexist with a stale last-known snapshot.",
       ),
     refreshed_at: z.string().datetime({ offset: true }).nullable(),
+    /** Additive disclosure: present only on refresh responses that skipped at
+     * least one vendor's fan-out for an active poll rate-limit cooldown
+     * (foreground refreshes honor the pacer instead of hammering a vendor
+     * that just said 429). Absent on plain reads and unskipped refreshes. */
+    refresh_skipped: z.array(QuotaRefreshSkipped).optional(),
   })
   .strict()
   .describe("Current quota snapshots without a fabricated aggregate.");
@@ -326,7 +438,17 @@ export function quotaSnapshotAvailability(
       });
     }
     if (release === null) continue;
-    if (scoped && (model === null || !modelScopeMatches(scope, model))) continue;
+    // The projection and the router must answer the SAME question: a scoped
+    // window that declares it governs the unspecified-model route blocks a
+    // bare run, or the Accounts card would read "available" for an account the
+    // router is already refusing.
+    if (
+      scoped &&
+      (model === null
+        ? constraint.applies_to_unspecified_model !== true
+        : !modelScopeMatches(scope, model))
+    )
+      continue;
     blocking.push(constraint.id);
     if (exhausted) sawExhausted = true;
     if (earliestRelease === null || release.at < earliestRelease.at) {

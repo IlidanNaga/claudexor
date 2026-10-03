@@ -29,6 +29,7 @@ import {
   sha256,
 } from "@claudexor/util";
 import { parseChatCompletion, parseModelsList } from "./parse.js";
+import { isTerminalProviderCompletion, providerCompletionErrorEvent } from "./providerError.js";
 
 /** A stalled remote endpoint must not hang a run forever. */
 const RAW_API_TIMEOUT_MS = 180_000;
@@ -119,6 +120,11 @@ function buildPatchEnvelope(
 export interface RawApiConfig {
   id?: string;
   providerFamily?: ProviderFamily;
+  /**
+   * Declared unit for this endpoint's provider-reported `usage.cost`;
+   * absent leaves the extension untrusted.
+   */
+  providerUsageCostUnit?: "usd";
   baseUrl?: string;
   keyEnv?: string;
   defaultModel?: string;
@@ -132,6 +138,7 @@ export interface RawApiConfig {
 export function createRawApiAdapter(config: RawApiConfig = {}): HarnessAdapter {
   const id = config.id ?? "raw-api";
   const providerFamily = config.providerFamily ?? "openai";
+  const providerUsageCostUnit = config.providerUsageCostUnit;
   const baseUrl =
     config.baseUrl ?? process.env.CLAUDEXOR_RAWAPI_BASE_URL ?? "https://api.openai.com/v1";
   const keyEnv =
@@ -156,7 +163,7 @@ export function createRawApiAdapter(config: RawApiConfig = {}): HarnessAdapter {
     return resolveSecret(id) ?? undefined;
   }
 
-  return {
+  const adapter: HarnessAdapter = {
     id,
 
     async discover(): Promise<HarnessManifest> {
@@ -202,7 +209,7 @@ export function createRawApiAdapter(config: RawApiConfig = {}): HarnessAdapter {
               { source: "api_key_env", kind: "http_header", relocatable_by: ["ENV"] },
             ],
           },
-          access_control: { readonly_mechanism: "none" },
+          access_control: { readonly_mechanism: "none", write_mechanism: "none" },
           isolation: { supported_containment: ["env_or_file_injection"] },
           attachment_inputs: [
             {
@@ -446,6 +453,40 @@ export function createRawApiAdapter(config: RawApiConfig = {}): HarnessAdapter {
         }
         const json = await res.json();
         const parsed = parseChatCompletion(json);
+        const usage = {
+          input_tokens: parsed.usage.input_tokens,
+          output_tokens: parsed.usage.output_tokens,
+          ...(providerUsageCostUnit === "usd" && parsed.usage.provider_cost !== undefined
+            ? {
+                cost_usd: parsed.usage.provider_cost,
+                ...(spec.processing
+                  ? {
+                      cost_basis: {
+                        kind: "cash" as const,
+                        source: "raw_api_declared_provider_usage_usd",
+                      },
+                    }
+                  : {}),
+              }
+            : {}),
+        };
+        if (isTerminalProviderCompletion(parsed)) {
+          yield providerCompletionErrorEvent(id, spec.session_id, nowIso(), parsed);
+          yield {
+            type: "usage",
+            session_id: spec.session_id,
+            ts: nowIso(),
+            usage,
+            observed_model: parsed.model ?? undefined,
+          };
+          yield {
+            type: "completed",
+            session_id: spec.session_id,
+            ts: nowIso(),
+            observed_model: parsed.model ?? undefined,
+          };
+          return;
+        }
         if (spec.intent === "implement" || spec.intent === "synthesize") {
           if (!spec.raw_context_packet) {
             yield {
@@ -495,10 +536,7 @@ export function createRawApiAdapter(config: RawApiConfig = {}): HarnessAdapter {
           type: "usage",
           session_id: spec.session_id,
           ts: nowIso(),
-          usage: {
-            input_tokens: parsed.usage.input_tokens,
-            output_tokens: parsed.usage.output_tokens,
-          },
+          usage,
           observed_model: parsed.model ?? undefined,
         };
         yield {
@@ -524,6 +562,32 @@ export function createRawApiAdapter(config: RawApiConfig = {}): HarnessAdapter {
       }
     },
   };
+  const run = adapter.run;
+  adapter.run = async function* (spec) {
+    if (!spec.processing && spec.processing_preference)
+      spec = {
+        ...spec,
+        processing: {
+          requested: spec.processing_preference,
+          submitted: null,
+          submittedNative: null,
+          observed: "unknown",
+          observedNative: [],
+          reason: "processing_control_unavailable; compatible_endpoint_preserved",
+          source: id,
+        },
+        processing_cost_basis: { nativeMode: null, kind: "unknown", source: id },
+      };
+    // Preserve compatible endpoints without guessing flags from the provider-family label.
+    for await (const event of run(spec)) {
+      if (spec.processing) {
+        event.processing = spec.processing;
+        event.processing_cost_basis = spec.processing_cost_basis;
+      }
+      yield event;
+    }
+  };
+  return adapter;
 }
 
 function resetsAtFromRetryAfter(header: string): string | null {

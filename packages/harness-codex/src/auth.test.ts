@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HarnessRunSpec, type HarnessEvent } from "@claudexor/schema";
 import type { CliRunLoopOptions } from "@claudexor/core";
 import {
@@ -283,7 +283,8 @@ describe("ensureCodexApiAuth", () => {
     });
     expect(args.slice(0, 4)).toEqual(["exec", "resume", "th-123", "--json"]);
     expect(args).toContain(CODEX_FILE_AUTH_OVERRIDE);
-    expect(args[args.length - 1]).toBe("follow up");
+    expect(args[args.length - 1]).toBe("-");
+    expect(args).not.toContain("follow up");
   });
 
   it("forwards model and reasoning effort as separate Codex config", () => {
@@ -313,7 +314,7 @@ describe("ensureCodexApiAuth", () => {
       'model_reasoning_effort="xhigh"',
       "-c",
       'web_search="cached"',
-      "review",
+      "-",
     ]);
   });
 });
@@ -523,6 +524,9 @@ describe("Codex transport-aware native doctor", () => {
           ]),
         },
         isolation: { supported_containment: expect.arrayContaining(["host_user_context"]) },
+        // turn/steer into the active turn, recorded on codex-cli 0.156.1
+        // (fixtures/app-server/recorded-steer-0.156.1.jsonl).
+        live_input: "mid_turn",
       },
     });
     expect(manifest.capability_profile.auth.credential_transports).not.toContainEqual({
@@ -571,19 +575,36 @@ describe("Codex transport-aware native doctor", () => {
     expect(cliOptions?.env?.HOME).toBe("/scoped/home");
     expect(cliOptions?.env?.CODEX_HOME).toBe(defaultNativeCodexHome());
     expect(cliOptions?.env?.OPENAI_API_KEY).toBeNull();
+    expect(cliOptions?.input).toBe("review");
+    expect(cliOptions?.args).not.toContain("review");
   });
 });
 
 describe("Codex missing-CLI diagnosis", () => {
+  // This fixture models PATH lookup, independently of an operator's explicit
+  // binary override. Version/advisory I/O is injected, so no vendor is probed.
+  async function pathMissReport(advisory: string | null) {
+    const previous = process.env.CLAUDEXOR_CODEX_BIN;
+    delete process.env.CLAUDEXOR_CODEX_BIN;
+    vi.resetModules();
+    try {
+      const { createCodexAdapter: isolatedAdapter } = await import("./index.js");
+      const adapter = isolatedAdapter({
+        detectVersion: async () => null,
+        brokenInstallAdvisory: () => advisory,
+      });
+      return await adapter.doctor({ cwd: "/repo", env: {}, fresh: true });
+    } finally {
+      if (previous === undefined) delete process.env.CLAUDEXOR_CODEX_BIN;
+      else process.env.CLAUDEXOR_CODEX_BIN = previous;
+      vi.resetModules();
+    }
+  }
   const ADVISORY =
     "Homebrew still lists codex as installed (/opt/homebrew/Caskroom/codex) but no runnable binary is on the harness PATH — broken install; run `brew reinstall --cask codex`";
 
   it("doctor surfaces the broken-install advisory in the installed check and reasons", async () => {
-    const adapter = createCodexAdapter({
-      detectVersion: async () => null,
-      brokenInstallAdvisory: () => ADVISORY,
-    });
-    const report = await adapter.doctor({ cwd: "/repo", env: {}, fresh: true });
+    const report = await pathMissReport(ADVISORY);
     expect(report.status).toBe("unavailable");
     expect(report.checks).toEqual([
       { id: "installed", status: "fail", detail: `codex not found on PATH — ${ADVISORY}` },
@@ -595,11 +616,7 @@ describe("Codex missing-CLI diagnosis", () => {
   });
 
   it("doctor keeps the plain dead-end wording when there is no advisory evidence", async () => {
-    const adapter = createCodexAdapter({
-      detectVersion: async () => null,
-      brokenInstallAdvisory: () => null,
-    });
-    const report = await adapter.doctor({ cwd: "/repo", env: {}, fresh: true });
+    const report = await pathMissReport(null);
     expect(report.checks).toEqual([
       { id: "installed", status: "fail", detail: "codex not found on PATH" },
     ]);

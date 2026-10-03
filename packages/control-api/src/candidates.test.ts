@@ -54,6 +54,7 @@ describe("candidatesFor ranking scorecard projection (QA-028)", () => {
     const runDir = runDirWith({ a01: "attempt_id: a01\nharness_id: codex\n" });
     const cards = candidatesFor(runDir, null);
     expect(cards[0]?.rankingAxes).toBeNull();
+    expect(cards[0]?.diffstat).toBeNull();
   });
 
   describe("applied confinement, as the CALLER of a delegated run sees it", () => {

@@ -3,6 +3,7 @@ import {
   parseReviewerEffortMap,
   parseReviewerModelMap,
   parseReviewerPanel,
+  parseReviewerPanelJson,
 } from "./reviewer-options.js";
 
 /**
@@ -136,5 +137,18 @@ describe("reviewer option parsing", () => {
     expect(parseReviewerPanel("codex=gpt-9:hyper", withHyper)).toEqual([
       { harness: "codex", model: "gpt-9", effort: "hyper" },
     ]);
+  });
+
+  it("parses strict credential pins only through the structured spelling", () => {
+    expect(
+      parseReviewerPanelJson(
+        '[{"harness":"cursor","model":"grok-4.6","credentialProfileId":"review-cursor"},{"harness":"claude","effort":"high"}]',
+      ),
+    ).toEqual([
+      { harness: "cursor", model: "grok-4.6", credentialProfileId: "review-cursor" },
+      { harness: "claude", effort: "high" },
+    ]);
+    expect(() => parseReviewerPanelJson("not-json")).toThrow(/expected a JSON array/);
+    expect(() => parseReviewerPanelJson("[]")).toThrow(/at least one reviewer/);
   });
 });

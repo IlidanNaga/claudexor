@@ -102,3 +102,17 @@ export function cashEstimatedFromLedgerEvent(payload: Record<string, unknown>): 
     payload["valuation_usd"] > 0;
   return estimated && !legacyExactZero;
 }
+
+/** A new component-aware ledger receipt distinguishes unknown from estimated
+ * zero. Absence preserves historical projection behavior. */
+export function cashKnowledgeFromEvents(
+  events: Record<string, unknown>[],
+): "exact" | "estimated" | "unknown" | undefined {
+  let knowledge: "exact" | "estimated" | "unknown" | undefined;
+  for (const event of events) {
+    if (event["type"] !== "budget.cash") continue;
+    const value = eventPayload(event)["cash_knowledge"];
+    if (value === "exact" || value === "estimated" || value === "unknown") knowledge = value;
+  }
+  return knowledge;
+}

@@ -38,6 +38,7 @@ DIST="$MACOS_DIR/dist"
 # apps. Final artifacts (DMG/ZIP/sha256/SBOM) stay directly in $DIST.
 BUNDLES="$DIST/bundle.noindex"
 APP="$BUNDLES/Claudexor.app"
+LEGACY_APP="$DIST/Claudexor.app"
 
 # Version SSOT is the generated CLAUDEXOR_VERSION constant (scripts/gen-version.mjs
 # from the root package.json). Read it so the bundle / DMG version can't silently
@@ -57,6 +58,8 @@ BUILD="${CLAUDEXOR_BUILD:-$(date +%Y%m%d%H%M)}"
 BUILD_SHA="${CLAUDEXOR_BUILD_SHA:-$(cd "$REPO_ROOT" && git rev-parse HEAD 2>/dev/null || echo unknown)}"
 export CLAUDEXOR_BUILD_SHA="$BUILD_SHA"
 DEV_REMOTE_RUNTIME="${CLAUDEXOR_DEV_REMOTE_RUNTIME:-0}"
+WIN32_CONPTY_EXPECTED_SHA256="${CLAUDEXOR_WIN32_CONPTY_SHA256:-}"
+REQUIRE_WIN32_CONPTY="${CLAUDEXOR_REQUIRE_WIN32_CONPTY_HELPER:-0}"
 if [ "$DEV_REMOTE_RUNTIME" = "1" ] && [ -n "${SIGN_IDENTITY:-}" ]; then
   echo "ERROR: CLAUDEXOR_DEV_REMOTE_RUNTIME is for unsigned local bundles only" >&2
   exit 1
@@ -81,7 +84,7 @@ BIN="$APP_PKG/.build/release/ClaudexorApp"
 
 echo "==> Assembling $APP"
 mkdir -p "$BUNDLES"
-rm -rf "$APP"
+rm -rf "$LEGACY_APP" "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/ClaudexorApp"
 
@@ -173,108 +176,25 @@ if [ "${CLAUDEXOR_NO_ENGINE_BUNDLE:-0}" != "1" ]; then
   SETUP_RUNNER_JS="$APP/Contents/Resources/setup-login-runner.cjs"
   BROWSER_MCP_DIR="$APP/Contents/Resources/browser-mcp-runtime"
   BROWSER_MCP_JS="$BROWSER_MCP_DIR/dist/browser-mcp-launcher.js"
-  echo "==> Building engine workspace (pnpm -w build)"
-  ( cd "$REPO_ROOT" && pnpm -w build >/dev/null )
-  echo "==> Bundling claudexord (esbuild single-file)"
-  # ESM->CJS shim: esbuild rewrites `import.meta.url` to undefined in CJS
-  # output, which crashes createRequire(import.meta.url) at load (the v1.0.0
-  # DMG shipped that crash). Define it to a banner-computed file URL so the
-  # bundle behaves like the real ESM module.
-  # `--define:process.env.CLAUDEXOR_BUILD_SHA` inlines the build sha as a string
-  # literal so engineBuildIdentity() reports a real sha in the packaged daemon
-  # (QA-002). build-runtime-closure.mjs re-tars THIS stamped bundle and asserts
-  # the same sha, so the bundled and downloaded closures are stamped identically.
-  if ( cd "$REPO_ROOT" && pnpm exec esbuild packages/cli/dist/claudexord.js \
-        --bundle --platform=node --format=cjs --target=node22 \
-        --banner:js="const CLAUDEXOR_BUNDLE_URL = require('node:url').pathToFileURL(__filename).href;" \
-        --define:import.meta.url=CLAUDEXOR_BUNDLE_URL \
-        --define:process.env.CLAUDEXOR_BUILD_SHA="\"$BUILD_SHA\"" \
-        --outfile="$ENGINE_JS" >/dev/null ); then
-    echo "    claudexord.bundle.cjs $(wc -c < "$ENGINE_JS" | tr -d ' ') bytes"
-  else
-    echo "ERROR: esbuild bundle failed; cannot build self-contained app" >&2
+  ENGINE_RESOURCES="${CLAUDEXOR_ENGINE_RESOURCES:-}"
+  if [ -z "$ENGINE_RESOURCES" ]; then
+    ENGINE_RESOURCES="$DIST/engine-resources.noindex"
+    rm -rf "$ENGINE_RESOURCES"
+    bash "$REPO_ROOT/scripts/build-engine-resources.sh" "$ENGINE_RESOURCES"
+  fi
+  # One stage owns bundling, deployment and native-code signing. The app only
+  # copies its bytes; the closure consumes the same stage directly in CI.
+  /usr/bin/ditto "$ENGINE_RESOURCES" "$APP/Contents/Resources"
+  WIN32_CONPTY_SHA256=""
+  if [ -f "$APP/Contents/Resources/native/claudexor-conpty-helper.exe" ]; then
+    WIN32_CONPTY_SHA256="$(shasum -a 256 "$APP/Contents/Resources/native/claudexor-conpty-helper.exe" | awk '{print $1}')"
+    node "$REPO_ROOT/scripts/verify-win32-conpty-helper.mjs" \
+      --file "$APP/Contents/Resources/native/claudexor-conpty-helper.exe" \
+      --expected-sha256 "${WIN32_CONPTY_EXPECTED_SHA256:-$WIN32_CONPTY_SHA256}"
+  elif [ "$REQUIRE_WIN32_CONPTY" = "1" ]; then
+    echo "ERROR: engine resources lack the required Windows ConPTY helper" >&2
     exit 1
   fi
-  echo "==> Bundling claudexor CLI for remote runtimes"
-  if ( cd "$REPO_ROOT" && pnpm exec esbuild packages/cli/dist/cli.js \
-        --bundle --platform=node --format=cjs --target=node22 \
-        --banner:js="const CLAUDEXOR_BUNDLE_URL = require('node:url').pathToFileURL(__filename).href;" \
-        --define:import.meta.url=CLAUDEXOR_BUNDLE_URL \
-        --define:process.env.CLAUDEXOR_BUILD_SHA="\"$BUILD_SHA\"" \
-        --outfile="$CLI_JS" >/dev/null ); then
-    echo "    claudexor.bundle.cjs $(wc -c < "$CLI_JS" | tr -d ' ') bytes"
-  else
-    echo "ERROR: CLI bundle failed; remote runtimes would be incomplete" >&2
-    exit 1
-  fi
-  echo "==> Bundling native-login runner"
-  if ( cd "$REPO_ROOT" && pnpm exec esbuild packages/cli/dist/setup-login-runner.js \
-        --bundle --platform=node --format=cjs --target=node22 \
-        --banner:js="const CLAUDEXOR_BUNDLE_URL = require('node:url').pathToFileURL(__filename).href;" \
-        --define:import.meta.url=CLAUDEXOR_BUNDLE_URL \
-        --outfile="$SETUP_RUNNER_JS" >/dev/null ); then
-    echo "    setup-login-runner.cjs $(wc -c < "$SETUP_RUNNER_JS" | tr -d ' ') bytes"
-  else
-    echo "ERROR: setup-login runner bundle failed; native subscription login would be broken" >&2
-    exit 1
-  fi
-  echo "==> Deploying pinned Browser MCP runtime"
-  rm -rf "$BROWSER_MCP_DIR"
-  if ( cd "$REPO_ROOT" && pnpm --filter @claudexor/core deploy --legacy --prod "$BROWSER_MCP_DIR" >/dev/null ); then
-    # pnpm's legacy deploy creates a virtual-store self-link back to the source
-    # workspace. The deployed package already is @claudexor/core, so the link is
-    # redundant and makes codesign reject the bundle as an external destination.
-    DEPLOY_SELF_LINK="$BROWSER_MCP_DIR/node_modules/.pnpm/node_modules/@claudexor/core"
-    if [ -L "$DEPLOY_SELF_LINK" ]; then rm "$DEPLOY_SELF_LINK"; fi
-    if [ -e "$DEPLOY_SELF_LINK" ] || [ -L "$DEPLOY_SELF_LINK" ]; then
-      echo "ERROR: Browser MCP deploy retained an external @claudexor/core self-link" >&2
-      exit 1
-    fi
-    # D-2: the runtime-update closure re-tars this directory and its
-    # assertNoNativeAddons guard forbids ANY .node file (the bundled Node's
-    # disable-library-validation would load them unsigned on user machines).
-    # fsevents is playwright's OPTIONAL fs-watch accelerator — chokidar falls
-    # back to polling without it — so prune every native addon here and fail
-    # loudly if one survives; the app layout stays closure-compatible by
-    # construction.
-    find "$BROWSER_MCP_DIR" -name "fsevents*" -type d -prune -exec rm -rf {} + 2>/dev/null || true
-    find "$BROWSER_MCP_DIR" -name "*.node" -type f -delete 2>/dev/null || true
-    # Pruning the fsevents dir leaves pnpm's SYMLINKS to it dangling — a
-    # signed-bundle codesign --verify walks the bundle and dies on a broken
-    # link ("No such file"), which killed the CI candidate while the local
-    # unsigned build never entered the signing branch. Remove every dangling
-    # symlink the prune orphaned.
-    find "$BROWSER_MCP_DIR" -type l ! -exec test -e {} \; -delete 2>/dev/null || true
-    LEFTOVER_NODE_ADDON="$(find "$BROWSER_MCP_DIR" -name '*.node' -type f | head -1)"
-    if [ -n "$LEFTOVER_NODE_ADDON" ]; then
-      echo "ERROR: Browser MCP runtime still carries a native addon: $LEFTOVER_NODE_ADDON" >&2
-      exit 1
-    fi
-    echo "    browser-mcp-runtime $(du -sh "$BROWSER_MCP_DIR" | cut -f1 | tr -d ' ')"
-  else
-    echo "ERROR: Browser MCP deploy failed; packaged browser requests would be unavailable" >&2
-    exit 1
-  fi
-  PROCESS_IDENTITY_HELPER="$APP/Contents/Resources/native/claudexor-process-identity"
-  mkdir -p "$(dirname "$PROCESS_IDENTITY_HELPER")"
-  cp "$REPO_ROOT/packages/core/dist/native/claudexor-process-identity" "$PROCESS_IDENTITY_HELPER"
-  chmod 755 "$PROCESS_IDENTITY_HELPER"
-  # macOS can briefly reject the first launch of a freshly copied ad-hoc-signed
-  # Mach-O while its code-signing monitor registers the new file. Keep the
-  # probe strict, but tolerate that bounded local race.
-  PROCESS_IDENTITY_PROBE_OK=0
-  for _ in 1 2 3; do
-    if "$PROCESS_IDENTITY_HELPER" --pid $$ | grep -Eq '^claudexor-process-identity-v2[[:space:]]'; then
-      PROCESS_IDENTITY_PROBE_OK=1
-      break
-    fi
-    sleep 0.2
-  done
-  if [ "$PROCESS_IDENTITY_PROBE_OK" -ne 1 ]; then
-    echo "ERROR: bundled process-identity helper failed its offline probe" >&2
-    exit 1
-  fi
-  echo "    bundled universal process-identity helper"
   # Prefer an explicit/notarized Node for the bundled engine. CI release builds
   # always set CLAUDEXOR_NODE_BIN (release.yml captures process.execPath from
   # actions/setup-node), so the PATH fallback below only ever applies to LOCAL
@@ -300,6 +220,42 @@ if [ "${CLAUDEXOR_NO_ENGINE_BUNDLE:-0}" != "1" ]; then
     exit 1
   fi
 
+  # The runtime-update closure now carries the packaged CLI as its local
+  # provisioning entrypoint. Prove those exact bytes load and expose help.
+  CLI_SMOKE_HOME="$(mktemp -d)"
+  CLI_HELP_JSON="$(env -i HOME="$CLI_SMOKE_HOME" PATH="/usr/bin:/bin" \
+    "$APP/Contents/Resources/node" "$CLI_JS" help --json)"
+  CLI_INSTALL_JSON="$(env -i HOME="$CLI_SMOKE_HOME" PATH="/usr/bin:/bin" \
+    "$APP/Contents/Resources/node" "$CLI_JS" \
+    harness install codex --target local --dry-run --json)"
+  "$APP/Contents/Resources/node" -e '
+    const help = JSON.parse(process.argv[1]);
+    const install = JSON.parse(process.argv[2]);
+    const expectedVersion = process.argv[3];
+    const harness = Array.isArray(help.commands)
+      ? help.commands.find((command) => command?.id === "harness")
+      : null;
+    if (
+      help.ok !== true ||
+      help.version !== expectedVersion ||
+      !harness?.flags?.includes("target") ||
+      install.ok !== true ||
+      install.dryRun !== true ||
+      install.harness !== "codex" ||
+      install.target !== "local" ||
+      install.installLocation !== "~/.claudexor/node/bin"
+    ) {
+      throw new Error(`bundled CLI help contract mismatch: ${JSON.stringify(help)}`);
+    }
+  ' "$CLI_HELP_JSON" "$CLI_INSTALL_JSON" "$VERSION"
+  if [ -n "$(find "$CLI_SMOKE_HOME" -mindepth 1 -print -quit)" ]; then
+    echo "ERROR: bundled CLI dry-run mutated its isolated HOME" >&2
+    find "$CLI_SMOKE_HOME" -mindepth 1 -maxdepth 3 -print >&2
+    exit 1
+  fi
+  rm -rf "$CLI_SMOKE_HOME"
+  echo "    bundled CLI launches"
+
   # Prove the adjacent runner executes under the exact Node shipped in the app.
   set +e
   "$APP/Contents/Resources/node" "$SETUP_RUNNER_JS" >"$APP/Contents/Resources/setup-runner-smoke.out" 2>&1
@@ -313,6 +269,36 @@ if [ "${CLAUDEXOR_NO_ENGINE_BUNDLE:-0}" != "1" ]; then
   fi
   rm -f "$APP/Contents/Resources/setup-runner-smoke.out"
   echo "    bundled setup-login runner launches"
+
+  # Prove the daemon entry itself works independently of the adjacent CLI: its
+  # packaged daemon bundle advertises and owns the narrow external-terminal
+  # recovery role, and that malformed setup input cannot fall through into
+  # daemon startup or create runtime state.
+  BUNDLED_ENGINE_PROBE="$("$APP/Contents/Resources/node" "$ENGINE_JS" --probe)"
+  "$APP/Contents/Resources/node" -e '
+    const probe = JSON.parse(process.argv[1]);
+    if (!Array.isArray(probe.roles) || !probe.roles.includes("setup_attach")) {
+      throw new Error(`packaged daemon probe lacks setup_attach: ${JSON.stringify(probe)}`);
+    }
+  ' "$BUNDLED_ENGINE_PROBE"
+  BUNDLED_SETUP_SMOKE_ROOT="$(mktemp -d)"
+  set +e
+  env -i HOME="$BUNDLED_SETUP_SMOKE_ROOT/home" PATH="/usr/bin:/bin" \
+    CLAUDEXOR_CONFIG_DIR="$BUNDLED_SETUP_SMOKE_ROOT/config" \
+    "$APP/Contents/Resources/node" "$ENGINE_JS" setup invalid \
+    >"$BUNDLED_SETUP_SMOKE_ROOT/stdout" 2>"$BUNDLED_SETUP_SMOKE_ROOT/stderr"
+  BUNDLED_SETUP_STATUS=$?
+  set -e
+  if [ "$BUNDLED_SETUP_STATUS" -ne 2 ] \
+    || ! grep -q "usage: claudexor setup attach <jobId>" "$BUNDLED_SETUP_SMOKE_ROOT/stderr" \
+    || [ -e "$BUNDLED_SETUP_SMOKE_ROOT/config" ]; then
+    echo "ERROR: packaged daemon setup role did not fail malformed input before daemon startup" >&2
+    cat "$BUNDLED_SETUP_SMOKE_ROOT/stdout" "$BUNDLED_SETUP_SMOKE_ROOT/stderr" >&2
+    rm -rf "$BUNDLED_SETUP_SMOKE_ROOT"
+    exit 1
+  fi
+  rm -rf "$BUNDLED_SETUP_SMOKE_ROOT"
+  echo "    bundled daemon setup attach role launches without the full CLI"
 
   # No network/package-manager access participates in the packaged Browser MCP.
   BROWSER_SMOKE_HOME="$(mktemp -d)"
@@ -402,7 +388,17 @@ if [ "${CLAUDEXOR_NO_ENGINE_BUNDLE:-0}" != "1" ]; then
   # previously discovered a forbidden native addon only at release time.
   echo "==> Closure-buildability smoke (build-runtime-closure against the packaged app)"
   CLOSURE_SMOKE_DIR="$(mktemp -d)"
-  if node "$REPO_ROOT/scripts/build-runtime-closure.mjs"       --app-bundle "$APP"       --version "$VERSION"       --out "$CLOSURE_SMOKE_DIR" >/dev/null; then
+  # Keep this array nonempty: macOS Bash 3.2 treats an empty array as unbound under nounset.
+  CLOSURE_BUILD_ARGS=(
+    --app-bundle "$APP"
+    --version "$VERSION"
+    --out "$CLOSURE_SMOKE_DIR"
+  )
+  if [ -n "$WIN32_CONPTY_SHA256" ]; then
+    CLOSURE_BUILD_ARGS+=(--win32-conpty-sha256 "$WIN32_CONPTY_SHA256")
+  fi
+  if node "$REPO_ROOT/scripts/build-runtime-closure.mjs" \
+      "${CLOSURE_BUILD_ARGS[@]}" >/dev/null; then
     echo "    runtime closure builds from the packaged app"
     rm -rf "$CLOSURE_SMOKE_DIR"
   else
@@ -436,7 +432,6 @@ if [ -n "${SIGN_IDENTITY:-}" ]; then
   DEPLOYED_PROCESS_HELPER="$APP/Contents/Resources/browser-mcp-runtime/dist/native/claudexor-process-identity"
   for NESTED_CODE in "$DEPLOYED_PROCESS_HELPER"; do
     [ -f "$NESTED_CODE" ] || { echo "ERROR: expected nested Browser MCP code is missing: $NESTED_CODE" >&2; exit 1; }
-    codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$NESTED_CODE"
     codesign --verify --strict --verbose=2 "$NESTED_CODE"
   done
   if [ -x "$APP/Contents/Resources/node" ]; then
@@ -445,8 +440,6 @@ if [ -n "${SIGN_IDENTITY:-}" ]; then
       --sign "$SIGN_IDENTITY" "$APP/Contents/Resources/node"
   fi
   if [ -x "$APP/Contents/Resources/native/claudexor-process-identity" ]; then
-    codesign --force --options runtime --timestamp \
-      --sign "$SIGN_IDENTITY" "$APP/Contents/Resources/native/claudexor-process-identity"
     codesign --verify --strict --verbose=2 "$APP/Contents/Resources/native/claudexor-process-identity"
   fi
   codesign --force --options runtime --timestamp \
@@ -460,7 +453,8 @@ if [ -n "${SIGN_IDENTITY:-}" ]; then
   SIGNED_PROBE="$("$APP/Contents/Resources/node" "$ENGINE_JS" --probe)"
   "$APP/Contents/Resources/node" -e '
     const probe = JSON.parse(process.argv[1]);
-    if (probe.version !== process.argv[2] || probe.buildSha !== process.argv[3]) {
+    if (probe.version !== process.argv[2] || probe.buildSha !== process.argv[3]
+      || !Array.isArray(probe.roles) || !probe.roles.includes("setup_attach")) {
       throw new Error(`signed app probe mismatch: ${JSON.stringify(probe)}`);
     }
   ' "$SIGNED_PROBE" "$VERSION" "$BUILD_SHA"

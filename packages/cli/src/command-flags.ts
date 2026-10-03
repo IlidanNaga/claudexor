@@ -4,7 +4,7 @@
  * line — the single source the arg parser, help, and MCP/CLI parity gate
  * read.
  */
-import { EFFORT_HINT_HELP } from "@claudexor/schema";
+import { AccessProfile, EFFORT_HINT_HELP } from "@claudexor/schema";
 
 export type CliFlagKind = "boolean" | "value";
 
@@ -30,6 +30,9 @@ export const COMMON_RUN_FLAGS: readonly string[] = [
   "web",
   "model",
   "effort",
+  "processing",
+  "workspace-kind",
+  "scope-path",
   "portfolio",
   "routing-goal",
   "profile",
@@ -52,7 +55,10 @@ export const AGENT_MODE_FLAGS: readonly string[] = [
   "allow-protected-path",
   "deny-path",
   "output-schema",
+  "review",
+  "no-review",
   "reviewer-panel",
+  "reviewer-panel-json",
   "reviewer-model",
   "reviewer-effort",
   "in-place",
@@ -119,6 +125,11 @@ export const CLI_FLAGS: readonly CliFlagSpec[] = [
     "Credential route filter for route-annotated model lists (models command)",
   ),
   valueFlag(
+    "target",
+    "<local|remote>",
+    "Harness install destination: local managed toolchain or remote runtime prefix (default: remote)",
+  ),
+  valueFlag(
     "mode",
     "<mode>",
     "agent verb: ask | plan | agent (strategies are flags, not modes);\n                           apply verb: delivery mode apply | commit | branch | pr",
@@ -130,6 +141,11 @@ export const CLI_FLAGS: readonly CliFlagSpec[] = [
   ),
   valueFlag("synthesis", "<mode>", "Best-of-N synthesis: auto (default, only n>=3)|always|never"),
   valueFlag("attempts", "<N>", "Convergence cap (agent): repair loop up to N attempts"),
+  booleanFlag("review", "Enable internal model review with an automatically selected panel"),
+  booleanFlag(
+    "no-review",
+    "Skip internal model review; completed work remains applicable without a review verdict",
+  ),
   booleanFlag("until-clean", "Convergence (agent): iterate until the review/gates are clean"),
   booleanFlag("deep-scan", "Deep scan (ask): bounded multi-scout research sweep with synthesis"),
   booleanFlag("resume", "Continue the most recently updated thread (shorthand for --thread <id>)"),
@@ -140,7 +156,7 @@ export const CLI_FLAGS: readonly CliFlagSpec[] = [
   booleanFlag("create", "Create-from-scratch intent (agent)"),
   booleanFlag(
     "council",
-    "Council (plan): N harnesses draft in parallel, the primary merges into one plan + one question set; --n sets members (2..4)",
+    "Council (plan): N harnesses draft in parallel, the primary merges into one plan + one question set; --n sets members (at least 2, up to the configured Council cap)",
   ),
   booleanFlag(
     "delegate",
@@ -178,7 +194,12 @@ export const CLI_FLAGS: readonly CliFlagSpec[] = [
   valueFlag(
     "reviewer-panel",
     "<list>",
-    'Explicit reviewers, e.g. "claude=claude-opus-4-8:max,cursor=gemini-3.1-pro,cursor=gemini-3.5-flash,cursor=gpt-5.5-extra-high"',
+    'Enable review with explicit reviewers, e.g. "claude=claude-opus-4-8:max,cursor=gemini-3.1-pro,cursor=gemini-3.5-flash,cursor=gpt-5.5-extra-high"',
+  ),
+  valueFlag(
+    "reviewer-panel-json",
+    "'<json-array>'",
+    "Enable review with structured reviewer entries as a JSON array; use credentialProfileId for an account pin and processingPreference for a service override",
   ),
   valueFlag(
     "reviewer-model",
@@ -186,14 +207,25 @@ export const CLI_FLAGS: readonly CliFlagSpec[] = [
     'Per-family reviewer model, e.g. "openai=gpt-4o-mini,anthropic=claude-haiku"',
   ),
   valueFlag("reviewer-effort", "<map>", 'Per-family reviewer effort, e.g. "anthropic=max"'),
-  valueFlag(
-    "access",
-    "<profile>",
-    "Access profile: readonly|workspace_write|full|external_sandbox_full|inherit_native",
-  ),
+  valueFlag("access", "<profile>", `Access profile: ${AccessProfile.options.join("|")}`),
   valueFlag("web", "<mode>", "External web/search policy: off|auto|cached|live"),
   valueFlag("model", "<id>", "Model hint forwarded to the selected harness route"),
   valueFlag("effort", "<level>", `Reasoning effort hint: ${EFFORT_HINT_HELP}`),
+  valueFlag(
+    "processing",
+    "<standard|fast|economy>",
+    "Advisory processing preference; fallback never introduces Fast.",
+  ),
+  valueFlag(
+    "workspace-kind",
+    "<git|directory>",
+    "Workspace geometry; directory execution requires no Git initialization",
+  ),
+  valueFlag(
+    "scope-path",
+    "<relative-path>",
+    "Selected file or directory footprint (repeatable); '.' selects the whole folder",
+  ),
   valueFlag(
     "primary-harness",
     "<id>",
@@ -259,6 +291,7 @@ export const CLI_FLAGS: readonly CliFlagSpec[] = [
   booleanFlag("accept-risk", null),
   booleanFlag("override", null),
   booleanFlag("revert", null),
+  booleanFlag("discard", "Discard a retained directory result without claiming rollback"),
   booleanFlag("accept-clean-patch", null),
   booleanFlag("rerun", null),
   valueFlag("apply-mode", "<m>", null),

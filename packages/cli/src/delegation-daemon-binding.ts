@@ -11,7 +11,7 @@ export function createDelegationDaemonBinding(): {
     authority: new DelegationBudgetAuthority({
       cancelAdmission: (jobId) => {
         if (!server) throw new Error("daemon cancellation authority is not initialized");
-        server.cancelJob(jobId);
+        server.cancelJob(jobId, "host_cancelled");
       },
     }),
     bind(value) {

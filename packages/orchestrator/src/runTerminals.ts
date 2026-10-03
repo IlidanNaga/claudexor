@@ -9,8 +9,10 @@
  */
 import { join } from "node:path";
 import {
+  type CancelReasonCode,
   makeOutcomeFacts,
   needsOperatorAttention,
+  normalizeCancelReasonCode,
   RunOutcomeFacts,
   type RunOutcomeFacts as RunOutcomeFactsType,
 } from "@claudexor/schema";
@@ -41,6 +43,7 @@ import {
 
 export type { AnnouncedRunContext } from "./runTerminalContext.js";
 export { cancelledResult, declaredFailure, failTerminally, writeFailure };
+export { attemptVendorFailure } from "./harnessFailure.js";
 
 function ownsDelegateDrain(context: AnnouncedRunContext): boolean {
   try {
@@ -106,14 +109,24 @@ function terminalEventTypeFor(
   return "run.completed";
 }
 
+/** Map an abort-signal reason token to its typed terminal RunReason. The
+ * abort reason is the ONE channel a cancel's provenance survives on — before
+ * this mapping every host-initiated cancel coerced to user_cancelled (the
+ * daemon's own ctrl-c relay and the MCP host teardown included). The client
+ * vocabulary is read from CANCEL_REASON_CODES so a future member cannot be
+ * silently coerced away here while the HTTP boundary already admits it;
+ * wall_clock_exceeded stays daemon-internal (deliberately NOT in the client
+ * enum — unforgeable). Unknown tokens keep the user_cancelled coercion for
+ * wire compatibility. */
+export function cancelReasonFromSignalToken(
+  reason: unknown,
+): "wall_clock_exceeded" | CancelReasonCode {
+  if (reason === "wall_clock_exceeded") return "wall_clock_exceeded";
+  return normalizeCancelReasonCode(reason) ?? "user_cancelled";
+}
+
 function cancellationFacts(signal: AbortSignal, prior: RunOutcomeFactsType): RunOutcomeFactsType {
-  return terminalOutcomeFacts(
-    prior,
-    "cancelled",
-    typeof signal.reason === "string" && signal.reason === "wall_clock_exceeded"
-      ? "wall_clock_exceeded"
-      : "user_cancelled",
-  );
+  return terminalOutcomeFacts(prior, "cancelled", cancelReasonFromSignalToken(signal.reason));
 }
 
 function terminalOutcomeFromPayload(payload: Record<string, unknown>): RunOutcomeFactsType {
@@ -331,7 +344,7 @@ export async function guardAnnouncedRun(
           const cancelFacts = terminalOutcomeFacts(
             result.facts,
             "cancelled",
-            signal.reason === "wall_clock_exceeded" ? "wall_clock_exceeded" : "user_cancelled",
+            cancelReasonFromSignalToken(signal.reason),
           );
           const cancelSummary =
             signal.reason === "wall_clock_exceeded"
@@ -424,7 +437,7 @@ export async function guardAnnouncedRun(
           const cancelFacts = terminalOutcomeFacts(
             priorFacts,
             "cancelled",
-            signal.reason === "wall_clock_exceeded" ? "wall_clock_exceeded" : "user_cancelled",
+            cancelReasonFromSignalToken(signal.reason),
           );
           const cancelSummary =
             signal.reason === "wall_clock_exceeded"

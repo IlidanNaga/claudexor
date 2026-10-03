@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"astra-fixture-thread"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll read numbers.json and sum its numbers.\n"}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -c 'cat numbers.json'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -c 'cat numbers.json'","aggregated_output":"{\"tag\":\"ASTRA_RELEASE_SMOKE\",\"numbers\":[17,29,43]}\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"{\"tag\":\"ASTRA_RELEASE_SMOKE\",\"sum\":89}"}}
+{"type":"turn.completed","usage":{"input_tokens":26028,"cached_input_tokens":12800,"cache_write_input_tokens":0,"output_tokens":131,"reasoning_output_tokens":24}}

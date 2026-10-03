@@ -82,7 +82,13 @@ describe("plan CLI attachment transport", () => {
 
     const priorArgv = process.argv;
     const exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
-    const stdout = vi.spyOn(process.stdout, "write").mockImplementation((() => true) as never);
+    const flushedWrite = (...args: unknown[]) => {
+      const callback = args.find((arg) => typeof arg === "function") as (() => void) | undefined;
+      callback?.();
+      return true;
+    };
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(flushedWrite as never);
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(flushedWrite as never);
     process.argv = [
       process.execPath,
       "claudexor",
@@ -91,13 +97,22 @@ describe("plan CLI attachment transport", () => {
       "--attach",
       attachmentPath,
       "--json",
+      "--processing",
+      "standard",
+      "--workspace-kind",
+      "directory",
+      "--scope-path",
+      "assets, originals",
+      "--scope-path",
+      "brief.txt",
     ];
     try {
       await import("./cli.js");
-      await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(0));
+      await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(0), { timeout: 2_500 });
     } finally {
       process.argv = priorArgv;
       stdout.mockRestore();
+      stderr.mockRestore();
     }
 
     expect(uploadedBytes).toBe(bytes);
@@ -108,6 +123,12 @@ describe("plan CLI attachment transport", () => {
       mode: "plan",
       prompt: "Use the attached brief",
       attachments: [{ resourceId: "res-plan-1" }],
+      processingPreference: "standard",
+      execution: {
+        isolation: "envelope",
+        workspaceKind: "directory",
+        scopePaths: ["assets, originals", "brief.txt"],
+      },
     });
     expect(JSON.stringify(runBody)).not.toContain(attachmentPath);
     expect(JSON.stringify(runBody)).not.toContain("PLAN_ATTACHMENT_SENTINEL");

@@ -1,6 +1,6 @@
 import { z } from "zod/v3";
 import { ApplyEligibility } from "./apply-eligibility.js";
-import { ReviewState, RunOutcomeFacts } from "./decision.js";
+import { ReviewState, RunOutcomeFacts, reviewAllowsApply } from "./decision.js";
 import { Id, IsoTimestamp, ModeKind, SchemaVersion } from "./primitives.js";
 import { RequiredAction, needsDecision, requiredActionsFor } from "./status-projection.js";
 
@@ -42,7 +42,7 @@ export const RunDeliverableFacts = z
   .object({
     present: z.boolean().describe("Whether the canonical primary deliverable exists."),
     kind: z
-      .enum(["answer", "report", "plan", "patch", "structured_output"])
+      .enum(["answer", "report", "plan", "patch", "files", "structured_output"])
       .nullable()
       .describe("Kind of canonical primary deliverable; null when none exists."),
     path: z
@@ -120,7 +120,7 @@ export type RunApplyFacts = z.infer<typeof RunApplyFacts>;
 export const RunPresentationPrimary = z
   .object({
     kind: z
-      .enum(["answer", "report", "plan", "patch", "structured_output", "diagnostic"])
+      .enum(["answer", "report", "plan", "patch", "files", "structured_output", "diagnostic"])
       .describe("Presentation kind of the terminal primary artifact."),
     path: z
       .string()
@@ -429,7 +429,12 @@ export function validateRunFactsInvariants(value: unknown): RunFacts {
       "work_report_contract",
       "workspace_unavailable",
     ]),
-    cancelled: new Set(["user_cancelled", "wall_clock_exceeded"]),
+    cancelled: new Set([
+      "user_cancelled",
+      "wall_clock_exceeded",
+      "host_cancelled",
+      "owner_task_gone",
+    ]),
     interrupted: new Set(["crash_interrupted", "context_capacity_exhausted"]),
   };
   if (!lifecycleReasons[outcome.lifecycle].has(outcome.reason)) {
@@ -452,8 +457,8 @@ export function validateRunFactsInvariants(value: unknown): RunFacts {
     if (facts.mode !== "agent") {
       violations.push("apply eligibility can be true only for agent mode");
     }
-    if (!deliverable.present || deliverable.kind !== "patch") {
-      violations.push("apply eligibility can be true only for a patch deliverable");
+    if (!deliverable.present || (deliverable.kind !== "patch" && deliverable.kind !== "files")) {
+      violations.push("apply eligibility can be true only for a patch or files deliverable");
     }
     if (outcome.lifecycle !== "succeeded") {
       violations.push("apply eligibility cannot be true for a non-succeeded lifecycle");
@@ -464,9 +469,9 @@ export function validateRunFactsInvariants(value: unknown): RunFacts {
     if (outcome.work_state?.state === "needs_input" || outcome.work_state?.state === "incomplete") {
       violations.push("apply eligibility cannot bypass an unfinished work_state");
     }
-    if (!apply.operator_decision_present && outcome.review !== "approved") {
+    if (!apply.operator_decision_present && !reviewAllowsApply(outcome)) {
       violations.push(
-        "apply eligibility without an operator decision requires outcome.review=approved",
+        "apply eligibility without an operator decision requires outcome.review=approved or an explicit review opt-out",
       );
     }
     if (!apply.operator_decision_present && outcome.checks === "failed") {

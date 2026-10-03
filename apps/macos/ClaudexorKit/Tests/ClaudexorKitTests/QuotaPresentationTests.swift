@@ -83,6 +83,14 @@ import Testing
         #expect(group.windows.first?.appliesToModels == ["fable", "claude-fable-5", "best"])
     }
 
+    @Test func modelScopeLabelCollapsesEveryVersionedFableAliasOntoTheFamily() {
+        // The live Fable window carries two versioned ids next to the family
+        // alias (claude-fable-5-1 joined claude-fable-5); both fold onto the
+        // family label and the generic `best` alias drops.
+        let models = ["fable", "claude-fable-5-1", "claude-fable-5", "best"]
+        #expect(QuotaPresentation.modelScopeLabel(models) == "Fable only")
+    }
+
     @Test func availabilityFoldUnionsScopedExhaustionsWithoutRatioInference() throws {
         func decorated(_ source: String, availability: [String: Any]) throws -> QuotaSnapshot {
             let object: [String: Any] = [

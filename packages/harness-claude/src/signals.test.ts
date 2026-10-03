@@ -6,7 +6,7 @@ import { HarnessEvent } from "@claudexor/schema";
 import { createClaudeParser } from "./parse.js";
 
 /**
- * D-16c fixture-parity: the SIGNAL-bearing claude 2.1.165 frames (context
+ * D-16c fixture-parity: the SIGNAL-bearing claude frames (context
  * exhaustion, compaction boundary, the typed rate-limit heartbeat) map onto
  * typed HarnessEvents — never dropped, never prose-matched. These fixtures
  * live in fixtures/signals/ (out of the top-level conformance loop, which
@@ -36,12 +36,49 @@ function parseFixture(name: string): HarnessEvent[] {
 }
 
 describe("claude D-16 signal fixtures", () => {
-  it("required-mcp-pending: preserves the live async startup status without a fatal", () => {
+  it("required-mcp-connected: preserves the current native startup status", () => {
     const parser = createClaudeParser({ requiredMcpServers: ["claudexor"] });
     const raw = JSON.parse(
-      readFileSync(join(SIGNALS, "required-mcp-pending.jsonl"), "utf8").trim(),
+      readFileSync(join(SIGNALS, "required-mcp-connected.jsonl"), "utf8").trim(),
     );
     const events = parser(raw, "sig") ?? [];
+    expect(events).toHaveLength(1);
+    expect(events[0]?.type).toBe("started");
+    // The native receipt passes through verbatim, including 2.1.281's `source`.
+    expect(events[0]?.payload?.["mcp_servers"]).toEqual([
+      { name: "claudexor", status: "connected", source: "dynamic" },
+    ]);
+    expect(events.some((event) => event.type === "error")).toBe(false);
+    expect(() => HarnessEvent.parse(events[0])).not.toThrow();
+  });
+
+  it("preserves the historical 2.1.165 async pending startup without a fatal", () => {
+    // Exact sanitized native frame from the 2026-07-26 recording. The 2.1.261
+    // and 2.1.281 probes waited for handshake and emitted connected; this keeps
+    // the older provisional-status regression without calling it fresh proof.
+    const raw = {
+      type: "system",
+      subtype: "init",
+      cwd: "/tmp/fixture-repo",
+      session_id: "00000000-0000-4000-8000-000000000000",
+      tools: ["Task", "AskUserQuestion", "Bash", "Edit", "Read", "Write", "ToolSearch"],
+      mcp_servers: [{ name: "claudexor", status: "pending" }],
+      model: "claude-opus-4-8[1m]",
+      permissionMode: "acceptEdits",
+      slash_commands: [],
+      apiKeySource: "none",
+      claude_code_version: "2.1.165",
+      output_style: "default",
+      agents: [],
+      skills: [],
+      plugins: [],
+      analytics_disabled: false,
+      product_feedback_disabled: false,
+      uuid: "fixture-uuid-required-mcp-pending",
+      memory_paths: { auto: "/home/user/.claude/projects/-tmp-fixture-repo/memory/" },
+      fast_mode_state: "off",
+    };
+    const events = createClaudeParser({ requiredMcpServers: ["claudexor"] })(raw, "sig") ?? [];
     expect(events).toHaveLength(1);
     expect(events[0]?.type).toBe("started");
     expect(events[0]?.payload?.["mcp_servers"]).toEqual([{ name: "claudexor", status: "pending" }]);
@@ -77,12 +114,12 @@ describe("claude D-16 signal fixtures", () => {
     // status:"allowed" is a routine heartbeat — recognized (dropped==0 above)
     // but it must NOT emit a rate_limit signal that would arm rotation.
     expect(events.some((e) => e.rate_limit !== undefined)).toBe(false);
-    // The 2.1.165 post_turn_summary frame is likewise recognized plumbing.
+    // Native system metadata is likewise recognized plumbing.
     expect(events.some((e) => e.type === "context")).toBe(false);
     expect(events.some((e) => e.type === "message" && e.final === true)).toBe(true);
   });
 
-  it("treats the VM-observed allowed_warning heartbeat as advisory, not a cooldown", () => {
+  it("treats the current native allowed_warning heartbeat as advisory, not a cooldown", () => {
     const events = parseFixture("allowed-warning-rate-limit-event.jsonl");
     expect(events).toEqual([]);
   });
@@ -131,6 +168,41 @@ describe("claude D-16 signal fixtures", () => {
     expect(out?.[0]?.rate_limit).toMatchObject({ resets_at: null, retry_delay_ms: null });
     expect(out?.[0]?.rate_limit).not.toHaveProperty("constraint_id");
     expect(out?.[0]?.rate_limit).not.toHaveProperty("applies_to_models");
+  });
+
+  it("org-disabled-subscription: typed oauth_org_not_allowed status; result prose is never answer material", () => {
+    const events = parseFixture("org-disabled-subscription.jsonl");
+    // A1: the plain-prose entitlement failure (live incident 2026-08-17,
+    // run-ea06645118d7) becomes a TYPED status event downstream consumers can
+    // read (attemptTelemetry → capability_refused) — no prose governance.
+    const typed = events.filter((e) => e.status?.error_category === "oauth_org_not_allowed");
+    expect(typed).toHaveLength(1);
+    expect(typed[0]?.type).toBe("status");
+    expect(typed[0]?.payload?.["entitlement_denied"]).toBe(true);
+    // A3 deliverable hygiene: the NON-SUCCESS result's prose rides a status
+    // event (timeline visibility), never a message the answer assembly could
+    // adopt; the mid-stream assistant message still flows (it is model output).
+    expect(events.filter((e) => e.type === "message")).toHaveLength(1);
+    expect(events.some((e) => e.type === "message" && e.final === true)).toBe(false);
+    const resultStatus = events.find((e) => e.payload?.["non_success_result"] === true);
+    expect(resultStatus?.type).toBe("status");
+    expect(resultStatus?.text).toContain("organization has disabled");
+  });
+
+  it("a successful result never emits the entitlement status even if prose echoes the phrase", () => {
+    const out = createClaudeParser()(
+      {
+        type: "result",
+        subtype: "success",
+        result:
+          "Report: the org message 'organization has disabled Claude subscription access' was seen in logs.",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+      "sig",
+    );
+    expect((out ?? []).some((e) => e.status?.error_category === "oauth_org_not_allowed")).toBe(
+      false,
+    );
   });
 
   it("maps rapid_refill_breaker terminal_reason to the continuation-eligible repeated_refill cause", () => {

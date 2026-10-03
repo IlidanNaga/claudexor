@@ -87,7 +87,7 @@ export function ensureCodexApiAuth(
 export function defaultNativeCodexHome(env?: Record<string, string | null | undefined>): string {
   const override = env?.["CLAUDEXOR_CODEX_NATIVE_HOME"] ?? process.env.CLAUDEXOR_CODEX_NATIVE_HOME;
   if (!override?.trim()) return join(nativeHarnessStateRoot(), "codex");
-  // Containment guard (symmetry with claude's defaultNativeClaudeConfigDir): an
+  // Owned-state guard (symmetry with claude's defaultNativeClaudeConfigDir): an
   // override that escapes the Claudexor-owned root could point the codex child
   // at (and mutate) an arbitrary directory. The root is claudexorOwnedRoot()
   // because registered credential-profile stores live at <ownedRoot>/profiles;

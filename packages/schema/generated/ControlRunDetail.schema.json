@@ -4,6 +4,190 @@
     "ControlRunDetail": {
       "type": "object",
       "properties": {
+        "attemptExecution": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "attemptId": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Non-empty identifier string."
+              },
+              "harnessId": {
+                "$ref": "#/definitions/ControlRunDetail/properties/attemptExecution/items/properties/attemptId"
+              },
+              "processing": {
+                "type": "object",
+                "properties": {
+                  "requested": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "standard",
+                          "fast",
+                          "economy"
+                        ],
+                        "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
+                  },
+                  "submitted": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/ControlRunDetail/properties/attemptExecution/items/properties/processing/properties/requested/anyOf/0"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
+                  },
+                  "submittedNative": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "\\S",
+                        "description": "User-supplied string that must contain visible content, not just whitespace."
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "User-supplied string that must contain visible content, not just whitespace."
+                  },
+                  "observed": {
+                    "type": "string",
+                    "enum": [
+                      "standard",
+                      "fast",
+                      "economy",
+                      "mixed",
+                      "unknown"
+                    ]
+                  },
+                  "observedNative": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/definitions/ControlRunDetail/properties/attemptExecution/items/properties/processing/properties/submittedNative/anyOf/0"
+                    }
+                  },
+                  "reason": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/ControlRunDetail/properties/attemptExecution/items/properties/processing/properties/submittedNative/anyOf/0"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "User-supplied string that must contain visible content, not just whitespace."
+                  },
+                  "source": {
+                    "$ref": "#/definitions/ControlRunDetail/properties/attemptExecution/items/properties/processing/properties/submittedNative/anyOf/0"
+                  }
+                },
+                "required": [
+                  "requested",
+                  "submitted",
+                  "submittedNative",
+                  "observed",
+                  "observedNative",
+                  "reason",
+                  "source"
+                ],
+                "additionalProperties": false,
+                "description": "Requested intent, submitted native control, and observed execution are independent facts. A submitted flag never proves observed service; mixed or missing session observations remain explicit."
+              },
+              "processingCostBasis": {
+                "type": "object",
+                "properties": {
+                  "nativeMode": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/ControlRunDetail/properties/attemptExecution/items/properties/processing/properties/submittedNative/anyOf/0"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "User-supplied string that must contain visible content, not just whitespace."
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "included",
+                      "paid_credits",
+                      "cash",
+                      "valuation",
+                      "unknown"
+                    ]
+                  },
+                  "source": {
+                    "$ref": "#/definitions/ControlRunDetail/properties/attemptExecution/items/properties/processing/properties/submittedNative/anyOf/0"
+                  }
+                },
+                "required": [
+                  "nativeMode",
+                  "kind",
+                  "source"
+                ],
+                "additionalProperties": false,
+                "description": "Mode-qualified billing evidence for an existing cost record. Authentication alone does not establish included premium service; credits, cash, and token valuation stay distinct."
+              },
+              "usageCost": {
+                "type": "object",
+                "properties": {
+                  "cashUsd": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "valuationUsd": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "unknownUsd": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "cashKnowledge": {
+                    "type": "string",
+                    "enum": [
+                      "exact",
+                      "estimated",
+                      "unknown"
+                    ],
+                    "description": "Quality of incremental-cash cost evidence for an operation."
+                  },
+                  "valuationKnowledge": {
+                    "$ref": "#/definitions/ControlRunDetail/properties/attemptExecution/items/properties/usageCost/properties/cashKnowledge"
+                  }
+                },
+                "required": [
+                  "cashUsd",
+                  "valuationUsd",
+                  "unknownUsd",
+                  "cashKnowledge",
+                  "valuationKnowledge"
+                ],
+                "additionalProperties": false,
+                "description": "Observed usage components. An amount of unknown meaning is not charged cash; separately proven included service can still establish exact zero incremental cash."
+              }
+            },
+            "required": [
+              "attemptId",
+              "harnessId"
+            ],
+            "additionalProperties": false,
+            "description": "Compact projection of existing attempt execution and amount evidence."
+          }
+        },
         "summary": {
           "type": "object",
           "properties": {
@@ -18,9 +202,7 @@
             "parentRunId": {
               "anyOf": [
                 {
-                  "type": "string",
-                  "minLength": 1,
-                  "description": "Non-empty identifier string."
+                  "$ref": "#/definitions/ControlRunDetail/properties/attemptExecution/items/properties/attemptId"
                 },
                 {
                   "type": "null"
@@ -32,7 +214,7 @@
             "delegatedFromRunId": {
               "anyOf": [
                 {
-                  "$ref": "#/definitions/ControlRunDetail/properties/summary/properties/parentRunId/anyOf/0"
+                  "$ref": "#/definitions/ControlRunDetail/properties/attemptExecution/items/properties/attemptId"
                 },
                 {
                   "type": "null"
@@ -125,6 +307,68 @@
                 {
                   "type": "object",
                   "properties": {
+                    "requestRefusal": {
+                      "type": "object",
+                      "properties": {
+                        "scope": {
+                          "type": "string",
+                          "const": "turn_text",
+                          "description": "All text input items in one native turn; separate instructions are excluded."
+                        },
+                        "unit": {
+                          "type": "string",
+                          "const": "unicode_scalars"
+                        },
+                        "limit": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "exclusiveMinimum": 0,
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "source": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "kind": {
+                          "type": "string",
+                          "const": "input_too_large"
+                        },
+                        "actual": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "native_code": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "scope",
+                        "unit",
+                        "limit",
+                        "source",
+                        "kind",
+                        "actual",
+                        "native_code"
+                      ],
+                      "additionalProperties": false,
+                      "description": "Vendor-typed physical input refusal; the same input cannot be repaired by changing this harness's account or model."
+                    },
                     "phase": {
                       "type": "string",
                       "default": "unknown",
@@ -161,11 +405,15 @@
                             "cost_unverifiable",
                             "delegation_child_drain_timeout",
                             "subscription_window_exhausted",
+                            "credential_pool_exhausted",
+                            "input_too_large",
                             "delegated_home_unavailable",
                             "delegated_confinement_unavailable",
-                            "delegated_evidence_incomplete"
+                            "delegated_evidence_incomplete",
+                            "access_profile_incompatible",
+                            "retired_access_profile"
                           ],
-                          "description": "Machine-readable failure sub-code within a RunFailure category (budget-denial reasons, Delegate child-drain timeout, a spent subscription quota window whose reopen time is RunFailure.resetsAt, and the delegated-run confinement refusals: missing scoped home, no OS-enforced boundary on this host, incomplete applied evidence)."
+                          "description": "Machine-readable failure sub-code within a RunFailure category, including historical delegated-run failures and active access-profile refusals."
                         },
                         {
                           "type": "null"
@@ -238,6 +486,58 @@
                       ],
                       "default": null,
                       "description": "When the refused window reopens (a spent subscription quota window), or null when the failure has no such time. Callers schedule a retry off this field, never off safeMessage."
+                    },
+                    "vendorFailure": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "code": {
+                              "anyOf": [
+                                {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 128
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ],
+                              "description": "The vendor's own machine-readable failure code, verbatim; null when the vendor recorded an error without one."
+                            },
+                            "message": {
+                              "anyOf": [
+                                {
+                                  "type": "string",
+                                  "maxLength": 4000
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ],
+                              "description": "The vendor's own words from the same record, verbatim (redacted); null when absent."
+                            },
+                            "source": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 64,
+                              "description": "Evidence channel the code was read from (codex: `codex_rollout`). An open vocabulary: consumers display it, never branch on it."
+                            }
+                          },
+                          "required": [
+                            "code",
+                            "message",
+                            "source"
+                          ],
+                          "additionalProperties": false,
+                          "description": "Vendor-typed failure evidence read from a vendor-owned machine-readable record, never parsed from prose."
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "The vendor's own typed failure for the attempt this record speaks for, or null when no vendor-typed evidence exists (every harness without such a channel, and any unreadable record). Facts only: carries no remedy.",
+                      "default": null
                     },
                     "nextActions": {
                       "type": "array",
@@ -358,6 +658,10 @@
               "type": "string",
               "description": "Scalar model requested for the run."
             },
+            "review": {
+              "type": "boolean",
+              "description": "Resolved model-review intent; absent on historical runs that retain review-required semantics."
+            },
             "reviewerPanel": {
               "type": "array",
               "items": {
@@ -370,9 +674,7 @@
                     "description": "Explicit reviewer harness id; repeated harness ids are allowed so one provider can review through multiple requested models."
                   },
                   "model": {
-                    "type": "string",
-                    "minLength": 1,
-                    "pattern": "\\S",
+                    "$ref": "#/definitions/ControlRunDetail/properties/attemptExecution/items/properties/processing/properties/submittedNative/anyOf/0",
                     "description": "Per-reviewer model hint, passed to that harness only."
                   },
                   "effort": {
@@ -381,13 +683,21 @@
                     "maxLength": 32,
                     "pattern": "^[a-z0-9]+(?:[_-][a-z0-9]+)*$",
                     "description": "Per-reviewer effort hint, passed to that harness only."
+                  },
+                  "credentialProfileId": {
+                    "$ref": "#/definitions/ControlRunDetail/properties/attemptExecution/items/properties/processing/properties/submittedNative/anyOf/0",
+                    "description": "Per-reviewer credential profile id; explicit pins are strict and never fall back."
+                  },
+                  "processingPreference": {
+                    "$ref": "#/definitions/ControlRunDetail/properties/attemptExecution/items/properties/processing/properties/requested/anyOf/0",
+                    "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
                   }
                 },
                 "required": [
                   "harness"
                 ],
                 "additionalProperties": false,
-                "description": "One reviewer of an explicit reviewer panel — a harness plus optional model and effort. The CLI spells one entry `harness=model:effort` (e.g. `claude=claude-opus-4-8:max`)."
+                "description": "One reviewer of an explicit reviewer panel — a harness plus optional model, effort, and strict credentialProfileId. Compact entries are unpinned; structured JSON carries pins."
               },
               "description": "Explicit reviewer panel used for the run."
             },
@@ -403,7 +713,7 @@
                     "description": "Glob approved by the operator/user for this run; consumed only by the auto-protected gate/test path policy, not by built-in critical-path gates."
                   },
                   "reason": {
-                    "$ref": "#/definitions/ControlRunDetail/properties/summary/properties/reviewerPanel/items/properties/model",
+                    "$ref": "#/definitions/ControlRunDetail/properties/attemptExecution/items/properties/processing/properties/submittedNative/anyOf/0",
                     "description": "Optional human-readable reason for the approval."
                   }
                 },
@@ -501,6 +811,51 @@
                 }
               ],
               "description": "Cached input tokens summed across all attempts; null when no harness reported them."
+            },
+            "inputTokenUsage": {
+              "type": "object",
+              "properties": {
+                "total_tokens": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "cache_read_tokens": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "cache_write_tokens": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "total_tokens",
+                "cache_read_tokens",
+                "cache_write_tokens"
+              ],
+              "additionalProperties": false,
+              "description": "Normalized input measurement projected from run telemetry; absent on older runs."
             },
             "outputConformance": {
               "anyOf": [
@@ -647,8 +1002,8 @@
                 "readonly",
                 "workspace_write",
                 "full",
-                "external_sandbox_full",
-                "inherit_native"
+                "inherit_native",
+                "external_sandbox_full"
               ],
               "description": "Access profile of the run: the effective profile when known, else the requested one (prefer requestedAccess/effectiveAccess)."
             },
@@ -672,7 +1027,7 @@
             },
             "webRequired": {
               "type": "boolean",
-              "description": "Whether the run required web evidence."
+              "description": "Explicit stored web requirement."
             },
             "webMode": {
               "$ref": "#/definitions/ControlRunDetail/properties/summary/properties/externalContextPolicy",
@@ -684,7 +1039,7 @@
                 "required": {
                   "type": "boolean",
                   "default": false,
-                  "description": "Whether the run required web evidence."
+                  "description": "Explicit stored web requirement."
                 },
                 "mode": {
                   "$ref": "#/definitions/ControlRunDetail/properties/summary/properties/externalContextPolicy",
@@ -704,7 +1059,7 @@
                 "satisfied": {
                   "type": "boolean",
                   "default": false,
-                  "description": "Whether the web-evidence requirement was satisfied."
+                  "description": "Completed without a typed failure; retrieved content is not necessarily proven."
                 },
                 "status": {
                   "type": "string",
@@ -716,7 +1071,7 @@
                     "unverified"
                   ],
                   "default": "none",
-                  "description": "Web-evidence verdict for the run."
+                  "description": "Observed web status; satisfied does not prove retrieved content was verified."
                 },
                 "tool": {
                   "type": [
@@ -849,13 +1204,14 @@
                   "type": "string",
                   "enum": [
                     "patch",
+                    "files",
                     "answer",
                     "plan",
                     "report",
                     "none"
                   ],
                   "default": "none",
-                  "description": "What the turn actually produced: a patch, an answer, a plan (no files changed), a report, or nothing."
+                  "description": "What the turn actually produced: a Git patch, directory files, an answer, a plan, a report, or nothing."
                 },
                 "diffStat": {
                   "anyOf": [
@@ -912,9 +1268,10 @@
                     "not_applied",
                     "applied",
                     "applied_review_blocked",
-                    "reverted"
+                    "reverted",
+                    "discarded"
                   ],
-                  "description": "Honest application state of a run's changes: not_applied (no in-place mutation), applied (applied and review clean), applied_review_blocked (applied but review blocked/unconverged), or reverted.",
+                  "description": "Honest application state: not_applied (delivery pending), applied, applied_review_blocked, reverted, or discarded (remaining copied output deliberately not applied).",
                   "default": "not_applied"
                 },
                 "preTurnSha": {
@@ -967,7 +1324,10 @@
                       "description": "Terminal lifecycle of the run."
                     },
                     "noChanges": {
-                      "type": "boolean",
+                      "type": [
+                        "boolean",
+                        "null"
+                      ],
                       "default": false,
                       "description": "True when the run finished without changing any files (the ex no_op fact)."
                     },
@@ -991,6 +1351,10 @@
                       "description": "Review axis: approved (clean cross-family verified review), blocked (open accepted findings), or not_run.",
                       "default": "not_run"
                     },
+                    "review_requested": {
+                      "type": "boolean",
+                      "description": "Frozen model-review intent. False permits an honestly unreviewed result; absent historical records retain the review requirement."
+                    },
                     "reason": {
                       "anyOf": [
                         {
@@ -1007,6 +1371,8 @@
                             "stuck_no_progress",
                             "wall_clock_exceeded",
                             "user_cancelled",
+                            "host_cancelled",
+                            "owner_task_gone",
                             "crash_interrupted",
                             "workspace_unavailable",
                             "input_required",
@@ -1183,7 +1549,7 @@
                     "order": {
                       "type": "array",
                       "items": {
-                        "$ref": "#/definitions/ControlRunDetail/properties/summary/properties/parentRunId/anyOf/0"
+                        "$ref": "#/definitions/ControlRunDetail/properties/attemptExecution/items/properties/attemptId"
                       },
                       "default": [],
                       "description": "Final ranked order, harness ids."
@@ -1191,7 +1557,7 @@
                     "dropped": {
                       "type": "array",
                       "items": {
-                        "$ref": "#/definitions/ControlRunDetail/properties/summary/properties/parentRunId/anyOf/0"
+                        "$ref": "#/definitions/ControlRunDetail/properties/attemptExecution/items/properties/attemptId"
                       },
                       "default": [],
                       "description": "Ids removed by paid_fallback or cooldown before ranking."
@@ -1300,7 +1666,7 @@
                   "envAllowlist": {
                     "type": "array",
                     "items": {
-                      "$ref": "#/definitions/ControlRunDetail/properties/summary/properties/reviewerPanel/items/properties/model"
+                      "$ref": "#/definitions/ControlRunDetail/properties/attemptExecution/items/properties/processing/properties/submittedNative/anyOf/0"
                     },
                     "default": [],
                     "description": "Non-secret parent environment names explicitly forwarded to the command."
@@ -1355,10 +1721,10 @@
                   "description": "Schema version of the artifact; bumped on breaking ABI changes."
                 },
                 "run_id": {
-                  "$ref": "#/definitions/ControlRunDetail/properties/summary/properties/parentRunId/anyOf/0"
+                  "$ref": "#/definitions/ControlRunDetail/properties/attemptExecution/items/properties/attemptId"
                 },
                 "task_id": {
-                  "$ref": "#/definitions/ControlRunDetail/properties/summary/properties/parentRunId/anyOf/0"
+                  "$ref": "#/definitions/ControlRunDetail/properties/attemptExecution/items/properties/attemptId"
                 },
                 "mode": {
                   "$ref": "#/definitions/ControlRunDetail/properties/summary/properties/mode"
@@ -1382,6 +1748,7 @@
                             "report",
                             "plan",
                             "patch",
+                            "files",
                             "structured_output"
                           ]
                         },
@@ -1401,7 +1768,7 @@
                     "producer_attempt_id": {
                       "anyOf": [
                         {
-                          "$ref": "#/definitions/ControlRunDetail/properties/summary/properties/parentRunId/anyOf/0"
+                          "$ref": "#/definitions/ControlRunDetail/properties/attemptExecution/items/properties/attemptId"
                         },
                         {
                           "type": "null"
@@ -1442,6 +1809,7 @@
                                 "report",
                                 "plan",
                                 "patch",
+                                "files",
                                 "structured_output",
                                 "diagnostic"
                               ],
@@ -1490,7 +1858,7 @@
                           "attempt_id": {
                             "anyOf": [
                               {
-                                "$ref": "#/definitions/ControlRunDetail/properties/summary/properties/parentRunId/anyOf/0"
+                                "$ref": "#/definitions/ControlRunDetail/properties/attemptExecution/items/properties/attemptId"
                               },
                               {
                                 "type": "null"
@@ -1592,7 +1960,7 @@
                     "receipt_attempt_id": {
                       "anyOf": [
                         {
-                          "$ref": "#/definitions/ControlRunDetail/properties/summary/properties/parentRunId/anyOf/0"
+                          "$ref": "#/definitions/ControlRunDetail/properties/attemptExecution/items/properties/attemptId"
                         },
                         {
                           "type": "null"
@@ -1621,7 +1989,7 @@
                     "blocker_ids": {
                       "type": "array",
                       "items": {
-                        "$ref": "#/definitions/ControlRunDetail/properties/summary/properties/parentRunId/anyOf/0"
+                        "$ref": "#/definitions/ControlRunDetail/properties/attemptExecution/items/properties/attemptId"
                       },
                       "default": [],
                       "description": "Stable ids of accepted evidence-backed blocking findings."
@@ -1822,6 +2190,7 @@
                     "plan",
                     "summary",
                     "patch",
+                    "files",
                     "diagnostic",
                     "structured_output"
                   ],
@@ -1893,6 +2262,22 @@
                 "default": null,
                 "description": "Attempt involved, when any."
               },
+              "messageId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null,
+                "description": "Live-message id on message.* receipt rows and on the adapter's live_input_delivered status row, when any."
+              },
+              "outcome": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null,
+                "description": "Typed live-message outcome on message.* rows (delivered | accepted | rejected | not_active | unsupported | delivery_unknown); `delivered` on the adapter's consumption status row; null elsewhere."
+              },
               "title": {
                 "type": "string",
                 "description": "Human-readable event title."
@@ -1903,7 +2288,28 @@
                   "null"
                 ],
                 "default": null,
-                "description": "Human-readable event detail."
+                "description": "Human-readable event detail. For typed harness text, the complete redacted text with original whitespace; title may be abbreviated."
+              },
+              "textKind": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "thinking",
+                      "message"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Normalized harness text category; null for non-text or legacy rows. Read text from detail, not the abbreviated title."
+              },
+              "textDelta": {
+                "type": "boolean",
+                "default": false,
+                "description": "True only for adapter-declared text fragments. Consecutive deltas of the same textKind and attempt may be concatenated verbatim; complete messages and other events remain separate."
               },
               "severity": {
                 "type": "string",
@@ -1969,6 +2375,15 @@
         "budget": {
           "type": "object",
           "properties": {
+            "cashKnowledge": {
+              "type": "string",
+              "enum": [
+                "exact",
+                "estimated",
+                "unknown"
+              ],
+              "description": "Cash certainty from the ledger; explicit unknown keeps spendUsd null independently of valuation."
+            },
             "paidBudget": {
               "$ref": "#/definitions/ControlRunDetail/properties/summary/properties/paidBudget",
               "default": {
@@ -2057,7 +2472,7 @@
                 "winner": {
                   "anyOf": [
                     {
-                      "$ref": "#/definitions/ControlRunDetail/properties/summary/properties/parentRunId/anyOf/0"
+                      "$ref": "#/definitions/ControlRunDetail/properties/attemptExecution/items/properties/attemptId"
                     },
                     {
                       "type": "null"
@@ -2249,10 +2664,11 @@
                   "type": "string",
                   "enum": [
                     "none",
+                    "deterministic_checks",
                     "cross_family_review",
                     "both"
                   ],
-                  "description": "What backed an applyable outcome: none (non-applyable), cross_family_review (a clean cross-family verified review), or both (deterministic gates and that review).",
+                  "description": "Verification evidence: none, deterministic_checks, cross_family_review (clean and verified), or both. An intentionally unreviewed result can be applicable without verification evidence.",
                   "default": "none"
                 },
                 "final_verify": {
@@ -2260,6 +2676,10 @@
                     {
                       "type": "object",
                       "properties": {
+                        "base_manifest_sha256": {
+                          "type": "string",
+                          "description": "Exact directory manifest verified; not a Git commit identifier."
+                        },
                         "attempted": {
                           "type": "boolean",
                           "description": "Whether the final verify was attempted."
@@ -2406,9 +2826,10 @@
                   "enum": [
                     "patch",
                     "new_repo",
-                    "report"
+                    "report",
+                    "files"
                   ],
-                  "description": "Kind of work product a run produces: a patch against the base tree, a newly created repository, or a report document."
+                  "description": "Kind of work product: Git patch, new repository, report, or complete directory file manifest with retained bytes."
                 },
                 "source_task_id": {
                   "type": "string",
@@ -2416,7 +2837,7 @@
                   "description": "Task the work product came from."
                 },
                 "producer_attempt_id": {
-                  "$ref": "#/definitions/ControlRunDetail/properties/summary/properties/parentRunId/anyOf/0",
+                  "$ref": "#/definitions/ControlRunDetail/properties/attemptExecution/items/properties/attemptId",
                   "description": "Attempt that produced it, when known."
                 },
                 "files": {
@@ -2440,7 +2861,7 @@
                 "source_task_id"
               ],
               "additionalProperties": false,
-              "description": "The deliverable a run produced (patch, new repo, or report), referenced by apply/delivery verbs."
+              "description": "The deliverable a run produced, referenced by apply/delivery verbs; files uses files.manifest and meta.manifest_sha256."
             },
             {
               "type": "null"
@@ -2557,17 +2978,17 @@
                 "requested": {
                   "type": "integer",
                   "exclusiveMinimum": 0,
-                  "description": "Requested member count (n; 2..4)."
+                  "description": "Requested member count (n; at least 2, up to the configured Council cap)."
                 },
                 "drafted": {
                   "type": "integer",
                   "minimum": 0,
-                  "description": "Members whose draft survived to the merge."
+                  "description": "Members with contract-accepted drafts; excludes retained unverified inputs and is not a work-completion or verification count."
                 },
                 "degraded": {
                   "type": "boolean",
                   "default": false,
-                  "description": "True when fewer members drafted than requested (failures disclosed per member)."
+                  "description": "True when fewer contract-accepted drafts than requested, including any retained unverified contribution; failures remain disclosed per member."
                 },
                 "mergedBy": {
                   "type": [
@@ -2602,7 +3023,7 @@
                           "failed",
                           "merged"
                         ],
-                        "description": "drafted = draft landed; merged = this member produced the unified plan; failed."
+                        "description": "Draft outcome: drafted = contract-accepted input; merged = accepted draft and successful merge; failed stays failed even when its unverified text helped the merger."
                       },
                       "error": {
                         "type": [
@@ -2697,7 +3118,7 @@
               "linked_acceptance_criteria": {
                 "type": "array",
                 "items": {
-                  "$ref": "#/definitions/ControlRunDetail/properties/summary/properties/parentRunId/anyOf/0"
+                  "$ref": "#/definitions/ControlRunDetail/properties/attemptExecution/items/properties/attemptId"
                 },
                 "default": [],
                 "description": "Ids of acceptance criteria this finding relates to."
@@ -2813,6 +3234,20 @@
                     ],
                     "default": null,
                     "description": "Reasoning effort requested for the reviewer route."
+                  },
+                  "credential_profile_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Credential profile requested/effective for the reviewer route; absent = account pool/default."
+                  },
+                  "observed_credential_profile_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Credential profile actually reported by the reviewer route; absent when undisclosed."
                   },
                   "observed_model": {
                     "type": [
@@ -3137,7 +3572,7 @@
                     "properties": {
                       "proven": {
                         "type": "boolean",
-                        "description": "Whether a boundary was actually enforced for this attempt: a named mechanism AND the path it was proven to deny. The only field a consumer should branch on."
+                        "description": "Whether a historical outer boundary was proven by a named mechanism, digest, and denied path; false for current native-access attempts."
                       },
                       "mechanism": {
                         "type": [
@@ -3158,7 +3593,7 @@
                           "string",
                           "null"
                         ],
-                        "description": "Why this attempt ran with NO boundary; null when one was applied. Present exactly when proven is false for a run that asked for a boundary."
+                        "description": "Why no additional outer boundary was applied; current delegated attempts carry the schema-owned deliberate-absence reason."
                       }
                     },
                     "required": [
@@ -3168,13 +3603,13 @@
                       "unavailableReason"
                     ],
                     "additionalProperties": false,
-                    "description": "Applied OS filesystem boundary for one attempt, or the stated reason there was none."
+                    "description": "Historical outer-boundary proof for one attempt, or the deliberate reason current native-access execution applied none."
                   },
                   {
                     "type": "null"
                   }
                 ],
-                "description": "Applied OS boundary for this attempt; null when the run never asked for one (every non-delegated run).",
+                "description": "Historical outer-boundary evidence or current deliberate-absence evidence; null when the attempt has neither.",
                 "default": null
               }
             },

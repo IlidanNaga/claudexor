@@ -40,7 +40,10 @@
               "description": "Terminal lifecycle of the run."
             },
             "noChanges": {
-              "type": "boolean",
+              "type": [
+                "boolean",
+                "null"
+              ],
               "default": false,
               "description": "True when the run finished without changing any files (the ex no_op fact)."
             },
@@ -64,6 +67,10 @@
               "description": "Review axis: approved (clean cross-family verified review), blocked (open accepted findings), or not_run.",
               "default": "not_run"
             },
+            "review_requested": {
+              "type": "boolean",
+              "description": "Frozen model-review intent. False permits an honestly unreviewed result; absent historical records retain the review requirement."
+            },
             "reason": {
               "anyOf": [
                 {
@@ -80,6 +87,8 @@
                     "stuck_no_progress",
                     "wall_clock_exceeded",
                     "user_cancelled",
+                    "host_cancelled",
+                    "owner_task_gone",
                     "crash_interrupted",
                     "workspace_unavailable",
                     "input_required",
@@ -195,6 +204,7 @@
                     "report",
                     "plan",
                     "patch",
+                    "files",
                     "structured_output"
                   ]
                 },
@@ -255,6 +265,7 @@
                         "report",
                         "plan",
                         "patch",
+                        "files",
                         "structured_output",
                         "diagnostic"
                       ],

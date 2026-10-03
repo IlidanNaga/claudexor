@@ -4,6 +4,8 @@ import { delimiter, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   CLEAN_ENV_ALLOWLIST,
+  WINDOWS_RUNTIME_ENV_KEYS,
+  pickAllowlistedEnv,
   composeBaseEnv,
   PROVIDER_SECRET_ENV,
   providerScrubEnv,
@@ -61,9 +63,10 @@ describe("composeBaseEnv (env_inheritance)", () => {
 
   it("mirror_native copies the whole parent env", () => {
     const env = composeBaseEnv("mirror_native", source, NO_RUNNER);
-    expect(env.PATH?.split(":").slice(0, 3)).toEqual([
+    expect(env.PATH?.split(":").slice(0, 4)).toEqual([
       "/home/x/.claudexor/node/bin",
       "/home/x/.local/bin",
+      "/home/x/.cursor/bin",
       "/home/x/.npm-global/bin",
     ]);
     expect(env.PATH?.split(":")).toContain("/usr/bin");
@@ -73,9 +76,10 @@ describe("composeBaseEnv (env_inheritance)", () => {
 
   it("clean keeps only the minimal allowlist (agent isolation): no arbitrary or provider vars leak", () => {
     const env = composeBaseEnv("clean", source, NO_RUNNER);
-    expect(env.PATH?.split(":").slice(0, 3)).toEqual([
+    expect(env.PATH?.split(":").slice(0, 4)).toEqual([
       "/home/x/.claudexor/node/bin",
       "/home/x/.local/bin",
+      "/home/x/.cursor/bin",
       "/home/x/.npm-global/bin",
     ]);
     expect(env.PATH?.split(":")).toContain("/usr/bin");
@@ -102,6 +106,10 @@ describe("composeBaseEnv managed-runner Node prepend rides every lane class (QA-
     root = realpathSync(mkdtempSync(join(tmpdir(), "env-scope-runner-")));
     runnerDir = join(root, "app-node");
     mkdirSync(runnerDir, { recursive: true });
+    // The prepend is refused for a group/world-writable runner dir (its own
+    // case below). Pin the mode so THIS fixture asserts the product rule and
+    // not the runner's umask: a `umask 0002` host would otherwise create 0o775.
+    chmodSync(runnerDir, 0o755);
     fakeNode = join(runnerDir, "node");
     writeFileSync(fakeNode, "#!/bin/sh\nexit 0\n");
     chmodSync(fakeNode, 0o755);
@@ -159,5 +167,24 @@ describe("composeBaseEnv managed-runner Node prepend rides every lane class (QA-
     // Prepending a killable Node's dir would poison the very shell we protect.
     expect((base.PATH ?? "").split(delimiter)[0]).not.toBe(dirname(brewNode));
     expect((base.PATH ?? "").split(delimiter)[0]).toBe("/parent/.claudexor/node/bin");
+  });
+});
+
+describe("pickAllowlistedEnv", () => {
+  it("matches Windows spellings case-insensitively and POSIX ones exactly", () => {
+    // Windows stores `SystemRoot`/`ComSpec`; a plain copy of process.env loses
+    // the live object's case-insensitive lookup, so the canonical uppercase
+    // allowlist would silently drop them.
+    const windows = { SystemRoot: "C:\\Windows", ComSpec: "C:\\Windows\\system32\\cmd.exe" };
+    expect(pickAllowlistedEnv(windows, WINDOWS_RUNTIME_ENV_KEYS, "win32")).toMatchObject({
+      SYSTEMROOT: "C:\\Windows",
+      COMSPEC: "C:\\Windows\\system32\\cmd.exe",
+    });
+    // On POSIX `http_proxy` and `HTTP_PROXY` are different variables, so the
+    // match must stay exact and never invent one from the other.
+    const posix = { HTTP_PROXY: "http://proxy:8080" };
+    expect(pickAllowlistedEnv(posix, ["http_proxy", "HTTP_PROXY"], "linux")).toEqual({
+      HTTP_PROXY: "http://proxy:8080",
+    });
   });
 });

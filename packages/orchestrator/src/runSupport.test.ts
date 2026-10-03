@@ -175,6 +175,46 @@ describe("harnessEventPayload (run-event projection)", () => {
   });
 });
 
+describe("harnessEventPayload keeps the typed terminal facts (run-event journal)", () => {
+  it("forwards harness_reported_error and the adapter's vendor_failure on a completed payload, redacted", () => {
+    // Both facts ride `completed.payload`, so the journal/SSE keep them with no
+    // dedicated projection field; the vendor's words are still secret-scanned.
+    const token = ["sk-or-v1", "c".repeat(40)].join("-");
+    const projected = harnessEventPayload("codex", "a01", {
+      type: "completed",
+      session_id: "ses-1",
+      ts: "2026-09-21T00:00:00Z",
+      payload: {
+        exit_code: 1,
+        harness_reported_error: true,
+        vendor_failure: {
+          code: "server_overloaded",
+          message: `at capacity ${token}`,
+          source: "codex_rollout",
+        },
+      },
+    });
+    const payload = projected["payload"] as Record<string, unknown>;
+    expect(payload["harness_reported_error"]).toBe(true);
+    expect(payload["vendor_failure"]).toEqual({
+      code: "server_overloaded",
+      message: "at capacity [redacted]",
+      source: "codex_rollout",
+    });
+    expect(JSON.stringify(projected)).not.toContain(token);
+  });
+
+  it("adds neither key to a completion that carried none", () => {
+    const projected = harnessEventPayload("codex", "a01", {
+      type: "completed",
+      session_id: "ses-1",
+      ts: "2026-09-21T00:00:00Z",
+      payload: { exit_code: 0 },
+    });
+    expect(projected["payload"]).toEqual({ exit_code: 0 });
+  });
+});
+
 describe("harnessEventPayload hoists adapter ignored_settings (INV-105 from inside the run)", () => {
   it("lifts payload.ignored_settings to the projection top level, where the timeline reads it", () => {
     const disclosure: HarnessEvent = {

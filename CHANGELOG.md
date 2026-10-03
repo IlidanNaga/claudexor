@@ -1,7 +1,399 @@
 # Changelog
 
-Release history for Claudexor. The current version is declared in the root
-`package.json` (the version SSOT); tags `v*` correspond to GitHub Releases.
+Release and candidate history for Claudexor. The current version is declared
+in the root `package.json` (the version SSOT); published versions are available
+on GitHub Releases.
+
+- **v3.18.0** (2026-10-02): Persistent MCP conversation tools can create, continue and inspect threads through the daemon, preserving thread mode and exact replay after a lost response. The macOS app previews agent-produced Markdown with a source toggle and keeps HTML/SVG passive. Selected native profiles retain their own billing evidence through dispatch and rotation. Cursor discovery also finds installations named `agent`, and background children on Windows request hidden consoles while interactive terminals stay available. Native Codex app-server retry notices now remain visible as nonterminal activity without changing final success, failure, account routing or retry policy. Thanks to @IlidanNaga for the thread, preview and profile contributions, @Petyok for Cursor discovery, and @kzmx23 for the Windows work and reconnect investigation that motivated the retry repair. The original Windows incident was not replayed; the repair was verified with recorded, credential-free Codex 0.156.1 traffic and isolated outcome controls.
+
+- **v3.17.2** (2026-09-30): Native input-size refusals retain their cause and measurements without futile account retries or unrelated quota resets. Clients can discover verified Unicode-scalar ASK budgets, including thread framing. Codex model requests preserve the existing network client while streaming exact bodies and recording proven non-delivery separately from unknown outcomes. Claude and AGY move large prompts off process arguments, with Claude system additions kept in their native role. Adapt Codex raw-model Ultra preferences to the strongest supported generation effort in the vendor order, preserve explicit effort evidence, and keep native Ultra delegation unchanged (#368). Login cancellation and timeout keep checking process-group death through transient exit-time probe errors within the existing grace period.
+
+- **v3.17.1** (2026-09-28): Reasoning effort is resolved as a route-owned preference, with separate requested, prepared native and provider-observed values. Exact supported values pass through; verified comparable ladders allow a disclosed adaptation without inventing a universal vendor scale. Missing or malformed capability evidence stays unknown, and a prepared setting is never labelled as sent or observed. Model-operation clients may opt into `captureEffortEvidence: true` at creation; the choice is bound to idempotency and immutable results, while legacy clients keep their result and catalogue shapes. Agent attempts retain typed effort facts in telemetry and silent diagnostic events rather than assistant speech. Effort refusals do not trigger runtime account, model or harness fallback; temporary Codex credential homes are cleaned up even when preparation refuses or the iterator closes early. Authentication smoke verification accepts only a validated, non-generative effort-preparation event before the ordinary started lifecycle, retaining its route and challenge checks. Disclosed residuals: CLI-wide capability evidence is not model-specific, absent provider echoes remain unknown, incomparable ladders remain conservative, and a generic status row may still appear in the diagnostic timeline. Real vendor generations are not a claim of the deterministic release tests. The app compatibility floor is unchanged.
+- **v3.17.0** (2026-09-26): Claude Code runs accept live messages too. The Claude adapter declares `live_input: next_tool_boundary`: a message sent to `POST /v2/runs/:id/messages` is written to the running session's stdin as a native stream-json user frame with the message id as its `uuid`, which Claude Code queues at once and folds into the running turn right after the current tool batch (recorded on Claude Code 2.1.283 with `--replay-user-messages`). Receipts are typed from the CLI's own frames: `accepted` when the `command_lifecycle` frame reports the message queued, `delivered` when the replay echo, the `started` lifecycle frame or `result.user_message_uuids` shows it was consumed (one `live_input_delivered` status event per message), `rejected`/`rpc_refused` when the CLI cancels, discards or refuses it, `delivery_unknown` when no queue receipt arrives within two seconds or the transport is lost. A message that arrives while the model is already writing its final text runs as the next native turn of the same process: the run loop now lets an adapter hold stdin open past a terminal frame (`session.onIo` seam, a holdable `closeStdinOn`), the Claude adapter keeps the session open while a message is queued or started or a run-owned background task is open, the parser reports the cost DELTA between results (`total_cost_usd` is cumulative across turns), emits one `started` per run and a typed `native_turn_started` status for each later turn, and the `--replay-user-messages` echoes and `command_lifecycle` frames are recognized plumbing. Two recorded fixtures pin both shapes. `POST /v2/runs` for a project root that is not registered now answers the typed `404 project_not_registered` (retryable: false, with the one remedy: register the root with `POST /v2/projects` or declare `scope.ephemeral`) instead of a retryable `503 idempotency_status_unavailable`; Exact Retry shares the fix and a root unregistered between the idempotency lookup and enqueue gets the same answer. Disclosed residuals: delivery waits for the current tool batch (a long tool call delays it), and `command_lifecycle` frames are marked internal by Claude Code (the documented replay echo and `user_message_uuids` are the authoritative receipts). The app compatibility floor is unchanged.
+- **v3.16.0** (2026-09-26): A message can be placed into a run that is already executing. `POST /v2/runs/:id/messages` hands `{text, expectedAttemptId?}` to the run's active agent attempt with journal-first admission (a `message.accepted` row is appended through a failure-propagating append before any native dispatch; when that append fails the receipt is `rejected`/`admission_persist_failed` and nothing is sent), typed outcomes `delivered | accepted | rejected | not_active | unsupported | delivery_unknown` with a typed `reason`, and a key-required idempotent receipt (the `Idempotency-Key` is the message id; a replay returns the stored receipt, a different body under the same key is `409 idempotency_conflict`). Every typed outcome is HTTP 200 so clients read `outcome`, never the status. Each harness declares its live-input channel as `capability_profile.live_input`, projected as `liveInput` in `GET /v2/agent-capabilities`: Codex is `mid_turn` through the app-server `turn/steer` request (`accepted` = the `{turnId}` reply; `delivered` = the `userMessage` echo whose `clientId` equals the message id, recorded on codex-cli 0.156.1; a refusal on a still-active turn is `rejected`/`rpc_refused`, a turn that already moved is `not_active`, transport loss or a 30 s silence is `delivery_unknown`, and a steer never cancels the run); Claude Code declares `none` (recorded on 2.1.282: a user frame written mid-turn is consumed only as the next turn, after the first `result` frame at which the adapter closes stdin); Cursor, Antigravity, OpenCode and raw-api declare `none`. Only agent runs register a live target: Ask and Plan runs, thread turns and runs with several live attempts but no `expectedAttemptId` answer typed refusals, a pending interaction answers `not_active`/`interaction_pending` without a vendor write, and steering is attempt-local (a native transient retry follows the new session, a convergence attempt or rerun never re-injects earlier messages). Timeline rows carry `messageId` and `outcome`, the message text lives only in the run's own `events.jsonl` (the journal copy keeps the digest), and the deterministic `fake-steerable` harness kind drives the canary story. This release lands on the community app-server lifecycle work from PR #355 (runs stay active for native background work; the Codex adapter runs `codex app-server` over stdio JSON-RPC). Disclosed residuals: a receipt landing after the run's terminal commit is durable in `events.jsonl` but misses the live SSE push; a consumed steer is not inactivity-watchdog progress until the model's next output; no CLI verb or MCP tool yet (`claudexor follow` is the later surface). The app compatibility floor is unchanged.
+- **v3.15.1** (2026-09-25): On Windows the CLI exits with its command's own status instead of aborting natively after printing valid output, so a successful `claudexor doctor --json` no longer ends in a libuv crash (#356). After stdout and stderr drain, the Windows CLI sets its exit code and lets Node exit naturally; the forced `process.exit()` it used before raced isolate teardown after `doctor`'s `fetch()` and, on Node 24.16, aborted with `UV_HANDLE_CLOSING` (0xC0000409, nodejs/node#56645; upstream fix nodejs/node#61999 shipped in Node 24.20.0) after the JSON was complete. An unref'd one-second backstop still forces the exit when a stray handle keeps the loop alive, output still drains first so large JSON projections are not truncated, and Linux and macOS keep the immediate exit. The Windows local-install smoke (`scripts/windows-local-install-smoke.mjs`) now fails when `doctor --json` exits non-zero or by signal before it trusts the JSON, and both Windows CI lanes (Node 20 and 24) run the exit-path regression (`packages/cli/src/cli-io.test.ts`). Published v3.15.0 is affected on Windows: its `doctor --json` could print valid JSON and then abort on Node 24.16, and its install smoke did not check that exit. Disclosed residuals: a future persistent stray handle still reaches the forced one-second backstop; a live Windows ChatGPT login and a real Codex task are not exercised by CI; win32-arm64 has no CI runner proof; issue #191 stays open for Claude/OpenCode and an operator's ambient npm install. The app compatibility floor is unchanged.
+- **v3.15.0** (2026-09-25): Codex installs locally on Windows through the managed toolchain, and doctor, login and runs resolve the image it installs. `claudexor harness install codex --target local` no longer refuses on Windows: a Windows npm global prefix holds only `.cmd`/sh/ps1 shims and Claudexor never spawns a harness through a shell, so the installer runs the toolchain's own npm (`node_modules\npm\bin\npm-cli.js` beside `node.exe`, never an ambient `npm`) against the exact pin and proves the vendor's `codex.exe` inside the pinned `@openai/codex-win32-<arch>` platform package. The harness PATH carries that image directory on win32, so every local surface resolves the same `codex.exe` by bare name; one core layout owner serves both the install proof and the PATH producer, and the receipt fields are unchanged. Claude, OpenCode, Cursor and Antigravity keep a typed `unsupported_platform` refusal on the Windows local target, now naming the exact reason, and an unsupported architecture refuses the same way. Both x64 Windows CI lanes install the real pinned package on the exact embedded Node with no ambient node/npm and an isolated profile, then check the receipt, direct and by-name `--version`, the idempotent recheck and `doctor --json` (`scripts/windows-local-install-smoke.mjs`). Disclosed residuals: win32-arm64 has no CI runner proof; a live Windows ChatGPT login and Agent run are not exercised by CI; an operator's own ambient npm install of Codex, and Claude/OpenCode on Windows, still meet issue #191, which stays open. Linux and macOS behaviour is unchanged. The app compatibility floor is unchanged.
+- **v3.14.0** (2026-09-24): New vendor models become usable without a Claudexor release per model (#338, #339, #340). Whether a model list may refuse an explicit model is now each harness's own declaration (`model_inventory_absence`), honoured on live and manifest lists alike: Claude, Codex and Cursor declare `advisory`, so an id their list lacks is persisted or forwarded byte-identical and the vendor decides, with the admission said once (the settings read-back carries `notes`, printed by the CLI; the doctor readiness row carries the note in its detail; the per-spawn gate keeps its status event); raw-api, agy and opencode stay authoritative, the automatic reviewer panel keeps its zero-cost skip, HTTP model operations stay strict, and refusals state observations instead of guessing a cause (INV-104 amended, CONCEPT-CHANGE). Claude models are discovered from the installed binary: the adapter's `models()` runs the prompt-free `initialize` handshake (a `config_dir_login` profile under its own config dir, an `api_key`/`oauth_token` profile with its own credential, the unscoped listing credential-free) and returns the picker's selectors with their resolutions as pinnable exact ids (`origin: live`, `resolved_model`) plus the frozen hints (`origin: hint`); a failing binary yields the hints and the listing reports `source: manifest`; the probe, the `--help` effort memo, the readonly-flag probe and the `--version` read all follow the binary a run's PATH patch selects, keyed by the binary's identity so an in-place CLI update is re-read without a daemon restart. The Codex HTTP catalog declares its own verified client version (`CODEX_HTTP_CLIENT_VERSION`, raised to a newer installed CLI, memoised by binary identity, never lowered), so floored models such as `gpt-6-sol` no longer hide behind the installer pin; the negotiated account view carries `clientVersion`/`clientVersionSource` and both membership refusals name the declared version. Managed vendor pins catch up to Claude Code 2.1.281 and Codex 0.156.1 with snapshots and credential-free recordings re-captured from the real binaries (`known_models` gains `gpt-6-sol`/`gpt-6-luna`; the Claude hint stamp stays at its last verification, 2.1.261; an already-installed CLI is not replaced, and on a kept older CLI a run whose live effort probe fails proceeds at the vendor default with the ignored-settings disclosure). Disclosed residuals: a mistyped explicit model on an advisory harness costs one spawn and returns the vendor's own text; the explicit reviewer panel forwards without the run-event disclosure; the agent capability catalog's `configuredModelValid` stays a boolean without the note; the `--help` memo is one slot and relative PATH-patch entries resolve as the daemon sees them. The app compatibility floor is unchanged.
+- **v3.13.0** — Configure daemon and strategy capacity in user-global YAML or environment: regular jobs now default to 24; candidate/scout parallelism, deep-scan width and Council membership keep their prior defaults with configurable upper bounds. Changes take effect on the next daemon start, with configured/effective/restart-required diagnostics. Council's macOS picker follows effective capacity. Nested Delegate limits and same-thread serialization remain unchanged. Explicit new YAML keys must be removed before rollback to an older strict-config engine.
+- **v3.12.10** (2026-09-21): A run's failure record now carries the vendor's own failure code beside its words. `codex exec --json` drops the machine-readable code that Codex's rollout record keeps (a capacity refusal is `server_overloaded`), so `RunFailure` gains an optional, nullable `vendorFailure: { code, message, source }` read fail-soft from that record after the process exited, bound to the current turn and `null` on any doubt or for any harness without such a channel; the code is opaque evidence that nothing branches on. A harness that voiced its own error and then exited non-zero is an `unknown_harness_error` with an explicit `retryable: false` instead of a process crash, `route.transient.exhausted` reports the observed retries beside the configured maximum, and retry, rotation, cooldown and credential verdicts read exactly the inputs they read before. The app compatibility floor is unchanged.
+- **v3.12.9** (2026-09-21): A Codex model list that omits a model no longer makes Claudexor refuse a run that asks for it. The Codex CLI serves a bundled default list when its remote fetch times out and nothing on the wire says which list answered, so a harness now declares what its live inventory proves (`model_inventory_absence`, default `authoritative`): Codex declares `advisory`, and an explicit model its list lacks — or an empty list — is forwarded to the vendor unchanged and disclosed once in the run's events, in both run gates and the explicit reviewer panel. Manifest truth, settings writes, the doctor, automatic reviewer selection, authenticated model operations, pinned accounts and the probe cache are unchanged. A vendor refusal on the CLI run path arrives as an ordinary error carrying the vendor's text, and a mistyped model on such a harness now costs one spawn. The app compatibility floor is unchanged.
+- **v3.12.8** (2026-09-20): Codex interrupted-stream diagnostics now record the last parsed SSE event and its silence separately from byte-chunk timing, so a later heartbeat or unfinished frame cannot make an old event look recent. Unknown outcomes and the no-retry policy are unchanged.
+- **v3.12.7** (2026-09-20): structured review outputs preserve caller-optional fields when strict vendor transport emits `null`, while required and caller-nullable fields retain their original validation. Codex Responses failure evidence now records monotonic chunk timing and deterministic interrupted-stream diagnostics without enabling automatic retries or changing unknown-outcome custody.
+- **v3.12.6** (2026-09-20): A Codex response that names no model, such as a refused or torn body, now leaves the live turn continuation exactly as the caller sent it, so an ordinary mid-turn error no longer starts a fresh conversation with the vendor. The app compatibility floor is unchanged.
+- **v3.12.5** (2026-09-20): A subscription account can answer a request for one model with a different model, without an error and without anything in its quota. Such a response now carries a typed mismatch fact, the account is ranked after the others for that model for half an hour without being excluded, and a conversation turn it answered is sent on through its own content and tool calls instead of refusing the next request. The app compatibility floor is unchanged.
+- **v3.12.4** (2026-09-19): Codex model discovery and quota checks now find the same CLI and Node runtime as sign-in and agent runs on GUI installations, while preserving scoped account homes and credential isolation.
+
+- **v3.12.3** (2026-09-18): a run marked `execution.delegated`, driven by an external orchestrator that owns the workspace, may request `access: full` without a user-level trust record. Runs an operator starts at a surface are unchanged: they still require the one-time grant and still receive the same typed 403 refusal with its retry remedy, and the effective profile of an admitted delegated run is still recorded as `full` rather than downgraded. Two surfaces can set the marker and the exemption costs something different on each. A control-API client holds the daemon token and can already grant itself the allow through `POST /v2/trust`, so the second ceremony bought nothing there. An MCP tool caller is the host's model, holds no token and has no trust-writing tool: for it this is a real widening, because one call with `execution.delegated: true` and `access: "full"` now runs unsandboxed native `full` on any `repoPath` without the grant, where before it was refused, and the only remaining control is the host's own MCP tool-approval policy. The macOS app cannot originate the marker, though Retry Exact and Run Again carry a recorded one forward, as do `claudexor retry` and `claudexor run-again`; belt sub-runs and public thread turns cannot set it. The Claudexor.app compatibility floor stays at 3.11.0 (no new wire contract the app must decode).
+
+- **v3.12.2** (2026-09-18): accounts remain eligible by default until quota usage reaches 100%, so the final 10% stays available for routing and rotation. Explicitly configured lower thresholds remain effective; vendor cooldowns and exhausted windows still block selection.
+
+- **v3.12.1** (2026-09-16): reading ONE run no longer serializes every retained run. The daemon's retained-command list RPC now takes an optional query addressing a single subject — one run id, or one parent's direct Delegate children — and selects before it redacts, so `GET /v2/runs/:id` (the status poll every embedding host makes) stops recursively projecting the prompts of unrelated runs. A measured install carried 1,627 retained records over 150.3 MB, 98.6% of it params. The honest cost is a reference and metadata scan over the retained records plus a sort over the matching children: not constant time, not constant memory, and unrelated to journal cold-replay memory or historical timeouts. The unqualified read, the global `GET /v2/runs` page, and the uncapped transitive cancellation cascade are unchanged; an engine older than the query ignores it and answers in full, so callers keep applying their own selection. The engine update keeps the Claudexor.app 3.11.0 compatibility floor (no new wire contract the app must decode).
+
+- **v3.12.0** (2026-09-14): the daemon's journal now replays frame by frame and forgets dead history through a fixed fold policy (per-token harness deltas, superseded quota snapshots, immutable params on updates, terminals of pruned commands), so startup memory follows the retained state rather than the journal size: on a 1.6 GB root, normal admission in about 20–30 s depending on host load, at the default heap, instead of an out-of-memory crash, and the root compacts to about 0.3 GB. Sequence numbers, the epoch and live cursors survive compaction, snapshots may span several frames, and maintenance re-arms on growth since the last pass (a restart no longer rewrites an already-compacted partition; a failed pass settles the baseline too). Typed compaction declines, `journal.records_retired` receipts and the daemon's own memory are logged on admission and on every maintenance pass; retained params of terminal commands are capped at 256 MiB; crash-GC reuses the prepared command projection. Compatibility: an engine from before 3.12.0 refuses a root served by 3.12.0 loudly (rollback = keep the journal, recover with 3.12.0 or newer); the app compatibility floor stays at Claudexor.app 3.11.0 (no new wire contract the app must decode). One-time residue: legacy prune tombstones carry no run ids, so terminals of runs pruned before 3.12.0 stay retained (none on the acceptance root); runs that never received a journaled terminal keep their pre-release progress frames until their command is pruned, when the tombstone retires them (two such runs hold about 3.1k frames on the acceptance root).
+
+- **v3.11.0** (2026-09-13): adds advisory Standard/Fast/Economy processing while preserving the selected model, reasoning effort and context. Native controls, account catalogs, actual service observations and monetary evidence remain separate; retries and account rotation recheck the actual service against the existing budget. Ordinary folders support direct work or complete selected copies without creating Git, with retained binary results, conflict-aware selected application and explicit discard. New state remains readable by this and later compatible runtimes; after a directory result is recorded, returning that state to 3.10.5 is not supported. Keep journals/results and recover with a compatible newer reader. The engine update requires Claudexor.app 3.11.0.
+
+- **v3.10.5** (2026-09-12): a model request whose account cannot hand over its model list now moves on to the next available account instead of ending the whole attempt, unless the account was pinned explicitly, and each account is tried at most once per request. When no account can serve the request, the reason given is the one the accounts actually gave: a request that failed because the model lists were unreachable no longer reports that every account ran out of subscription quota, and reports no reset time. An account is marked busy until a stated time only when the vendor itself named that time or delay.
+
+- **v3.10.4** (2026-09-12): Codex model operations can carry the caller's live `x-codex-turn-state` continuation on the existing route-bound opaque envelope (opt-in per request, captured once before the body, replayed only on the matching account and model, no separate daemon turn-state store; retained only in the existing private request/result custody); attempt/run telemetry and run summaries gain an additive normalized input measurement (`inputTokenUsage`: complete input total, cache reads, cache writes, unknown stays null) folded strictly across contributions, while legacy token fields keep their harness-specific meanings.
+
+- **v3.10.3** (2026-09-11): exposes successful upstream Codex catalog contact through the existing provenance and observation-time fields. Reused catalogs retain their original observation time, failed reads produce no fresh proof, and the response stays compatible with strict older clients.
+
+- **v3.10.2** (2026-09-09): preserves useful Council drafts whose completion report contradicts its required inputs as explicitly unverified merger inputs, while keeping the original attempt failed and inspectable. Automatic journal compaction now runs after normal admission with full acknowledged history, cursor continuity, and cancellable single-writer installation; Windows pending-tail recovery uses a verified temporary descriptor while ordinary append behavior stays unchanged.
+
+- **v3.10.1** (2026-09-08): Antigravity model and quota checks use closed pipe
+  input so a failed silent-auth check cannot open interactive sign-in. Explicit
+  login retains its terminal. Ambiguous authentication timeouts remain probe
+  failures, and failed quota refreshes remain visible alongside stale data.
+  Existing freshness windows, account routing and polling cadence are unchanged.
+  Windows interactive login now binds child standard streams to the pseudoconsole
+  instead of inherited parent pipes; native fixtures require the exact submitted
+  input before reporting success.
+- **v3.10.0** (2026-09-07): adds caller-owned Codex model operations using the
+  same managed accounts as Agents. Applications retain their system prompts,
+  conversation history and tool execution; the engine preserves exact payloads,
+  one-generation operation identity, recoverable results and explicit ACK.
+  Codex is the implemented Models source; Claude, Cursor and other harnesses
+  remain available for Agents. Explicit output caps and temperature are not
+  supported by this route, and cash cost stays unknown without a provider
+  receipt. Model catalogs remain account-specific and required before dispatch;
+  retained compact receipts preserve idempotency and still grow with history.
+  Reduces redundant journal startup copying and validation without deleting
+  history or disabling compaction. Runtime replacement now respects unconfirmed
+  setup termination. A setup failure recorded before process-group evidence can
+  leave replacement and further login for that harness deferred indefinitely:
+  Reconcile, Cancel and restart cannot clear that historical record, and automatic
+  recovery of this case is deferred. Contributor release review no longer
+  requires named model brands, overlapping runs or signed review attestations;
+  runtime signatures, platform CI and exact candidate-byte promotion remain.
+  Thanks to Praxis Relay and CLIProxyAPI for the model-transport research and
+  design references; neither is embedded as another relay service.
+- **v3.9.8** (2026-09-05): ordinary Agent work now defaults to no internal
+  model review, independently of executor selection. Explicit panels and
+  review opt-in, Best-of, and requested review cycles remain available;
+  deliberately unreviewed work can be applied normally with an honest status
+  while required checks and patch integrity remain enforced. Recorded intent
+  preserves historical run/retry behavior. Adds GPT-6 Astra through Ultra and
+  Claude Fable 5.1 (#259), with Codex CLI 0.153.3 and Claude Code 2.1.261.
+  Refreshed native protocol evidence preserves SSE retries and historical MCP
+  startup handling. Unpriced Codex usage and incompatible saved cost averages
+  stay unknown instead of inheriting generic tariffs.
+- **v3.9.7** (2026-09-04): the published release of the 3.9.6 code below,
+  shipped under an owner-authorized publication exception (no custom Ed25519
+  review attestation or runtime manifests, so in-place engine update and
+  first-time remote bootstrap are unavailable for this version; signed and
+  notarized app artifacts, npm provenance, and SBOMs are unchanged). 3.9.6 was
+  prepared and tagged but never published.
+- **v3.9.6** (2026-09-03): background quota polling no longer lets one revoked,
+  never-logged-in, or failing profile pin its vendor's healthy profiles to the
+  15-minute retry ceiling — renewals, evidence installed mid-ladder by a
+  foreground refresh or a harness event, and vendor window resets are never
+  postponed by a sibling's retry ladder; the Claude OAuth source remembers a
+  proven vendor rejection per token instead of re-presenting it every cycle
+  (#263). Captured workspace diffs relativize GNU diff 3.8 bare binary records
+  (#252). The vendor 429 floor, typed absence semantics, and the five-minute
+  freshness contract are unchanged.
+- **v3.9.5** (2026-09-01): background quota renewal now starts on the last
+  existing poll tick before primary evidence would become stale. The
+  five-minute display and routing freshness contract, single poller, vendor
+  pacing, Retry-After handling, and typed absence semantics remain unchanged.
+- **v3.9.4** (2026-08-31): includes the typed delegation text and whitespace
+  preservation prepared for 3.9.3, together with harness-independent release
+  review by two distinct approved model families. Claude read-only runs retain
+  AskUserQuestion; workspace-write command execution honors caller denies and
+  scoped Bash permissions, with enforcement strength exposed by the typed
+  `write_mechanism` capability. Interactive runs support structured output;
+  runs without configured gates report that absence without inventing passed
+  or failed checks. Cancellation reasons retain their typed user/host/owner
+  provenance across the control boundary.
+- **v3.9.3** (2026-08-30, unpublished candidate, superseded by 3.9.4):
+  delegated run timelines preserve typed text-fragment
+  metadata and original whitespace so hosts can join streamed words without
+  inserting event separators into model prose. Complete messages, tool events,
+  final answers, and omission disclosures retain their distinct semantics.
+  Release review accepts any two distinct approved model families on any
+  harness, recording the actual model and harness while preserving independent
+  full-context reports, exact-candidate evidence, and signed attestation checks.
+- **v3.9.2** (2026-08-30): Claude subscription quota refresh now wakes Claude
+  Code's own prompt-free OAuth lifecycle before probing an expired or
+  near-expiry access token. Claude Code retains refresh-token custody, locking,
+  rotation, and store writes; Claudexor sends no MCP frame or model prompt and
+  only re-reads the fresh access token after expiry metadata advances.
+  Publication uses the owner-approved one-release `waive_cursor_review`
+  exception to accelerate the live quota hotfix after its correctness, scope,
+  security, exact-vendor acceptance, and full release gates completed; both
+  owner-signed runtime manifests and every other release, notarization, and
+  provenance gate remain required, and no formal Cursor attestation is claimed.
+- **v3.9.1** (2026-08-30): refreshable Claude Code profiles remain signed in
+  when an idle `oauth/usage` probe cannot prove the vendor-owned access token
+  is fresh. Known-expired refreshable tokens skip the usage request, while an
+  unknown-expiry 401/403 is reported as the typed `refresh_failed` quota
+  absence instead of falsely downgrading the account to `auth_revoked`.
+  Publication uses the owner-approved one-release `waive_cursor_review`
+  exception after the required Fable subagent tier disappeared from the live
+  Cursor catalog; both owner-signed runtime manifests and every other release,
+  notarization, and provenance gate remain required, and no formal Cursor
+  attestation is claimed.
+- **v3.9.0** (2026-08-29): quota polling is paced per vendor lane with a
+  persisted Retry-After floor (a 429 or restart no longer amplifies vendor
+  traffic); foreground quota refreshes honor vendor cooldowns and disclose
+  skipped vendors additively; suppressed polls stay stated through typed gap
+  absences (`rate_limited`, `probe_skipped_rate_limited`, `poll_paced`); the
+  claude probe loop short-circuits after the first 429 and the agy fan-out is
+  bounded; the `claudexor_accounts` MCP tool defaults to the cached listing
+  with `fresh: true` opting into the snapshot; and the cursor adapter can
+  host the delegation belt via reconciled lane `mcp.json` injection
+  (CONCEPT-CHANGE(INV-030); its owner-set live E2E was executed — see
+  docs/FEATURES.md for the bounded-proof record and remaining caveats).
+  Ships under the owner-authorized version-scoped Ed25519 waiver: the release
+  omits the review attestation and both signed runtime manifests, so in-app
+  engine update and first-time remote bootstrap are unavailable for 3.9.0
+  (client verifiers stay fail-closed); DMG/npm/provenance are unchanged.
+- **v3.8.4** (2026-08-28): implicit profile pools now drop only the typed
+  quota-exhausted lane when a sibling harness can continue, while explicit
+  pools remain strict and an exhausted primary preserves its typed terminal
+  failure when no fallback survives admission.
+- **v3.8.3** (2026-08-26): large compacted journal snapshots now replay
+  record-by-record without materializing one whole-array JavaScript string,
+  while decompression and opportunistic compaction remain bounded and fail
+  back to the existing journal instead of entering recovery-only mode.
+- **v3.8.2** (2026-08-24): reviewer routing now preserves the selected
+  credential profile through every reviewer surface, exposes a read-only
+  accounts view, and discloses unavailable reviewer families instead of
+  silently dropping them. Transient Claude native auth-status transport
+  failures stay typed as unknown with bounded retry and last-known-good
+  disclosure rather than appearing as a logout. Startup recovery now keeps
+  the frozen pre-admission verdict as its fail-closed fallback until a live
+  post-quarantine re-verdict succeeds, and a delayed startup completion can no
+  longer overwrite that newer recovery state or duplicate normal-plane work.
+  Release verification now treats Codex model and effort catalogs as
+  account-scoped: every live ladder and default must match the recorded union,
+  while models advertised only by another account no longer create false
+  drift; `gpt-5.2` is admitted when the pinned CLI advertises it. The
+  Git-heavy orchestration and raw-patch regressions are split into independent
+  tests so their combined work cannot exhaust one composite timeout; every
+  scenario keeps its original production call and assertion. Codex and Cursor
+  one-shot prompts now use their native stdin contracts instead of process argv,
+  so large agent-first review packets no longer fail before model startup with
+  `spawn E2BIG`. Publication uses the owner-approved one-release
+  `waive_cursor_review` exception to avoid repeating the full-context review
+  already completed during release work in a different execution setup; both
+  signed runtime manifests and every other release and provenance gate remain
+  required, and no schema-v6 review attestation is claimed.
+- **v3.8.1** (2026-08-22): profile-scoped Antigravity runs now create and use
+  a private macOS keychain under each profile HOME before the vendor touches
+  Keychain Services. This removes the recurring “Keychain not found” dialog
+  without changing the host default keychain, native-HOME behavior, or
+  multi-account separation. The release also carries the pending daemon
+  concurrency and native delegated-access changes already merged on `main`.
+  Publication uses the owner-approved one-release `waive_cursor_review`
+  exception because the required Cursor review lanes were unavailable; both
+  signed runtime manifests and all other release and provenance gates remain
+  required, and no formal Cursor attestation is claimed.
+- **v3.8.0** (2026-08-20): a host embedding Claudexor can finish `Connect` for
+  a vendor CLI that is not installed yet. `claudexor harness install` gains an
+  explicit `--target local`: npm-pinned vendors install into the managed
+  toolchain root (`~/.claudexor/node`) that local binary resolution and
+  confinement already read, instead of the SSH-host prefix the historical
+  `remote` target owns; the script vendors (cursor, agy) keep choosing their
+  own destination (`~/.local/bin` / `~/.cursor/bin`) — the receipt discloses
+  where, and the resolver reads both.
+  The watched remote flow keeps its prefix, its disclosure and its exit-code
+  contract, and neither the install lease, the post-install proof, nor the
+  empty-download refusal applies to it. Two deliberate differences remain and
+  are the whole list: a refused install no longer creates an empty vendor root
+  before refusing, and — because the resolver now reads Cursor's own
+  `~/.cursor/bin` — vendor children resolve executables through one more
+  user-owned directory of the same trust class as the `~/.local/bin` they
+  already searched. The lease also does not serialize a local install against
+  a concurrent remote one writing the same vendor-chosen launcher; upstream
+  had no serialization anywhere, so that is the inherited baseline, disclosed
+  rather than claimed away. What the unattended local path
+  has instead of a human at the terminal is proof: concurrent
+  installs into one prefix serialize on a cross-process lease (a lease whose
+  owner died fails closed with a typed `install_lock_stale` and its exact
+  cleanup path, never an ABA-prone auto-reclaim), and success requires
+  resolving the installed launcher and executing its `--version` — a child
+  exiting zero without that postcondition is a typed
+  `install_verification_failed`, so `ok:true` always carries `installedBinary`
+  and `installedVersion`. A script vendor installed this way is disclosed as
+  `unattended_unpinned` and records the downloaded installer's size and
+  sha256; it never claims the `human_observed` verification the watched path
+  earns. The signed runtime closure now also ships `claudexor.bundle.cjs`
+  stamped with the same build sha as the daemon, so the host invokes that
+  exact reviewed CLI rather than anything it found on PATH. Three model-gate
+  defects found by the release review are fixed with it: a cursor account
+  pinned by a credential profile now answers its OWN model inventory through
+  the same route resolver its run uses (previously the gate consulted the
+  engine-default ladder, got an empty list, and refused a model the pinned
+  account genuinely offers); the pre-run gate no
+  longer replays an admitted credential route as an auth preference for every
+  adapter (a non-Cursor `auto` run was enumerated against an inventory its own
+  spawn would not use), and no spawned spec is rewritten any more, so Cursor's
+  `auth_switched`/`readiness_preferred` disclosure survives an explicit-model
+  `auto` run. The Cursor model inventory now also runs in the run's `cwd`.
+  This publish uses the owner-approved one-release `skip_custom_ed25519`
+  waiver: Apple codesigning/notarization, GitHub provenance and npm provenance
+  are unchanged, and the three custom Ed25519 documents are simply absent
+  rather than unsigned — no client signature check is weakened.
+  The release also carries the Windows Antigravity work merged from PR #207:
+  credential-profile custody and managed setup login become platform-aware,
+  with an exact Windows Antigravity one-binding policy, vendor-proven
+  doctor/quota results, durable ambiguity handling, and host-resolved terminal
+  capability projection.
+- **v3.6.0** (2026-08-18): the unified account model (INV-135 rewrite,
+  owner-approved). Every account is a named registry row; the separate
+  "default"/"CLI login" account type is gone. A detected legacy claude/codex
+  default-store login auto-registers at daemon start as the ordinary
+  `<harness>-default` row through a crash-recoverable migration: while it is
+  incomplete the affected harness refuses runs with a typed error, and
+  `POST /v2/accounts-migration/rollback` is the supported downgrade path.
+  Unpinned runs route through a quota-aware pool of enabled+ready rows with
+  sticky, disclosed thread bindings; explicit pins stay strict (typed
+  `subscription_window_exhausted` refusal, no silent rotation); pool
+  exhaustion is a typed `credential_pool_exhausted` terminal carrying the
+  pool's earliest known reset, and the paid API-key route serves it only under
+  the explicit `api_key` preference, never silently under `auto` (owner Q3=A).
+  New wire surface is additive: the `accountPools` pool authority plus
+  `GET /v2/account-pools` (the feature marker) and the migration rollback
+  endpoint; `harnessAccounts` stays on the wire as `[]` for legacy strict
+  clients. Cursor host-Keychain logins are retired — every cursor account
+  lives in an isolated vendor file-store row, and `auth login` becomes
+  bootstrap sugar into the `<harness>-default` row. Deleting a row is provable
+  (typed retryable error on partial cleanup) and retires migrated legacy
+  aliases in the same operation. See PR #206 for the full story.
+- **v3.5.0** (2026-08-17): Google's Antigravity CLI (`agy`) becomes a
+  Claudexor harness, with the thing the vendor itself does not offer — several
+  Google AI Pro/Ultra subscriptions signed in side by side and rotated on
+  quota. Accounts are named profiles, each a Claudexor-owned home directory
+  where the vendor keeps its own token file, so the operator's real home and
+  login keychain stay untouched (live-proven across three Google accounts on
+  macOS). Sign-in works from the app card: the vendor prints a link and waits
+  sixty seconds for a pasted code, reads that code only from a real terminal
+  (the daemon-hosted runner interposes `expect(1)` and propagates the vendor's
+  own exit status), and the job's deadline IS the vendor's window — published
+  as fixed, refused on extend, with a bounded exchange grace after the paste
+  so the clock cannot cancel a sign-in that succeeded. `claudexor quota` reads
+  each account's own `/quota`; every Antigravity window is model-scoped, so an
+  exhausted Gemini budget does not block the account's Claude/GPT slugs, and a
+  run naming no model is governed by whichever budget the profile's selected
+  model actually spends. `claudexor harness install agy` downloads Google's
+  official installer in full (PowerShell one on Windows), prints its size and
+  sha256, and runs the file it showed — never a piped script. Disclosed
+  honestly rather than hidden: the vendor exposes no config-dir variable, so
+  one profile home also holds its conversation state and threads are not
+  isolated from each other; no machine-readable account identity exists;
+  platform isolation is proven on macOS only and doctor says so elsewhere.
+  Also in this release: the Windows process-identity reader no longer times
+  out on a cold PowerShell, silently degrading Windows runs. Development ran
+  as five parallel reviewed phases plus an integration wave; the closing
+  triad+scope wave ran through Claudexor's own agentic flow and its sol slot
+  caught the resident-TUI login defect none of seven prior waves saw.
+- **v3.4.2** (2026-08-16): every mutating delegated cursor run on macOS
+  crashed within seconds — `RetriableError: [internal] unable to open database
+  file` (SQLITE_CANTOPEN). cursor-agent keeps its chat store in SQLite under
+  the scoped HOME, SQLite canonicalizes the database path on open
+  (`realpath(3)` lstat/readlinks every intermediate component), and the
+  Seatbelt profile's runtime-root read deny covered the components between the
+  runtime root and the allowed scoped home. This is the same class the 3.3.15
+  CODEX_HOME fix closed for the native state root — and the residual its
+  review predicted for the scoped home — so the metadata traversal carve-out
+  now covers the union of EVERY own root's denied ancestors (scoped home,
+  worktree, native state root): literal, metadata-only, placed after the deny
+  it punches through. Nothing else is re-opened — file data under the runtime
+  root, sibling projects, and directory listings stay denied, and the boundary
+  probe semantics are unchanged. Two-sided `sandbox-exec` regressions pin the
+  class (canonicalize of each own root, a cursor-shaped SQLite open+WAL write,
+  and both pre-fix reproductions with the carve-out stripped), and the
+  real-harness battery's delegated-confinement phase grows a cursor case
+  beside codex, capability-checked against the real repo mutation and its
+  green test gate rather than exit status alone.
+- **v3.4.1** (2026-08-15): the Windows native-login groundwork, grown from
+  community PR #189 (Renat, @dead9111) and reworked with the contributor's
+  three commits preserved. Windows could not reach the login lane at all: the
+  sealed manifest rejected `C:\...` paths and process identity answered
+  `unsupported_platform`, so no execution permit was ever issued. The
+  absolute-path contract is now a REGEX covering POSIX, drive-rooted, and UNC
+  spellings — chosen over a `node:path` refinement because only a regex
+  survives `schema:gen` as a JSON Schema `pattern` (the refinement silently
+  relaxed the generated wire contract to `minLength: 1`) — with drive-relative
+  `C:x` and root-relative `\x` refused and the Swift decoder mirroring the
+  same rule. Process identity gains an OPT-IN win32 reader that takes the
+  kernel's own process creation time (`GetProcessTimes` via the absolute
+  System32 PowerShell) as the birth token, so a recycled PID compares
+  DIFFERENT exactly as on POSIX; the default service still answers
+  `unsupported_platform`, so run capture, the orphan reaper, and the daemon
+  writer lease keep their fail-closed Windows behavior. Windows has no process
+  groups and no cooperative TERM, so on the login lane both escalation steps
+  are one identity-gated `taskkill /T /F` of the recorded leader's tree — the
+  terminator this repo already owns — and emptiness is the leader's identity
+  being gone, disclosed in ARCHITECTURE as a leader-death proof rather than
+  the POSIX group-ESRCH proof. The vendor binary is still executed without a
+  shell: on win32 the harness resolver offers only executable images
+  (`.exe`/`.com`, the v3.3.9 `git.exe` rule), and an npm `.cmd`/shell shim is
+  refused with an advisory naming the real cause (issue #191 tracks spawning
+  shims through their JS entry). Login env allowlists forward the Windows
+  process-environment keys and match them case-insensitively on win32 only
+  (`SystemRoot` vs `SYSTEMROOT`; on POSIX `http_proxy` and `HTTP_PROXY` stay
+  distinct) through one shared picker that also repairs the pre-existing
+  `SYSTEMROOT` hole in clean-env spawns. The journal partition walker now
+  addresses entries with `join`, fixing a real 3.4.0 Windows regression where
+  the second daemon start read its own journal as missing and demanded
+  recovery (the contributor's own find). The detached login runner passes
+  `windowsHide` so "no Terminal" also means no console window, and a failed
+  codex login no longer recommends the macOS-only `--browser-redirect`
+  Terminal handoff off macOS. A `windows-latest` CI lane is REQUIRED through
+  the `build-test` aggregate and earned its place on its first run: it caught
+  8.3-short-path temp fixtures, live-proved the PowerShell identity reader,
+  and surfaced that journal compaction cannot rename over its own open handle
+  on Windows (issue #190; those four cases are skipped there with the cause
+  named). Ordinary codex runs on Windows with an npm install remain
+  non-functional (the shim class, issue #191) — this release makes the
+  refusal typed and honest rather than ENOENT.
+- **v3.4.0** (2026-08-15) — Shared data roots are now protected by a
+  persistent root-authority barrier: the daemon records a writer epoch and a
+  proven serving-version floor, refuses grants from released or foreign
+  leases, and rejects malformed version candidates even on a fresh floor.
+  Startup runs in two stages — a strictly read-only preparation that inspects
+  the writer lease and journal partitions, then, only after the authority is
+  won and the preparation revalidates, the floor advance, crash garbage
+  collection, and journal activation. A stale flat-layout root from an older
+  daemon migrates in place with no window where the anchor file is absent,
+  and staleness is only concluded from a proven-dead writer. When a partition
+  needs recovery the daemon serves recovery-only: product routes answer a
+  typed error while recovery routes stay available, and a successful
+  quarantine reopens the journals and completes normal admission in the same
+  process, so repair needs no restart. The serving mode is reported honestly
+  across the control handshake, CLI start report, remote commands, the macOS
+  app, and the harness battery. Quarantining one partition can no longer
+  disturb a healthy sibling's preparation identity, and the setup supervisor
+  cannot be started twice after an in-process reopen. The daemon also
+  recovers automatically from Linux zombie writer leases while keeping live
+  or uncertain owners fail-closed, survives disconnected RPC followers
+  instead of crashing, and treats web access as optional for every non-off
+  policy with native Cursor web approvals for managed read-only runs. CLI
+  readiness waits through the transient recovery-only startup window: acting
+  commands and `daemon start` keep re-handshaking until normal admission
+  opens or the start budget expires, so a healthy journal-heavy startup is
+  never misreported as a recovery-blocked daemon.
+
+- **v3.3.16** (2026-08-15) — The macOS packager now removes the exact
+  pre-3.3.13 `dist/Claudexor.app` only after a successful Swift build produces
+  the release executable; failed or incomplete builds preserve both app paths,
+  and unrelated `dist` content survives. Data-root ownership is now explicit by
+  mode: the default root recognizes archived `v2` and active `v3`, while `v1`
+  remains unrecognized because v1-era bytes lived directly under
+  `~/.claudexor`; an explicit `CLAUDEXOR_CONFIG_DIR` treats `v1`, `v2`, and
+  `v3` children as ordinary unrecognized entries. Reporting remains advisory
+  and never deletes these paths. The Cursor adapter follows the current stream
+  contract by dropping strict user prompt echoes, preserving nested token usage
+  without inventing a dollar cost, and classifying permission-denied tool
+  results as denied. The built-in OpenRouter route now preserves finite
+  non-negative `usage.cost`, including zero, as an exact USD receipt; explicit
+  terminal provider-error completions fail with safe typed evidence, while
+  ordinary stop and length completions remain successful. Cold daemon starts
+  now wait up to 90 seconds for large journals instead of reporting failure
+  after 15 seconds while initialization continues in the background.
 
 - **v3.3.15** (2026-08-10) — Mutating delegated codex runs work again on
   macOS. Codex canonicalizes its `CODEX_HOME` at startup, and the Seatbelt

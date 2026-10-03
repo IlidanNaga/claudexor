@@ -30,6 +30,13 @@ export const RouteProof = z
           .nullable()
           .default(null)
           .describe("Model requested for the route; null = harness default."),
+        credential_profile_id: z
+          .string()
+          .nullable()
+          .optional()
+          .describe(
+            "Credential profile requested/effective for the route; absent = account pool/default.",
+          ),
       })
       .describe("What was requested."),
     observed: z
@@ -44,6 +51,13 @@ export const RouteProof = z
           .nullable()
           .default(null)
           .describe("Model actually observed; null when no evidence."),
+        credential_profile_id: z
+          .string()
+          .nullable()
+          .optional()
+          .describe(
+            "Credential profile actually observed on the harness route; absent when undisclosed.",
+          ),
         evidence_source: RouteEvidenceSource.default("unavailable"),
       })
       .describe("What was actually observed."),

@@ -1,4 +1,12 @@
-import { isTerminalLifecycle, ModeKind, type RunOutcomeFacts } from "@claudexor/schema";
+import {
+  ControlProblem,
+  isTerminalLifecycle,
+  ModeKind,
+  RunExecution,
+  type ProcessingPreference,
+  normalizeCancelReasonCode,
+  type RunOutcomeFacts,
+} from "@claudexor/schema";
 import {
   connectDaemonIfRunning,
   daemonOutcomeSummary,
@@ -13,9 +21,19 @@ import {
   projectRunPrimaryOutput,
 } from "./run-detail-projections.js";
 import { primaryOutputForCli } from "./primary-output.js";
+import { controlProblemError } from "./cli-error.js";
 import { controlApiFetch, type ControlApiAddress } from "./live.js";
 import { absentDaemonRecovery, BELT_DAEMON_LOST } from "./mcp-daemon-unavailable.js";
-import { projectImmediateRunDetail, projectRecoveryRunDetail } from "./mcp-run-projections.js";
+import {
+  isRecoverableRunDetailIntegrityProblem,
+  projectDegradedRecoveryRunDetail,
+  projectImmediateRunDetail,
+  projectRecoveryRunDetail,
+} from "./mcp-run-projections.js";
+import { readRunDetailResponse } from "./run-detail-response.js";
+import { catalogQuery } from "./mcp-catalog-query.js";
+import { threadQuery } from "./mcp-thread-query.js";
+import { journalRecoveryQuery } from "./mcp-journal-recovery.js";
 
 export interface SurfaceRunnerHooks {
   onEvent?: (event: any) => void;
@@ -24,18 +42,16 @@ export interface SurfaceRunnerHooks {
 }
 
 export interface McpSurfaceRunnerOptions {
-  /** Belt subprocesses must bind to their already-running parent daemon and
-   * never create a second authority under a scoped HOME. */
+  /** Bind belt subprocesses to their existing parent daemon. */
   requireExistingDaemon?: boolean;
   /** Belt-only lineage bound by the bridge from its injected environment.
    * Raw tool arguments can never switch the generic MCP runner into this path. */
   delegationParentRunId?: string | null;
-  /** Belt-only original project root, bound by the engine descriptor. Raw tool
-   * arguments cannot redirect a child into the parent envelope or another repo. */
+  /** Original project root from the engine descriptor, never from child arguments. */
   delegationRepoRoot?: string | null;
-  /** ACP composition is supplied only by the ACP-aware bridge. Keeping this
-   * dependency injected prevents the packaged belt self-entry from pulling in
-   * or initializing the ACP surface. */
+  delegationProcessingPreference?: ProcessingPreference;
+  delegationExecution?: Pick<RunExecution, "workspaceKind" | "scopePaths">;
+  /** ACP-aware bridges inject this; the packaged belt does not initialize ACP. */
   acpSessionQuery?: (
     input: any,
     hooks: SurfaceRunnerHooks | undefined,
@@ -52,8 +68,10 @@ export interface McpSurfaceRunnerOptions {
  */
 export function mcpSurfaceRunner(options: McpSurfaceRunnerOptions = {}) {
   return async (p: any, hooks?: SurfaceRunnerHooks) => {
-    if (p?.mode === "__status" || p?.mode === "__capabilities") {
-      return catalogQuery(p.mode, options.requireExistingDaemon === true);
+    if (p?.mode === "__status" || p?.mode === "__capabilities" || p?.mode === "__accounts") {
+      return catalogQuery(p.mode, options.requireExistingDaemon === true, {
+        fresh: p?.fresh === true,
+      });
     }
     if (
       p?.mode === "__runs_list" ||
@@ -77,6 +95,13 @@ export function mcpSurfaceRunner(options: McpSurfaceRunnerOptions = {}) {
       );
     }
     if (p?.mode === "__journal_recovery") return journalRecoveryQuery(p);
+    if (
+      p?.mode === "__thread_create" ||
+      p?.mode === "__thread_turn" ||
+      p?.mode === "__thread_read"
+    ) {
+      return threadQuery(p, options.requireExistingDaemon === true);
+    }
     if (typeof p?.mode === "string" && p.mode.startsWith("__acp_session_")) {
       if (!options.acpSessionQuery) {
         throw new Error("ACP session operation reached a non-ACP surface");
@@ -95,11 +120,16 @@ export function mcpSurfaceRunner(options: McpSurfaceRunnerOptions = {}) {
     const repoRoot =
       options.delegationRepoRoot ??
       (typeof p?.repoPath === "string" && p.repoPath.trim() ? p.repoPath : process.cwd());
+    const processingPreference = options.delegationParentRunId
+      ? options.delegationProcessingPreference
+      : p?.processingPreference;
     const body: Record<string, unknown> = {
       prompt: String(p?.prompt ?? ""),
       mode,
       scope: { kind: "project", root: repoRoot },
-      execution: { isolation: "envelope" },
+      execution: options.delegationParentRunId
+        ? { ...options.delegationExecution, isolation: "envelope" }
+        : RunExecution.parse(p?.execution ?? { isolation: "envelope" }),
       ...(p?.harness ? { harnesses: [String(p.harness)] } : {}),
       ...(p?.primaryHarness ? { primaryHarness: String(p.primaryHarness) } : {}),
       ...(p?.race === true
@@ -112,6 +142,7 @@ export function mcpSurfaceRunner(options: McpSurfaceRunnerOptions = {}) {
       ...(p?.council === true ? { council: true } : {}),
       ...(Array.isArray(p?.tests) ? { tests: p.tests } : {}),
       ...(p?.paidBudget ? { paidBudget: p.paidBudget } : {}),
+      ...(p?.credentialProfileId ? { credentialProfileId: String(p.credentialProfileId) } : {}),
       ...(p?.access ? { access: String(p.access) } : {}),
       // `externalContextPolicy` is the control-api-parity alias of `web`; the
       // validator already enforced equality when both are present. Honor the
@@ -123,6 +154,8 @@ export function mcpSurfaceRunner(options: McpSurfaceRunnerOptions = {}) {
           : {}),
       ...(p?.model ? { model: String(p.model) } : {}),
       ...(p?.effort ? { effort: String(p.effort) } : {}),
+      ...(processingPreference !== undefined ? { processingPreference } : {}),
+      ...(typeof p?.review === "boolean" ? { review: p.review } : {}),
       ...(Array.isArray(p?.reviewerPanel) ? { reviewerPanel: p.reviewerPanel } : {}),
       ...(p?.reviewerModels && typeof p.reviewerModels === "object"
         ? { reviewerModels: p.reviewerModels }
@@ -160,29 +193,27 @@ export function mcpSurfaceRunner(options: McpSurfaceRunnerOptions = {}) {
       ...(onPollTick ? { onPollTick } : {}),
     });
     try {
-      // The derived apply verdict rides the result (single producer: the run
-      // detail endpoint). The post-terminal detail read DEGRADES: a missing/
-      // legacy detail projects null fields, and a raised typed problem —
-      // especially 500 run_facts_invalid, the server's verdict that the run's
-      // receipt cannot be trusted — rides the result as `detailProblem` with
-      // the runId preserved instead of erasing the finished run's outcome.
-      // A deferred MCP call normally returns while the run is still live, but
-      // the bind/status race may already observe a terminal. Project detail
-      // from ACTUAL lifecycle truth; never delay an ordinary running handle.
       let detail: Record<string, unknown> | null = null;
+      let canonicalPrimary: ReturnType<typeof projectRunPrimaryOutput> = null;
+      let detailProjection = projectImmediateRunDetail(null, { runId: out.runId });
       let detailProblem: ReturnType<typeof describeRunDetailProblem> | null = null;
       if (p?.deferred !== true || isTerminalLifecycle(out.status)) {
         try {
           detail = await fetchRunDetail(addr, out.runId);
+          detailProjection = projectImmediateRunDetail(detail, {
+            runId: out.runId,
+            ...(isTerminalLifecycle(out.status)
+              ? { lifecycle: out.status as RunOutcomeFacts["lifecycle"] }
+              : {}),
+          });
+          canonicalPrimary = projectRunPrimaryOutput(detail);
         } catch (error) {
+          detail = null;
           detailProblem = describeRunDetailProblem(error);
+          detailProjection = projectImmediateRunDetail(null, { runId: out.runId });
         }
       }
-      // Canonical output comes from that same detail read (bounded, redacted,
-      // mode-aware). Read local artifacts only when detail was attempted but
-      // unavailable; this preserves a useful terminal result without creating a
-      // second normal-path artifact owner.
-      const canonicalPrimary = projectRunPrimaryOutput(detail);
+      // Local artifacts remain only the established soft-absence fallback.
       const localFallback =
         (p?.deferred !== true || isTerminalLifecycle(out.status)) &&
         !detail &&
@@ -197,7 +228,6 @@ export function mcpSurfaceRunner(options: McpSurfaceRunnerOptions = {}) {
           : null;
       const primary = canonicalPrimary ?? localFallback;
       const presented = presentRunPrimaryOutput(primary);
-      const detailProjection = projectImmediateRunDetail(detail);
       const reason = daemonOutcomeSummary({
         ...out,
         outcomeFacts: detailProjection.outcomeFacts ?? undefined,
@@ -207,14 +237,6 @@ export function mcpSurfaceRunner(options: McpSurfaceRunnerOptions = {}) {
         detailProjection.outcomeBanner ??
         reason ??
         (primary?.kind === "patch" ? "patch produced (see artifacts)" : `run ${out.status}`);
-      // The sub-run's real settled spend rides the result so the delegation belt
-      // can reconcile its budget reservation against the actual drawn amount
-      // (single producer: the run-detail budget projection). Deferred calls return
-      // before terminal, so spend is not yet settled — null (the belt then keeps
-      // its reservation committed fail-closed rather than seeing spend 0).
-      // Council membership + merge disclosure (QA-023b) rides the result so an MCP
-      // host that asked for `--council` can machine-verify it was really N/N and
-      // who merged. Terminal projection — null on a deferred (still-live) handle.
       return {
         runId: out.runId,
         runDir: out.runDir,
@@ -237,24 +259,6 @@ export function mcpSurfaceRunner(options: McpSurfaceRunnerOptions = {}) {
   };
 }
 
-async function catalogQuery(mode: "__status" | "__capabilities", beltContext = false) {
-  const connection = beltContext ? await connectDaemonIfRunning() : await ensureDaemon();
-  if (!connection) throw new Error(BELT_DAEMON_LOST);
-  const { addr } = connection;
-  const path = mode === "__status" ? "/harnesses" : "/agent-capabilities";
-  const response = await controlApiFetch(addr, path);
-  const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-  if (!response.ok) throw new Error(`control API ${path} failed (HTTP ${response.status})`);
-  if (mode === "__capabilities") return body;
-  const harnesses = Array.isArray(body["harnesses"])
-    ? (body["harnesses"] as Record<string, unknown>[])
-    : [];
-  return {
-    ...body,
-    available: harnesses.filter((item) => item["status"] === "ok").map((item) => item["id"]),
-  };
-}
-
 /**
  * Recovery queries — thin read-only projections over the daemon control API
  * (auto-starting it like every daemon-tracked path). A host that lost a run
@@ -271,20 +275,21 @@ async function recoveryQuery(
   const conn = await connectDaemonIfRunning();
   if (!conn) return absentDaemonRecovery(mode, context.beltContext);
   const { addr } = conn;
-  const get = async (path: string): Promise<Record<string, unknown>> => {
+  const get = async (path: string, runDetail = false): Promise<Record<string, unknown>> => {
     const res = await controlApiFetch(addr, path, {
       headers: { authorization: `Bearer ${addr.token}` },
     });
-    const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-    if (!res.ok)
-      throw new Error(
-        typeof body["message"] === "string"
-          ? (body["message"] as string)
-          : typeof body["error"] === "string"
-            ? (body["error"] as string)
-            : `HTTP ${res.status} for ${path}`,
-      );
-    return body;
+    if (res.ok) {
+      return runDetail
+        ? readRunDetailResponse(res)
+        : ((await res.json()) as Record<string, unknown>);
+    }
+    const body: unknown = await res.json().catch(() => ({}));
+    const error = controlProblemError(res.status, body, `HTTP ${res.status} for ${path}`);
+    Object.assign(error, {
+      mcpRecoveryTypedControlProblem: ControlProblem.safeParse(body).success,
+    });
+    throw error;
   };
   if (mode === "__runs_list") {
     // GET /runs is a BOUNDED keyset page (QA-052): a single read undercounts the
@@ -334,22 +339,31 @@ async function recoveryQuery(
   }
   if (!runId) throw new Error("runId is required");
   if (mode === "__run_inspect" || mode === "__run_status" || mode === "__run_result") {
-    const detail = await get(`/runs/${encodeURIComponent(runId)}`);
-    return projectRecoveryRunDetail(
-      mode,
-      runId,
-      detail,
+    const parent =
       typeof input["delegatedFromRunId"] === "string"
         ? (input["delegatedFromRunId"] as string)
-        : undefined,
-    );
+        : undefined;
+    const scopedRecovery = context.beltContext || parent !== undefined;
+    try {
+      const detail = await get(`/runs/${encodeURIComponent(runId)}`, true);
+      return projectRecoveryRunDetail(mode, runId, detail, parent);
+    } catch (error) {
+      if (scopedRecovery || !isRecoverableRunDetailIntegrityProblem(error)) {
+        throw error;
+      }
+      return projectDegradedRecoveryRunDetail(runId, error);
+    }
   }
   if (mode === "__run_cancel") {
     const res = await controlApiFetch(addr, `/runs/${encodeURIComponent(runId)}/control`, {
       method: "POST",
       headers: { authorization: `Bearer ${addr.token}`, "content-type": "application/json" },
       body: JSON.stringify({
-        control: { kind: "cancel", reason: "MCP host requested durable run cancellation" },
+        control: {
+          kind: "cancel",
+          reason: "MCP host requested durable run cancellation",
+          reason_code: "host_cancelled",
+        },
       }),
     });
     const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
@@ -435,48 +449,9 @@ async function recoveryQuery(
   };
 }
 
-async function journalRecoveryQuery(input: Record<string, unknown>): Promise<unknown> {
-  const conn = await connectDaemonIfRunning();
-  if (!conn) throw new Error("the Claudexor daemon is not running");
-  const action = String(input["action"] ?? "inspect");
-  const partition = String(input["partition"] ?? "");
-  if (!partition) throw new Error("partition is required");
-  const base = `/recovery/partitions/${encodeURIComponent(partition)}`;
-  const suffix =
-    action === "inspect"
-      ? ""
-      : action === "validate" || action === "export" || action === "quarantine"
-        ? `/${action}`
-        : null;
-  if (suffix === null) throw new Error(`unknown journal recovery action '${action}'`);
-  const body =
-    action === "quarantine"
-      ? {
-          expectedFingerprint: String(input["expectedFingerprint"] ?? ""),
-          confirmation: String(input["confirmation"] ?? ""),
-        }
-      : undefined;
-  const response = await controlApiFetch(conn.addr, `${base}${suffix}`, {
-    method: action === "inspect" ? "GET" : "POST",
-    ...(body
-      ? { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }
-      : {}),
-  });
-  const result = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-  if (!response.ok) {
-    throw new Error(
-      typeof result["message"] === "string"
-        ? (result["message"] as string)
-        : `journal recovery failed (HTTP ${response.status})`,
-    );
-  }
-  return result;
-}
-
 /**
- * Cancel bridge: once the run is BOUND (we know its id), an aborted host
- * signal posts the typed cancel control exactly once. Runs on the poll tick
- * so an abort that races run-binding still lands.
+ * Once a run is bound, forward a typed abort cause, defaulting untyped host
+ * signals to host_cancelled. Poll ticks preserve aborts that race run-binding.
  */
 export function makeCancelBridge(
   addr: ControlApiAddress,
@@ -492,7 +467,11 @@ export function makeCancelBridge(
         method: "POST",
         headers: { Authorization: `Bearer ${addr.token}`, "Content-Type": "application/json" },
         body: JSON.stringify({
-          control: { kind: "cancel", reason: "mcp host cancelled the tool call" },
+          control: {
+            kind: "cancel",
+            reason: "calling surface cancelled the run",
+            reason_code: normalizeCancelReasonCode(signal.reason) ?? "host_cancelled",
+          },
         }),
       });
       posted = response.ok;

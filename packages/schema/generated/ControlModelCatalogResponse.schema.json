@@ -1,0 +1,265 @@
+{
+  "$ref": "#/definitions/ControlModelCatalogResponse",
+  "definitions": {
+    "ControlModelCatalogResponse": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Non-empty identifier string."
+        },
+        "credentialProfileId": {
+          "$ref": "#/definitions/ControlModelCatalogResponse/properties/source"
+        },
+        "accountFingerprint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observedAt": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Original catalog observation time; cached reuse never advances it."
+        },
+        "provenance": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "provider_http means the catalog body was read and validated from a successful upstream HTTP response at observedAt. Other values do not certify provider contact."
+        },
+        "clientVersion": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "\\S",
+              "description": "User-supplied string that must contain visible content, not just whitespace."
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Client version the transport declared when it read this catalog; the backend lists only models whose minimum client version is at or below it. Null for catalogs from an older engine.",
+          "default": null
+        },
+        "clientVersionSource": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "verified_transport",
+                "installed_cli"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Where the declared client version came from: verified_transport (the version this Claudexor release verified its HTTP transport against) or installed_cli (a newer installed Codex CLI raised it). Null for catalogs from an older engine."
+        },
+        "models": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/definitions/ControlModelCatalogResponse/properties/clientVersion/anyOf/0"
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "isDefault": {
+                "type": "boolean"
+              },
+              "contextWindow": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "exclusiveMinimum": 0
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "maxContextWindow": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "exclusiveMinimum": 0
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "maxOutputTokens": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "exclusiveMinimum": 0
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "inputModalities": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "reasoningEfforts": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "reasoningEffortPreferenceOrder": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/definitions/ControlModelCatalogResponse/properties/clientVersion/anyOf/0"
+                },
+                "description": "Internal vendor order for preference adaptation when it includes choices the raw transport cannot submit. Not accepted values; projected out of both public catalog views."
+              },
+              "reasoningEffortsVerified": {
+                "type": "boolean",
+                "description": "Whether the provider supplied a fully parsed effort array, including a known empty array. Missing on historical catalogs means unverified."
+              },
+              "defaultReasoningEffort": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "supportedOptions": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "processing": {
+                "type": "object",
+                "properties": {
+                  "modes": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "standard",
+                            "fast",
+                            "economy"
+                          ],
+                          "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "nativeModes": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "$ref": "#/definitions/ControlModelCatalogResponse/properties/models/items/properties/processing/properties/modes/anyOf/0/items"
+                        },
+                        "id": {
+                          "$ref": "#/definitions/ControlModelCatalogResponse/properties/clientVersion/anyOf/0"
+                        }
+                      },
+                      "required": [
+                        "mode",
+                        "id"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "defaultNativeMode": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/ControlModelCatalogResponse/properties/clientVersion/anyOf/0"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "User-supplied string that must contain visible content, not just whitespace."
+                  },
+                  "eligible": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "source": {
+                    "$ref": "#/definitions/ControlModelCatalogResponse/properties/clientVersion/anyOf/0"
+                  },
+                  "observedAt": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "ISO-8601 timestamp string."
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "ISO-8601 timestamp string."
+                  }
+                },
+                "required": [
+                  "modes",
+                  "nativeModes",
+                  "defaultNativeMode",
+                  "eligible",
+                  "source",
+                  "observedAt"
+                ],
+                "additionalProperties": false,
+                "description": "Exact model/account service evidence. Null modes or eligibility means unknown, not unsupported; native IDs remain adapter-owned. Transport support is declared separately."
+              }
+            },
+            "required": [
+              "id",
+              "label",
+              "isDefault",
+              "contextWindow",
+              "maxContextWindow",
+              "maxOutputTokens",
+              "inputModalities",
+              "reasoningEfforts",
+              "defaultReasoningEffort",
+              "supportedOptions"
+            ],
+            "additionalProperties": false,
+            "description": "Model metadata from the selected raw transport; CLI compaction and usable-window policies are not capacity."
+          }
+        }
+      },
+      "required": [
+        "source",
+        "credentialProfileId",
+        "accountFingerprint",
+        "observedAt",
+        "provenance",
+        "models"
+      ],
+      "additionalProperties": false,
+      "description": "Exact-profile model discovery, not a global CLI alias list or an inference entitlement guarantee."
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

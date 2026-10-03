@@ -149,7 +149,9 @@ export interface ReviewerInfo {
   harness_id: string;
   requested_model?: string | null;
   requested_effort?: string | null;
+  credential_profile_id?: string | null;
   observed_model?: string | null;
+  observed_credential_profile_id?: string | null;
   route_proof_status?: RouteProofStatus;
 }
 
@@ -195,7 +197,13 @@ export function parseFindingsDetailed(
             harness_id: reviewer.harness_id,
             requested_model: reviewer.requested_model ?? null,
             requested_effort: reviewer.requested_effort ?? null,
+            ...(reviewer.credential_profile_id !== undefined
+              ? { credential_profile_id: reviewer.credential_profile_id ?? null }
+              : {}),
             observed_model: reviewer.observed_model ?? null,
+            ...(reviewer.observed_credential_profile_id !== undefined
+              ? { observed_credential_profile_id: reviewer.observed_credential_profile_id ?? null }
+              : {}),
             route_proof_status: reviewer.route_proof_status ?? "unverified",
           },
           status: "proposed",

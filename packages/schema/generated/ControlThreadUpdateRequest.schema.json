@@ -56,10 +56,9 @@
                 "readonly",
                 "workspace_write",
                 "full",
-                "external_sandbox_full",
                 "inherit_native"
               ],
-              "description": "Filesystem/command access profile for a run: readonly (no writes), workspace_write (writes inside the workspace only), full (unrestricted; requires the per-repo trust allow), external_sandbox_full (the harness stands its native sandbox down; the engine applies its own OS boundary only on delegated runs — requested directly this is unrestricted, and not behind the trust allow), inherit_native (defer to the harness's own native sandbox settings)."
+              "description": "Active filesystem/command access profile for a run: readonly (no writes), workspace_write (use the harness's native workspace-write policy), full (unrestricted; requires the per-repo trust allow for a run an operator starts at a surface, not for an execution.delegated run), inherit_native (defer to the harness's own native settings)."
             },
             {
               "type": "null"

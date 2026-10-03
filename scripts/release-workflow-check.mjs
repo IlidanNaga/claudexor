@@ -40,13 +40,52 @@ for (const file of files) {
   }
 }
 
+const ci = readFileSync(".github/workflows/ci.yml", "utf8");
 const release = readFileSync(".github/workflows/release.yml", "utf8");
+const win32ConptyBuild = readFileSync(
+  "packages/core/scripts/build-win32-conpty-helper.mjs",
+  "utf8",
+);
 const publishMcp = readFileSync(".github/workflows/publish-mcp.yml", "utf8");
 const prepareJob = jobBody(release, "prepare");
 const packageMacosJob = jobBody(release, "package-macos");
 const publishNpmJob = jobBody(release, "publish-npm");
 const publishReleaseJob = jobBody(release, "publish-release");
-const staleAttestationSchemaPattern = /schema-v[2345]/;
+errors.push(...windowsPrLegFindings(ci));
+errors.push(...windowsConptyCustodyFindings(release));
+errors.push(...windowsConptyBuildFindings(win32ConptyBuild));
+const engineResourcesStep = stepBody(
+  packageMacosJob,
+  "Build shared engine resources before app packaging",
+);
+const appBuilder = readFileSync("apps/macos/scripts/build-app.sh", "utf8");
+const resourceBuilder = readFileSync("scripts/build-engine-resources.sh", "utf8");
+if (
+  !engineResourcesStep.includes("bash scripts/build-engine-resources.sh") ||
+  !engineResourcesStep.includes("CLAUDEXOR_ENGINE_RESOURCES=") ||
+  packageMacosJob.indexOf("Build shared engine resources") >
+    packageMacosJob.indexOf("Build signed DMG and ZIP") ||
+  !appBuilder.includes('ditto "$ENGINE_RESOURCES" "$APP/Contents/Resources"') ||
+  appBuilder.includes("pnpm exec esbuild") ||
+  !resourceBuilder.includes(
+    'codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$helper"',
+  ) ||
+  !packageMacosJob.includes('diff -r "$CLAUDEXOR_ENGINE_RESOURCES/$entry"')
+) {
+  errors.push(
+    "engine resources must build/sign once before app packaging and be compared before closure publication",
+  );
+}
+const macosPr = jobBody(ci, "swift");
+if (
+  !macosPr.includes("bash scripts/build-engine-resources.sh") ||
+  !macosPr.includes("process-identity.test.ts") ||
+  !ci.includes('if [ "$MACOS_RESULT" != "success" ]')
+) {
+  errors.push(
+    "ci.yml: required macOS CI must build/probe the independent engine stage and test native identity",
+  );
+}
 const exactPromotionPairedNeedles = [
   [
     "SBOM license-input prepared-SHA binding",
@@ -68,10 +107,12 @@ for (const [label, pattern] of [
   ["workflow has publish mode", /publish/],
   ["review attestation is verified", /verify-release-input\.mjs/],
   [
-    // validateReleaseAttestation rejects any non-v6 attestation, so the
-    // workflow_dispatch input must document the schema owners actually sign.
-    "attestation input is documented as a schema-v6 full-context owner-review attestation",
-    /review_attestation_b64:\s*\n\s*description:[^\n]*schema-v6 full-context owner-review attestation/,
+    "independent review reference is exposed",
+    /review_url:\s*\n\s*description:[^\n]*independent review/,
+  ],
+  [
+    "responsible maintainer confirms review",
+    /review_confirmed:\s*\n\s*description:[^\n]*responsible/,
   ],
   ["npm provenance is mandatory", /--provenance/],
   [
@@ -88,8 +129,8 @@ for (const [label, pattern] of [
   ],
   ["engine runtime update closure is built (M7)", /build-runtime-closure\.mjs/],
   [
-    "runtime closure is built from the signed app bundle",
-    /build-runtime-closure\.mjs\s+\\\s*\n\s*--app-bundle apps\/macos\/dist\/bundle\.noindex\/Claudexor\.app/,
+    "runtime closure is built from the common engine-resource stage",
+    /build-runtime-closure\.mjs\s+\\\s*\n\s*--resources "\$CLAUDEXOR_ENGINE_RESOURCES"/,
   ],
   [
     "runtime manifest digest is self-verified before upload",
@@ -365,12 +406,6 @@ for (const [label, broken, expectedFinding] of exactPromotionMutationCases) {
     errors.push(`release-workflow-check self-test: failed to reject ${label}`);
   }
 }
-for (const staleVersion of ["schema-v2", "schema-v3", "schema-v4", "schema-v5"]) {
-  const expected = "release.yml: stale schema-v2/v3/v4/v5 attestation wording is forbidden";
-  if (!staleAttestationFindings(`${release}\n# ${staleVersion}`).includes(expected)) {
-    errors.push(`release-workflow-check self-test: failed to reject ${staleVersion}`);
-  }
-}
 if (!/^\s+ref:\s*\$\{\{\s*github\.sha\s*\}\}\s*$/m.test(prepareJob)) {
   errors.push(
     "release.yml: prepare checkout must use the immutable workflow-dispatch github.sha (never hardcoded main)",
@@ -382,12 +417,21 @@ if (!/^\s{4}runs-on:\s*macos-26\s*$/m.test(publishNpmJob)) {
 // The Linux SSH smoke is a publication gate: both publish jobs must depend on
 // it and it must really exercise the promoted archive (not a no-op).
 errors.push(...remoteSmokeGateFindings(release));
+const delayedWindowsFixtureCi = ci
+  .replace(
+    "      - name: Build native ConPTY fixture\n        run: pnpm --filter @claudexor/core build:win32-fixtures\n\n",
+    "",
+  )
+  .replace(
+    "          packages/journal/src/index.test.ts\n",
+    "          packages/journal/src/index.test.ts\n\n      - name: Build native ConPTY fixture\n        run: pnpm --filter @claudexor/core build:win32-fixtures\n",
+  );
 for (const [label, mutated] of [
   [
     "publish-npm without the SSH smoke gate",
     release.replace(
-      "needs: [prepare, package-macos, remote-linux-ssh-smoke]",
-      "needs: [prepare, package-macos]",
+      "needs: [prepare, package-macos, remote-linux-ssh-smoke, windows-conpty-candidate-smoke]",
+      "needs: [prepare, package-macos, windows-conpty-candidate-smoke]",
     ),
   ],
   [
@@ -410,6 +454,130 @@ for (const [label, mutated] of [
     errors.push(`release-workflow-check self-test: failed to reject ${label}`);
   }
 }
+for (const [label, mutated] of [
+  [
+    "missing Windows authority job",
+    release.replace("  windows-conpty-authority:\n", "  renamed-conpty-authority:\n"),
+  ],
+  [
+    "authority moved off Windows 2022",
+    release.replace(
+      "  windows-conpty-authority:\n    name: Build or promote authoritative Windows ConPTY bytes\n    needs: prepare\n    runs-on: windows-2022",
+      "  windows-conpty-authority:\n    name: Build or promote authoritative Windows ConPTY bytes\n    needs: prepare\n    runs-on: windows-latest",
+    ),
+  ],
+  [
+    "authority Node floor drift",
+    release.replace(
+      "          node-version: 20.19.0\n\n      - name: Initialize pinned x64 MSVC environment",
+      "          node-version: 24.16.0\n\n      - name: Initialize pinned x64 MSVC environment",
+    ),
+  ],
+  [
+    "publish rebuilt Windows authority",
+    release.replace(
+      "          run-id: ${{ needs.prepare.outputs.candidate_run_id }}\n          github-token: ${{ github.token }}",
+      "          github-token: ${{ github.token }}",
+    ),
+  ],
+  [
+    "macOS package bypassed Windows authority dependency",
+    release.replace(
+      "  package-macos:\n    name: Build signed, notarized and attested macOS artifacts\n    needs: [prepare, windows-conpty-authority]",
+      "  package-macos:\n    name: Build signed, notarized and attested macOS artifacts\n    needs: prepare",
+    ),
+  ],
+  [
+    "assembled-byte smoke moved off Windows latest",
+    release.replace(
+      "  windows-conpty-candidate-smoke:\n    name: Execute assembled Windows ConPTY bytes (Node 24.16)\n    needs: [prepare, windows-conpty-authority, package-macos]\n    runs-on: windows-latest",
+      "  windows-conpty-candidate-smoke:\n    name: Execute assembled Windows ConPTY bytes (Node 24.16)\n    needs: [prepare, windows-conpty-authority, package-macos]\n    runs-on: windows-2022",
+    ),
+  ],
+  [
+    "npm publish bypassed assembled-byte smoke",
+    release.replace(
+      "needs: [prepare, package-macos, remote-linux-ssh-smoke, windows-conpty-candidate-smoke]",
+      "needs: [prepare, package-macos, remote-linux-ssh-smoke]",
+    ),
+  ],
+  [
+    "npm copied fresh authority rather than promoted closure bytes",
+    release.replace(
+      'cp "$promoted" packages/core/dist/native/claudexor-conpty-helper.exe',
+      'cp "$authority" packages/core/dist/native/claudexor-conpty-helper.exe',
+    ),
+  ],
+  [
+    "npm rebuilt core after staging the promoted helper",
+    release.replace(
+      "      - name: Verify packed native helper custody",
+      "      - run: pnpm --filter @claudexor/core build\n      - name: Verify packed native helper custody",
+    ),
+  ],
+  [
+    "POSIX-only URL disclosure suite re-added to assembled Windows smoke",
+    release.replace(
+      "          packages/cli/src/setup-login-runner-transport.test.ts\n",
+      "          packages/cli/src/setup-login-runner-transport.test.ts\n          packages/cli/src/setup-login-url-disclosure.test.ts\n",
+    ),
+  ],
+]) {
+  if (mutated === release || windowsConptyCustodyFindings(mutated).length === 0) {
+    errors.push(`release-workflow-check self-test: failed to reject ${label}`);
+  }
+}
+for (const [label, mutated] of [
+  ["the common /MT static CRT freeze", win32ConptyBuild.replace('      "/MT",\n', "")],
+  [
+    "the post-link static CRT dependency assertion",
+    win32ConptyBuild.replace(
+      "  const dependencyError = verifyStaticCrtDependencies(temporary, buildEnvironment);\n",
+      "  const dependencyError = null;\n",
+    ),
+  ],
+]) {
+  if (mutated === win32ConptyBuild || windowsConptyBuildFindings(mutated).length === 0) {
+    errors.push(`release-workflow-check self-test: failed to reject removal of ${label}`);
+  }
+}
+for (const [label, mutated] of [
+  [
+    "extra Windows PR matrix leg",
+    ci.replace(
+      "          - runner: windows-latest\n            node-version: 24.16.0",
+      "          - runner: windows-latest\n            node-version: 24.16.0\n          - runner: windows-2022\n            node-version: 24.16.0",
+    ),
+  ],
+  [
+    "Windows 2022 Node compatibility floor drift",
+    ci.replace(
+      "          - runner: windows-2022\n            node-version: 20.19.0",
+      "          - runner: windows-2022\n            node-version: 24.16.0",
+    ),
+  ],
+  [
+    "deleted native ConPTY PR test",
+    ci.replace("          packages/core/src/win32-conpty-helper.test.ts\n", ""),
+  ],
+  [
+    "deleted Windows agy print acceptance",
+    ci.replace("          packages/harness-agy/src/win32-print-acceptance.test.ts\n", ""),
+  ],
+  [
+    "deleted portable platform-auth declaration test",
+    ci.replace("          packages/schema/src/platform-auth-policy.test.ts\n", ""),
+  ],
+  ["Windows agy acceptance ordered before native fixture build", delayedWindowsFixtureCi],
+  [
+    "Windows matrix removed from required aggregate",
+    ci.replace("    needs: [build-test, windows-test, swift]", "    needs: [build-test, swift]"),
+  ],
+]) {
+  if (mutated === ci || windowsPrLegFindings(mutated).length === 0) {
+    errors.push(`release-workflow-check self-test: failed to reject ${label}`);
+  }
+}
 const beforeAssets = publishReleaseJob.indexOf("--phase before");
 const uploadAssets = publishReleaseJob.indexOf('gh release upload "$TAG" "$file"');
 const afterAssets = publishReleaseJob.indexOf("--phase after");
@@ -425,7 +593,6 @@ if (!(uploadAssets >= 0 && uploadAssets < afterAssets && afterAssets < publishDr
 if (/gh\s+release\s+delete-asset/.test(publishReleaseJob)) {
   errors.push("release.yml: retry flow must never delete unexpected remote assets");
 }
-
 const coreManifest = JSON.parse(readFileSync("packages/core/package.json", "utf8"));
 if (
   coreManifest.bin?.["claudexor-process-identity"] !== "./dist/native/claudexor-process-identity"
@@ -434,6 +601,12 @@ if (
 }
 if (!String(coreManifest.scripts?.prepack ?? "").includes("verify-npm-darwin-package.mjs")) {
   errors.push("packages/core/package.json: Darwin helper prepack verification is missing");
+}
+errors.push(...coreNpmLifecycleFindings(coreManifest));
+const lifecycleMutation = structuredClone(coreManifest);
+lifecycleMutation.scripts.prepare = "pnpm build";
+if (coreNpmLifecycleFindings(lifecycleMutation).length === 0) {
+  errors.push("release-workflow-check self-test: failed to reject a core prepare rebuild");
 }
 const npmPublisher = readFileSync("scripts/publish-npm-release.mjs", "utf8");
 const verifyDarwinPackage = npmPublisher.indexOf("verify-npm-darwin-package.mjs");
@@ -469,34 +642,17 @@ for (const [label, pattern] of [
 }
 
 const verifier = readFileSync("scripts/verify-release-input.mjs", "utf8");
-if (!/validateReleaseAttestation\(attestation, reviewAuthority/.test(verifier)) {
-  errors.push("verify-release-input.mjs: signed review authority is not checked before publish");
-}
-if (!/candidateVersion:\s*version/.test(verifier)) {
-  errors.push("verify-release-input.mjs: review runtime version is not bound to package.json");
-}
-const fullGateRunner = readFileSync("scripts/run-full-gate-receipt.mjs", "utf8");
 if (
-  !/process\.argv\.length !== 3/.test(fullGateRunner) ||
-  !/pathIsWithin\(candidateRoot, outDir\)/.test(fullGateRunner) ||
-  !/buildReleaseReviewRuntimeArtifacts/.test(fullGateRunner) ||
-  !/reviewRuntimeArtifacts/.test(fullGateRunner)
+  !verifier.includes('process.env.REVIEW_CONFIRMED_INPUT !== "true"') ||
+  !verifier.includes("process.env.REVIEW_URL_INPUT")
 ) {
   errors.push(
-    "run-full-gate-receipt.mjs: gate must require OUT_DIR and bind verifier plus packaged CLI artifacts",
+    "verify-release-input.mjs: publish must require independent review and maintainer confirmation",
   );
 }
-const reviewSealer = readFileSync("scripts/seal-owner-review-attestation.mjs", "utf8");
-for (const [label, pattern] of [
-  [
-    "imports only receipt-verified verifier bytes",
-    /readVerifiedReleaseReviewRuntime[\s\S]*data:text\/javascript/,
-  ],
-  ["pins the owner-approved operator reviewer panel", /OWNER_REVIEW_PANEL/],
-  ["checks actual operator reviewer overlap", /validateReviewerOverlap/],
-  ["binds each reviewer report by digest", /report_sha256/],
-]) {
-  if (!pattern.test(reviewSealer)) errors.push(`seal-owner-review-attestation.mjs: ${label}`);
+for (const retired of ["review_attestation_b64:", "waive_cursor_review:", "skip_custom_ed25519:"]) {
+  if (release.includes(retired))
+    errors.push(`release.yml: retired review/publication input ${retired}`);
 }
 if (!/GITHUB_REF[\s\S]*refs\/tags\/\$\{tag\}/.test(verifier)) {
   errors.push(
@@ -539,7 +695,6 @@ for (const [label, pattern] of [
 ]) {
   if (pattern.test(release)) errors.push(`release.yml: ${label}`);
 }
-errors.push(...staleAttestationFindings(release));
 
 for (const [label, pattern] of [
   ["manual tag input is required", /workflow_dispatch:[\s\S]*?tag:[\s\S]*?required:\s*true/],
@@ -599,9 +754,9 @@ if (
 }
 
 const directInputs = [...release.matchAll(/\$\{\{\s*inputs\.[^}]+\}\}/g)].map((match) => match[0]);
-if (directInputs.length !== 6) {
+if (directInputs.length !== 7) {
   errors.push(
-    `release.yml: expected exactly six input projections into workflow env, got ${directInputs.length}`,
+    `release.yml: expected exactly seven input projections into workflow env, got ${directInputs.length}`,
   );
 }
 if (errors.length) {
@@ -707,8 +862,23 @@ function exactCandidateAppPromotionErrors(job) {
     );
   }
   requirePattern(
+    "normal publish must ship the engine manifest only after signed verification against the promoted closure",
+    /signed="\$RUNNER_TEMP\/runtime-manifest\.signed\.json"\n\s*printf '%s' "\$RUNTIME_MANIFEST_B64_INPUT" \| base64 -d > "\$signed"\n\s*node scripts\/verify-signed-runtime-manifest\.mjs \\\n\s*--signed "\$signed" \\\n\s*--unsigned "\$RUNNER_TEMP\/runtime-closure\/runtime-manifest\.json" \\\n\s*--tarball "\$RUNNER_TEMP\/runtime-closure\/claudexor-runtime-\$VERSION\.tar\.gz" \\\n\s*--version "\$VERSION" \\\n\s*--expected-build-sha "\$PREPARED_SHA"\n\s*cp "\$signed" "\$assets\/runtime-manifest\.json"/,
+    assembleStep,
+  );
+  requirePattern(
     "publish must ship the remote manifest only after unsigned-to-signed verification against promoted archives",
     /remote_signed="\$RUNNER_TEMP\/remote-runtime-manifest\.signed\.json"\n\s*printf '%s' "\$REMOTE_RUNTIME_MANIFEST_B64_INPUT" \| base64 -d > "\$remote_signed"\n\s*node scripts\/verify-signed-remote-runtime-manifest\.mjs \\\n\s*--signed "\$remote_signed" \\\n\s*--unsigned "\$RUNNER_TEMP\/remote-runtimes\/remote-runtime-manifest\.json" \\\n\s*--assets-dir "\$RUNNER_TEMP\/remote-runtimes" \\\n\s*--version "\$VERSION" \\\n\s*--expected-build-sha "\$PREPARED_SHA"\n\s*cp "\$remote_signed" "\$assets\/remote-runtime-manifest\.json"/,
+    assembleStep,
+  );
+  requirePattern(
+    "unsigned engine manifest stays candidate-only",
+    /if \[ "\$RELEASE_MODE_INPUT" = publish \]; then[\s\S]*?cp "\$signed" "\$assets\/runtime-manifest\.json"\n\s*else\n\s*cp "\$RUNNER_TEMP\/runtime-closure\/runtime-manifest\.json" "\$assets\/"/,
+    assembleStep,
+  );
+  requirePattern(
+    "unsigned remote manifest stays candidate-only",
+    /if \[ "\$RELEASE_MODE_INPUT" = publish \]; then[\s\S]*?cp "\$remote_signed" "\$assets\/remote-runtime-manifest\.json"\n\s*else\n\s*cp "\$RUNNER_TEMP\/remote-runtimes\/remote-runtime-manifest\.json" "\$assets\/"/,
     assembleStep,
   );
   requirePattern(
@@ -773,7 +943,6 @@ function exactCandidateAppPromotionErrors(job) {
     'cp "$RUNNER_TEMP/remote-runtimes/remote-runtime-manifest.json" "$assets/"',
     'cp "candidate-assets/Claudexor-remote-runtime-$VERSION.spdx.json" "$assets/"',
     '> "$assets/Claudexor-remote-runtime-$VERSION.spdx.json"',
-    'cp "$RUNNER_TEMP/review-attestation.json" "$assets/REVIEW_ATTESTATION.json"',
   ].sort();
   if (JSON.stringify(assembledAssetWrites) !== JSON.stringify(expectedAssembledAssetWrites)) {
     findings.push(
@@ -804,6 +973,249 @@ function jobSection(workflow, name) {
   if (start < 0) return "";
   const next = workflow.slice(start + 2).search(/^  [a-z0-9-]+:\n/m);
   return next < 0 ? workflow.slice(start) : workflow.slice(start, start + 2 + next);
+}
+
+function windowsPrLegFindings(workflow) {
+  const findings = [];
+  const windows = jobSection(workflow, "windows-test");
+  const gate = jobSection(workflow, "build-test-gate");
+  const requirePattern = (label, pattern, scope = windows) => {
+    if (!scope || !pattern.test(scope)) findings.push(`ci.yml: ${label}`);
+  };
+  const matrixRows = [...windows.matchAll(/^\s+- runner:\s*([^\s]+)\s*$/gm)].map(
+    (match) => match[1],
+  );
+  if (JSON.stringify(matrixRows) !== JSON.stringify(["windows-2022", "windows-latest"])) {
+    findings.push(
+      "ci.yml: Windows PR matrix must contain exactly windows-2022 then windows-latest",
+    );
+  }
+  requirePattern(
+    "windows-2022 must run Node 20.19.0 and windows-latest must run Node 24.16.0",
+    /- runner: windows-2022\n\s*node-version: 20\.19\.0\n\s*- runner: windows-latest\n\s*node-version: 24\.16\.0/,
+  );
+  requirePattern(
+    "Windows PR legs must initialize the x64 MSVC environment",
+    /Initialize pinned x64 MSVC environment[\s\S]*?VsDevCmd\.bat[\s\S]*?-arch=x64 -host_arch=x64/,
+  );
+  requirePattern(
+    "Windows PR legs must build the native ConPTY fixture",
+    /pnpm --filter @claudexor\/core build:win32-fixtures/,
+  );
+  requirePattern(
+    "Windows PR legs must run helper, resolver, and runner transport tests",
+    /win32-conpty-helper\.test\.ts[\s\S]*?setup-login-pty\.test\.ts[\s\S]*?setup-login-runner-transport\.test\.ts/,
+  );
+  requirePattern(
+    "Windows PR legs must run the real agy print/client_pty acceptance",
+    /packages\/harness-agy\/src\/win32-print-acceptance\.test\.ts/,
+  );
+  requirePattern(
+    "Windows PR legs must run portable platform-auth declaration and consumer tests",
+    /platform-auth-policy\.test\.ts[\s\S]*?capabilities\.test\.ts[\s\S]*?harness-agy\/src\/conformance\.test\.ts[\s\S]*?setup-login-capability\.test\.ts/,
+  );
+  const build = windows.indexOf("      - name: Build\n        run: pnpm build");
+  const nativeFixture = windows.indexOf("pnpm --filter @claudexor/core build:win32-fixtures");
+  const agyAcceptance = windows.indexOf("packages/harness-agy/src/win32-print-acceptance.test.ts");
+  if (!(build >= 0 && build < nativeFixture && nativeFixture < agyAcceptance)) {
+    findings.push(
+      "ci.yml: Windows agy acceptance must run after pnpm build and the native fixture build",
+    );
+  }
+  requirePattern(
+    "required build-test aggregate must depend on and reject a failed Windows matrix",
+    /needs:\s*\[build-test, windows-test, swift\][\s\S]*?WINDOWS_RESULT:[\s\S]*?\[ "\$WINDOWS_RESULT" != "success" \]/,
+    gate,
+  );
+  return findings;
+}
+
+function windowsConptyCustodyFindings(workflow) {
+  const findings = [];
+  const authority = jobSection(workflow, "windows-conpty-authority");
+  const packageMacos = jobSection(workflow, "package-macos");
+  const assembledSmoke = jobSection(workflow, "windows-conpty-candidate-smoke");
+  const publishNpm = jobSection(workflow, "publish-npm");
+  const npmSmoke = jobSection(workflow, "npm-smoke");
+  const requirePattern = (label, pattern, scope) => {
+    if (!scope || !pattern.test(scope)) findings.push(`release.yml: ${label}`);
+  };
+
+  requirePattern(
+    "Windows ConPTY authority must run on windows-2022",
+    /^\s{4}runs-on:\s*windows-2022\s*$/m,
+    authority,
+  );
+  requirePattern(
+    "Windows ConPTY authority must use the Node 20.19 compatibility floor",
+    /node-version:\s*20\.19\.0/,
+    authority,
+  );
+  requirePattern(
+    "candidate authority must build the helper and native fake child with MSVC",
+    /Build authoritative helper and native fake child[\s\S]*?build-win32-conpty-helper\.mjs[\s\S]*?--require --out \$helper --fixture-out \$fixture/,
+    authority,
+  );
+  requirePattern(
+    "publish authority must download the candidate run's exact internal artifact",
+    /Download the candidate authority artifact for exact publish promotion[\s\S]*?download-artifact@[0-9a-f]{40}[\s\S]*?run-id:\s*\$\{\{\s*needs\.prepare\.outputs\.candidate_run_id\s*\}\}/,
+    authority,
+  );
+  requirePattern(
+    "Windows authority must pin the exact three-file internal set",
+    /"claudexor-conpty-helper\.exe",\n\s*"claudexor-conpty-helper\.exe\.sha256",\n\s*"claudexor-conpty-test-child\.exe"/,
+    authority,
+  );
+  requirePattern(
+    "Windows authority must verify its SHA sidecar and PE-x64 shape before upload",
+    /Windows ConPTY authority SHA sidecar mismatch[\s\S]*?verify-win32-conpty-helper\.mjs --file \$helper --expected-sha256 \$hash[\s\S]*?verify-win32-conpty-helper\.mjs --file \$fixture/,
+    authority,
+  );
+  requirePattern(
+    "macOS packaging must depend on and download the Windows authority artifact",
+    /needs:\s*\[prepare, windows-conpty-authority\][\s\S]*?Download authoritative Windows ConPTY bytes/,
+    packageMacos,
+  );
+  requirePattern(
+    "macOS packaging must export the authoritative helper path, hash, and required flag",
+    /CLAUDEXOR_WIN32_CONPTY_HELPER=\$helper[\s\S]*?CLAUDEXOR_WIN32_CONPTY_SHA256=\$expected[\s\S]*?CLAUDEXOR_REQUIRE_WIN32_CONPTY_HELPER=1/,
+    packageMacos,
+  );
+  requirePattern(
+    "candidate app and ZIP must compare embedded Windows helper bytes to authority",
+    /verify-win32-conpty-helper\.mjs \\\n\s*--file "\$CLAUDEXOR_WIN32_CONPTY_HELPER" \\\n\s*--file "\$app\/Contents\/Resources\/native\/claudexor-conpty-helper\.exe" \\\n\s*--file "\$zipstage\/Claudexor\.app\/Contents\/Resources\/native\/claudexor-conpty-helper\.exe"/,
+    packageMacos,
+  );
+  requirePattern(
+    "runtime closure must bind and re-extract the authoritative Windows helper",
+    /build-runtime-closure\.mjs[\s\S]*?--win32-conpty-sha256 "\$CLAUDEXOR_WIN32_CONPTY_SHA256"[\s\S]*?runtime-closure-extract[\s\S]*?closure_extract\/native\/claudexor-conpty-helper\.exe/,
+    packageMacos,
+  );
+  requirePattern(
+    "assembled Windows smoke must run on windows-latest with Node 24.16",
+    /^\s{4}runs-on:\s*windows-latest\s*$[\s\S]*?node-version:\s*24\.16\.0/m,
+    assembledSmoke,
+  );
+  requirePattern(
+    "assembled Windows smoke must depend on candidate assembly and authority",
+    /needs:\s*\[prepare, windows-conpty-authority, package-macos\]/,
+    assembledSmoke,
+  );
+  requirePattern(
+    "assembled Windows smoke must compare authority, app, and closure helper bytes",
+    /--file \$authority --file \$appHelper --file \$closureHelper[\s\S]*?--expected-sha256 \$expected/,
+    assembledSmoke,
+  );
+  requirePattern(
+    "assembled Windows smoke must execute native helper and setup transport contracts",
+    /win32-conpty-helper\.test\.ts[\s\S]*?setup-login-pty\.test\.ts[\s\S]*?setup-login-runner-transport\.test\.ts/,
+    assembledSmoke,
+  );
+  if (/setup-login-url-disclosure\.test\.ts/.test(assembledSmoke)) {
+    findings.push(
+      "release.yml: assembled Windows smoke must not run the POSIX-only setup-login-url-disclosure suite",
+    );
+  }
+  requirePattern(
+    "assembled Windows daemon must pass probe, protocol handshake, and identity-bound stop",
+    /--probe[\s\S]*?\/v2\/handshake[\s\S]*?--stop \$env:VERSION \$env:PREPARED_SHA[\s\S]*?WaitForExit\(15000\)/,
+    assembledSmoke,
+  );
+  requirePattern(
+    "npm publication must be gated by the assembled Windows smoke",
+    /needs:\s*\[[^\]]*windows-conpty-candidate-smoke[^\]]*\]/,
+    publishNpm,
+  );
+  requirePattern(
+    "npm must stage the promoted closure helper rather than rebuild or copy fresh authority",
+    /tar -xzf "release-assets\/claudexor-runtime-\$VERSION\.tar\.gz"[\s\S]*?--file "\$authority" --file "\$promoted" --expected-sha256 "\$expected"[\s\S]*?cp "\$promoted" packages\/core\/dist\/native\/claudexor-conpty-helper\.exe/,
+    publishNpm,
+  );
+  const npmBuild = publishNpm.indexOf("      - run: pnpm build");
+  const npmStage = publishNpm.indexOf(
+    "      - name: Stage the promoted closure's exact Windows helper for npm",
+  );
+  const npmPack = publishNpm.indexOf("      - name: Verify packed native helper custody");
+  const npmPublish = publishNpm.indexOf(
+    "      - name: Publish only missing, byte-identical packages",
+  );
+  if (!(npmBuild >= 0 && npmBuild < npmStage && npmStage < npmPack && npmPack < npmPublish)) {
+    findings.push(
+      "release.yml: npm must build before staging, then only verify/pack/publish the promoted helper",
+    );
+  }
+  if (/\b(?:pnpm|npm)\b[^\n]*\bbuild\b/.test(publishNpm.slice(Math.max(0, npmStage)))) {
+    findings.push("release.yml: npm must not rebuild core after staging the promoted helper");
+  }
+  requirePattern(
+    "npm smoke must compare the installed helper to the internal authority",
+    /verify-win32-conpty-helper\.mjs[\s\S]*?windows-conpty-authority\/claudexor-conpty-helper\.exe[\s\S]*?--file "\$packaged_conpty" --expected-sha256 "\$expected"/,
+    npmSmoke,
+  );
+  if (/signtool|Authenticode/i.test(workflow)) {
+    findings.push(
+      "release.yml: Windows helper custody must not claim or introduce Authenticode in this plan",
+    );
+  }
+  return findings;
+}
+
+function windowsConptyBuildFindings(source) {
+  const findings = [];
+  const compileStart = source.indexOf("function compile(");
+  const verifyStart = source.indexOf("function verifyStaticCrtDependencies(");
+  const verifyProbeStart = source.indexOf("function verifyProbe(");
+  const compile =
+    compileStart >= 0 && verifyStart > compileStart ? source.slice(compileStart, verifyStart) : "";
+  const verifier =
+    verifyStart >= 0 && verifyProbeStart > verifyStart
+      ? source.slice(verifyStart, verifyProbeStart)
+      : "";
+
+  if (!/["']\/MT["']/.test(compile)) {
+    findings.push("build-win32-conpty-helper.mjs: common MSVC compile path must freeze /MT");
+  }
+  if (!/sanitizedMsvcEnvironment\(process\.env\)/.test(compile)) {
+    findings.push(
+      "build-win32-conpty-helper.mjs: common MSVC compile path must scrub inherited CL and _CL_",
+    );
+  }
+  if (!/spawnSync\([\s\S]*?["']cl\.exe["'][\s\S]*?env:\s*buildEnvironment/.test(compile)) {
+    findings.push(
+      "build-win32-conpty-helper.mjs: cl.exe must receive the scrubbed build environment",
+    );
+  }
+  const assertion = compile.indexOf("verifyStaticCrtDependencies(temporary, buildEnvironment)");
+  const publish = compile.indexOf("renameSync(temporary, output)");
+  if (!(assertion >= 0 && publish > assertion)) {
+    findings.push(
+      "build-win32-conpty-helper.mjs: every linked PE must pass the CRT dependency assertion before publication",
+    );
+  }
+  if (
+    !/spawnSync\([\s\S]*?["']dumpbin\.exe["'][\s\S]*?["']\/DEPENDENTS["']/.test(verifier) ||
+    !/dumpbinDependencyBasenames/.test(verifier) ||
+    !/dynamicCrtDependencies/.test(verifier) ||
+    !/dependencies\.length === 0/.test(verifier)
+  ) {
+    findings.push(
+      "build-win32-conpty-helper.mjs: build must fail closed on dumpbin dependency basenames and dynamic VC/UCRT imports",
+    );
+  }
+  return findings;
+}
+
+function coreNpmLifecycleFindings(manifest) {
+  const findings = [];
+  for (const lifecycle of ["prepack", "prepare", "postpack"]) {
+    const script = String(manifest.scripts?.[lifecycle] ?? "");
+    if (/\b(?:pnpm|npm|turbo)\b[^&|;]*\bbuild\b|\btsc\b|build-win32-conpty-helper/.test(script)) {
+      findings.push(
+        `packages/core/package.json: ${lifecycle} must verify, not rebuild, after promoted helper staging`,
+      );
+    }
+  }
+  return findings;
 }
 
 function remoteSmokeGateFindings(workflow) {
@@ -848,11 +1260,4 @@ function replaceLastOccurrence(text, needle, replacement) {
   return index < 0
     ? text
     : `${text.slice(0, index)}${replacement}${text.slice(index + needle.length)}`;
-}
-
-function staleAttestationFindings(workflow) {
-  // The attestation is schema v6; stale v2-v5 wording must never return.
-  return staleAttestationSchemaPattern.test(workflow)
-    ? ["release.yml: stale schema-v2/v3/v4/v5 attestation wording is forbidden"]
-    : [];
 }

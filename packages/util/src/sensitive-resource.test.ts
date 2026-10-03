@@ -13,6 +13,8 @@ describe("SensitiveResourcePolicy hostile corpus", () => {
     ["home/.aws/config", "credential_store"],
     ["home/.config/gcloud/application_default_credentials.json", "credential_store"],
     ["home/.ssh/id_ed25519", "credential_store"],
+    ["home/Library/Keychains/login.keychain-db", "credential_store"],
+    ["home/login.keychain-db", "credential_file"],
     ["repo/id_rsa", "private_key"],
     [".claudexor/auth/native.json", "credential_store"],
   ] as const)("classifies %s as %s", (path, expectedClass) => {
@@ -28,6 +30,7 @@ describe("SensitiveResourcePolicy hostile corpus", () => {
     ".env.template",
     "docs/environment.md",
     "keys/id_ed25519.pub",
+    "repo/src/keychains/Item.swift",
     "src/gcloud/client.ts",
     "packages/secrets/src/index.ts",
   ])("does not confuse a safe template/public path with a secret: %s", (path) => {

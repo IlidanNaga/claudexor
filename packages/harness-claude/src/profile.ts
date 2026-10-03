@@ -1,26 +1,21 @@
 import type { CredentialProfile, CredentialProfileStatus } from "@claudexor/schema";
 import { CredentialProfileStatus as CredentialProfileStatusSchema } from "@claudexor/schema";
 import { nowIso, redactSecrets } from "@claudexor/util";
-import { canonicalIsolationLocator, normalizeThroughExistingAncestor } from "@claudexor/core";
+import { canonicalIsolationLocator } from "@claudexor/core";
 import { namespacedSecretRefBase } from "@claudexor/secrets";
 import { claudeNativeEnv, BIN, type ClaudeProfileRuntimeDeps } from "./index.js";
-import { defaultNativeClaudeConfigDir } from "./native-home.js";
 
 /**
  * Canonicalize a profile's isolation locator (INV-135): absolute, trailing
- * separators stripped, symlinks resolved when the dir exists. Refuses the
- * Claudexor-owned default native dir — profiles are ADDITIVE identities;
- * ordinary ~/.claude is never a target, so profile operations cannot touch it.
+ * separators stripped, symlinks resolved when the dir exists. Under the
+ * unified account model the Claudexor-owned legacy native dir IS a legal row
+ * locator — the exact dir the startup migration auto-registers as
+ * `claude-default` (bytes never move; Claude Code keys its Keychain item by
+ * this exact path). Ordinary ~/.claude stays outside the owned root and is
+ * still refused by the shared isolation-locator authority check.
  */
 export function canonicalProfileConfigDir(locator: string): string {
-  const dir = canonicalIsolationLocator(locator, "credential profile config dir");
-  const defaultDir = normalizeThroughExistingAncestor(defaultNativeClaudeConfigDir());
-  if (dir === defaultDir) {
-    throw new Error(
-      "credential profile config dir must not be the default native Claude dir (profiles are additive; INV-135)",
-    );
-  }
-  return dir;
+  return canonicalIsolationLocator(locator, "credential profile config dir");
 }
 
 /**
@@ -40,6 +35,8 @@ export async function resolveClaudeProfileRoute(
       subscriptionSource: "native_session" | "oauth_token_env" | null;
       key: string | null;
       oauthToken: string | null;
+      authStatusStale?: boolean;
+      authStatusStaleAgeMs?: number;
       refusal: null;
     }
   | { refusal: string }
@@ -48,6 +45,8 @@ export async function resolveClaudeProfileRoute(
   let key: string | null = null;
   let oauthToken: string | null = null;
   let subscriptionSource: "native_session" | "oauth_token_env" | null = null;
+  let authStatusStale = false;
+  let authStatusStaleAgeMs: number | undefined;
   if (profile.credential_kind === "config_dir_login") {
     try {
       const configDir = canonicalProfileConfigDir(profile.isolation_locator ?? "");
@@ -56,8 +55,11 @@ export async function resolveClaudeProfileRoute(
       // re-normalizes its env, and without the explicit dir it would inspect
       // the DEFAULT store while claiming to verify the profile.
       const probe = await runtime.probeAuthStatus(BIN, { env: nativeEnv, configDir, abortSignal });
-      if (probe.authed) subscriptionSource = "native_session";
-      else
+      if (probe.authed) {
+        subscriptionSource = "native_session";
+        authStatusStale = probe.stale === true;
+        authStatusStaleAgeMs = probe.staleAgeMs;
+      } else
         return {
           refusal: probe.probeError
             ? `credential profile "${profile.profile_id}": auth probe failed — ${probe.probeError}`
@@ -90,6 +92,7 @@ export async function resolveClaudeProfileRoute(
     subscriptionSource,
     key,
     oauthToken,
+    ...(authStatusStale ? { authStatusStale: true, authStatusStaleAgeMs } : {}),
     refusal: null,
   };
 }
@@ -112,10 +115,20 @@ export async function probeClaudeCredentialProfile(
       if (probe.authed)
         return CredentialProfileStatusSchema.parse({
           ...base,
-          availability: "available",
-          verification: "passed",
-          detail: "claude.ai login verified in the profile config dir",
-          last_verified_at: nowIso(),
+          availability: probe.stale ? "unknown" : "available",
+          verification: probe.stale ? "not_run" : "passed",
+          ...(probe.stale
+            ? {
+                stale: true,
+                ...(probe.staleAgeMs === undefined ? {} : { stale_age_ms: probe.staleAgeMs }),
+              }
+            : {}),
+          detail: probe.stale
+            ? `auth-status probe is stale; using last-known-good claude.ai login${
+                probe.staleAgeMs === undefined ? "" : ` (${probe.staleAgeMs}ms old)`
+              }`
+            : "claude.ai login verified in the profile config dir",
+          ...(probe.stale ? {} : { last_verified_at: nowIso() }),
         });
       // Readiness-edge contract (ARCHITECTURE §auth / DEVELOPMENT): a probe
       // that could not decide is unknown+not_run; a cleanly logged-out dir is

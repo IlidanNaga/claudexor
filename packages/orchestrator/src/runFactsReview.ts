@@ -46,7 +46,11 @@ export function readReviewArtifacts(
         // terminal-facts path) instead of being silently skipped.
         throw new Error(`review artifact contains an invalid finding: ${name}`);
       }
-      reviewerHarnessIds.add(finding.data.reviewer.harness_id);
+      // Deterministic policy findings are not a model invocation. Their blocker
+      // ids remain authoritative even when model review was deliberately off.
+      if (finding.data.reviewer.harness_id !== "policy") {
+        reviewerHarnessIds.add(finding.data.reviewer.harness_id);
+      }
       // Reviewer participation is run-wide, but blockers describe only the
       // terminal deliverable. A losing race candidate or an earlier
       // convergence iteration must not contaminate the winner's review axis.

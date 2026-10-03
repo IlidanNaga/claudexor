@@ -20,7 +20,7 @@ struct ThreadsScreen: View {
     // "⋯" per-turn options (collapsed by default).
     @State var showOptions = false
     @State var capUsdText = ""
-    @State var selectedAccess: AccessProfile = .workspaceWrite
+    @State var threadAccessSelection: ComposerThreadAccessSelection = .active(.workspaceWrite)
     @State var selectedWebPolicy = "auto"
     /// Per-turn auth route REQUEST (W18): auto | subscription | api_key. Not sticky.
     @State var authRoutePreference = ""  // "" = Thread default; see authRouteRequest (sol #1)
@@ -36,13 +36,14 @@ struct ThreadsScreen: View {
     /// Plan strategy (D31): Council draft-and-merge across N harnesses. Plan-only.
     @State var councilEnabled = false
     @State var councilMembers = 2
-    /// Arm the agent-driven browser (Playwright MCP) for this turn. Requires full
-    /// access (codex's sandbox cancels navigation otherwise); turning it on forces
-    /// access to full + is disclosed in the options panel. Not sticky across threads.
+    /// Arm the agent-driven browser (Playwright MCP) for this turn. Access stays
+    /// independent; the daemon applies the selected harness's native MCP preflight.
+    /// Not sticky across threads.
     @State var browser = false
     /// Parent-owned complete Advanced draft. Incomplete rows remain visible to
     /// Send validity and survive popover dismissal; only valid rows serialize.
     @State var reviewDraft = ComposerReviewDraft()
+    @State var reviewChanges = false
     /// QA-010: optional Create-turn deterministic test command (argv text). Shown
     /// only for the Create agent strategy; parsed into the run's typed `tests`
     /// gate. Not sticky across threads.
@@ -72,34 +73,24 @@ struct ThreadsScreen: View {
     private let minThreadW: CGFloat = 240
     private let maxThreadW: CGFloat = 360
 
-    var browserPolicy: ComposerBrowserPolicy {
-        .init(
-            selectedAccess: selectedAccess,
-            selectedWebPolicy: selectedWebPolicy,
-            browserArmed: browser,
-            browserAvailable: browserAvailableForCurrentTurn
-        )
-    }
-
-    var effectiveBrowserArmed: Bool { browserPolicy.effectiveBrowserArmed }
-    var effectiveAccess: AccessProfile { browserPolicy.effectiveAccess }
-    var effectiveWebPolicy: String { browserPolicy.effectiveWebPolicy }
     var runControlApplicability: ComposerRunControlApplicability {
         .resolve(mode: composerMode)
     }
     /// Per-turn options the "⋯" panel collects, mapped onto engine run-start fields.
     var currentOptions: TurnOptions {
-        TurnOptions(
+        let browserRequest = browserPolicy.requestProjection
+        return TurnOptions(
             maxUsd: ComposerOptionParser.parseNonnegativeFiniteDouble(capUsdText),
-            access: effectiveAccess == .workspaceWrite ? nil : effectiveAccess.wire,
-            web: effectiveWebPolicy == "auto" ? nil : effectiveWebPolicy,
+            access: browserRequest.access,
+            web: browserRequest.web,
             // untilClean / delegate / council are overlaid in send() from the
             // resolved Agent/Plan strategy (resolveComposerStrategy). Delegate
             // is additionally masked there by requestedForWire so a stale ON
             // value cannot cross a known-unavailable route.
             maxAttempts: maxAttempts,
-            browser: effectiveBrowserArmed,
+            browser: browserRequest.browser,
             models: composerModels,
+            review: reviewChanges,
             reviewerPanel: runControlApplicability.reviewers.applicable && !reviewerPanelEntries.isEmpty
                 ? reviewerPanelEntries : nil,
             protectedPathApprovals:
@@ -154,14 +145,14 @@ struct ThreadsScreen: View {
         guard !t.isEmpty else { return false }
         return ComposerOptionParser.parseNonnegativeFiniteDouble(t) == nil
     }
-
     var reviewerPanelInvalid: Bool {
         guard runControlApplicability.reviewers.applicable else { return false }
+        if reviewerPanelStructuredInvalid { return true }
+        if reviewDraft.hasValidReviewerJSON { return false }
         let tokens = reviewerPanelTokens
         return reviewDraft.reviewerPickerIncomplete
             || (!tokens.isEmpty && tokens.count != reviewerPanelEntries.count)
     }
-
     var protectedApprovalsInvalid: Bool {
         guard runControlApplicability.protectedPathApprovals.applicable else { return false }
         let tokens = protectedApprovalTokens
@@ -175,6 +166,9 @@ struct ThreadsScreen: View {
 
     var composerSendAvailability: ComposerSendAvailability {
         var blockers: [ComposerSendBlocker] = []
+        if let migrationBlocker = threadAccessSelection.migrationBlocker {
+            blockers.append(.access(migrationBlocker))
+        }
         if capUsdInvalid {
             blockers.append(.budget("Fix the budget cap in More options to send"))
         }
@@ -440,8 +434,12 @@ struct ThreadsScreen: View {
                 // D26: the write scope is STICKY per thread — the chip reflects
                 // the thread's server-side `access` and a switch PATCHes it
                 // (persists across turns/reload). " · Browser" appends while armed.
-                AccessChip(access: $selectedAccess, browserArmed: effectiveBrowserArmed,
-                           writeDisabled: composerMode.isReadOnly)
+                AccessChip(
+                    access: threadAccessSelection.activeAccess,
+                    browserArmed: effectiveBrowserArmed,
+                    writeDisabled: composerMode.isReadOnly && threadAccessSelection.activeAccess != nil,
+                    onPick: selectComposerAccess
+                )
             }
             // The "⋯" options button is ALWAYS available — a no-project Ask is
             // still entitled to a per-turn model / web / budget. `composerOptions`
@@ -472,7 +470,10 @@ struct ThreadsScreen: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .onAppear { if !threadHasProject { composerMode = .ask } }
+        .onAppear {
+            if !threadHasProject { composerMode = .ask }
+            reconcileComposerAccess(model.effectiveThreadAccess)
+        }
         .onChange(of: composerSelectionContext) { oldContext, newContext in
             let selectionTransition = composerSubmissions.classifySelection(
                 from: oldContext, to: newContext
@@ -496,14 +497,11 @@ struct ThreadsScreen: View {
             }
             resetPerTurnComposerOptions()
         }
-        // D26: a write-scope switch is STICKY — PATCH the thread (or the draft
-        // value) so it persists. Guarded so re-seeding on thread switch, and
-        // picking the value that already equals the trust default (nil sticky),
-        // never fire a redundant PATCH.
-        .onChange(of: selectedAccess) { _, picked in
-            let stickyOrDefault = model.effectiveThreadAccess ?? model.composerAccessDefault.wire
-            guard picked.wire != stickyOrDefault else { return }
-            Task { await model.setThreadAccess(picked.wire) }
+        // Server-confirmed thread access is the producer. In particular, a
+        // migration-required historical wire remains distinct until its explicit
+        // PATCH returns the new active value.
+        .onChange(of: model.effectiveThreadAccess) { _, recordedWire in
+            reconcileComposerAccess(recordedWire)
         }
         // The no-project gate also fires when the project changes under a draft
         // (clearing it from Settings, etc.) — fall back to read-only Ask.

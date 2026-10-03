@@ -64,6 +64,11 @@
           "default": null,
           "description": "Artifact path of the materialized structured output: final/output.json when conformant, final/output.invalid.json when parsed but non-conformant; null when the answer never parsed."
         },
+        "normalized_optional_nulls": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        },
         "generated_at": {
           "type": "string",
           "minLength": 1,

@@ -8,9 +8,10 @@ import {
   ControlThread,
   ControlThreadTurn,
   ControlTurnRunCard,
+  directDelegatedChildrenFromRecords,
   type ControlRunSummary,
 } from "@claudexor/schema";
-import { directDelegatedChildrenFromRecords, type DaemonRunRecord } from "./run-record.js";
+import { type DaemonRunRecord } from "./run-record.js";
 
 export function delegatedChildRunIds(
   parentRunId: string,

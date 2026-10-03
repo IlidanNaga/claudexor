@@ -5,7 +5,11 @@ import type {
   ReviewFinding,
   WorkState,
 } from "@claudexor/schema";
-import { DecisionRecord as DecisionRecordSchema, isBlocking } from "@claudexor/schema";
+import {
+  DecisionRecord as DecisionRecordSchema,
+  isBlocking,
+  reviewAllowsApply,
+} from "@claudexor/schema";
 
 /** Evidence assembled for one tournament candidate. */
 export interface CandidateEvidence {
@@ -32,6 +36,41 @@ export interface CandidateEvidence {
   workState?: WorkState;
 }
 
+/**
+ * The candidate's CONFIGURED deterministic gates. The synthetic `harness`
+ * pseudo-gate row (appended by the evidence producer when a run errored) is
+ * process/lifecycle evidence, never a configured check — every checks-axis
+ * consumer routes through this ONE filter so a producer that appends the
+ * pseudo-gate (or repollutes the test counts) can't resurrect
+ * "tests=0% / required gates FAILED" on a zero-configured-gate run.
+ */
+function configuredGates(c: CandidateEvidence): GateResult[] {
+  return c.gates.filter((g) => g.id !== "harness");
+}
+
+/** Test counts for the label surfaces: when a producer's numeric counts were
+ * computed over the AUGMENTED array (the sentinel present), re-derive from the
+ * configured gates so "tests=0%" cannot resurrect through the numbers alone.
+ * A gate-less producer keeps its own numbers — testsTotal is not always a
+ * gate count on the public CandidateEvidence surface. */
+function configuredTestCounts(c: CandidateEvidence): { passed: number; total: number } {
+  const hasSentinel = c.gates.some((g) => g.id === "harness");
+  if (!hasSentinel) return { passed: c.testsPassed, total: c.testsTotal };
+  const configured = configuredGates(c);
+  return {
+    passed: configured.filter((g) => g.status === "passed").length,
+    total: configured.length,
+  };
+}
+
+/**
+ * Ranking predicate — reads the AUGMENTED gates array ON PURPOSE: the
+ * synthetic `harness` pseudo-gate is how an errored candidate is demoted in
+ * the score tuple, and routing this through `configuredGates` was reproduced
+ * to let an errored empty-diff candidate outrank a healthy one and terminate
+ * the run harness_failed. The honesty fixes live in the LABEL and the checks
+ * axis (both read `configuredGates`); ranking keeps lifecycle demotion.
+ */
 function requiredGatesPassed(c: CandidateEvidence): boolean {
   const required = c.gates.filter((g) => g.required);
   return required.length === 0 ? true : required.every((g) => g.status === "passed");
@@ -61,18 +100,34 @@ function openBlockerCount(c: CandidateEvidence): number {
 }
 
 /**
- * Test pass-fraction. Zero configured tests is zero test EVIDENCE (0, never a
- * vacuous 1): a candidate with no tests must not score "100%" in rankings or
- * user-facing decision strings. (The held-out split axis was retired in the
- * v0.15 triage: no producer ever populated it — re-add WITH a real held-out
- * runner if that anti-reward-hacking design returns.)
+ * Test pass-fraction — the RANKING value, reading the RAW producer counts on
+ * purpose. Routing it through `configuredTestCounts` was reproduced to change
+ * existing ordering: two harness-errored candidates with 1/10 and 9/10 test
+ * evidence both re-derived to 1/1 = 100% and the smaller-diff 1/10 candidate
+ * won the axis. Zero tests is zero test EVIDENCE (0, never a vacuous 1).
+ * (The held-out split axis was retired in the v0.15 triage: no producer ever
+ * populated it — re-add WITH a real held-out runner if that
+ * anti-reward-hacking design returns.)
  */
 function effectiveTestFraction(c: CandidateEvidence): number {
   return c.testsTotal > 0 ? c.testsPassed / c.testsTotal : 0;
 }
 
-/** Human label for test evidence: honest "n/a" when no tests exist at all. */
+/** Human label for test evidence on VERDICT surfaces (why_winner,
+ * final_checks): honest "n/a" when no tests exist at all — label-only, so it
+ * may re-derive augmented-computed counts through `configuredTestCounts`. */
 function testEvidenceLabel(c: CandidateEvidence): string {
+  const { passed, total } = configuredTestCounts(c);
+  if (total === 0) return "n/a";
+  return `${((passed / total) * 100).toFixed(0)}%`;
+}
+
+/** The RANKING-axis format: describes the same raw counts the axis VALUE
+ * ranks on (QA-028 — value and label on one surface may never disagree; the
+ * configured label rendered two errored candidates as "100% vs 100%" while
+ * raw 1/10-vs-9/10 decided the ordering, leaving the persisted decisive_axis
+ * unable to explain itself). Verdict surfaces keep `testEvidenceLabel`. */
+function rawTestAxisLabel(c: CandidateEvidence): string {
   if (c.testsTotal === 0) return "n/a";
   return `${(effectiveTestFraction(c) * 100).toFixed(0)}%`;
 }
@@ -95,7 +150,17 @@ const AXES: RankingAxis[] = [
   {
     key: "required_gates",
     value: (c) => (requiredGatesPassed(c) ? 1 : 0),
-    format: (c) => requiredGateLabel(c),
+    // The axis FORMAT must describe the same predicate the axis RANKS on
+    // (QA-028: value and label on one surface may never disagree). Ranking
+    // reads the AUGMENTED gates, so a harness-errored candidate formats as
+    // FAILED-with-cause here even when zero gates are configured — while the
+    // verdict surfaces (requiredGateLabel/checks) keep configured-only truth.
+    format: (c) => {
+      if (requiredGatesPassed(c)) return requiredGateLabel(c);
+      return configuredGates(c).some((gate) => gate.required)
+        ? "required gates FAILED"
+        : "required gates FAILED (harness errored; none configured)";
+    },
   },
   {
     key: "acceptance_coverage",
@@ -110,7 +175,7 @@ const AXES: RankingAxis[] = [
   {
     key: "tests",
     value: (c) => effectiveTestFraction(c),
-    format: (c) => testEvidenceLabel(c),
+    format: (c) => rawTestAxisLabel(c),
   },
   {
     key: "clean_review",
@@ -201,8 +266,13 @@ export interface ArbitrationResult {
 }
 
 function requiredGateLabel(candidate: CandidateEvidence): string {
-  if (!candidate.gates.some((gate) => gate.required)) return "required gates n/a (none configured)";
-  return requiredGatesPassed(candidate) ? "required gates passed" : "required gates FAILED";
+  const required = configuredGates(candidate).filter((gate) => gate.required);
+  if (required.length === 0) return "required gates n/a (none configured)";
+  // The label describes CONFIGURED gates only — lifecycle (the pseudo-gate)
+  // must not turn "every configured gate passed" into a FAILED claim.
+  return required.every((gate) => gate.status === "passed")
+    ? "required gates passed"
+    : "required gates FAILED";
 }
 
 /** Pairwise comparison over EVERY ranking axis (QA-028 root cause #2): the
@@ -234,6 +304,8 @@ function pairwise(a: CandidateEvidence, b: CandidateEvidence): PairwiseCompariso
 export function arbitrate(
   candidates: CandidateEvidence[],
   opts: {
+    /** Frozen run intent; absence preserves historical review-required behavior. */
+    reviewRequested?: boolean;
     spendUsd?: number | null;
     estimatedSpend?: boolean;
     /** QA-010b: settled cash vs subscription-valuation split from the ledger,
@@ -254,6 +326,7 @@ export function arbitrate(
           noChanges: true,
           checks: "not_configured",
           review: "not_run",
+          ...(opts.reviewRequested !== undefined ? { review_requested: opts.reviewRequested } : {}),
           reason: "harness_failed",
         },
         why_winner: "no candidates",
@@ -273,19 +346,31 @@ export function arbitrate(
     ? compareTuples(scoreTuple(winner), scoreTuple(runnerUp)) === 0
     : false;
 
-  const requiredOk = requiredGatesPassed(winner);
   const blockerCount = openBlockerCount(winner);
   const hasDiff = (winner.diffBytes ?? winner.diffSize ?? 0) > 0;
   const harnessFailed = winner.gates.some((g) => g.id === "harness" && g.status === "failed");
   // v3 AXES (D8/D18): the harness pseudo-gate row is process evidence, not a
-  // configured deterministic check — it feeds lifecycle, never the checks
-  // axis (the old lattice let it flip hasGates and reroute the whole tree).
-  const realGates = winner.gates.filter((g) => g.id !== "harness");
-  const checksConfigured = winner.testsTotal > 0 || realGates.length > 0;
+  // configured deterministic check — it feeds lifecycle and RANKING, never the
+  // checks axis (the old lattice let it flip hasGates and reroute the whole
+  // tree). So EVERY input to the checks axis is configured-derived: the gates
+  // via `configuredGates`, the counts via `configuredTestCounts` (a producer
+  // that computed counts over the augmented array cannot re-admit the
+  // pseudo-gate through the numbers), and the required predicate over the
+  // configured rows — `requiredGatesPassed` reads the augmented gates for the
+  // score tuple and must not leak here, or a configured-green run whose
+  // harness errored renders "required gates passed" beside checks=failed on
+  // one record. Gate-less producers keep their raw test counts, so failing
+  // tests without gates still fail checks (base behavior).
+  const realGates = configuredGates(winner);
+  const cfgCounts = configuredTestCounts(winner);
+  const checksConfigured = cfgCounts.total > 0 || realGates.length > 0;
+  const cfgRequired = realGates.filter((g) => g.required);
+  const cfgRequiredOk =
+    cfgRequired.length === 0 ? true : cfgRequired.every((g) => g.status === "passed");
   const checksPassed =
     checksConfigured &&
-    requiredOk &&
-    (winner.testsTotal === 0 || winner.testsPassed === winner.testsTotal);
+    cfgRequiredOk &&
+    (cfgCounts.total === 0 || cfgCounts.passed === cfgCounts.total);
   const checks = checksConfigured ? (checksPassed ? "passed" : "failed") : "not_configured";
   const reviewRan = winner.reviewVerified === true;
   // Accepted blockers ALWAYS surface as review=blocked — even from an
@@ -327,19 +412,28 @@ export function arbitrate(
     noChanges,
     checks,
     review,
+    ...(opts.reviewRequested !== undefined ? { review_requested: opts.reviewRequested } : {}),
     reason,
     ...(workState ? { work_state: workState } : {}),
   } as const;
   // Honest disclosure of WHAT verified an applyable run. "both" requires a
   // DETERMINISTIC check — a real test count or a REQUIRED gate that passed —
   // not mere presence. A no-check run adopted on review evidence is
-  // cross_family_review. Only an APPROVED review is applyable-quality.
+  // cross_family_review. Review permission and verification evidence differ.
   const gateVerified =
     (winner.testsTotal > 0 && winner.testsPassed === winner.testsTotal) ||
     realGates.some((g) => g.required && g.status === "passed");
   const applyable =
-    lifecycle === "succeeded" && review === "approved" && checks !== "failed" && !workVeto;
-  const verificationBasis = applyable ? (gateVerified ? "both" : "cross_family_review") : "none";
+    lifecycle === "succeeded" && reviewAllowsApply(facts) && checks !== "failed" && !workVeto;
+  const verificationBasis = !applyable
+    ? "none"
+    : review === "approved"
+      ? gateVerified
+        ? "both"
+        : "cross_family_review"
+      : gateVerified
+        ? "deterministic_checks"
+        : "none";
 
   // The decisive axis for the WINNER vs the runner-up: the first axis on which
   // they differ (null on an exact tie, where route order decided).
@@ -399,7 +493,9 @@ export function arbitrate(
     accepted_risks: acceptedRisks,
     final_checks: [
       requiredGateLabel(winner),
-      `final cross-family review ${winner.finalReviewClean ? "clean" : "not clean"}`,
+      opts.reviewRequested === false
+        ? "model review not requested"
+        : `final cross-family review ${winner.finalReviewClean ? "clean" : "not clean"}`,
       ...(tiedWithRunnerUp
         ? [
             `tie: winner chosen by route order (no distinguishing evidence vs ${runnerUp?.label ?? "runner-up"})`,

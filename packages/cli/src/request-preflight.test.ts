@@ -164,7 +164,121 @@ describe("run request requirements preflight", () => {
         }),
       ),
     ).rejects.toMatchObject({ code: "browser_unavailable" });
-    expect(resolvedRoots).toEqual(["/trusted-project"]);
+    expect(resolvedRoots).toEqual(["/trusted-project", "/trusted-project"]);
+  });
+
+  it("refuses readonly write-backed controls and skips Git", async () => {
+    let gitProbes = 0;
+    const preflight = createRunRequirementsPreflight(resources, "/no-project", {
+      accessDefault: () => "readonly",
+      gitCapability: async () => {
+        gitProbes += 1;
+        return {
+          status: "missing" as const,
+          version: null,
+          detail: "Git is unavailable",
+          remediation: "Install Git and retry.",
+        };
+      },
+    });
+
+    await expect(
+      preflight(
+        ControlRunStartRequest.parse({
+          prompt: "repair",
+          mode: "agent",
+          access: "readonly",
+          attempts: 2,
+        }),
+      ),
+    ).rejects.toMatchObject({
+      code: "strategy_access_incompatible",
+      status: 400,
+      retryable: false,
+      requiredActions: [expect.stringMatching(/workspace_write\/full/)],
+    });
+    await expect(
+      preflight(
+        ControlRunStartRequest.parse({
+          prompt: "repair",
+          mode: "agent",
+          untilClean: true,
+        }),
+      ),
+    ).rejects.toMatchObject({
+      code: "strategy_access_incompatible",
+      status: 400,
+      retryable: false,
+      requiredActions: [expect.stringMatching(/workspace_write\/full/)],
+    });
+    for (const access of ["readonly", undefined] as const) {
+      await expect(
+        preflight(
+          ControlRunStartRequest.parse({
+            prompt: "run a write-backed gate",
+            mode: "agent",
+            ...(access === undefined ? {} : { access }),
+            tests: [{ program: "sh", args: ["-c", "true"], envAllowlist: [] }],
+          }),
+        ),
+      ).rejects.toMatchObject({
+        code: "strategy_access_incompatible",
+        status: 400,
+        retryable: false,
+      });
+    }
+    await expect(
+      preflight(ControlRunStartRequest.parse({ prompt: "inspect", mode: "agent" })),
+    ).resolves.toBeUndefined();
+    await expect(
+      preflight(
+        ControlRunStartRequest.parse({
+          prompt: "inspect the caller-owned tree",
+          mode: "agent",
+          scope: { kind: "project", root: "/readonly-project" },
+          execution: { isolation: "live", delegated: true },
+        }),
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      preflight(
+        ControlRunStartRequest.parse({
+          prompt: "cannot converge without writes",
+          mode: "agent",
+          scope: { kind: "project", root: "/readonly-project" },
+          execution: { isolation: "live", delegated: true },
+          attempts: 2,
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "strategy_access_incompatible" });
+    expect(gitProbes).toBe(0);
+  });
+
+  it("requires a caller-owned tree when the project default is mutating", async () => {
+    let gitProbes = 0;
+    const preflight = createRunRequirementsPreflight(resources, "/no-project", {
+      accessDefault: () => "workspace_write",
+      gitCapability: async () => {
+        gitProbes += 1;
+        return gitAvailable();
+      },
+    });
+
+    await expect(
+      preflight(
+        ControlRunStartRequest.parse({
+          prompt: "edit the caller-owned tree",
+          mode: "agent",
+          scope: { kind: "project", root: "/write-project" },
+          execution: { isolation: "live", delegated: true },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      code: "execution_workspace_required",
+      status: 400,
+      retryable: false,
+    });
+    expect(gitProbes).toBe(0);
   });
 
   it("refuses only Git-dependent run shapes before harness work", async () => {

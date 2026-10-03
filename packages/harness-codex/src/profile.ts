@@ -1,15 +1,7 @@
-/**
- * `external_sandbox_full` = codex stands its own sandbox down; the engine
- * provides its own boundary only on delegated runs (a direct request runs
- * unrestricted). Required, not optional: codex shells out to
- * `/usr/bin/sandbox-exec` and macOS refuses a nested profile, so the two
- * cannot both be applied.
- */
 export const CODEX_ACCESS_PROFILES = [
   "readonly",
   "workspace_write",
   "full",
-  "external_sandbox_full",
   "inherit_native",
 ] as const;
 
@@ -24,7 +16,7 @@ import type {
 import { CredentialProfileStatus as CredentialProfileStatusSchema } from "@claudexor/schema";
 import { namespacedSecretRefBase } from "@claudexor/secrets";
 import { claudexorOwnedRoot, nowIso, redactSecrets } from "@claudexor/util";
-import { codexAuthModeAt, defaultNativeCodexHome, ensureCodexApiAuth } from "./auth.js";
+import { codexAuthModeAt, ensureCodexApiAuth } from "./auth.js";
 import { canonicalIsolationLocator, normalizeThroughExistingAncestor } from "@claudexor/core";
 import { BIN, codexNativeEnv, type CodexProfileRuntimeDeps } from "./index.js";
 
@@ -35,7 +27,7 @@ import { BIN, codexNativeEnv, type CodexProfileRuntimeDeps } from "./index.js";
  * native `defaultNativeCodexHome`), read the account's OWN `auth.json` and
  * project ONLY the allowlisted `{email, plan}` claims out of the id_token. The
  * token itself and every other claim never leave this function — nothing is
- * returned or logged but email and plan. Containment is enforced HERE: a home
+ * returned or logged but email and plan. Path ownership is enforced HERE: a home
  * outside the Claudexor-owned root (the ordinary vendor `~/.codex` above all)
  * is refused WITHOUT a read. Missing/malformed/undisclosed → `null`, never a
  * throw — an unreadable store must not break the accounts listing.
@@ -85,7 +77,7 @@ function decodeJwtClaims(jwt: string): Record<string, unknown> | null {
 
 /**
  * True when `dir` resolves inside the Claudexor-owned tree — the SAME
- * confinement the isolation-locator discipline uses, normalized through the
+ * ownership rule the isolation-locator discipline uses, normalized through the
  * deepest existing ancestor so a symlinked root (/var → /private/var) matches.
  */
 function isWithinOwnedRoot(dir: string): boolean {
@@ -96,18 +88,14 @@ function isWithinOwnedRoot(dir: string): boolean {
 
 /**
  * Canonicalize a profile's CODEX_HOME (INV-135): absolute, symlinks resolved
- * when the dir exists, and NEVER the default native home — profiles are
- * additive identities; the vendor-owned default is never a profile target.
+ * when the dir exists. Under the unified account model the Claudexor-owned
+ * legacy native home IS a legal row locator — the exact dir the startup
+ * migration auto-registers as `codex-default` (bytes never move). The
+ * operator's ordinary ~/.codex stays outside the owned root and is still
+ * refused by the shared locator check.
  */
 export function canonicalCodexProfileHome(locator: string): string {
-  const dir = canonicalIsolationLocator(locator, "credential profile CODEX_HOME");
-  const defaultDir = normalizeThroughExistingAncestor(defaultNativeCodexHome());
-  if (dir === defaultDir) {
-    throw new Error(
-      "credential profile CODEX_HOME must not be the default native codex home (profiles are additive; INV-135)",
-    );
-  }
-  return dir;
+  return canonicalIsolationLocator(locator, "credential profile CODEX_HOME");
 }
 
 /**

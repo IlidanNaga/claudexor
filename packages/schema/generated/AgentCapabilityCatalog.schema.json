@@ -62,6 +62,82 @@
           "items": {
             "type": "object",
             "properties": {
+              "inputLimits": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "scope": {
+                      "type": "string",
+                      "const": "turn_text",
+                      "description": "All text input items in one native turn; separate instructions are excluded."
+                    },
+                    "unit": {
+                      "type": "string",
+                      "const": "unicode_scalars"
+                    },
+                    "limit": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "source": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "verified_against": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Native runtime version against which the bound was observed."
+                    },
+                    "askPromptBudget": {
+                      "type": "object",
+                      "properties": {
+                        "shape": {
+                          "type": "string",
+                          "const": "ordinary_initial_attempt",
+                          "description": "Ordinary ASK initial attempt, including thread-turn continuity; excludes deep-scan and automatic continuation attempts."
+                        },
+                        "engineOverheadMax": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "shape",
+                        "engineOverheadMax"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "scope",
+                    "unit",
+                    "limit",
+                    "source",
+                    "verified_against"
+                  ],
+                  "additionalProperties": false,
+                  "description": "Adapter-owned observed input bound, not a predictive refusal or a model-window claim."
+                }
+              },
+              "processingPreferences": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "standard",
+                    "fast",
+                    "economy"
+                  ],
+                  "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
+                }
+              },
+              "accountCatalog": {
+                "type": "boolean"
+              },
               "id": {
                 "type": "string",
                 "description": "Harness id (codex, claude, cursor, opencode, raw-api, openrouter, ...)."
@@ -130,7 +206,7 @@
                   "boolean",
                   "null"
                 ],
-                "description": "Strict truth-source check of configuredModel (null when no model is configured)."
+                "description": "Admission of configuredModel under the harness's own absence declaration (INV-104): false = refused by an authoritative list, or no list could be read; true = listed, or unlisted on an advisory harness (forwarded to the vendor; the settings write and doctor readiness carry that note); null when no model is configured."
               },
               "models": {
                 "type": "object",
@@ -246,10 +322,9 @@
                     "readonly",
                     "workspace_write",
                     "full",
-                    "external_sandbox_full",
                     "inherit_native"
                   ],
-                  "description": "Filesystem/command access profile for a run: readonly (no writes), workspace_write (writes inside the workspace only), full (unrestricted; requires the per-repo trust allow), external_sandbox_full (the harness stands its native sandbox down; the engine applies its own OS boundary only on delegated runs — requested directly this is unrestricted, and not behind the trust allow), inherit_native (defer to the harness's own native sandbox settings)."
+                  "description": "Active filesystem/command access profile for a run: readonly (no writes), workspace_write (use the harness's native workspace-write policy), full (unrestricted; requires the per-repo trust allow for a run an operator starts at a surface, not for an execution.delegated run), inherit_native (defer to the harness's own native settings)."
                 },
                 "description": "Access profiles the adapter can enforce."
               },
@@ -262,6 +337,16 @@
                   "none"
                 ],
                 "description": "HOW read-only is enforced (fs_sandbox | permission_deny | tool_allowlist | none) — none means read-only intent is advisory for this harness."
+              },
+              "writeMechanism": {
+                "type": "string",
+                "enum": [
+                  "fs_sandbox",
+                  "tool_policy",
+                  "none"
+                ],
+                "description": "HOW workspace_write is confined (fs_sandbox | tool_policy | none) — tool_policy means an allowed shell is unconfined (no FS/network fence); consumers choosing lanes by confinement read THIS field, never a harness name.",
+                "default": "none"
               },
               "delegation": {
                 "type": "object",
@@ -299,6 +384,42 @@
                 ],
                 "additionalProperties": false,
                 "description": "Whether this installed runtime can offer Delegate through this harness."
+              },
+              "liveInput": {
+                "type": "string",
+                "enum": [
+                  "mid_turn",
+                  "next_tool_boundary",
+                  "none"
+                ],
+                "description": "How a live message enters one of this harness's RUNNING sessions (POST /v2/runs/:id/messages): mid_turn | next_tool_boundary | none. The harness maximum from its capability profile; the POST answers for the specific run. Omitted by engines older than 3.16.0 (= none).",
+                "default": "none"
+              },
+              "setupLogin": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "mode": {
+                        "type": "string",
+                        "enum": [
+                          "in_app",
+                          "external_terminal"
+                        ],
+                        "description": "in_app requests the daemon-hosted login flow; external_terminal requests the existing client PTY flow."
+                      }
+                    },
+                    "required": [
+                      "mode"
+                    ],
+                    "additionalProperties": false,
+                    "description": "Effective setup-login flow for this harness on the current host."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Effective setup-login flow for this harness on the current host; current producers emit null or an object, while omission identifies a legacy catalog row."
               }
             },
             "required": [
@@ -389,6 +510,16 @@
         "mutability": {
           "type": "object",
           "properties": {
+            "workspaceKinds": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "git",
+                  "directory"
+                ]
+              }
+            },
             "readOnlyModes": {
               "type": "array",
               "items": {
@@ -431,7 +562,7 @@
               "items": {
                 "$ref": "#/definitions/AgentCapabilityCatalog/properties/harnesses/items/properties/accessProfilesSupported/items"
               },
-              "description": "Access vocabulary; `full` additionally requires the per-repo trust allow (claudexor trust --allow-full-access)."
+              "description": "Access vocabulary; `full` additionally requires the per-repo trust allow (claudexor trust --allow-full-access) for a run an operator starts at a surface, not for an execution.delegated run."
             },
             "applyModes": {
               "type": "array",

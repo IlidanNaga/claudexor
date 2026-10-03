@@ -1,11 +1,52 @@
 import { PassThrough } from "node:stream";
 import { createInterface } from "node:readline";
 import { describe, expect, it } from "vitest";
+import { makeOutcomeFacts, SCHEMA_VERSION, validateRunFactsInvariants } from "@claudexor/schema";
 import { defaultClaudexorTools, serveClaudexorMcp, type McpTool, type RunnerFn } from "./index.js";
 import { beltClaudexorTools } from "./delegation-belt.js";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function validPlanRunFacts(runId: string) {
+  return validateRunFactsInvariants({
+    schema_version: SCHEMA_VERSION,
+    run_id: runId,
+    task_id: `task-${runId}`,
+    mode: "plan",
+    outcome: makeOutcomeFacts("succeeded"),
+    deliverable: {
+      present: true,
+      kind: "plan",
+      path: "final/plan.md",
+      producer_attempt_id: "p01",
+    },
+    participants: {
+      planners: 1,
+      attempts: [
+        {
+          attempt_id: "p01",
+          harness_id: "codex",
+          role: "planner",
+          deliverable_present: true,
+          status: "success",
+        },
+      ],
+    },
+    gates: {
+      configured: false,
+      required: 0,
+      total: 0,
+      executed: false,
+      state: "not_configured",
+      receipt_attempt_id: null,
+    },
+    review: { state: "not_run", blocker_ids: [], blockers: 0 },
+    apply: { eligibility: null, operator_decision_present: false },
+    required_actions: [],
+    generated_at: "2026-08-14T00:00:00.000Z",
+  });
 }
 
 /** Drive the REAL stdio wire (newline JSON-RPC over streams) against the served factory. */
@@ -57,7 +98,7 @@ async function wireToolCall(tools: McpTool[], name: string, args: Record<string,
 }
 
 describe("Claudexor MCP server (SDK v2)", () => {
-  it("negotiates the client's 2025-06-18 era, lists 17 tools, and answers PING during a slow call", async () => {
+  it("negotiates the client's 2025-06-18 era, lists 21 tools, and answers PING during a slow call", async () => {
     const tools = defaultClaudexorTools(async (p) => {
       if (p.mode === "agent") {
         await sleep(500);
@@ -94,7 +135,7 @@ describe("Claudexor MCP server (SDK v2)", () => {
     const init = w.responses.find((r) => r.id === "init");
     expect(init?.result?.protocolVersion).toBe("2025-06-18");
     expect(init?.result?.serverInfo?.name).toBe("claudexor");
-    expect(w.responses.find((r) => r.id === 2)?.result?.tools).toHaveLength(17);
+    expect(w.responses.find((r) => r.id === 2)?.result?.tools).toHaveLength(21);
     const call = w.responses.find((r) => r.id === 3);
     expect(call?.result?.content?.[0]?.text).toContain("slow done");
   });
@@ -223,13 +264,7 @@ describe("Claudexor MCP server (SDK v2)", () => {
         writeModes: ["agent"],
         isolationKinds: ["envelope", "live"],
         workspaceModes: ["in_place", "isolated"],
-        accessProfiles: [
-          "readonly",
-          "workspace_write",
-          "full",
-          "external_sandbox_full",
-          "inherit_native",
-        ],
+        accessProfiles: ["readonly", "workspace_write", "full", "inherit_native"],
         applyModes: ["apply", "commit", "branch", "pr"],
       },
       cliCommands: [{ id: "ask", mutability: "read", stability: "stable", recovery: false }],
@@ -287,6 +322,10 @@ describe("Claudexor MCP server (SDK v2)", () => {
     expect(planSchema?.properties).not.toHaveProperty("tests");
     expect(planSchema?.properties).not.toHaveProperty("deepScan");
     expect(runSchema?.properties?.tests?.type).toBe("array");
+    expect(runSchema?.properties?.credentialProfileId).toMatchObject({
+      type: "string",
+      pattern: "\\S",
+    });
     expect(runSchema?.properties).not.toHaveProperty("deepScan");
     expect(runSchema?.properties).not.toHaveProperty("council");
 
@@ -395,12 +434,196 @@ describe("Claudexor MCP server (SDK v2)", () => {
     expect(textOf(24)).toContain("inline_secret_rejected");
   });
 
+  it("exposes persistent thread tools with strict route controls and durable handles", async () => {
+    const calls: Record<string, unknown>[] = [];
+    const tools = defaultClaudexorTools(async (params) => {
+      calls.push(params);
+      return params.mode === "__thread_create"
+        ? {
+            summary: "created thread th-1; in_place writes to /tmp/canonical-project",
+            threadId: "th-1",
+            title: "Audit",
+            workspaceMode: "in_place",
+            repoRoot: "/tmp/canonical-project",
+          }
+        : {
+            summary: "queued",
+            jobId: "job-1",
+            threadId: "th-1",
+            turnId: "turn-1",
+            runId: "run-1",
+            runDir: "/tmp/run-1",
+          };
+    });
+    const create = tools.find((tool) => tool.name === "claudexor_thread_create")!;
+    const turn = tools.find((tool) => tool.name === "claudexor_thread_turn")!;
+    expect(create.description).toContain("Creation starts no model");
+    expect(create.description).toContain("project directory directly (in_place)");
+    expect(create.description).toContain("workspace=isolated");
+    expect(create.inputSchema.properties).toMatchObject({
+      workspace: {
+        enum: ["in_place", "isolated"],
+        description: expect.stringContaining("the default"),
+      },
+    });
+
+    expect(create.inputSchema).toMatchObject({
+      additionalProperties: false,
+      required: ["repoPath"],
+      properties: { credentialProfileId: { type: "string", pattern: "\\S" } },
+    });
+    expect(turn.inputSchema).toMatchObject({
+      additionalProperties: false,
+      required: ["threadId", "prompt"],
+      properties: {
+        model: { type: "string", pattern: "\\S" },
+        credentialProfileId: { type: "string", pattern: "\\S" },
+        idempotencyKey: { type: "string", maxLength: 256 },
+      },
+    });
+    expect(
+      (create.inputSchema.properties as Record<string, unknown>)?.idempotencyKey,
+    ).toMatchObject({ maxLength: 256 });
+
+    const created = await wireToolCall(tools, create.name, {
+      repoPath: "/tmp/project",
+      credentialProfileId: "work-secondary",
+    });
+    const queued = await wireToolCall(tools, turn.name, {
+      threadId: "th-1",
+      prompt: "continue",
+      model: "gpt-6-sol",
+      credentialProfileId: "work-secondary",
+      idempotencyKey: "turn-once",
+    });
+    const refused = await wireToolCall(tools, create.name, { repoPath: "relative" });
+
+    expect(created?.structuredContent).toMatchObject({
+      threadId: "th-1",
+      workspaceMode: "in_place",
+      repoRoot: "/tmp/canonical-project",
+    });
+    expect(created?.content?.[0]?.text).toBe(created?.structuredContent?.summary);
+    expect(queued?.structuredContent).toMatchObject({
+      threadId: "th-1",
+      turnId: "turn-1",
+      runId: "run-1",
+    });
+    expect(refused?.isError).toBe(true);
+    expect(calls).toEqual([
+      {
+        mode: "__thread_create",
+        repoPath: "/tmp/project",
+        credentialProfileId: "work-secondary",
+      },
+      {
+        mode: "__thread_turn",
+        threadId: "th-1",
+        prompt: "continue",
+        model: "gpt-6-sol",
+        credentialProfileId: "work-secondary",
+        idempotencyKey: "turn-once",
+      },
+    ]);
+    const read = tools.find((tool) => tool.name === "claudexor_thread_read")!;
+    expect(read.annotations?.readOnlyHint).toBe(true);
+    expect(read.inputSchema).toMatchObject({ required: ["threadId"], additionalProperties: false });
+  });
+
+  it("declares the thread-turn handle as an object-root outputSchema the SDK enforces", async () => {
+    const queued = {
+      summary: "queued turn t on thread th",
+      jobId: "job-1",
+      threadId: "th",
+      turnId: "t",
+      state: "queued",
+    };
+    const tools = defaultClaudexorTools(async () => queued);
+    const w = wire(tools);
+    await w.initialize();
+    w.send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+    await sleep(80);
+    await w.close();
+    const listed = (w.responses.find((r) => r.id === 1)?.result?.tools as any[]).find(
+      (tool) => tool.name === "claudexor_thread_turn",
+    );
+    // 2025-era hosts would otherwise receive {result: handle} instead of the handle.
+    expect(listed?.outputSchema?.type).toBe("object");
+    expect(listed?.outputSchema?.properties?.result).toBeUndefined();
+    expect(listed?.outputSchema?.anyOf).toHaveLength(2);
+    const call = await wireToolCall(tools, "claudexor_thread_turn", {
+      threadId: "th",
+      prompt: "go",
+    });
+    expect(call?.isError).not.toBe(true);
+    expect(call?.structuredContent).toEqual(queued);
+    const drifted = await wireToolCall(
+      defaultClaudexorTools(async () => ({ summary: "s", threadId: "th", turnId: "t" })),
+      "claudexor_thread_turn",
+      { threadId: "th", prompt: "go" },
+    );
+    expect(drifted?.isError).toBe(true);
+  });
+
+  it("preserves typed thread failures on the MCP wire", async () => {
+    const error = Object.assign(new Error("thread is busy"), {
+      code: "thread_busy",
+      retryable: true,
+      requiredActions: ["wait for the active turn"],
+      context: { threadId: "th-1" },
+    });
+    const result = await wireToolCall(
+      defaultClaudexorTools(async () => {
+        throw error;
+      }),
+      "claudexor_thread_turn",
+      { threadId: "th-1", prompt: "continue" },
+    );
+
+    expect(result?.isError).toBe(true);
+    expect(result?.structuredContent).toEqual({
+      status: "failed",
+      failure: {
+        message: "thread is busy",
+        code: "thread_busy",
+        retryable: true,
+        requiredActions: ["wait for the active turn"],
+        context: { threadId: "th-1" },
+      },
+    });
+  });
+
+  it("redacts and bounds thread failures before they cross the MCP wire", async () => {
+    const secret = `sk-${"x".repeat(40)}`;
+    const error = Object.assign(new Error(`failed with ${secret}`), {
+      code: "thread_failed",
+      fieldErrors: { prompt: [`contains ${secret}`] },
+      requiredActions: [`remove ${secret}`],
+      details: { nested: { token: secret } },
+      context: { stderr: `${secret}${"x".repeat(3_000)}` },
+    });
+    const result = await wireToolCall(
+      defaultClaudexorTools(async () => {
+        throw error;
+      }),
+      "claudexor_thread_turn",
+      { threadId: "th-1", prompt: "continue" },
+    );
+    const failure = result?.structuredContent?.failure as Record<string, unknown>;
+
+    expect(JSON.stringify(failure)).not.toContain(secret);
+    expect(JSON.stringify(failure)).toContain("[redacted]");
+    expect(JSON.stringify(failure).length).toBeLessThan(12_000);
+  });
+
   it("run tools return structuredContent mirroring the text (summary, handles, applyEligibility)", async () => {
+    const runFacts = validPlanRunFacts("r-s1");
     const tools = defaultClaudexorTools(async () => ({
       runId: "r-s1",
       runDir: "/tmp/r-s1",
       status: "succeeded",
       summary: "Did the thing.",
+      runFacts,
       applyEligibility: {
         eligible: false,
         state: "blocked",
@@ -424,6 +647,7 @@ describe("Claudexor MCP server (SDK v2)", () => {
     expect(sc?.summary).toBe("Did the thing.");
     expect(sc?.runId).toBe("r-s1");
     expect(sc?.status).toBe("succeeded");
+    expect(sc?.runFacts).toEqual(runFacts);
     expect(sc?.applyEligibility?.eligible).toBe(false);
     expect(sc?.applyEligibility?.requiredAction).toBe("decision");
     // Read-only vs mutating annotations ride tools/list.
@@ -434,11 +658,22 @@ describe("Claudexor MCP server (SDK v2)", () => {
     await w2.close();
     const list = w2.responses.find((r) => r.id === 2)?.result?.tools as Array<Record<string, any>>;
     const byName = Object.fromEntries(list.map((t) => [t.name, t]));
+    for (const name of [
+      "claudexor_ask",
+      "claudexor_plan",
+      "claudexor_run",
+      "claudexor_best_of",
+      "claudexor_create",
+    ]) {
+      expect(byName[name]?.description).toContain("durable run handle");
+      expect(byName[name]?.description).not.toContain("Returns final output");
+    }
     expect(byName["claudexor_ask"]?.annotations?.readOnlyHint).toBe(true);
     expect(byName["claudexor_run"]?.annotations?.readOnlyHint).toBe(false);
     expect(byName["claudexor_apply_check"]?.annotations?.readOnlyHint).toBe(true);
     expect(byName["claudexor_run_status"]?.annotations?.readOnlyHint).toBe(true);
     expect(byName["claudexor_run_result"]?.annotations?.readOnlyHint).toBe(true);
+    expect(byName["claudexor_accounts"]?.annotations?.readOnlyHint).toBe(true);
     expect(byName["claudexor_run_cancel"]?.annotations).toMatchObject({
       readOnlyHint: false,
       destructiveHint: true,
@@ -509,11 +744,13 @@ describe("Claudexor MCP server (SDK v2)", () => {
     // A schema-valid McpRunHandleResult passes; the SDK strictly validates
     // structuredContent against the declared outputSchema, so conformance is
     // enforced by the wire itself.
+    const runFacts = validPlanRunFacts("r-h1");
     const handle = {
       summary: "run r-h1: succeeded",
       runId: "r-h1",
       runDir: "/tmp/r-h1",
       status: "succeeded",
+      runFacts,
       decisionStatus: "approved",
       pendingInteractions: 0,
       outcomeFacts: null,
@@ -544,6 +781,7 @@ describe("Claudexor MCP server (SDK v2)", () => {
       expect(res?.isError, `${name} result should conform to its outputSchema`).not.toBe(true);
       const sc = res?.structuredContent as Record<string, any>;
       expect(sc?.runId).toBe("r-h1");
+      expect(sc?.runFacts).toEqual(runFacts);
       expect(sc?.applyEligibility?.eligible).toBe(true);
       expect(sc?.detailProblem?.code).toBe("detail_unavailable");
     }
@@ -673,6 +911,12 @@ describe("Claudexor MCP server (SDK v2)", () => {
     expect(schema?.properties?.reviewerPanel?.type).toBe("array");
     expect(schema?.properties?.reviewerPanel?.minItems).toBe(1);
     expect(schema?.properties?.reviewerPanel?.items?.properties?.authPreference).toBeUndefined();
+    expect(schema?.properties?.reviewerPanel?.items?.properties?.credentialProfileId).toMatchObject(
+      {
+        type: "string",
+        minLength: 1,
+      },
+    );
     expect(schema?.properties?.model?.type).toBe("string");
     expect(schema?.properties?.model?.minLength).toBe(1);
     expect(schema?.properties?.harness?.minLength).toBe(1);
@@ -701,6 +945,7 @@ describe("Claudexor MCP server (SDK v2)", () => {
     expect(schema?.properties?.tests?.type).toBe("array");
     expect(schema?.properties?.paidBudget?.anyOf).toHaveLength(2);
     expect(schema?.properties?.access?.enum).toContain("workspace_write");
+    expect(schema?.properties?.access?.enum).not.toContain("external_sandbox_full");
     expect(schema?.properties?.protectedPathApprovals?.items?.required).toEqual(["path"]);
 
     await runTool?.handler(
@@ -734,6 +979,71 @@ describe("Claudexor MCP server (SDK v2)", () => {
       access: "workspace_write",
       protectedPathApprovals: [{ path: "test/**" }],
     });
+  });
+
+  it("exposes the read-only Accounts doorway and returns the server snapshot unchanged", async () => {
+    const snapshot = {
+      profiles: [
+        {
+          profile: {
+            profile_id: "work",
+            harness_id: "claude",
+            display_name: "work",
+            credential_kind: "config_dir_login",
+            isolation_locator: "/tmp/claudexor-review-profile",
+          },
+          status: {
+            profile_id: "work",
+            harness_id: "claude",
+            availability: "available",
+            verification: "passed",
+          },
+          identity: null,
+        },
+      ],
+      harnesses: [{ id: "claude", status: "ok" }],
+      git: { status: "available", version: null, detail: null, remediation: null },
+      quota: { snapshots: [], refreshed_at: null },
+      quotaEventCursor: "q-1",
+      accountPools: [{ harness_id: "claude", next_up: { kind: "profile", profileId: "work" } }],
+    };
+    const calls: unknown[] = [];
+    const tools = defaultClaudexorTools(async (params) => {
+      calls.push(params);
+      return snapshot;
+    });
+    const accounts = tools.find((tool) => tool.name === "claudexor_accounts");
+    expect(accounts?.annotations?.readOnlyHint).toBe(true);
+    // Contract change (owner decision 11=A): the DEFAULT read is the cached
+    // credential-profiles listing; fresh:true opts into the expensive atomic
+    // snapshot. The declared output schema is the honest union of both forms.
+    expect(accounts?.inputSchema).toMatchObject({
+      type: "object",
+      additionalProperties: false,
+      properties: { fresh: { type: "boolean" } },
+    });
+    expect(accounts?.description).toContain("CACHED");
+    const members = accounts?.outputSchema?.anyOf as Array<Record<string, unknown>>;
+    expect(members).toHaveLength(2);
+    const [listing, atomic] = members.map((member) => member.properties as Record<string, unknown>);
+    expect(listing).toMatchObject({ profiles: expect.any(Object) });
+    expect(listing?.quotaEventCursor).toBeUndefined();
+    expect(atomic).toMatchObject({
+      harnesses: expect.any(Object),
+      git: expect.any(Object),
+      quota: expect.any(Object),
+      quotaEventCursor: expect.any(Object),
+      profiles: expect.any(Object),
+    });
+    const result = await accounts!.handler({}, {});
+    expect(result).toMatchObject({ structured: snapshot });
+    await accounts!.handler({ fresh: true }, {});
+    await accounts!.handler({ fresh: false }, {});
+    expect(calls).toEqual([
+      { mode: "__accounts" },
+      { mode: "__accounts", fresh: true },
+      { mode: "__accounts" },
+    ]);
   });
 
   it("REFUSES to serve when the plugin artifact version does not match the CLI", async () => {

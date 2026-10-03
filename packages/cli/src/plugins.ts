@@ -197,35 +197,30 @@ function recoveryVerbLine(): string {
     : (parts[0] ?? "");
 }
 
-/** POSIX single-quote shell quoting so a runtime path containing spaces (or any
- * other shell metacharacter) survives copy-paste into a terminal intact. */
+/** POSIX single-quote shell quoting for safely copied runtime paths. */
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
-/** The EXECUTABLE absolute CLI prefix, derived from the SAME validated runtime
- * paths the MCP descriptor uses (bundled Node + dist cli.js), shell-quoted.
- * QA-029B: the generated fallback must be a command that actually runs, never a
- * bare `claudexor` that exits 127 because it is not on the user's terminal PATH. */
+/** QA-029B: validated bundled Node + CLI prefix, never a PATH-dependent bare command. */
 function absoluteCliPrefix(runtime: RuntimePaths): string {
   return `${shellQuote(runtime.nodePath)} ${shellQuote(runtime.cliPath)}`;
 }
 
-/** Render the registry's canonical fallback templates (`claudexor ask "..."`, …)
- * as executable absolute commands by swapping the bare leading `claudexor` token
- * for the absolute Node+CLI prefix (the registry owns the verb/flag grammar; only
- * the prefix is install-specific). The replacement is a FUNCTION, not a string, so
- * a `$` in a nodePath/cliPath isn't read as a `String.replace` `$&`/`$$` pattern. */
+/** Make registry fallback templates executable with the validated absolute CLI prefix. */
 function hostFallbackCommands(runtime: RuntimePaths): string[] {
   const prefix = absoluteCliPrefix(runtime);
   return hostFallbackExamples().map((example) => example.replace(/^claudexor\b/, () => prefix));
 }
 
-/** The exact Claude slash invocation for the generated skills-directory plugin.
- * Claude Code namespaces plugin skills as `/plugin-name:skill-name`; both the
- * manifest name and the skill name are `claudexor`, so the real command is
- * `/claudexor:claudexor` (QA-029A) — plain `/claudexor` is NOT an alias. */
+/** Exact Claude plugin skill invocation; plain `/claudexor` is not an alias (QA-029A). */
 const CLAUDE_SLASH_COMMAND = "/claudexor:claudexor";
+
+const MCP_RUN_HANDLE_GUIDANCE =
+  "MCP run tools enqueue work and return a durable run handle, not terminal output or a live thread. Follow the handle with `claudexor_run_status`/`claudexor_run_result` (or the CLI) before claiming the answer, completion, or applyability.";
+
+const READINESS_GUIDANCE =
+  "Readiness has separate owners: `claudexor_status`/doctor is the aggregate/default-store projection, `claudexor_accounts` is the server-authored exact-profile readiness/quota snapshot, `claudexor_capabilities` declares setup transport, and `claudexor models --harness <id>` is default-route discovery rather than a named profile entitlement. An unpinned request may still be admitted through the canonical account pool when it selects a ready exact profile; only a genuinely profile-less/default fallback depends on doctor status. For a selected profile, strict run/reviewer preflight owns model admission and result telemetry owns the observed profile/model route. `unknown/not_run`, stale quota, or unavailable inventory is uncertainty/refusal; `external_terminal` means the supported client terminal attach path and is not itself unreadiness.";
 
 function skillText(host: PluginHost, runtime: RuntimePaths): string {
   return [
@@ -242,11 +237,13 @@ function skillText(host: PluginHost, runtime: RuntimePaths): string {
     "",
     "Prefer these routes:",
     "",
-    "- MCP tool `claudexor_status` to check available harnesses.",
+    "- MCP tool `claudexor_status` to inspect the aggregate/default harness projection.",
     "- MCP tool `claudexor_capabilities` for the full machine-readable catalog (harness health, modes, mutability matrix).",
+    "- MCP tool `claudexor_accounts` for the read-only atomic Accounts snapshot (profiles, readiness, quota freshness, and next-up routing identity).",
     "- MCP tool `claudexor_ask` for read-only answers (deepScan:true for bounded multi-scout research synthesis).",
     "- MCP tool `claudexor_plan` for read-only implementation plans.",
     "- MCP tool `claudexor_run` for a single agent run.",
+    "- MCP tools `claudexor_thread_create` + `claudexor_thread_turn` for durable multi-turn work (`claudexor_thread_read` is read-only).",
     "- MCP tool `claudexor_best_of` for best-of-N attempts.",
     "- MCP tool `claudexor_create` for create-from-scratch runs.",
     "- MCP tools `claudexor_runs` / `claudexor_inspect` / `claudexor_apply_check` to recover a lost run handle (read-only).",
@@ -255,11 +252,12 @@ function skillText(host: PluginHost, runtime: RuntimePaths): string {
     "",
     ...hostFallbackCommands(runtime).map((command) => `\`${command}\``),
     "",
-    "MCP support is one-shot and honest: tools return the final Claudexor output, not a live Claudexor thread. Use an explicit `repoPath` when the host cwd may not be the target project.",
+    MCP_RUN_HANDLE_GUIDANCE,
+    "Use an explicit `repoPath` when the host cwd may not be the target project. Use `credentialProfileId` for a strict account pin. For multi-turn supervision, create the thread once, enqueue each follow-up with `claudexor_thread_turn` (pass an `idempotencyKey` and retry an unknown outcome with the same key and body), then follow its returned `runId` with the ordinary status/result tools. If the turn returns only a queued `jobId`, use `claudexor_runs` to recover its `runId` after binding; `claudexor_thread_read` lists earlier turns without starting work.",
     "",
-    "Readiness semantics: a harness is usable only when `claudexor_status` reports it `ok` (doctor-backed). An installed binary, a stored key, or an auth file alone is NOT readiness — do not retry a degraded harness expecting different results; surface the doctor reasons instead.",
-    "",
-    "Setup and login prerequisites (version check, plugin status/repair, and logging in ONLY via `claudexor auth login <harness>` — never a bare vendor login) are the strict sequence in docs/AGENT_ONBOARDING.md (Install And Login).",
+    READINESS_GUIDANCE,
+    "Reviewer identity: an omitted profile uses the canonical model-first account pool and may select a ready exact `claudexor_accounts` row even when aggregate/default doctor is unavailable. A structured reviewer entry may carry strict `credentialProfileId` and never silently falls back. Aggregate doctor status or a host/default login neither proves nor vetoes a pooled or explicitly named profile; only a genuinely profile-less/default fallback depends on doctor status `ok` and the requested intent. Use `--reviewer-panel-json '<array>'` for pinned CLI entries; the compact `--reviewer-panel` spelling remains unpinned.",
+    "Setup and login prerequisites (version check, plugin status/repair, and logging in ONLY via `claudexor auth login <harness>` — never a bare vendor login) are the strict sequence in docs/AGENT_ONBOARDING.md (Install And Login). Do not initiate login merely because a readiness probe is unknown; get explicit human authorization.",
     "",
     "Host timeouts: mutating tools can run for many minutes and hosts often cap tool calls. The `runId:` trailer arrives in EVERY result — if the host times out, the run continues daemon-side; recover it with `claudexor_inspect` or the CLI.",
     "",
@@ -302,10 +300,12 @@ function commandText(host: PluginHost, runtime: RuntimePaths): string {
       (command) => `- \`${command.replace('"..."', '"$ARGUMENTS"')}\``,
     ),
     "",
-    "Do not claim live thread parity through MCP. Ask for an explicit repo path if the target project is ambiguous.",
+    MCP_RUN_HANDLE_GUIDANCE,
+    READINESS_GUIDANCE,
     "",
-    // QA-029A: this command file is only reached AFTER a correct invocation, but
-    // it still records the exact grammar so a reader learns the canonical name.
+    "For durable MCP conversations, create once with `claudexor_thread_create`, continue with `claudexor_thread_turn`, and inspect with `claudexor_thread_read`. These tools do not expose portable native vendor sessions or a live vendor conversation. Ask for an explicit repo path if the target project is ambiguous.",
+    "",
+    // QA-029A: retain the exact invocation grammar in the generated command.
     ...(host === "claude"
       ? [
           `Explicit invocation: \`${CLAUDE_SLASH_COMMAND} <request>\` — natural-language activation also works; plain \`/claudexor\` is not an alias.`,
@@ -326,8 +326,6 @@ function readmeText(host: PluginHost, runtime: RuntimePaths): string {
     "",
     "It packages Claudexor instructions and MCP configuration for the host. All orchestration remains in the local Claudexor CLI and engine.",
     "",
-    // QA-029A/B: state the exact Claude slash command and an executable fallback
-    // right where a user reads how to invoke the plugin.
     ...(host === "claude"
       ? [
           `Explicit invocation: \`${CLAUDE_SLASH_COMMAND} <request>\` (natural-language activation also works; plain \`/claudexor\` is not an alias).`,
@@ -336,6 +334,7 @@ function readmeText(host: PluginHost, runtime: RuntimePaths): string {
           "",
         ]
       : []),
+    MCP_RUN_HANDLE_GUIDANCE,
     "Long-running MCP tools (claudexor_run, claudexor_best_of, claudexor_create) are daemon-tracked: every result carries a `runId:` trailer, so a call abandoned by a host timeout stays recoverable via `claudexor inspect <runId>` / `claudexor follow <runId>`.",
     "",
   ].join("\n");
@@ -371,7 +370,8 @@ function manifest(kind: "claude" | "codex" | "cursor"): string {
         displayName: "Claudexor",
         shortDescription: "Harness-agnostic coding through the local Claudexor CLI.",
         longDescription:
-          "Use Claudexor for local planning, runs, races, and review through generated skills and one-shot MCP tools.",
+          "Use Claudexor for local planning, runs, races, and review through generated skills and durable-handle MCP tools.",
+        defaultPrompt: ["Use Claudexor for harness-agnostic planning, execution, and review."],
         developerName: "Claudexor",
         category: "Productivity",
         capabilities: ["Productivity"],

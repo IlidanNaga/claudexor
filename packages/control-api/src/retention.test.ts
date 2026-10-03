@@ -1,4 +1,12 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -77,7 +85,40 @@ function deps(project: RetentionProject, overrides: Partial<RetentionDeps> = {})
   };
 }
 
+function seedDataRootEntry(dataRoot: string, name: string, kind: "directory" | "file"): void {
+  const path = join(dataRoot, name);
+  if (kind === "file") writeFileSync(path, `${name}\n`);
+  else mkdirSync(path, { recursive: true });
+}
+
 describe("runRetentionPass", () => {
+  it("retains the remainder of partial files delivery and releases explicit discard to normal retention", async () => {
+    const { project } = sandbox();
+    const records = ["pending", "discarded", "direct"].map((id) => {
+      const runId = `run-files-${id}`;
+      const root = seedRun(project.runsDir, runId, {
+        workProduct: `kind: files\nmeta:\n  apply_state: ${id === "direct" ? "applied" : "not_applied"}\n`,
+      });
+      if (id !== "direct")
+        writeFileSync(
+          join(root, "final/delivery_state.yaml"),
+          `applyState: ${id === "discarded" ? "discarded" : "not_applied"}\nappliedPaths: [already-delivered.bin]\n`,
+        );
+      return { runId, state: "succeeded", finishedAt: daysAgo(90) };
+    });
+    const receipt = await runRetentionPass(
+      { ...POLICY, keepLastRunsPerProject: 0 },
+      { dry_run: false },
+      deps(project, { records: () => records }),
+    );
+    expect(receipt.deleted_runs.map((r) => r.run_id).sort()).toEqual([
+      "run-files-direct",
+      "run-files-discarded",
+    ]);
+    expect(existsSync(join(project.runsDir, "run-files-pending", "final/work_product.yaml"))).toBe(
+      true,
+    );
+  });
   it("deletes only old terminal unreferenced trees, keeps newest-N, leaves a tombstone", async () => {
     const { project } = sandbox();
     seedRun(project.runsDir, "run-old-a");
@@ -405,17 +446,42 @@ describe("runRetentionPass", () => {
     expect(receipt.errors).toEqual([]);
   });
 
-  it("override mode ALSO owns secrets.json/plugins/quota/workspaces at the top level", async () => {
+  it.each([
+    {
+      mode: undefined,
+      expected: ["plugins", "quota", "secrets.json", "v1", "workspaces"],
+    },
+    {
+      mode: "override" as const,
+      expected: ["v1", "v2", "v3"],
+    },
+  ])("preserves the complete owned-name inventory in $mode mode", async ({ mode, expected }) => {
     const { project, root } = sandbox();
     const dataRoot = join(root, "data-root");
-    // Under an explicit CLAUDEXOR_CONFIG_DIR root the engine writes these
-    // directly at the top level — they are owned, not foreign.
-    for (const owned of ["v3", "plugins", "quota", "workspaces"]) {
-      mkdirSync(join(dataRoot, owned), { recursive: true });
+    mkdirSync(dataRoot, { recursive: true });
+    const commonDirectories = [
+      "node",
+      "profiles",
+      "runtime",
+      "cache",
+      "dogfood",
+      "keys",
+      "release-authority",
+      "planning",
+      "remote",
+      "daemon",
+      "projects",
+      "native",
+      "runs",
+      "trust",
+      "telemetry",
+    ];
+    for (const name of commonDirectories) seedDataRootEntry(dataRoot, name, "directory");
+    seedDataRootEntry(dataRoot, "config.yaml", "file");
+    for (const name of ["v1", "v2", "v3", "plugins", "quota", "workspaces"]) {
+      seedDataRootEntry(dataRoot, name, "directory");
     }
-    writeFileSync(join(dataRoot, "config.yaml"), "retention: {}\n");
-    writeFileSync(join(dataRoot, "secrets.json"), "{}\n");
-    mkdirSync(join(dataRoot, "my-scratch"), { recursive: true });
+    seedDataRootEntry(dataRoot, "secrets.json", "file");
 
     const receipt = await runRetentionPass(
       POLICY,
@@ -423,10 +489,86 @@ describe("runRetentionPass", () => {
       {
         ...deps(project),
         dataRoot,
-        dataRootMode: "override",
+        ...(mode === undefined ? {} : { dataRootMode: mode }),
       },
     );
-    expect(receipt.data_root_unrecognized).toEqual(["my-scratch"]);
+    expect(receipt.data_root_unrecognized).toEqual(expected);
+    expect(receipt.errors).toEqual([]);
+  });
+
+  it("reports the default v1/v2/v3 matrix and keeps unrelated names sorted", async () => {
+    const { project, root } = sandbox();
+    const dataRoot = join(root, "data-root");
+    for (const name of ["v1", "v2", "v3", "z-scratch", "a-scratch"]) {
+      mkdirSync(join(dataRoot, name), { recursive: true });
+    }
+    const receipt = await runRetentionPass(
+      POLICY,
+      { dry_run: true, data_root_report: true },
+      { ...deps(project), dataRoot },
+    );
+    expect(receipt.data_root_unrecognized).toEqual(["a-scratch", "v1", "z-scratch"]);
+    expect(receipt.errors).toEqual([]);
+  });
+
+  it("reports v1/v2/v3 as plain unrecognized names under an explicit override", async () => {
+    const { project, root } = sandbox();
+    const dataRoot = join(root, "data-root");
+    for (const name of ["v1", "v2", "v3", "scratch"]) {
+      mkdirSync(join(dataRoot, name), { recursive: true });
+    }
+    const receipt = await runRetentionPass(
+      POLICY,
+      { dry_run: true, data_root_report: true },
+      { ...deps(project), dataRoot, dataRootMode: "override" },
+    );
+    expect(receipt.data_root_unrecognized).toEqual(["scratch", "v1", "v2", "v3"]);
+    expect(receipt.errors).toEqual([]);
+  });
+
+  it("keeps default v1/v2/v3 bytes untouched in a non-dry advisory scan", async () => {
+    const { project, root } = sandbox();
+    const dataRoot = join(root, "data-root");
+    const markers = new Map<string, string>();
+    for (const name of ["v1", "v2", "v3"]) {
+      const marker = `${name}-sentinel-${name.repeat(2)}\n`;
+      markers.set(name, marker);
+      mkdirSync(join(dataRoot, name), { recursive: true });
+      writeFileSync(join(dataRoot, name, "marker.txt"), marker);
+    }
+    const receipt = await runRetentionPass(
+      { ...POLICY, keepLastRunsPerProject: 0 },
+      { dry_run: false, data_root_report: true },
+      { ...deps(project), dataRoot },
+    );
+    expect(receipt.data_root_unrecognized).toEqual(["v1"]);
+    expect(receipt.deleted_runs).toEqual([]);
+    expect(receipt.deleted_reviews).toEqual([]);
+    expect(receipt.freed_bytes).toBe(0);
+    for (const [name, marker] of markers) {
+      expect(readFileSync(join(dataRoot, name, "marker.txt"), "utf8")).toBe(marker);
+    }
+  });
+
+  it("reports default generation names with unexpected kinds without following symlinks", async () => {
+    const { project, root } = sandbox();
+    const dataRoot = join(root, "data-root");
+    const target = join(root, "elsewhere");
+    mkdirSync(dataRoot, { recursive: true });
+    mkdirSync(target, { recursive: true });
+    writeFileSync(join(target, "sentinel.txt"), "outside\n");
+    symlinkSync(target, join(dataRoot, "v2"));
+    writeFileSync(join(dataRoot, "v3"), "not a directory\n");
+    const receipt = await runRetentionPass(
+      POLICY,
+      { dry_run: true, data_root_report: true },
+      { ...deps(project), dataRoot },
+    );
+    expect(receipt.data_root_unrecognized).toEqual([
+      "v2 (unexpected-kind)",
+      "v3 (unexpected-kind)",
+    ]);
+    expect(readFileSync(join(target, "sentinel.txt"), "utf8")).toBe("outside\n");
     expect(receipt.errors).toEqual([]);
   });
 

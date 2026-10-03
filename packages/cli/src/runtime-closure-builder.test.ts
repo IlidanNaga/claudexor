@@ -36,6 +36,7 @@ function fakeAppBundle(
     nativeAddon?: boolean;
     internalLink?: boolean;
     escapingLink?: boolean;
+    win32Conpty?: boolean;
   } = {},
 ): string {
   const resources = join(root, "Claudexor.app", "Contents", "Resources");
@@ -45,6 +46,8 @@ function fakeAppBundle(
   if (opts.omit !== "claudexord.bundle.cjs")
     // Stamp the sha into the bundle the way the real esbuild --define does.
     writeFileSync(join(resources, "claudexord.bundle.cjs"), `// daemon sha=${sha}\n`);
+  if (opts.omit !== "claudexor.bundle.cjs")
+    writeFileSync(join(resources, "claudexor.bundle.cjs"), `// cli sha=${sha}\n`);
   if (opts.omit !== "setup-login-runner.cjs")
     writeFileSync(join(resources, "setup-login-runner.cjs"), "// runner\n");
   writeFileSync(
@@ -52,6 +55,8 @@ function fakeAppBundle(
     "// mcp\n",
   );
   writeFileSync(join(resources, "native", "claudexor-process-identity"), "binary");
+  if (opts.win32Conpty)
+    writeFileSync(join(resources, "native", "claudexor-conpty-helper.exe"), fakePe());
   // A forbidden native addon lands under a closure dir when requested.
   if (opts.nativeAddon)
     writeFileSync(join(resources, "browser-mcp-runtime", "fsevents.node"), "native");
@@ -72,17 +77,37 @@ function fakeAppBundle(
     }
   }
   // Node and the SwiftPM UI bundle are app-owned; they may be present in the
-  // real bundle but must NOT land in the closure.
+  // real bundle but must NOT land in the closure. The reviewed CLI is part of
+  // the closure so embedders can invoke exact operational commands.
   if (opts.withNode) writeFileSync(join(resources, "node"), "node-binary");
   writeFileSync(join(resources, "AppIcon.icns"), "icon");
   return join(root, "Claudexor.app");
 }
 
-function run(app: string, out: string, ver = version, buildSha = FAKE_BUILD_SHA) {
-  return execFileSync("node", [script, "--app-bundle", app, "--version", ver, "--out", out], {
-    encoding: "utf8",
-    env: { ...process.env, CLAUDEXOR_BUILD_SHA: buildSha },
-  });
+function run(
+  app: string,
+  out: string,
+  ver = version,
+  buildSha = FAKE_BUILD_SHA,
+  win32ConptySha256?: string,
+) {
+  return execFileSync(
+    "node",
+    [
+      script,
+      "--app-bundle",
+      app,
+      "--version",
+      ver,
+      "--out",
+      out,
+      ...(win32ConptySha256 ? ["--win32-conpty-sha256", win32ConptySha256] : []),
+    ],
+    {
+      encoding: "utf8",
+      env: { ...process.env, CLAUDEXOR_BUILD_SHA: buildSha },
+    },
+  );
 }
 
 beforeEach(() => {
@@ -93,6 +118,40 @@ afterEach(() => {
 });
 
 describe("build-runtime-closure", () => {
+  it("consumes the common resource stage without an app bundle", () => {
+    const app = fakeAppBundle(work, { internalLink: true });
+    const resources = join(app, "Contents", "Resources");
+    const out = join(work, "resource-out");
+    execFileSync(
+      process.execPath,
+      [script, "--resources", resources, "--version", version, "--out", out],
+      { env: { ...process.env, CLAUDEXOR_BUILD_SHA: FAKE_BUILD_SHA } },
+    );
+    const extracted = join(work, "resource-extracted");
+    mkdirSync(extracted);
+    execFileSync("tar", [
+      "-xzf",
+      join(out, `claudexor-runtime-${version}.tar.gz`),
+      "-C",
+      extracted,
+    ]);
+    for (const name of [
+      "claudexord.bundle.cjs",
+      "claudexor.bundle.cjs",
+      "setup-login-runner.cjs",
+      "native/claudexor-process-identity",
+    ]) {
+      expect(readFileSync(join(extracted, name))).toEqual(readFileSync(join(resources, name)));
+    }
+    expect(() =>
+      execFileSync(
+        process.execPath,
+        [script, "--resources", resources, "--app-bundle", app, "--version", version, "--out", out],
+        { stdio: "pipe" },
+      ),
+    ).toThrow();
+  });
+
   it("emits a tarball plus a manifest whose sha256 matches the tarball", () => {
     const app = fakeAppBundle(work, { withNode: true });
     const out = join(work, "out");
@@ -136,13 +195,35 @@ describe("build-runtime-closure", () => {
       { encoding: "utf8" },
     );
     expect(listing).toContain("claudexord.bundle.cjs");
+    expect(listing).toContain("claudexor.bundle.cjs");
     expect(listing).toContain("browser-mcp-runtime/dist/browser-mcp-launcher.js");
     expect(listing).toContain("native/claudexor-process-identity");
-    // Node, the CLI, and AppIcon stay host/app-owned — never in the closure.
+    // Node and AppIcon stay host/app-owned — never in the closure.
     const entries = listing.split("\n");
     expect(entries).not.toContain("node");
-    expect(entries).not.toContain("claudexor.bundle.cjs");
     expect(listing).not.toContain("AppIcon.icns");
+  });
+
+  it("binds the staged Windows helper bytes without widening runtime-manifest schema v1", () => {
+    const app = fakeAppBundle(work, { win32Conpty: true });
+    const helper = join(app, "Contents", "Resources", "native", "claudexor-conpty-helper.exe");
+    const expected = createHash("sha256").update(readFileSync(helper)).digest("hex");
+    const out = join(work, "out");
+    run(app, out, version, FAKE_BUILD_SHA, expected);
+    const listing = execFileSync(
+      "tar",
+      ["-tzf", join(out, `claudexor-runtime-${version}.tar.gz`)],
+      { encoding: "utf8" },
+    );
+    expect(listing).toContain("native/claudexor-conpty-helper.exe");
+    const manifest = JSON.parse(readFileSync(join(out, "runtime-manifest.json"), "utf8"));
+    expect(manifest.schemaVersion).toBe(1);
+    expect(manifest).not.toHaveProperty("files");
+    expect(manifest).not.toHaveProperty("win32ConptySha256");
+
+    expect(() => run(app, join(work, "wrong"), version, FAKE_BUILD_SHA, "0".repeat(64))).toThrow(
+      /byte mismatch/,
+    );
   });
 
   it("materializes internal package links into a link-free regular tree", () => {
@@ -197,9 +278,38 @@ describe("build-runtime-closure", () => {
     expect(() => run(app, out)).toThrow(/setup-login-runner\.cjs/);
   });
 
+  it("fails when the reviewed CLI entry is missing from the app bundle", () => {
+    const app = fakeAppBundle(work, { omit: "claudexor.bundle.cjs" });
+    const out = join(work, "out");
+    expect(() => run(app, out)).toThrow(/claudexor\.bundle\.cjs/);
+  });
+
+  it.each([false, true])(
+    "refuses a universal closure without its Darwin helper (Windows helper: %s)",
+    (win32Conpty) => {
+      const app = fakeAppBundle(work, { win32Conpty });
+      rmSync(join(app, "Contents", "Resources", "native", "claudexor-process-identity"));
+      expect(() => run(app, join(work, "out"))).toThrow(
+        /requires the native\/claudexor-process-identity file/,
+      );
+    },
+  );
+
   it("refuses a --version that does not match the generated CLAUDEXOR_VERSION", () => {
     const app = fakeAppBundle(work);
     const out = join(work, "out");
     expect(() => run(app, out, "9.9.9")).toThrow(/does not match/);
   });
 });
+
+function fakePe(): Buffer {
+  const bytes = Buffer.alloc(512);
+  bytes.write("MZ", 0, "ascii");
+  bytes.writeUInt32LE(0x80, 0x3c);
+  bytes.write("PE\0\0", 0x80, "ascii");
+  bytes.writeUInt16LE(0x8664, 0x84);
+  bytes.writeUInt16LE(0xf0, 0x94);
+  bytes.writeUInt16LE(0x0002, 0x96);
+  bytes.writeUInt16LE(0x020b, 0x98);
+  return bytes;
+}

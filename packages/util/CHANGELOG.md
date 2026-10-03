@@ -1,5 +1,129 @@
 # @claudexor/util
 
+## 3.18.0
+
+## 3.17.2
+
+## 3.17.1
+
+## 3.17.0
+
+## 3.16.0
+
+## 3.15.1
+
+## 3.15.0
+
+## 3.14.0
+
+## 3.13.0
+
+## 3.12.10
+
+## 3.12.9
+
+## 3.12.8
+
+## 3.12.7
+
+## 3.12.6
+
+## 3.12.5
+
+## 3.12.4
+
+## 3.12.3
+
+## 3.12.2
+
+## 3.12.1
+
+## 3.12.0
+
+## 3.11.0
+
+## 3.10.5
+
+## 3.10.4
+
+## 3.10.3
+
+## 3.10.2
+
+## 3.10.1
+
+## 3.10.0
+
+## 3.9.8
+
+## 3.9.7
+
+## 3.9.6
+
+## 3.9.5
+
+## 3.9.4
+
+## 3.9.3
+
+## 3.9.2
+
+## 3.9.1
+
+## 3.9.0
+
+## 3.8.4
+
+## 3.8.3
+
+## 3.8.2
+
+## 3.8.1
+
+### Patch Changes
+
+- ce6dba1: Prepare an isolated macOS keychain inside each Antigravity credential profile before vendor probes, quota reads, logins, and runs. The vendor's existing file fallback and profile separation remain unchanged.
+- 2794ec7: Remove the engine-owned outer Seatbelt wrapper and restore each harness's
+  native access policy. Delegated mutating runs now keep stable project identity
+  separate from their disposable execution workspace, active requests use
+  `readonly`, `workspace_write`, or explicitly trusted `full`, and historical
+  outer-confinement artifacts remain readable without enabling new retired-mode
+  runs.
+
+## 3.8.0
+
+## 3.7.0
+
+## 3.6.0
+
+## 3.5.0
+
+### Minor Changes
+
+- 2316ef8: Add the Antigravity CLI (`agy`) as a harness, so a Google AI Pro/Ultra
+  subscription runs through Claudexor like the other vendor CLIs.
+
+  Named Google identities are Claudexor-owned profile HOMEs (`config_dir_login`),
+  so several subscriptions stay signed in side by side without touching the
+  operator's real home or login keychain. `claudexor quota` reads each profile's
+  own `/quota` windows, and the windows are model-scoped: exhausting the Gemini
+  budget does not block the account's Claude/GPT slugs. `claudexor harness
+install agy` downloads Google's official installer in full, prints its size and
+  sha256, and runs the file you were shown — it is never piped into a shell.
+
+  The vendor exposes no config-dir environment variable, so the profile HOME also
+  holds its conversation and cache state, and it publishes no machine-readable
+  account identity — both are disclosed rather than papered over. Windows support
+  is best effort in this release.
+
+## 3.4.2
+
+## 3.4.1
+
+## 3.4.0
+
+## 3.3.16
+
 ## 3.3.15
 
 ## 3.3.14

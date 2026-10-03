@@ -2,32 +2,24 @@ import Foundation
 
 // MARK: - Access profile (per-turn write scope)
 
-/// How much a write turn may touch — surfaced in the composer's "⋯" options and
-/// sent on the turn (the engine's `access` field). Read-only modes ignore it.
+/// How much an Agent turn may touch — surfaced in the composer's Access chip
+/// and sent on the turn (the engine's `access` field). Ask and Plan ignore it.
 ///
-/// Extracted from `DomainModels.swift` so the five-value model stays a small,
+/// Extracted from `DomainModels.swift` so the active four-value model stays a small,
 /// single-owner unit (INV-124 readability ratchet).
 enum AccessProfile: String, CaseIterable, Identifiable {
-    // All five engine wire values are modelled so a thread carrying an advanced
-    // profile decodes/round-trips losslessly (never coerced to Full/Read-only).
-    case readOnly, workspaceWrite, full, externalSandboxFull, inheritNative
+    case readOnly, workspaceWrite, full, inheritNative
     var id: String { rawValue }
-    /// The profiles a composer turn may PICK. The advanced two
-    /// (external-sandbox-full, inherit-native) are engine/CLI-only — present in
-    /// the enum for lossless decode, never offered as a composer choice.
+    /// The profiles a composer turn may pick. inherit-native remains CLI-only.
     static let composerCases: [AccessProfile] = [.readOnly, .workspaceWrite, .full]
-    /// Access profiles that satisfy an engine-declared unrestricted-access
-    /// requirement. External sandboxes are unrestricted inside their own
-    /// boundary without becoming a persistent host trust grant.
     var satisfiesFullAccessRequirement: Bool {
-        self == .full || self == .externalSandboxFull
+        self == .full
     }
     var label: String {
         switch self {
         case .readOnly: return "Read-only"
         case .workspaceWrite: return "Workspace write"
         case .full: return "Full access"
-        case .externalSandboxFull: return "External sandbox (full)"
         case .inheritNative: return "Inherit native"
         }
     }
@@ -36,7 +28,6 @@ enum AccessProfile: String, CaseIterable, Identifiable {
         case .readOnly: return "eye"
         case .workspaceWrite: return "square.and.pencil"
         case .full: return "lock.open"
-        case .externalSandboxFull: return "shippingbox"
         case .inheritNative: return "arrow.triangle.branch"
         }
     }
@@ -46,7 +37,6 @@ enum AccessProfile: String, CaseIterable, Identifiable {
         case .readOnly: return "readonly"
         case .workspaceWrite: return "workspace_write"
         case .full: return "full"
-        case .externalSandboxFull: return "external_sandbox_full"
         case .inheritNative: return "inherit_native"
         }
     }
@@ -57,12 +47,71 @@ enum AccessProfile: String, CaseIterable, Identifiable {
         case "readonly": self = .readOnly
         case "workspace_write": self = .workspaceWrite
         case "full": self = .full
-        case "external_sandbox_full": self = .externalSandboxFull
         case "inherit_native": self = .inheritNative
         default: return nil
         }
     }
-    /// Humanize a raw engine access wire value for badges (covers all five;
-    /// unknown values pass through verbatim rather than being coerced).
-    static func humanize(_ wire: String) -> String { AccessProfile(wire: wire)?.label ?? wire }
+    /// Historical display remains readable without making the retired value active.
+    static func humanize(_ wire: String) -> String {
+        if wire == "external_sandbox_full" { return "Retired external sandbox (full)" }
+        return AccessProfile(wire: wire)?.label ?? wire
+    }
+}
+
+/// Composer-owned projection of a thread's recorded access wire. A retired or
+/// unknown historical value is not an active profile and must remain a distinct
+/// migration-required state until the server confirms an explicit active PATCH.
+enum ComposerThreadAccessSelection: Equatable {
+    case active(AccessProfile)
+    case migrationRequired(recordedWire: String, suggested: AccessProfile)
+
+    static func resolve(
+        recordedWire: String?,
+        defaultAccess: AccessProfile
+    ) -> ComposerThreadAccessSelection {
+        guard let recordedWire else { return .active(defaultAccess) }
+        guard let active = AccessProfile(wire: recordedWire) else {
+            return .migrationRequired(recordedWire: recordedWire, suggested: defaultAccess)
+        }
+        return .active(active)
+    }
+
+    var suggestedAccess: AccessProfile {
+        switch self {
+        case .active(let access): return access
+        case .migrationRequired(_, let suggested): return suggested
+        }
+    }
+
+    var activeAccess: AccessProfile? {
+        guard case .active(let access) = self else { return nil }
+        return access
+    }
+
+    var migrationBlocker: String? {
+        guard case .migrationRequired = self else { return nil }
+        return "Choose an active access profile for this historical thread before continuing."
+    }
+
+    /// A migration choice always persists, even when it equals the repository
+    /// default. Ordinary active selections retain the existing no-op behavior.
+    func action(
+        selecting access: AccessProfile,
+        recordedWire: String?,
+        defaultAccess: AccessProfile
+    ) -> ComposerThreadAccessAction {
+        let currentWire = recordedWire ?? defaultAccess.wire
+        let migrationRequired = activeAccess == nil
+        return .init(
+            access: access,
+            patchWire: migrationRequired || access.wire != currentWire ? access.wire : nil,
+            waitsForPersistence: migrationRequired
+        )
+    }
+}
+
+struct ComposerThreadAccessAction: Equatable {
+    var access: AccessProfile
+    var patchWire: String?
+    var waitsForPersistence: Bool
 }

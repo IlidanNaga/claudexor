@@ -30,8 +30,9 @@ import { fileURLToPath } from "node:url";
 import { CLAUDEXOR_VERSION } from "./version.js";
 
 /** Generate a short unique id, optionally prefixed (e.g. "run-3f2a...."). */
+export const SHORT_ID_LENGTH = 12;
 export function newId(prefix = ""): string {
-  const id = randomUUID().replace(/-/g, "").slice(0, 12);
+  const id = randomUUID().replace(/-/g, "").slice(0, SHORT_ID_LENGTH);
   return prefix ? `${prefix}-${id}` : id;
 }
 
@@ -270,8 +271,9 @@ export function userConfigDir(): string {
 /**
  * This build's generation-versioned default root, INDEPENDENT of the
  * CLAUDEXOR_CONFIG_DIR override. v3 is an intentionally empty, non-migrating
- * namespace: the untouched older roots (v2, v1) ARE the archive (owner
- * decision, v3.0.0 plan). Keeping the version boundary in the default root
+ * namespace: the untouched v2 generation is the archive, while v1-era data
+ * remains unversioned directly under `~/.claudexor` (owner decision, v3.0.0
+ * plan). Keeping the version boundary in the default root
  * prevents the daemon from even probing older config, trust, secret, token,
  * or journal bytes whose contracts this generation deleted. An explicit
  * CLAUDEXOR_CONFIG_DIR remains the hermetic test/operator override and is
@@ -285,10 +287,10 @@ export function defaultUserConfigDir(): string {
 }
 
 /**
- * The ONE Claudexor-owned confinement root (round-22 DRY): under an explicit
+ * The ONE Claudexor-owned state root (round-22 DRY): under an explicit
  * CLAUDEXOR_CONFIG_DIR override, that override IS the complete relocatable
  * root; without it the owned tree is ~/.claudexor. Credential-profile
- * locators and the isolation-locator confinement both derive from here —
+ * locators and isolation-locator authority both derive from here —
  * never re-derive this ternary inline.
  */
 export function claudexorOwnedRoot(): string {
@@ -302,9 +304,8 @@ export function claudexorOwnedRoot(): string {
  *
  * Each adapter owns the layout below its own vendor directory, but the root is
  * shared: it is where a subscription lane's credential actually lives, which
- * makes it the one part of the runtime tree a confined harness process must
- * still be able to open. Spelled once so the confinement carve-out and the
- * adapters cannot drift apart.
+ * makes it the one part of the runtime tree each selected native profile must
+ * be able to open. Spelled once so adapters cannot drift apart.
  */
 export function nativeHarnessStateRoot(): string {
   return join(userConfigDir(), "native");

@@ -1,0 +1,220 @@
+/**
+ * The vendor RECIPES `claudexor harness install` executes, and the disclosure
+ * it prints before executing anything. Split from harness-installer.ts so the
+ * WHAT (which artifact, from where, into which prefix, with what evidence)
+ * stays readable next to itself, while the installer file owns the HOW
+ * (lease, spawn, proof, CLI surface). A new vendor is a row in one of the two
+ * tables here, never a new branch there.
+ */
+import { join } from "node:path";
+import { CLAUDE_VENDOR_CLI_VERSION } from "@claudexor/harness-claude";
+import { CODEX_VENDOR_CLI_VERSION } from "@claudexor/harness-codex";
+import { OPENCODE_VENDOR_CLI_VERSION } from "@claudexor/harness-opencode";
+import { managedNodeRoot, windowsNativeImageSegments } from "@claudexor/core";
+import type { PinnedVendorCliVersion } from "@claudexor/util";
+import { INSTALLABLE_HARNESSES } from "./harness-command-specs.js";
+
+export type InstallableHarness = (typeof INSTALLABLE_HARNESSES)[number];
+
+export function isInstallableHarness(value: string): value is InstallableHarness {
+  return INSTALLABLE_HARNESSES.includes(value as InstallableHarness);
+}
+
+/** Install destinations. `remote` is the historical issue-#89 SSH-host prefix;
+ * `local` is the managed toolchain root this host's harness resolution already
+ * reads, so an install there is immediately runnable. */
+export const HARNESS_INSTALL_TARGETS = ["local", "remote"] as const;
+export type HarnessInstallTarget = (typeof HARNESS_INSTALL_TARGETS)[number];
+
+export function isHarnessInstallTarget(value: string): value is HarnessInstallTarget {
+  return HARNESS_INSTALL_TARGETS.includes(value as HarnessInstallTarget);
+}
+
+/** ONE table owns each target's npm prefix and how it is disclosed. */
+export const TARGET_LAYOUTS: Record<
+  HarnessInstallTarget,
+  { displayRoot: string; root(home: string): string }
+> = {
+  local: { displayRoot: "~/.claudexor/node", root: managedNodeRoot },
+  remote: {
+    displayRoot: "~/.claudexor/remote/vendor",
+    root: (home) => join(home, ".claudexor", "remote", "vendor"),
+  },
+};
+
+/** Exact npm pins. Each version ALIASES the harness package's vendor-version
+ * SSOT (vendor-cli-version.ts there). For claude/codex that is the version
+ * this release's freshness gates verified; the opencode pin is a
+ * deterministic install target only — no recorded verification fixture
+ * vouches for it (its vendor-cli-version.ts discloses this). Cursor and agy
+ * are absent deliberately: they ship no npm artifact (see SCRIPT_INSTALLERS
+ * below). */
+export type HarnessInstallVerification =
+  | "release_verified"
+  | "deterministic_only"
+  | "human_observed"
+  /** A script vendor installed unattended under an explicit local `--yes`:
+   * pinned to nothing and watched by nobody, so the receipt carries the exact
+   * installer bytes instead of a human's attention. */
+  | "unattended_unpinned";
+
+export const NPM_PINS: Partial<
+  Record<
+    InstallableHarness,
+    {
+      npmPackage: string;
+      /** Launcher names the post-install proof executes, in preference order. */
+      binaryNames: readonly string[];
+      version: PinnedVendorCliVersion;
+      verification: Exclude<HarnessInstallVerification, "human_observed" | "unattended_unpinned">;
+    }
+  >
+> = {
+  claude: {
+    npmPackage: "@anthropic-ai/claude-code",
+    binaryNames: ["claude"],
+    version: CLAUDE_VENDOR_CLI_VERSION,
+    verification: "release_verified",
+  },
+  codex: {
+    npmPackage: "@openai/codex",
+    binaryNames: ["codex"],
+    version: CODEX_VENDOR_CLI_VERSION,
+    verification: "release_verified",
+  },
+  opencode: {
+    npmPackage: "opencode-ai",
+    binaryNames: ["opencode"],
+    version: OPENCODE_VENDOR_CLI_VERSION,
+    verification: "deterministic_only",
+  },
+};
+
+export const CURSOR_INSTALL_URL = "https://cursor.com/install";
+/**
+ * Google's official Antigravity CLI installer, as published on
+ * antigravity.google/docs/cli/install (`curl -fsSL <this url> | bash`, which
+ * Claudexor deliberately does NOT do — see the header). Verified end to end on
+ * 2026-08-16: the script fetched from this URL installed agy 1.1.13 to
+ * `~/.local/bin/agy`, which is the destination disclosed below. The vendor
+ * ships one signed Go binary and no npm package, so it takes the same
+ * human-observed path as cursor.
+ */
+export const AGY_INSTALL_URL = "https://antigravity.google/cli/install.sh";
+/** The vendor's Windows installer, from the same documentation page. */
+export const AGY_INSTALL_URL_WINDOWS = "https://antigravity.google/cli/install.ps1";
+
+/** Vendors distributed as a shell installer instead of a pinnable npm
+ * artifact. ONE branch serves both entries; the per-harness text below is the
+ * only thing that differs, so a third such vendor is a row, not a fork. */
+const SCRIPT_INSTALLERS: Record<
+  "agy" | "cursor",
+  {
+    url: string;
+    windowsUrl?: string;
+    installLocation: string;
+    pinNote: string;
+    /** Launcher the post-install proof resolves and version-probes. */
+    binaryName: string;
+  }
+> = {
+  agy: {
+    binaryName: "agy",
+    url: AGY_INSTALL_URL,
+    // The one vendor here that publishes a Windows installer of its own; the
+    // POSIX row would otherwise be all Claudexor could honestly offer.
+    windowsUrl: AGY_INSTALL_URL_WINDOWS,
+    installLocation: "~/.local/bin (as selected by Google's Antigravity installer)",
+    pinNote:
+      "none — Antigravity ships no pinnable npm artifact; the vendor script is downloaded in full, its size and sha256 print, and it runs in this terminal where you watch it",
+  },
+  cursor: {
+    // The legacy alias every Cursor login/run surface already consumes.
+    binaryName: "cursor-agent",
+    url: CURSOR_INSTALL_URL,
+    installLocation: "~/.local/bin (or ~/.cursor/bin, as selected by Cursor's installer)",
+    pinNote:
+      "none — Cursor ships no pinnable npm artifact; the vendor script is downloaded in full, its size and sha256 print, and it runs in this terminal where you watch it",
+  },
+};
+
+type ScriptInstaller = (typeof SCRIPT_INSTALLERS)[keyof typeof SCRIPT_INSTALLERS];
+
+/** Membership is asked of the TABLE, never re-typed: a third script vendor is
+ * one row, and cannot be added to the table yet fall through here. */
+export function scriptInstaller(harness: InstallableHarness): ScriptInstaller | null {
+  return Object.hasOwn(SCRIPT_INSTALLERS, harness)
+    ? SCRIPT_INSTALLERS[harness as keyof typeof SCRIPT_INSTALLERS]
+    : null;
+}
+
+export interface HarnessInstallerDisclosure {
+  harness: InstallableHarness;
+  /** Which prefix this disclosure describes; echoed into every receipt. */
+  target: HarnessInstallTarget;
+  command: string;
+  installLocation: string;
+  /** Exact vendor version the command installs; null exactly for the script
+   * vendors (cursor, agy), which have no pinnable artifact — disclosed, never
+   * faked. */
+  pinnedVersion: string | null;
+  /** Evidence behind the install target. Package-registry integrity verifies
+   * downloaded bytes for every npm pin, but only release_verified means the
+   * exact vendor version was exercised by this release's freshness gates. */
+  verification: HarnessInstallVerification;
+}
+
+export function harnessInstallerDisclosure(
+  harness: InstallableHarness,
+  target: HarnessInstallTarget = "remote",
+  platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch,
+): HarnessInstallerDisclosure {
+  const layout = TARGET_LAYOUTS[target];
+  const pin = NPM_PINS[harness];
+  const windows = platform === "win32";
+  if (pin) {
+    // A local Windows prefix holds no `bin` dir: npm leaves shims in the prefix
+    // root and the launcher is the package-native image (or there is none, and
+    // the installer refuses); the remote target is always a POSIX SSH host.
+    const nativeImage =
+      windows && target === "local" ? windowsNativeImageSegments(pin.npmPackage, arch) : null;
+    const installLocation =
+      windows && target === "local"
+        ? nativeImage
+          ? `${layout.displayRoot}/node_modules/${nativeImage.join("/")}`
+          : `${layout.displayRoot}/node_modules/${pin.npmPackage} (no Claudexor-runnable Windows image in this release)`
+        : `${layout.displayRoot}/bin`;
+    return {
+      harness,
+      target,
+      command: `npm install --global --prefix ${layout.displayRoot} ${pin.npmPackage}@${pin.version}`,
+      installLocation,
+      pinnedVersion: pin.version,
+      verification: pin.verification,
+    };
+  }
+  const script = scriptInstaller(harness);
+  /* c8 ignore next -- every non-npm harness has a script row; this is the
+     unreachable guard that keeps the two tables honest. */
+  if (!script) throw new Error(`harness ${harness} has neither an npm pin nor a script installer`);
+  const url = windows ? (script.windowsUrl ?? script.url) : script.url;
+  const file = windows && script.windowsUrl ? "install.ps1" : "install.sh";
+  const runner =
+    windows && script.windowsUrl ? "powershell -ExecutionPolicy Bypass -File" : "/bin/sh";
+  return {
+    harness,
+    target,
+    command:
+      `curl --fail --silent --show-error --location ${url} ` +
+      `--output <private-tmpdir>/${file} && ${runner} <private-tmpdir>/${file}`,
+    // The vendor script picks its own destination, so the local target cannot
+    // move it; only the WITNESS differs between the two targets.
+    installLocation:
+      windows && script.windowsUrl
+        ? "%LOCALAPPDATA%\\agy\\bin (as selected by Google's Antigravity installer)"
+        : script.installLocation,
+    pinnedVersion: null,
+    verification: target === "local" ? "unattended_unpinned" : "human_observed",
+  };
+}

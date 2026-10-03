@@ -1,4 +1,4 @@
-import { WorkReport, type HarnessEvent, type ToolRef } from "@claudexor/schema";
+import { InputTokenUsage, WorkReport, type HarnessEvent, type ToolRef } from "@claudexor/schema";
 import { nowIso, redactSecrets } from "@claudexor/util";
 import { applyCodexRateLimit, applyCodexTransient, codexReconnectStatus } from "./retry-signals.js";
 
@@ -126,6 +126,14 @@ export function parseCodexEvent(
           input_tokens: numberOrUndef(u.input_tokens),
           output_tokens: numberOrUndef(u.output_tokens),
           cached_input_tokens: numberOrUndef(u.cached_input_tokens),
+          input_token_usage: {
+            total_tokens: InputTokenUsage.shape.total_tokens.safeParse(u.input_tokens).data ?? null,
+            cache_read_tokens:
+              InputTokenUsage.shape.cache_read_tokens.safeParse(u.cached_input_tokens).data ?? null,
+            cache_write_tokens:
+              InputTokenUsage.shape.cache_write_tokens.safeParse(u.cache_write_input_tokens).data ??
+              null,
+          },
         },
       },
     ];
@@ -327,7 +335,9 @@ export function parseCodexEvent(
       }
       case "command_execution": {
         const failed =
-          item.status === "failed" || (typeof item.exit_code === "number" && item.exit_code !== 0);
+          item.status === "failed" ||
+          item.status === "declined" ||
+          (typeof item.exit_code === "number" && item.exit_code !== 0);
         const detail = summarizeCodexOutput(item.aggregated_output ?? item.output);
         return [
           {
@@ -463,7 +473,13 @@ function applyRequiredMcpFailure(
   };
 }
 
-/** Translate Codex's stderr-only required-MCP fatal into the same typed receipt as JSON errors. */
+/**
+ * Translate Codex's stderr-only fatals into the same typed receipts as JSON
+ * errors: the required-MCP startup fatal, and (A1 cursor-parity) a vendor
+ * rate/usage-limit that reaches stderr instead of a typed `error` frame —
+ * without the typed `rate_limit` signal a stderr-shaped limit is a generic
+ * harness_error and reactive credential rotation can never fire on it.
+ */
 export function parseCodexStderrFailure(
   message: string,
   sessionId: string,
@@ -476,7 +492,9 @@ export function parseCodexStderrFailure(
     error: message,
   };
   applyRequiredMcpFailure(event, message, state);
-  return event.payload?.["mcp_servers"] ? event : null;
+  // Stderr carries no typed resets_at field; the signal stays reset-less.
+  applyCodexRateLimit(event, message, null);
+  return event.payload?.["mcp_servers"] || event.rate_limit ? event : null;
 }
 
 function escapeRegex(value: string): string {

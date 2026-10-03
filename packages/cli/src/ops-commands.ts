@@ -3,15 +3,12 @@
  * managed secret store. Thin surfaces — every action delegates to the daemon
  * client, gateway, or SecretStore; --json purity via cli-io.
  */
-import { spawn } from "node:child_process";
-import { closeSync, mkdirSync, openSync, readFileSync } from "node:fs";
-import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   DaemonClient,
   awaitDaemonTermination,
   defaultSocketPath,
-  ensureDaemonRuntimeRoot,
+  inspectDaemonWriterLease,
   logPath,
   readToken,
   rotateToken,
@@ -32,8 +29,11 @@ import {
   GitCapability,
 } from "@claudexor/schema";
 import { type ParsedArgs, flagBool, flagStr } from "./args.js";
+import { harnessListPath, requestedHarnesses, unknownHarnesses } from "./ops-harness-selection.js";
 import { CliError, controlProblemError, renderCliFailure, usageError } from "./cli-error.js";
-import { profilesCommand, secretsCommand } from "./credential-commands.js";
+import { accountsCommand, profilesCommand, secretsCommand } from "./credential-commands.js";
+import { CLI_DAEMON_LAUNCH_SOURCES, launchDetachedDaemon } from "./daemon-launch.js";
+import { reportDaemonStartReady } from "./daemon-start-report.js";
 import {
   authSourceAvailability,
   checksSummary,
@@ -42,9 +42,34 @@ import {
   printUsageError,
   statusGlyph,
 } from "./cli-io.js";
-import { ensureDaemon, waitForDaemonReady } from "./daemon-run.js";
+import { authLoginHarnessList, isKnownAuthLoginHarness } from "./auth-login-harnesses.js";
+export { authLoginHarnessList, isKnownAuthLoginHarness } from "./auth-login-harnesses.js";
+import { DAEMON_START_READY_TIMEOUT_MS, ensureDaemon, waitForDaemonReady } from "./daemon-run.js";
 import { controlApiFetch } from "./live.js";
 import { streamDurableCodexLogin, terminalLoginFallback } from "./setup-login-inline.js";
+import { readDaemonDiagnosticTail } from "./startup-diagnostics.js";
+
+interface OperatorDaemonStopDeps {
+  inspectLease: typeof inspectDaemonWriterLease;
+  shutdown(): Promise<unknown>;
+  awaitTermination: typeof awaitDaemonTermination;
+}
+
+/** Pin strict signal authority before the asynchronous operator-stop RPC. */
+export async function stopDaemonForOperator(
+  socketPath: string,
+  deps: OperatorDaemonStopDeps,
+): ReturnType<typeof awaitDaemonTermination> {
+  const lease = deps.inspectLease(socketPath);
+  const expectedOwner =
+    lease.status === "owned" && lease.capability.status === "capable" ? lease.owner : null;
+  await deps.shutdown();
+  return deps.awaitTermination(socketPath, {
+    allowSigkill: expectedOwner !== null,
+    ...(expectedOwner === null ? {} : { expectedOwner }),
+    requireNoSuccessor: false,
+  });
+}
 
 export function dispatchOpsCommand(
   command: string,
@@ -68,6 +93,8 @@ export function dispatchOpsCommand(
       return secretsCommand(args, json);
     case "profiles":
       return profilesCommand(args, json);
+    case "accounts":
+      return accountsCommand(args, json);
     default:
       return undefined;
   }
@@ -87,14 +114,13 @@ export async function daemonCommand(args: ParsedArgs, json: boolean): Promise<nu
         await new DaemonClient(defaultSocketPath(), existingToken).health();
         const existingReady = await waitForDaemonReady(5_000);
         if (existingReady) {
-          if (json)
-            printJson({
-              pid: null,
-              socket: defaultSocketPath(),
-              ready: true,
-              alreadyRunning: true,
-            });
-          else print(`claudexord already running; socket ${defaultSocketPath()}`);
+          reportDaemonStartReady({
+            json,
+            socket: defaultSocketPath(),
+            servingMode: existingReady.engine.servingMode,
+            pid: null,
+            alreadyRunning: true,
+          });
           return 0;
         }
         if (json)
@@ -115,38 +141,54 @@ export async function daemonCommand(args: ParsedArgs, json: boolean): Promise<nu
     const daemonScript =
       process.env["CLAUDEXOR_DAEMON_ENTRY"] ??
       fileURLToPath(new URL("./claudexord.js", import.meta.url));
-    // Startup stderr goes to the daemon log (append), not the void — a crash
-    // before the daemon's own logging starts must leave evidence for
-    // `claudexor daemon logs`.
-    ensureDaemonRuntimeRoot();
-    mkdirSync(dirname(logPath()), { recursive: true });
-    const stderrFd = openSync(logPath(), "a");
-    const child = spawn(process.execPath, [daemonScript], {
-      detached: true,
-      stdio: ["ignore", "ignore", stderrFd],
-      env: harnessRuntimeEnv(),
-    });
-    child.unref();
-    closeSync(stderrFd);
+    let launch;
+    try {
+      launch = launchDetachedDaemon({
+        entryPath: daemonScript,
+        launchSource: CLI_DAEMON_LAUNCH_SOURCES.explicitStart,
+        env: harnessRuntimeEnv(),
+      });
+    } catch (error) {
+      return renderCliFailure(json, error);
+    }
     // Block until the daemon (socket + control API) is actually ready, so a
     // follow-up `status`/run can't race the spawn. Fail loudly (exit 1) if it
     // never comes up.
-    const ready = await waitForDaemonReady(15_000);
-    if (json) {
-      printJson({ pid: child.pid ?? null, socket: defaultSocketPath(), ready: ready !== null });
-    } else if (ready) {
-      print(`claudexord ready (pid ${child.pid}); socket ${defaultSocketPath()}`);
-    } else {
-      print(
-        `claudexord started (pid ${child.pid}) but did not become ready within 15s; check \`claudexor daemon logs\``,
+    let ready;
+    try {
+      ready = await waitForDaemonReady(DAEMON_START_READY_TIMEOUT_MS, () =>
+        launch.failure()
+          ? launch.callerError("readiness_wait", DAEMON_START_READY_TIMEOUT_MS)
+          : null,
+      );
+    } catch (error) {
+      return renderCliFailure(json, error, {
+        extras: { pid: launch.pid, socket: defaultSocketPath(), ready: false },
+      });
+    }
+    if (!ready) {
+      return renderCliFailure(
+        json,
+        launch.callerError("readiness_wait", DAEMON_START_READY_TIMEOUT_MS),
+        {
+          extras: { pid: launch.pid, socket: defaultSocketPath(), ready: false },
+        },
       );
     }
-    return ready ? 0 : 1;
+    launch.markReady();
+    reportDaemonStartReady({
+      json,
+      socket: defaultSocketPath(),
+      servingMode: ready.engine.servingMode,
+      pid: launch.pid,
+      alreadyRunning: false,
+    });
+    return 0;
   }
   if (sub === "logs") {
     let tail: string;
     try {
-      tail = readFileSync(logPath(), "utf8").split("\n").slice(-40).join("\n");
+      tail = readDaemonDiagnosticTail({ path: logPath(), lines: 40 }).text;
     } catch (err) {
       const message = `no daemon log at ${logPath()} (${err instanceof Error ? err.message : String(err)}); the daemon may not have started on this machine yet`;
       return renderCliFailure(json, new Error(message));
@@ -172,14 +214,13 @@ export async function daemonCommand(args: ParsedArgs, json: boolean): Promise<nu
       return 0;
     }
     if (sub === "stop") {
-      await client.shutdown();
       // "stop requested" is not "stopped" (W3.5): confirm the daemon's death
       // before reporting success, so scripts and test disposers can trust the
       // exit code instead of racing a still-live process.
-      const termination = await awaitDaemonTermination(defaultSocketPath(), {
-        // This command is the user's explicit forceful operator stop. Runtime
-        // replacement never inherits this signal authority implicitly.
-        allowSigkill: true,
+      const termination = await stopDaemonForOperator(defaultSocketPath(), {
+        inspectLease: inspectDaemonWriterLease,
+        shutdown: () => client.shutdown(),
+        awaitTermination: awaitDaemonTermination,
       });
       if (termination.outcome === "still_alive") {
         // D-7 projector: one failure envelope; the stop-state facts ride as
@@ -236,31 +277,6 @@ export async function daemonGet(path: string): Promise<unknown> {
   return response.json();
 }
 
-function requestedHarnesses(args: ParsedArgs): string[] | undefined {
-  const only = flagStr(args, "harness");
-  return only
-    ? only
-        .split(",")
-        .map((id) => id.trim())
-        .filter(Boolean)
-    : undefined;
-}
-
-function harnessListPath(args: ParsedArgs, fresh = false): string {
-  const query = new URLSearchParams();
-  if (fresh) query.set("fresh", "true");
-  if (flagBool(args, "all")) query.set("all", "true");
-  for (const id of requestedHarnesses(args) ?? []) query.append("harness", id);
-  const encoded = query.toString();
-  return `/harnesses${encoded ? `?${encoded}` : ""}`;
-}
-
-function unknownHarnesses(requested: string[] | undefined, observed: string[]): string[] {
-  if (!requested) return [];
-  const known = new Set(observed);
-  return requested.filter((id) => !known.has(id));
-}
-
 export async function doctorCommand(args: ParsedArgs, json: boolean): Promise<number> {
   const raw = await daemonGet(harnessListPath(args));
   const response = ControlHarnessListResponse.parse(raw);
@@ -309,6 +325,10 @@ export async function doctorCommand(args: ParsedArgs, json: boolean): Promise<nu
     if (status.reasons.length) print(`    reasons: ${status.reasons.join(", ")}`);
     if (status.configuredModelCheck?.status === "rejected") {
       print(`    model: INVALID — ${status.configuredModelCheck.message}`);
+    } else if (status.configuredModelCheck?.message) {
+      // An advisory harness admitted a model its list lacks: the human form
+      // says so too, not only the JSON readiness row.
+      print(`    model: ${status.configuredModel ?? ""} — ${status.configuredModelCheck.message}`);
     }
   }
   if (advisory) print(`advisory: ${advisory}`);
@@ -358,7 +378,10 @@ export async function modelsCommand(args: ParsedArgs, json: boolean): Promise<nu
       const ctx = m.context_window ? ` (${m.context_window} ctx)` : "";
       const label = m.label && m.label !== m.id ? ` — ${m.label}` : "";
       const routes = m.routes ? ` [routes: ${m.routes.join(", ")}]` : "";
-      print(`    ${m.id}${label}${ctx}${routes}`);
+      const resolved =
+        m.resolved_model && m.resolved_model !== m.id ? ` → ${m.resolved_model}` : "";
+      const hint = m.origin === "hint" ? " (hint)" : "";
+      print(`    ${m.id}${label}${resolved}${ctx}${routes}${hint}`);
     }
   }
   return 0;
@@ -404,12 +427,14 @@ export async function authCommand(
   }
   if (sub === "login") {
     if (!harness) {
-      return printUsageError(json, "usage: claudexor auth login <codex|claude|cursor>");
+      return printUsageError(json, `usage: claudexor auth login <${authLoginHarnessList()}>`);
     }
     if (!isKnownAuthLoginHarness(harness)) {
       return printUsageError(
         json,
-        `claudexor: unknown auth-login harness '${harness}' (expected codex|claude|cursor)`,
+        ControlHarnessSetupHarness.safeParse(harness).success
+          ? `claudexor: ${harness} has no default account to sign in to — use \`claudexor profiles login ${harness} <profile-id>\``
+          : `claudexor: unknown auth-login harness '${harness}' (expected ${authLoginHarnessList()})`,
       );
     }
     // --browser-redirect (codex only): explicit opt-in for the localhost
@@ -473,10 +498,6 @@ export async function authCommand(
     return accepted ? 0 : 1;
   }
   return printUsageError(json, "usage: claudexor auth status|login");
-}
-
-export function isKnownAuthLoginHarness(harness: string): boolean {
-  return ControlHarnessSetupHarness.safeParse(harness).success;
 }
 
 /** Thin client of the daemon-owned retention service (W3.6). */

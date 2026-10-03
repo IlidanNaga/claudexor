@@ -30,10 +30,19 @@ extension ThreadsScreen {
     }
 
     var reviewerPanelEntries: [ReviewerPanelEntry] {
+        if let structured = ComposerOptionParser.parseReviewerPanelJSON(reviewDraft.reviewerText) {
+            return structured
+        }
         let efforts = Set(model.harnesses.flatMap(\.effortLevels))
         return reviewerPanelTokens.compactMap {
             ComposerOptionParser.parseReviewerPanelEntry($0, effortLevels: efforts)
         }
+    }
+
+    var reviewerPanelStructuredInvalid: Bool {
+        let raw = reviewDraft.reviewerText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard raw.first == "[" else { return false }
+        return ComposerOptionParser.parseReviewerPanelJSON(raw) == nil
     }
 
     var protectedApprovalTokens: [String] {

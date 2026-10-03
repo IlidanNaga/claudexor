@@ -1,8 +1,8 @@
 import type {
   AuthPreference,
-  AuthSourceReadiness,
   CredentialProfile,
   CredentialProfileStatus,
+  CredentialUnusableObservation,
   HarnessEvent,
   QuotaAbsence,
   QuotaSnapshot,
@@ -12,23 +12,19 @@ import {
   quotaSourceTraits,
 } from "@claudexor/schema";
 import { redactSecrets } from "@claudexor/util";
-import { estimateEffectiveAuthRoute } from "@claudexor/schema";
-import {
-  nextEligibleProfile,
-  profileHeadroomBreach,
-  type ProfilePolicy,
-} from "./credential-profile-rotation.js";
+import { liveUnusableFor } from "./credential-cooldown.js";
 export {
+  effectiveLimitAction,
+  limitSubjectRoute,
   nextEligibleProfile,
   planReactiveRotation,
-  preflightCredentialProfile,
-  preflightDefaultSubject,
   profileHeadroomBreach,
   rotateSpecOnTypedLimit,
   rotationRetryEligible,
   staticRotationCandidates,
   type ProfilePolicy,
 } from "./credential-profile-rotation.js";
+export { preflightDefaultSubject } from "./credential-preflight.js";
 
 /**
  * The ONE resolve owner for credential profiles (INV-135): explicit id →
@@ -60,6 +56,17 @@ export async function selectedProfileAvailability(input: {
    * it. Omitting it admits on the LOCAL store alone — which is the reading of
    * `verification: passed` that let a run dispatch into a revoked token. */
   quota?: VendorQuotaObservations | null;
+  /** Live typed credential failures are stronger than a local LKG status.
+   * Admission must reject the row before probing or dispatching it. */
+  unusable?: readonly CredentialUnusableObservation[];
+  model?: string | null;
+  /** Only an already selected profile (explicit pin or durable binding) may
+   * consume the adapter's bounded stale observation. Pool/rotation selection
+   * remains fresh-only for it. */
+  allowStale?: boolean;
+  /** This choice is not an explicit pin (a durable binding or a pool row):
+   * it may consume a `last_positive_after_timeout` stale basis (INV-135 #363). */
+  unpinned?: boolean;
 }): Promise<string | null> {
   if (!input.profileId) return null;
   let profile: CredentialProfile;
@@ -68,12 +75,24 @@ export async function selectedProfileAvailability(input: {
   } catch (error) {
     return error instanceof Error ? error.message : String(error);
   }
+  const dead = liveUnusableFor(
+    input.unusable ?? [],
+    input.harnessId,
+    profile.profile_id,
+    input.model,
+  );
+  if (dead) {
+    return `credential profile "${profile.profile_id}" credential is unusable (${dead.code})`;
+  }
   if (!input.probe) return `harness "${input.harnessId}" has no profile probe`;
   const result = vendorVerifiedProfileStatus(
     await probeCredentialProfileStatus(profile, input.probe),
     input.quota,
   );
-  return profileStatusAdmits(profile, result)
+  return profileStatusAdmits(profile, result, {
+    allowStale: input.allowStale === true,
+    unpinned: input.unpinned === true,
+  })
     ? "available"
     : (result.detail ?? `${result.availability}/${result.verification}`);
 }
@@ -185,15 +204,34 @@ export function vendorVerifiedProfileStatus(
   );
 }
 
-/** One readiness predicate shared by run admission and accounts projection. */
+/**
+ * One readiness predicate shared by run admission and accounts projection.
+ * Fresh readiness admits every caller. A stale observation (always
+ * unknown/not_run on a config-dir row) admits only by its basis: the generic
+ * last-known-good grace keeps an already selected route alive (`allowStale`:
+ * pin or durable binding), while a `last_positive_after_timeout` basis admits
+ * an UNPINNED choice alone — binding, pool, rotation, `next_up` — and never an
+ * explicit pin (owner-approved INV-135 amendment, #363).
+ */
 export function profileStatusAdmits(
   profile: Pick<CredentialProfile, "credential_kind">,
-  result: { availability: string; verification: string },
+  result: { availability: string; verification: string; stale?: boolean; stale_basis?: string },
+  options: { allowStale?: boolean; unpinned?: boolean } = {},
 ): boolean {
   const verificationAdmits =
     result.verification === "passed" ||
     (profile.credential_kind === "api_key" && result.verification === "not_run");
-  return result.availability === "available" && verificationAdmits;
+  const staleConfigDir =
+    profile.credential_kind === "config_dir_login" &&
+    result.stale === true &&
+    result.availability === "unknown" &&
+    result.verification === "not_run";
+  const staleAdmits =
+    staleConfigDir &&
+    (result.stale_basis === "last_positive_after_timeout"
+      ? options.unpinned === true
+      : options.allowStale === true);
+  return (result.availability === "available" && verificationAdmits) || staleAdmits;
 }
 
 /** One fail-closed profile doctor wrapper shared by Accounts and runtime
@@ -245,111 +283,6 @@ export function effectiveAuthPreference(
   return (
     values.find((value) => value !== undefined && value !== null && value !== "auto") ?? "auto"
   );
-}
-
-/** Fresh effective route for the unprofiled/default subject in Accounts. The
- * gateway status proves aggregate intent readiness; the schema auth estimator
- * then chooses the exact usable source under the same configured preference as
- * run admission. Returning the route (not merely a bool) keeps next_up labels
- * truthful when a native-capable harness falls back to an API key. */
-export function defaultCredentialRoute(
-  status: {
-    status: "ok" | "degraded" | "unavailable";
-    routableIntents: readonly unknown[];
-    authSources: readonly AuthSourceReadiness[];
-  },
-  requested: AuthPreference,
-): "local_session" | "api_key" | null {
-  if (status.status !== "ok" || status.routableIntents.length === 0) return null;
-  return estimateEffectiveAuthRoute(requested, status.authSources);
-}
-
-/** The informational identity an UNPINNED run of a harness would route to next
- * (INV-135 `next_up`) — the same routing owner that admits and rotates runs,
- * exposed for the accounts projection so no surface re-derives it. Never gates
- * routing: explicit control is a per-run `--profile` / per-thread pin.
- *
- * Semantics mirror run-time admission: an unpinned run's default subject is the
- * unprofiled/default credential when it participates in the ladder; enabled profiles route
- * only by explicit pin or, under `rotate`, as the quota-failover target when the
- * default subject is already over headroom. A disabled default leaves an
- * unpinned run with nothing routable. */
-export type NextUpIdentity =
-  | { kind: "profile"; profileId: string }
-  | { kind: "native"; route: "local_session" | "api_key" }
-  | { kind: "none"; reason: string };
-
-export function nextUpIdentity(args: {
-  registry: readonly CredentialProfile[];
-  harnessId: string;
-  policy: ProfilePolicy;
-  snapshots: readonly QuotaSnapshot[];
-  defaultEnabled: boolean;
-  /** Fresh doctor/admission truth for the unprofiled default subject. */
-  defaultReady: boolean;
-  /** Effective source route of that default subject under configured auth preference. */
-  defaultRoute: "local_session" | "api_key" | null;
-  /** Profiles admitted by their fresh profile doctor probe in this snapshot. */
-  readyProfileIds: ReadonlySet<string>;
-  /** Known configured model, null for the native default, or omitted only when
-   * this projection has no model context and must stay conservative. */
-  model?: string | null;
-}): NextUpIdentity {
-  const {
-    registry,
-    harnessId,
-    policy,
-    snapshots,
-    defaultEnabled,
-    defaultReady,
-    defaultRoute,
-    readyProfileIds,
-    model,
-  } = args;
-  if (!defaultEnabled) {
-    return {
-      kind: "none",
-      reason: "the default credential is disabled; enable it or pin an account per-run (--profile)",
-    };
-  }
-  if (!defaultReady) {
-    return {
-      kind: "none",
-      reason: "the default credential is not ready; refresh Accounts or run `claudexor doctor`",
-    };
-  }
-  // Under `rotate`, a native/default subject already over its headroom bound
-  // fails over to the next eligible enabled profile BEFORE spawn — that is who
-  // an unpinned run routes to next. `ask`/`fail` proceed on the native default.
-  if (policy.limit_action === "rotate" && defaultRoute === "local_session") {
-    const breach = profileHeadroomBreach(
-      snapshots,
-      harnessId,
-      null,
-      policy.headroom_threshold,
-      model,
-    );
-    if (breach) {
-      const next = nextEligibleProfile(
-        registry,
-        harnessId,
-        policy,
-        null,
-        snapshots,
-        readyProfileIds,
-        new Set(),
-        model,
-      );
-      if (next) return { kind: "profile", profileId: next.profile_id };
-    }
-  }
-  if (!defaultRoute) {
-    return {
-      kind: "none",
-      reason: "the default credential route is unknown; refresh Accounts or run `claudexor doctor`",
-    };
-  }
-  return { kind: "native", route: defaultRoute };
 }
 
 /**

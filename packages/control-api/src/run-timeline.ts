@@ -265,6 +265,13 @@ export function timelineEvents(
   for (const ev of events ?? readRunEvents(rec)) {
     const payload = eventPayload(ev);
     const type = String(ev["type"] ?? "event");
+    const textKind =
+      type === "harness.event" &&
+      (payload["type"] === "thinking" || payload["type"] === "message") &&
+      typeof payload["text"] === "string"
+        ? payload["type"]
+        : null;
+    const textDelta = textKind !== null && eventPayload(payload)["delta"] === true;
     // Typed tool info travels on the normalized HarnessEvent `tool` field.
     const tool =
       payload["tool"] && typeof payload["tool"] === "object" && !Array.isArray(payload["tool"])
@@ -272,6 +279,16 @@ export function timelineEvents(
         : {};
     const harnessId = stringOrNull(payload["harness_id"] ?? payload["harness"]);
     const attemptId = stringOrNull(payload["attempt_id"] ?? payload["attemptId"]);
+    // Live-message receipts (message.*) and the adapter's consumption status
+    // (harness.event status live_input_delivered) carry the message id so a
+    // caller can reconcile delivery on the timeline (CONTRACT A26).
+    const nested = eventPayload(payload);
+    const messageId = stringOrNull(payload["message_id"] ?? nested["message_id"]);
+    const outcome = type.startsWith("message.")
+      ? stringOrNull(payload["outcome"])
+      : nested["code"] === "live_input_delivered"
+        ? "delivered"
+        : null;
     const partialGitInitialization =
       type === "project.git.initialized" && payload["partial"] === true;
     const title =
@@ -285,11 +302,13 @@ export function timelineEvents(
               payload["error"],
           )) ?? prettyEventType(type);
     const errorSummary = stringOrNull(tool["error_summary"] ?? payload["error"]);
-    const detail = partialGitInitialization
-      ? `Stopped during ${String(payload["failed_stage"] ?? "unknown")} at ${String(payload["repo_root"] ?? "?")}; partial Git metadata may remain.`
-      : (stringOrNull(payload["detail"] ?? payload["text"] ?? payload["error"]) ??
-        stringOrNull(tool["content_summary"]) ??
-        errorSummary);
+    const detail = textKind
+      ? stringOrNull(payload["text"])
+      : partialGitInitialization
+        ? `Stopped during ${String(payload["failed_stage"] ?? "unknown")} at ${String(payload["repo_root"] ?? "?")}; partial Git metadata may remain.`
+        : (stringOrNull(payload["detail"] ?? payload["text"] ?? payload["error"]) ??
+          stringOrNull(tool["content_summary"]) ??
+          errorSummary);
     const toolName = stringOrNull(tool["name"]);
     const target = stringOrNull(tool["target"]);
     // INV-105 disclosure (QA-070): unsupported per-harness knobs the route could
@@ -311,8 +330,12 @@ export function timelineEvents(
         ts: typeof ev["ts"] === "string" ? ev["ts"] : undefined,
         harnessId,
         attemptId,
+        messageId,
+        outcome,
         title,
         detail,
+        textKind,
+        textDelta,
         severity,
         toolName,
         target,

@@ -6,15 +6,15 @@ import * as SetupLoginProtocol from "./setup-login-protocol.js";
 import * as SetupTransport from "./setup-transport.js";
 export * from "./setup-transport.js";
 
-const SetupTimestamp = z.string().datetime({ offset: true });
-const Sha256Hex = z.string().regex(/^[a-f0-9]{64}$/);
+export const SetupTimestamp = z.string().datetime({ offset: true });
+export const Sha256Hex = z.string().regex(/^[a-f0-9]{64}$/);
 
 export const ProcessIdentityKnown = z
   .object({
     status: z.literal("known"),
     pid: z.number().int().positive(),
-    platform: z.enum(["linux", "darwin"]),
-    source: z.enum(["procfs_stat", "proc_pidinfo"]),
+    platform: z.enum(["linux", "darwin", "win32"]),
+    source: z.enum(["procfs_stat", "proc_pidinfo", "win32_process_times"]),
     startToken: z.string().min(1),
     processGroupId: z.number().int().positive(),
   })
@@ -80,7 +80,7 @@ export type SetupExecutionEvidence = z.infer<typeof SetupExecutionEvidence>;
 
 export const SetupExecutableEvidence = z
   .object({
-    realpath: z.string().startsWith("/"),
+    realpath: SetupLoginProtocol.SetupLoginAbsolutePath,
     sha256: Sha256Hex,
     size: z.number().int().nonnegative(),
     mode: z.number().int().nonnegative(),
@@ -101,7 +101,29 @@ export const SetupCommandAuthorization = z
   .strict();
 export type SetupCommandAuthorization = z.infer<typeof SetupCommandAuthorization>;
 
-const SetupNativeCommandReceiptShape = {
+export const SETUP_TERMINAL_TRANSPORT_ERROR_CODES = [
+  "terminal_transport_unavailable",
+  "terminal_transport_unsupported",
+  "terminal_transport_probe_failed",
+  "terminal_transport_failed",
+] as const;
+
+/** Exact terminal-backend failures shared by setup admission, the PTY resolver,
+ * the detached runner receipt, and strict client decoders. */
+export const SetupTerminalTransportErrorCode = z
+  .enum(SETUP_TERMINAL_TRANSPORT_ERROR_CODES)
+  .describe("Typed setup-login terminal transport failure.");
+export type SetupTerminalTransportErrorCode = z.infer<typeof SetupTerminalTransportErrorCode>;
+
+export const SetupNativeCommandErrorCode = z.enum([
+  "permit_timeout",
+  "spawn_failed",
+  "device_auth_unsupported",
+  ...SETUP_TERMINAL_TRANSPORT_ERROR_CODES,
+]);
+export type SetupNativeCommandErrorCode = z.infer<typeof SetupNativeCommandErrorCode>;
+
+export const SetupNativeCommandReceiptShape = {
   executionId: z.string().regex(/^[A-Za-z0-9-]+$/),
   commandDigest: Sha256Hex,
   manifestDigest: Sha256Hex,
@@ -109,7 +131,7 @@ const SetupNativeCommandReceiptShape = {
   commandStarted: z.boolean(),
   exitCode: z.number().int().nonnegative().nullable(),
   signal: z.string().nullable(),
-  errorCode: z.enum(["permit_timeout", "spawn_failed", "device_auth_unsupported"]).optional(),
+  errorCode: SetupNativeCommandErrorCode.optional(),
   finishedAt: SetupTimestamp,
 };
 
@@ -133,13 +155,25 @@ export const SetupNativeCommandReceipt = z
       deny(["errorCode"], "spawn_failed cannot claim that the command started");
     if (value.errorCode === "device_auth_unsupported" && value.commandStarted)
       deny(["errorCode"], "device_auth_unsupported means the vendor command was never started");
+    if (
+      [
+        "terminal_transport_unavailable",
+        "terminal_transport_unsupported",
+        "terminal_transport_probe_failed",
+      ].includes(value.errorCode ?? "") &&
+      value.commandStarted
+    )
+      deny(
+        ["errorCode"],
+        `${value.errorCode} means the authorized vendor command was never started`,
+      );
   })
   .describe("Durable, hash-bound result of the allowlisted native setup command.");
 export type SetupNativeCommandReceipt = z.infer<typeof SetupNativeCommandReceipt>;
 
 /** Harness ids with a daemon-managed native-login flow. */
 export const ControlHarnessSetupHarness = z
-  .enum(["codex", "claude", "cursor"])
+  .enum(["codex", "claude", "cursor", "agy"])
   .describe("Harness ids with a managed native-login flow.");
 export type ControlHarnessSetupHarness = z.infer<typeof ControlHarnessSetupHarness>;
 
@@ -200,7 +234,7 @@ export const ControlSetupJobOutcome = z
       "timed_out",
       "cancelled_by_user",
       "cancelled_on_restart",
-      // Historical (pre-3.0.3 restart reconciliation); kept for journal replay.
+      // The live monitor proved the permitted process group empty without a result.
       "interrupted",
       "interrupted_unknown",
       "termination_unconfirmed",
@@ -226,15 +260,17 @@ export const ControlSetupJobCreateRequest = z
     harness: ControlHarnessSetupHarness,
     action: SetupTransport.ControlSetupJobAction,
     authRequest: z.literal("subscription"),
-    /** Target a REGISTERED config-dir credential profile (INV-135): the
-     * vendor login runs scoped to the profile's own dir and verification
-     * probes THE PROFILE — the default native store is never touched.
+    /** Target a REGISTERED config-dir credential binding (INV-135): the vendor
+     * login runs under the binding's exact scoped environment and verification
+     * probes that binding under its effective platform credential policy.
      * Absent = the harness's default session (unchanged behavior). */
     profileId: z
       .string()
       .min(1)
       .optional()
-      .describe("Registered config_dir_login profile to log in; absent = the default session."),
+      .describe(
+        "Registered config_dir_login binding to log in under its exact scoped environment; absent = the default session.",
+      ),
     /** Codex-only interactive login flow selection. Default (absent) is
      * device_auth — the D-17 primary flow: typed device-code over the official
      * codex app-server (NO Terminal), completed in an isolated browser context
@@ -283,6 +319,12 @@ export const ControlSetupJob = z
     deadlineAt: SetupTimestamp.optional().describe(
       "Current native-login deadline when the job has one.",
     ),
+    deadlineFixed: z
+      .boolean()
+      .optional()
+      .describe(
+        "Whether the deadline is the VENDOR's own window and cannot be extended (agy waits exactly 60s for its pasted code); absent = the engine owns the window and extending it is honest.",
+      ),
     outcome: ControlSetupJobOutcome.optional(),
     command: z
       .string()
@@ -551,149 +593,3 @@ export const ControlSetupJobListResponse = z
   .object({ jobs: z.array(ControlSetupJob).describe("All known setup jobs.") })
   .describe("Response for listing setup jobs.");
 export type ControlSetupJobListResponse = z.infer<typeof ControlSetupJobListResponse>;
-
-/** Internal, file-backed protocol between claudexord and the detached native-login runner. */
-export const SetupLoginProtocolVersion = z.literal(2);
-
-export const SetupLoginManifest = z
-  .object({
-    version: SetupLoginProtocolVersion,
-    jobId: SetupLoginProtocol.SetupLoginJobId,
-    executionId: SetupLoginProtocol.SetupLoginExecutionId,
-    harness: z.enum(["codex", "claude", "cursor"]),
-    jobDir: SetupLoginProtocol.SetupLoginAbsolutePath,
-    binary: SetupLoginProtocol.SetupLoginAbsolutePath,
-    args: z.array(z.string()),
-    cwd: SetupLoginProtocol.SetupLoginAbsolutePath,
-    /** Scoped config dir for an INV-135 profile login (claude CLAUDE_CONFIG_DIR /
-     * codex CODEX_HOME). OPTIONAL, not defaulted: absent on default-store jobs so
-     * pre-existing manifests keep their sealed digest across a daemon upgrade. */
-    profileConfigDir: SetupLoginProtocol.SetupLoginAbsolutePath.optional(),
-    /** How the runner performs the login: "terminal" (codex browser_redirect
-     * fallback only), "device_code" (codex app-server), "url_disclosure"
-     * (daemon-hosted, URL captured into the sidecar — cursor), or
-     * "url_disclosure_with_input" (same + one-shot stdin input — claude).
-     * OPTIONAL/undefaulted so pre-upgrade manifests keep their digest. */
-    loginMode: z
-      .enum(["terminal", "device_code", "url_disclosure", "url_disclosure_with_input"])
-      .optional(),
-    /** Which app-server auth flow the device_code runner requests. Present only
-     * with loginMode "device_code". */
-    appServerFlow: SetupAppServerLoginFlow.optional(),
-    /** Sidecar the runner writes its transient disclosure to; read by the
-     * daemon for the snapshot overlay, never journaled. device_code manifests
-     * REQUIRE it; terminal manifests MAY carry it (the runner then captures the
-     * vendor login's OAuth URL into it as an `oauth_url` disclosure). Optional
-     * so pre-upgrade sealed manifests keep their digest. */
-    deviceCodePath: SetupLoginProtocol.SetupLoginAbsolutePath.optional(),
-    /** One-shot input sidecar (url_disclosure_with_input only): transient,
-     * never journaled, delivered to the vendor CLI's stdin by the runner. */
-    inputPath: SetupLoginProtocol.SetupLoginAbsolutePath.optional(),
-    statePath: SetupLoginProtocol.SetupLoginAbsolutePath,
-    resultPath: SetupLoginProtocol.SetupLoginAbsolutePath,
-    permitPath: SetupLoginProtocol.SetupLoginAbsolutePath,
-    permitDeadlineAt: SetupTimestamp,
-    permitWaitMs: SetupLoginProtocol.SetupClientPtyPermitWaitMs,
-    executable: SetupExecutableEvidence,
-    commandDigest: Sha256Hex,
-    manifestDigest: Sha256Hex,
-  })
-  .strict()
-  .superRefine((value, context) => {
-    const deny = (path: string[], message: string) =>
-      context.addIssue({ code: z.ZodIssueCode.custom, path, message });
-    const deviceCode = value.loginMode === "device_code";
-    const urlDisclosure =
-      value.loginMode === "url_disclosure" || value.loginMode === "url_disclosure_with_input";
-    if (deviceCode && value.harness !== "codex")
-      deny(["loginMode"], "device_code login mode exists only for the codex app-server");
-    if (deviceCode && (!value.appServerFlow || !value.deviceCodePath))
-      deny(["appServerFlow"], "device_code manifests require appServerFlow and deviceCodePath");
-    // deviceCodePath is legal on terminal manifests too (the runner captures
-    // the vendor login's OAuth URL into it); only the app-server flow selector
-    // stays device_code-exclusive.
-    if (!deviceCode && value.appServerFlow)
-      deny(["appServerFlow"], "appServerFlow requires loginMode device_code");
-    if (urlDisclosure && !value.deviceCodePath)
-      deny(["deviceCodePath"], "url_disclosure manifests require the disclosure sidecar path");
-    if ((value.loginMode === "url_disclosure_with_input") !== (value.inputPath !== undefined))
-      deny(["inputPath"], "inputPath rides url_disclosure_with_input manifests, exactly");
-  });
-export type SetupLoginManifest = z.infer<typeof SetupLoginManifest>;
-
-/**
- * TRANSIENT device-code sidecar the device_code runner writes after
- * `account/login/start` succeeds. Bound to the job + execution like the state
- * sidecar. The daemon reads it to overlay {@link SetupDeviceCodeDisclosure} on
- * snapshots/SSE; its `userCode` is NEVER journaled, logged, or copied into the
- * durable result receipt (INV-062 / D-17).
- */
-export const SetupLoginDeviceCode = z
-  .object({
-    version: SetupLoginProtocolVersion,
-    jobId: SetupLoginProtocol.SetupLoginJobId,
-    executionId: SetupLoginProtocol.SetupLoginExecutionId,
-    flow: SetupLoginDisclosureFlow,
-    verificationUrl: z.string().url(),
-    userCode: z.string(),
-    disclosedAt: SetupTimestamp,
-  })
-  .strict();
-export type SetupLoginDeviceCode = z.infer<typeof SetupLoginDeviceCode>;
-
-export const SetupLoginRunnerState = z
-  .object({
-    version: SetupLoginProtocolVersion,
-    jobId: SetupLoginProtocol.SetupLoginJobId,
-    executionId: SetupLoginProtocol.SetupLoginExecutionId,
-    processGroup: SetupProcessGroupHandle,
-    stage: z.enum(["awaiting_permit", "running"]),
-    observedAt: SetupTimestamp,
-    commandDigest: Sha256Hex,
-    manifestDigest: Sha256Hex,
-  })
-  .strict();
-export type SetupLoginRunnerState = z.infer<typeof SetupLoginRunnerState>;
-
-export const SetupLoginPermit = z
-  .object({
-    version: SetupLoginProtocolVersion,
-    jobId: SetupLoginProtocol.SetupLoginJobId,
-    executionId: SetupLoginProtocol.SetupLoginExecutionId,
-    issuedAt: SetupTimestamp,
-    commandDigest: Sha256Hex,
-    manifestDigest: Sha256Hex,
-  })
-  .strict();
-export type SetupLoginPermit = z.infer<typeof SetupLoginPermit>;
-
-export const SetupLoginRunnerResult = z
-  .object({
-    version: SetupLoginProtocolVersion,
-    jobId: SetupLoginProtocol.SetupLoginJobId,
-    ...SetupNativeCommandReceiptShape,
-    /** Bounded, ANSI-stripped tail of the vendor command's captured output —
-     * diagnostic evidence for classifying a failed login (e.g. the device-code
-     * toggle being disabled). RESULT-FILE ONLY: the durable control receipt
-     * deliberately does not carry it (the ≤600-char slice in the failure
-     * message is the only journal/API exposure). Only tee'd flows (codex). */
-    outputTail: z.string().max(4000).optional(),
-  })
-  .strict()
-  .superRefine((value, context) => {
-    const parsed = SetupNativeCommandReceipt.safeParse({
-      executionId: value.executionId,
-      commandDigest: value.commandDigest,
-      manifestDigest: value.manifestDigest,
-      permitIssuedAt: value.permitIssuedAt,
-      commandStarted: value.commandStarted,
-      exitCode: value.exitCode,
-      signal: value.signal,
-      ...(value.errorCode ? { errorCode: value.errorCode } : {}),
-      finishedAt: value.finishedAt,
-    });
-    if (!parsed.success) {
-      for (const issue of parsed.error.issues) context.addIssue(issue);
-    }
-  });
-export type SetupLoginRunnerResult = z.infer<typeof SetupLoginRunnerResult>;

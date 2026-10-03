@@ -5,6 +5,26 @@ import ClaudexorKit
 // views over the owning screen's state and AppModel; send availability and the
 // actual submission continue to consume the same resolved values.
 extension ThreadsScreen {
+    var browserPolicy: ComposerBrowserPolicy {
+        .init(
+            selectedAccess: threadAccessSelection.suggestedAccess,
+            selectedWebPolicy: selectedWebPolicy,
+            browserArmed: browser,
+            browserAvailable: browserAvailableForCurrentTurn)
+    }
+
+    var effectiveBrowserArmed: Bool { browserPolicy.effectiveBrowserArmed }
+    var effectiveAccess: AccessProfile { browserPolicy.effectiveAccess }
+    var effectiveWebPolicy: String { browserPolicy.effectiveWebPolicy }
+
+    func reconcileComposerAccess(_ recordedWire: String?) {
+        threadAccessSelection = .resolve(
+            recordedWire: recordedWire,
+            defaultAccess: model.composerAccessDefault)
+        agentStrategy = agentStrategy.reconciling(
+            access: threadAccessSelection.suggestedAccess)
+    }
+
     var poolFamilies: [HarnessFamily] { model.selectableHarnesses.filter { $0 != .fake && $0 != .raw } }
 
     /// The harness that will answer in chat (sticky thread primary > global default).
@@ -45,6 +65,10 @@ extension ThreadsScreen {
         )
     }
 
+    var councilMemberLimit: Int {
+        composerCouncilMemberLimit(model.activeSettingsSnapshot)
+    }
+
     var resolvedComposerStrategy: ComposerStrategyResolution {
         resolveComposerStrategy(
             intent: composerMode,
@@ -52,14 +76,21 @@ extension ThreadsScreen {
             delegate: DelegationPresentation.requestedForWire(
                 isOn: delegate, control: delegateControlState),
             councilEnabled: councilEnabled,
-            councilMembers: councilMembers)
+            councilMembers: councilMembers,
+            maxCouncilMembers: councilMemberLimit)
     }
 
     /// The exact options `send()` passes to AppModel. Availability reads this
     /// same value, so hidden strategy fields cannot classify a different request.
     var resolvedComposerOptions: TurnOptions {
         var options = currentOptions
-        options.untilClean = resolvedComposerStrategy.untilClean
+        let repair = composerRepairWire(
+            mode: resolvedComposerStrategy.mode,
+            access: effectiveAccess,
+            requestedAttempts: options.maxAttempts,
+            requestedUntilClean: resolvedComposerStrategy.untilClean)
+        options.maxAttempts = repair.attempts
+        options.untilClean = repair.untilClean == true
         options.delegate = resolvedComposerStrategy.delegate
         options.council = resolvedComposerStrategy.council
         options.councilN = resolvedComposerStrategy.councilN

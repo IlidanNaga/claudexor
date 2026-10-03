@@ -25,14 +25,14 @@ export interface ClaudeNativeHomeOptions {
  * `claudeNativeEnv`/`probeAuthStatus`), falling back to `process.env` — reading
  * only `process.env` made the doctor/run auth probe ignore an override carried
  * in the run env and silently probe the default store (symmetry with codex's
- * defaultNativeCodexHome). The config-root containment guard still applies.
+ * defaultNativeCodexHome). The config-root ownership guard still applies.
  */
 export function defaultNativeClaudeConfigDir(
   env?: Record<string, string | null | undefined>,
 ): string {
   const override = env?.[CLAUDE_NATIVE_DIR_ENV] ?? process.env.CLAUDEXOR_CLAUDE_NATIVE_DIR;
   if (!override?.trim()) return join(nativeHarnessStateRoot(), "claude", "default");
-  // Containment root is claudexorOwnedRoot(), NOT userConfigDir(): registered
+  // Owned state root is claudexorOwnedRoot(), NOT userConfigDir(): registered
   // credential-profile stores live at <ownedRoot>/profiles (that root's own
   // doc: "credential-profile locators ... derive from here"), and Claude Code
   // keys its Keychain item by the EXACT config-dir path, so no symlink or copy
@@ -134,8 +134,8 @@ export function claudeAccountIdentity(
 }
 
 /**
- * True when `dir` resolves inside the Claudexor-owned tree — the SAME
- * confinement the isolation-locator discipline uses, normalized through the
+ * True when `dir` resolves inside the Claudexor-owned tree — the same path
+ * authority the isolation-locator discipline uses, normalized through the
  * deepest existing ancestor so a symlinked root (/var → /private/var) matches.
  */
 function isWithinOwnedRoot(dir: string): boolean {

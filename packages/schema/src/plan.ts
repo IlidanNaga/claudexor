@@ -81,7 +81,9 @@ export const CouncilMember = z
       .describe("primary = the merger that synthesizes the unified plan; member = draft only."),
     status: z
       .enum(["drafted", "failed", "merged"])
-      .describe("drafted = draft landed; merged = this member produced the unified plan; failed."),
+      .describe(
+        "Draft outcome: drafted = contract-accepted input; merged = accepted draft and successful merge; failed stays failed even when its unverified text helped the merger.",
+      ),
     error: z
       .string()
       .nullable()
@@ -98,12 +100,24 @@ export type CouncilMember = z.infer<typeof CouncilMember>;
  * shape-identical to a solo plan, so this field is purely additive disclosure. */
 export const CouncilProjection = z
   .object({
-    requested: z.number().int().positive().describe("Requested member count (n; 2..4)."),
-    drafted: z.number().int().nonnegative().describe("Members whose draft survived to the merge."),
+    requested: z
+      .number()
+      .int()
+      .positive()
+      .describe("Requested member count (n; at least 2, up to the configured Council cap)."),
+    drafted: z
+      .number()
+      .int()
+      .nonnegative()
+      .describe(
+        "Members with contract-accepted drafts; excludes retained unverified inputs and is not a work-completion or verification count.",
+      ),
     degraded: z
       .boolean()
       .default(false)
-      .describe("True when fewer members drafted than requested (failures disclosed per member)."),
+      .describe(
+        "True when fewer contract-accepted drafts than requested, including any retained unverified contribution; failures remain disclosed per member.",
+      ),
     mergedBy: z
       .string()
       .nullable()

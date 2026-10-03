@@ -11,9 +11,10 @@
             "rerun_with_feedback",
             "accept_risk",
             "override_needs_human",
-            "revert_run"
+            "revert_run",
+            "discard"
           ],
-          "description": "Operator decision on a blocked run: accept_clean_patch (apply it), rerun_with_feedback, accept_risk, override_needs_human, or revert_run (restore the pre-turn snapshot)."
+          "description": "Operator decision: apply an accepted result, rerun with feedback, accept risk, override needs-human, revert a recorded Git effect, or discard remaining copied files without applying them."
         },
         "findingIds": {
           "type": "array",
@@ -90,7 +91,7 @@
         "action"
       ],
       "additionalProperties": false,
-      "description": "Typed, auditable operator decision on a NEEDS_HUMAN-blocked run."
+      "description": "Typed operator decision on a run or its pending copied result."
     }
   },
   "$schema": "http://json-schema.org/draft-07/schema#"

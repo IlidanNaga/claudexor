@@ -10,9 +10,18 @@ struct ComposerBrowserPolicy: Equatable {
     var browserAvailable: Bool = true
 
     var effectiveBrowserArmed: Bool { browserArmed && browserAvailable }
-    var effectiveAccess: AccessProfile { effectiveBrowserArmed ? .full : selectedAccess }
-    var effectiveWebPolicy: String {
-        effectiveBrowserArmed && selectedWebPolicy == "off" ? "auto" : selectedWebPolicy
+    /// Browser and filesystem access are independent request axes. The daemon
+    /// owns the per-harness preflight when the selected access/web combination
+    /// cannot host MCP; the app never rewrites either user selection.
+    var effectiveAccess: AccessProfile { selectedAccess }
+    var effectiveWebPolicy: String { selectedWebPolicy }
+
+    var requestProjection: ComposerBrowserRequestProjection {
+        .init(
+            access: effectiveAccess == .workspaceWrite ? nil : effectiveAccess.wire,
+            web: effectiveWebPolicy == "auto" ? nil : effectiveWebPolicy,
+            browser: effectiveBrowserArmed
+        )
     }
 
     func disarmingBrowser() -> ComposerBrowserPolicy {
@@ -28,6 +37,15 @@ struct ComposerBrowserPolicy: Equatable {
     static func browserArmed(_ current: Bool, afterAvailability available: Bool) -> Bool {
         current && available
     }
+}
+
+/// Exact run-start fields owned by the Browser/access/web policy. Keeping this
+/// projection pure lets submission tests prove Browser + Web Off stays `off` on
+/// the wire and reaches the daemon's existing typed preflight unchanged.
+struct ComposerBrowserRequestProjection: Equatable {
+    var access: String?
+    var web: String?
+    var browser: Bool
 }
 
 // MARK: - Canonical run-control applicability projection
@@ -63,6 +81,7 @@ struct ComposerRunControlApplicability: Equatable {
 // MARK: - Send availability
 
 enum ComposerSendBlocker: Equatable {
+    case access(String)
     case budget(String)
     case reviewer(String)
     case approvals(String)
@@ -72,7 +91,7 @@ enum ComposerSendBlocker: Equatable {
 
     var reason: String {
         switch self {
-        case .budget(let value), .reviewer(let value), .approvals(let value),
+        case .access(let value), .budget(let value), .reviewer(let value), .approvals(let value),
              .testCommand(let value), .attachments(let value), .applicability(let value):
             return value
         }
@@ -121,6 +140,7 @@ struct ComposerDraftSnapshot: Equatable {
     var councilMembers: Int = 2
     var browser: Bool = false
     var reviewDraft: ComposerReviewDraft = .init()
+    var reviewChanges: Bool = false
     var testCommandText: String = ""
     var composerModels: [String: String] = [:]
 }
@@ -172,6 +192,8 @@ enum ComposerDraftRecovery {
             ? defaults.councilMembers : current.councilMembers
         recovered.browser = current.browser == attempted.browser
             ? defaults.browser : current.browser
+        recovered.reviewChanges = current.reviewChanges == attempted.reviewChanges
+            ? defaults.reviewChanges : current.reviewChanges
         recovered.reviewDraft = current.reviewDraft == attempted.reviewDraft
             ? defaults.reviewDraft : current.reviewDraft
         recovered.testCommandText = sameTestCommand(

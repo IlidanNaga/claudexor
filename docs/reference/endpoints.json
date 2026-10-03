@@ -15,6 +15,30 @@
     },
     {
       "method": "GET",
+      "path": "/v2/account-pools",
+      "mutating": false,
+      "applicability": "global",
+      "summary": "Read the per-harness account-pool routing verdict (who an unpinned run routes to next) under the unified account model.",
+      "auth": "loopback_bearer",
+      "request_schema": null,
+      "parameters": [],
+      "response_schema": "ControlAccountPoolsResponse",
+      "error_schema": "ControlProblem"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/accounts-migration/rollback",
+      "mutating": true,
+      "applicability": "global",
+      "summary": "Reverse the unified-accounts startup migration (the supported downgrade path): continuity keys return to the engine default and the auto-registered row leaves the registry.",
+      "auth": "loopback_bearer",
+      "request_schema": "ControlAccountsMigrationRollbackRequest",
+      "parameters": [],
+      "response_schema": "ControlAccountsMigrationRollbackResponse",
+      "error_schema": "ControlProblem"
+    },
+    {
+      "method": "GET",
       "path": "/v2/agent-capabilities",
       "mutating": false,
       "applicability": "global",
@@ -210,6 +234,26 @@
       "request_schema": null,
       "parameters": [
         {
+          "name": "view",
+          "in": "query",
+          "required": false,
+          "repeatable": false,
+          "enum": [
+            "accounts"
+          ],
+          "schema_ref": null,
+          "description": "Opt in to all enabled account catalogs with separate availability and provenance; omission preserves the legacy response."
+        },
+        {
+          "name": "credentialProfileId",
+          "in": "query",
+          "required": false,
+          "repeatable": false,
+          "enum": null,
+          "schema_ref": "Id",
+          "description": "Restrict the accounts view to this exact enabled credential profile."
+        },
+        {
           "name": "route",
           "in": "query",
           "required": false,
@@ -222,7 +266,7 @@
           "description": "Filter enumerated models to the given credential route (models foreign to the route are hidden)."
         }
       ],
-      "response_schema": "ControlHarnessModelsResponse",
+      "response_schema": "ControlHarnessModelsQueryResponse",
       "error_schema": "ControlProblem"
     },
     {
@@ -235,6 +279,157 @@
       "request_schema": "ControlGcRequest",
       "parameters": [],
       "response_schema": "ControlGcReceipt",
+      "error_schema": "ControlProblem"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/model-operations",
+      "mutating": true,
+      "applicability": "global",
+      "summary": "Accept one idempotent model generation without an agent run.",
+      "auth": "loopback_bearer",
+      "request_schema": "ControlModelOperationCreateRequest",
+      "parameters": [
+        {
+          "name": "captureEffortEvidence",
+          "in": "query",
+          "required": false,
+          "repeatable": false,
+          "enum": [
+            "true",
+            "false"
+          ],
+          "schema_ref": null,
+          "description": "Retain typed effort preparation and observation evidence in the private result. Omitted or false preserves the legacy result shape; the choice is bound to idempotency."
+        },
+        {
+          "name": "captureFailureEvidence",
+          "in": "query",
+          "required": false,
+          "repeatable": false,
+          "enum": [
+            "true",
+            "false"
+          ],
+          "schema_ref": null,
+          "description": "Retain exact failed-response bytes and exception details in the private result. Omitted or false preserves the legacy result shape."
+        }
+      ],
+      "response_schema": "ControlModelOperationDetail",
+      "error_schema": "ControlProblem"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-operations/:id",
+      "mutating": false,
+      "applicability": "global",
+      "summary": "Inspect dispatch, outcome and response custody for the same operation.",
+      "auth": "loopback_bearer",
+      "request_schema": null,
+      "parameters": [],
+      "response_schema": "ControlModelOperationDetail",
+      "error_schema": "ControlProblem"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/model-operations/:id/ack",
+      "mutating": true,
+      "applicability": "global",
+      "summary": "Acknowledge the exact result digest and release temporary model bytes.",
+      "auth": "loopback_bearer",
+      "request_schema": "ControlModelOperationAckRequest",
+      "parameters": [],
+      "response_schema": "ControlModelOperationDetail",
+      "error_schema": "ControlProblem"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/model-operations/:id/control",
+      "mutating": true,
+      "applicability": "global",
+      "summary": "Cancel an existing model operation; settled results remain settled.",
+      "auth": "loopback_bearer",
+      "request_schema": "ControlModelOperationControlRequest",
+      "parameters": [],
+      "response_schema": "ControlModelOperationDetail",
+      "error_schema": "ControlProblem"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-operations/:id/result",
+      "mutating": false,
+      "applicability": "global",
+      "summary": "Read exact model response bytes without acknowledging delivery.",
+      "auth": "loopback_bearer",
+      "request_schema": null,
+      "parameters": [],
+      "response_schema": null,
+      "error_schema": "ControlProblem"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-sources",
+      "mutating": false,
+      "applicability": "global",
+      "summary": "List raw model transports, independent of agent harnesses.",
+      "auth": "loopback_bearer",
+      "request_schema": null,
+      "parameters": [
+        {
+          "name": "view",
+          "in": "query",
+          "required": false,
+          "repeatable": false,
+          "enum": [
+            "accounts"
+          ],
+          "schema_ref": null,
+          "description": "Opt in to account catalog and processing transport capabilities; omitted preserves the legacy source shape."
+        }
+      ],
+      "response_schema": "ControlModelSourcesQueryResponse",
+      "error_schema": "ControlProblem"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-sources/:id/models",
+      "mutating": false,
+      "applicability": "global",
+      "summary": "Read a selected account's raw model catalog and context evidence.",
+      "auth": "loopback_bearer",
+      "request_schema": null,
+      "parameters": [
+        {
+          "name": "view",
+          "in": "query",
+          "required": false,
+          "repeatable": false,
+          "enum": [
+            "accounts"
+          ],
+          "schema_ref": null,
+          "description": "Enumerate every enabled account's separate inventory and availability; omitted selects one account using the inference pool criteria. Account view cannot be combined with requestedModel."
+        },
+        {
+          "name": "credentialProfileId",
+          "in": "query",
+          "required": false,
+          "repeatable": false,
+          "enum": null,
+          "schema_ref": null,
+          "description": "Pin a managed profile; omitted selects the engine's Auto account."
+        },
+        {
+          "name": "requestedModel",
+          "in": "query",
+          "required": false,
+          "repeatable": false,
+          "enum": null,
+          "schema_ref": "ModelCallRequest#/properties/model",
+          "description": "Select one account able to serve this model using the inference pool criteria; omitted discovers one account without a model constraint."
+        }
+      ],
+      "response_schema": "ControlModelCatalogQueryResponse",
       "error_schema": "ControlProblem"
     },
     {
@@ -646,6 +841,18 @@
       "error_schema": "ControlProblem"
     },
     {
+      "method": "POST",
+      "path": "/v2/runs/:id/messages",
+      "mutating": true,
+      "applicability": "run",
+      "summary": "Place a live message into a run's active attempt and return a typed receipt: delivered (native consumption observed), accepted (native acceptance observed, consumption unproved), rejected, not_active, unsupported, or delivery_unknown. Every typed outcome answers HTTP 200 (unlike the answer and control routes); the Idempotency-Key is the message id and a replay returns the stored receipt.",
+      "auth": "loopback_bearer",
+      "request_schema": "ControlRunMessageRequest",
+      "parameters": [],
+      "response_schema": "ControlRunMessageResponse",
+      "error_schema": "ControlProblem"
+    },
+    {
       "method": "GET",
       "path": "/v2/runs/:id/produced",
       "mutating": false,
@@ -770,7 +977,8 @@
           "enum": [
             "codex",
             "claude",
-            "cursor"
+            "cursor",
+            "agy"
           ],
           "schema_ref": "ControlSetupJobListFilter#/properties/harness",
           "description": "Filter setup jobs to one harness."

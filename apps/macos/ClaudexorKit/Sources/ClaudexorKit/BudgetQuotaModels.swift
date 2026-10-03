@@ -162,21 +162,53 @@ public struct QuotaAbsence: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
+/// One vendor lane a refresh cycle did not re-fetch because its poll
+/// rate-limit cooldown is active; its snapshots/absences in the same response
+/// are last-known registry data.
+public struct QuotaRefreshSkipped: Codable, Sendable, Equatable, Identifiable {
+    public let vendor: String
+    public let notBefore: String
+
+    private enum CodingKeys: String, CodingKey {
+        case vendor
+        case notBefore = "not_before"
+    }
+
+    public init(vendor: String, notBefore: String) {
+        self.vendor = vendor
+        self.notBefore = notBefore
+    }
+
+    public var id: String { vendor }
+}
+
 public struct ControlQuotaResponse: Codable, Sendable, Equatable {
     public let snapshots: [QuotaSnapshot]
     /// Every registered subject reports either a snapshot or a typed absence.
     public let absences: [QuotaAbsence]
     public let refreshedAt: String?
+    /// Present only on refresh responses that skipped at least one vendor's
+    /// fan-out for an active poll rate-limit cooldown; those vendors' rows
+    /// above are last-known data, not the product of this refresh. Optional
+    /// so an absent wire field round-trips absent, never as a minted [].
+    public let refreshSkipped: [QuotaRefreshSkipped]?
 
     private enum CodingKeys: String, CodingKey {
         case snapshots, absences
         case refreshedAt = "refreshed_at"
+        case refreshSkipped = "refresh_skipped"
     }
 
-    public init(snapshots: [QuotaSnapshot], absences: [QuotaAbsence] = [], refreshedAt: String?) {
+    public init(
+        snapshots: [QuotaSnapshot],
+        absences: [QuotaAbsence] = [],
+        refreshedAt: String?,
+        refreshSkipped: [QuotaRefreshSkipped]? = nil
+    ) {
         self.snapshots = snapshots
         self.absences = absences
         self.refreshedAt = refreshedAt
+        self.refreshSkipped = refreshSkipped
     }
 
     public init(from decoder: Decoder) throws {
@@ -184,5 +216,7 @@ public struct ControlQuotaResponse: Codable, Sendable, Equatable {
         snapshots = try c.decode([QuotaSnapshot].self, forKey: .snapshots)
         absences = try c.decodeIfPresent([QuotaAbsence].self, forKey: .absences) ?? []
         refreshedAt = try c.decodeIfPresent(String.self, forKey: .refreshedAt)
+        refreshSkipped =
+            try c.decodeIfPresent([QuotaRefreshSkipped].self, forKey: .refreshSkipped)
     }
 }

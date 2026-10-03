@@ -53,6 +53,8 @@ public struct StartRunRequest: Codable, Sendable {
     /// Harness-scoped model map (harness id -> model id). Specific beats
     /// general: an entry wins over the scalar `model` and settings defaults.
     public var models: [String: String]?
+    /// Optional internal model-review intent; explicit panels also enable review.
+    public var review: Bool?
     public var reviewerPanel: [ReviewerPanelEntry]?
     public var reviewerModels: [String: String]?
     public var reviewerEfforts: [String: String]?
@@ -75,7 +77,7 @@ public struct StartRunRequest: Codable, Sendable {
                 execution: RunExecution = RunExecution(), harnesses: [String]? = nil,
                 primaryHarness: String? = nil, routingGoal: String? = nil, model: String? = nil,
                 models: [String: String]? = nil,
-                reviewerPanel: [ReviewerPanelEntry]? = nil,
+                review: Bool? = nil, reviewerPanel: [ReviewerPanelEntry]? = nil,
                 reviewerModels: [String: String]? = nil, reviewerEfforts: [String: String]? = nil,
                 n: Int? = nil, paidBudget: PaidBudget? = nil, access: String? = nil,
                 web: String? = nil,
@@ -91,6 +93,7 @@ public struct StartRunRequest: Codable, Sendable {
         self.routingGoal = routingGoal
         self.model = model
         self.models = models
+        self.review = review
         self.reviewerPanel = reviewerPanel
         self.reviewerModels = reviewerModels
         self.reviewerEfforts = reviewerEfforts
@@ -262,6 +265,7 @@ public struct RunSummary: Codable, Sendable, Identifiable, Equatable {
     public let primaryHarness: String?
     public let routingGoal: String?
     public let model: String?
+    public let review: Bool?
     public let reviewerPanel: [ReviewerPanelEntry]?
     public let protectedPathApprovals: [ProtectedPathApproval]?
     public let n: Int?
@@ -344,49 +348,11 @@ public struct RequestRequirementResolution: Codable, Sendable, Equatable {
     }
 }
 
-public struct TimelineEvent: Codable, Sendable, Identifiable, Equatable {
-    public var id: String { "\(type)-\(ts ?? "")-\(title)-\(attemptId ?? "")" }
-    public let type: String
-    public let ts: String?
-    public let harnessId: String?
-    public let attemptId: String?
-    public let title: String
-    public let detail: String?
-    public let severity: String?
-    public let toolName: String?
-    public let target: String?
-    public let errorSummary: String?
-    /// Unsupported per-harness knobs the route could NOT honor (INV-105),
-    /// disclosed on `harness.started` (e.g. "max_turns=5 (manifest ... =false)").
-    /// The row renders warning-shaped with these values, so a requested
-    /// safety/behavior limit that was dropped is visible, not silent (QA-070).
-    /// Optional so an older daemon that omits the key decodes to nil.
-    public let ignoredSettings: [String]?
-    public let rawRef: String?
-
-    public init(type: String, ts: String?, harnessId: String?, attemptId: String?,
-                title: String, detail: String?, severity: String?, toolName: String?,
-                target: String?, errorSummary: String?, ignoredSettings: [String]? = nil,
-                rawRef: String?) {
-        self.type = type
-        self.ts = ts
-        self.harnessId = harnessId
-        self.attemptId = attemptId
-        self.title = title
-        self.detail = detail
-        self.severity = severity
-        self.toolName = toolName
-        self.target = target
-        self.errorSummary = errorSummary
-        self.ignoredSettings = ignoredSettings
-        self.rawRef = rawRef
-    }
-}
-
 /// Budget snapshot for a run (v3): the tagged cash cap, spend, and provenance.
 /// `paidBudget` replaces the old flat `maxUsd` — the cap is `.finite`/`.unlimited`.
 public struct BudgetSnapshot: Codable, Sendable, Equatable {
     public let paidBudget: PaidBudget
+    public let cashKnowledge: String?
     /// CASH spend so far in USD; null when unknown.
     public let spendUsd: Double?
     /// Subscription VALUATION in USD (QA-023c): what this run's native-subscription
@@ -421,9 +387,10 @@ public struct BudgetSnapshot: Codable, Sendable, Equatable {
     public init(paidBudget: PaidBudget, spendUsd: Double?, remainingUsd: Double?,
                 estimated: Bool, source: String,
                 valuationUsd: Double? = nil, valuationKnowledge: String = "unknown",
-                evidence: String = "complete") {
+                evidence: String = "complete", cashKnowledge: String? = nil) {
         self.paidBudget = paidBudget
-        self.spendUsd = spendUsd
+        self.cashKnowledge = cashKnowledge
+        self.spendUsd = cashKnowledge == "unknown" ? nil : spendUsd
         self.valuationUsd = valuationUsd
         self.valuationKnowledge = valuationKnowledge
         self.remainingUsd = remainingUsd
@@ -434,17 +401,15 @@ public struct BudgetSnapshot: Codable, Sendable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case paidBudget, spendUsd, valuationUsd, valuationKnowledge, remainingUsd,
-             estimated, source, evidence
+             estimated, source, evidence, cashKnowledge
     }
 
-    // Custom decode so a legacy/version-skewed engine that omits the Ф2 valuation
-    // and evidence fields still decodes: the defaults MIRROR the server zod defaults
-    // EXACTLY (valuation nil / knowledge "unknown" / evidence "complete", per
-    // control.ts BudgetSnapshot) — decoding evidence differently would fork the contract.
+    // Legacy defaults mirror ControlBudgetSnapshot; explicit unknown cash stays nil.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         paidBudget = try c.decode(PaidBudget.self, forKey: .paidBudget)
-        spendUsd = try c.decodeIfPresent(Double.self, forKey: .spendUsd) ?? nil
+        cashKnowledge = try c.decodeIfPresent(String.self, forKey: .cashKnowledge)
+        spendUsd = cashKnowledge == "unknown" ? nil : try c.decodeIfPresent(Double.self, forKey: .spendUsd)
         valuationUsd = try c.decodeIfPresent(Double.self, forKey: .valuationUsd) ?? nil
         valuationKnowledge = try c.decodeIfPresent(String.self, forKey: .valuationKnowledge) ?? "unknown"
         remainingUsd = try c.decodeIfPresent(Double.self, forKey: .remainingUsd) ?? nil

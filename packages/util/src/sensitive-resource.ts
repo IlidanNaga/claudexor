@@ -35,6 +35,11 @@ export interface SensitiveContentDecision {
   readonly text: string;
 }
 
+export interface SensitiveContentScanner {
+  write(text: string): void;
+  finish(): boolean;
+}
+
 export type SymlinkTargetKind = "directory" | "file" | "other" | "unknown";
 
 export type SensitiveSymlinkDenyReason =
@@ -87,6 +92,10 @@ const CREDENTIAL_STORE_PARTS = new Set([
   ".cursor",
   ".docker",
   ".gcloud",
+  // Antigravity CLI (agy) keeps sensitive vendor state here; Darwin/Linux or
+  // fallback state may include a token file, while Windows primary auth may
+  // live in the OS keychain. Every profile HOME still contains this state root.
+  ".gemini",
   ".gnupg",
   ".kube",
   ".openai",
@@ -94,6 +103,10 @@ const CREDENTIAL_STORE_PARTS = new Set([
 ]);
 
 const CREDENTIAL_FILE_BASENAMES = new Set([
+  // The agy token-file basename remains sensitive wherever it is found, even
+  // though its presence is not an auth/readiness oracle on every platform.
+  "antigravity-oauth-token",
+  "login.keychain-db",
   ".git-credentials",
   ".netrc",
   ".npmrc",
@@ -157,6 +170,13 @@ export class SensitiveResourcePolicy {
         return sensitivePath("credential_store", part, `credential-store path component: ${part}`);
       }
       if (lower === ".config" && parts[index + 1]?.toLowerCase() === "gcloud") {
+        return sensitivePath(
+          "credential_store",
+          `${part}/${parts[index + 1]}`,
+          `credential-store path component: ${part}/${parts[index + 1]}`,
+        );
+      }
+      if (lower === "library" && parts[index + 1]?.toLowerCase() === "keychains") {
         return sensitivePath(
           "credential_store",
           `${part}/${parts[index + 1]}`,
@@ -238,6 +258,51 @@ export class SensitiveResourcePolicy {
     return this.inspectContent(text, "reject").containsSensitiveContent;
   }
 
+  /** Streaming artifact scan over the same signatures. The rolling lexical
+   * carry handles chunk-split credentials; a private-key block retains its
+   * opening delimiter independently of its arbitrarily large body. This is a
+   * scanner buffer, never an artifact size limit or a truncated scan. */
+  createContentScanner(): SensitiveContentScanner {
+    const privateRule = CONTENT_RULES.find((rule) => rule.id === "private_key_block")!;
+    const [start, end] = privateRule.pattern.source.split("[\\s\\S]*?");
+    const opening = new RegExp(start!, "g"),
+      closing = new RegExp(end!, "g");
+    let carry = "",
+      keyOpening = "",
+      found = false;
+    return {
+      write: (text) => {
+        if (found) return;
+        const combined = carry + text;
+        if (
+          CONTENT_RULES.some((rule) => {
+            rule.pattern.lastIndex = 0;
+            return rule.pattern.test(rule.id === "aws_access_key" ? combined + "A" : combined);
+          })
+        ) {
+          found = true;
+          return;
+        }
+        const previousOpening = keyOpening;
+        opening.lastIndex = 0;
+        const begin = opening.exec(combined);
+        if (!keyOpening && begin) keyOpening = begin[0];
+        closing.lastIndex = 0;
+        const finish = closing.exec(
+          previousOpening
+            ? combined
+            : combined.slice(begin ? begin.index + begin[0].length : combined.length),
+        );
+        if (keyOpening && finish && this.containsSensitiveContent(keyOpening + finish[0])) {
+          found = true;
+          return;
+        }
+        carry = combined.slice(-4096);
+      },
+      finish: () => found || this.containsSensitiveContent(carry),
+    };
+  }
+
   assessSymlink(input: SensitiveSymlinkInput): SensitiveSymlinkDecision {
     const sourceRoot = resolve(input.sourceRoot);
     const canonicalRoot = resolve(input.canonicalSourceRoot);
@@ -280,27 +345,6 @@ export class SensitiveResourcePolicy {
     }
 
     return assessRelocation(input, sourceRoot, sourcePath, excludedRoots);
-  }
-
-  /**
-   * The credential-bearing entries this policy classifies, as names RELATIVE to
-   * a home directory.
-   *
-   * `classifyPath` answers "is this path sensitive"; a filesystem confinement
-   * needs the complementary question — "which paths under this home must a
-   * confined process be unable to open" — and cannot get there by classifying,
-   * because it has no candidate list to classify. Exposing the sets from their
-   * owner keeps the confinement deny list DERIVED: a store added here reaches
-   * the sandbox profile with no second edit, and no consumer may re-list them
-   * (`scripts/sensitive-resource-ownership-check.mjs` fails the build if one
-   * tries).
-   */
-  homeRelativeCredentialEntries(): readonly string[] {
-    return Object.freeze([
-      ...CREDENTIAL_STORE_PARTS,
-      ...CREDENTIAL_FILE_BASENAMES,
-      ".config/gcloud",
-    ]);
   }
 }
 

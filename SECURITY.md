@@ -54,6 +54,44 @@ What Claudexor already does, so you can calibrate reports:
   they are user-invoked except the app's update check, which runs only on app
   foreground (there is no background update timer). Local files named
   `telemetry` contain only on-device run evidence and are never transmitted.
+- Harness processes run as the signed-in OS user under each vendor CLI's
+  native access mode. Claudexor does not add an outer Seatbelt, container, or
+  other OS filesystem boundary. Scoped `HOME` and named profile directories
+  select the intended account and separate vendor-written state; they do not
+  stop the process from reaching other same-user host paths. In particular,
+  trusted `full` can read or mutate out-of-project state, and those effects are
+  outside Claudexor's patch capture, review, revert, and rollback custody.
+- Repository trust gates authorization for an operator at a surface to request
+  native `full`; it is not a containment claim. `workspace_write` and `readonly`
+  mean the selected adapter's native policy, whose exact enforcement differs by
+  vendor. A run marked `execution.delegated` carries the external orchestrator's
+  own authority instead and needs no trust record. Two surfaces can set that
+  marker, and what the exemption costs differs between them, so both are stated
+  separately. A control-API client holds the daemon token and can already grant
+  itself the allow through `POST /v2/trust`, so requiring a second ceremony
+  there bought nothing. An MCP tool caller is the host's model: it holds no
+  token and has no trust-writing tool, so for it the marker is a real widening.
+  One call with `execution.delegated: true` and `access: "full"` now runs
+  unsandboxed native `full` on any `repoPath` without the grant, where before it
+  received the typed refusal, and the only remaining control is the host's own
+  MCP tool-approval policy. The marker is caller-asserted and is not
+  authenticated proof that an external orchestrator is really driving the run.
+  It is recorded for an auditor in the run's job params, the recorded run start
+  request that Exact Retry replays, and the per-attempt confinement disclosure
+  on mutating delegated attempts; the immutable contract records the resulting
+  `full` effective profile but not which authority admitted it.
+- The macOS app cannot originate the marker: its `RunExecution` carries only
+  `isolation`. It can re-issue a run that already recorded one, because Retry
+  Exact replays the recorded request and the Run Again draft keeps
+  `execution`, so both carry `delegated` forward into a new `full` run without a
+  grant; `claudexor retry` and `claudexor run-again` behave the same way.
+  Delegation-belt sub-runs cannot set it, and public thread turns cannot either,
+  because their strict execution schema does not accept the field. Either way
+  the harness runs as the signed-in OS user with no outer boundary, as described
+  above. For an externally orchestrated mutating run, the registered/trusted
+  project stays `scope.root` while the harness executes in the caller-supplied
+  `execution.workspaceRoot`; neither path relationship nor a second trust
+  store is implied.
 
 In scope: the CLI, daemon, control API, MCP/ACP servers, the macOS app, and
 the host-integration plugin writers. Out of scope: vulnerabilities in the

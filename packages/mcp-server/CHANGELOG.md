@@ -1,5 +1,387 @@
 # @claudexor/mcp-server
 
+## 3.18.0
+
+### Minor Changes
+
+- Release the integrated persistent MCP conversation tools and macOS agent-file previews. Thanks to @IlidanNaga for these contributions, including selected-profile billing repairs, to @Petyok for Cursor launcher discovery, and to @kzmx23 for Windows background-process and reconnect investigations.
+
+### Patch Changes
+
+- @claudexor/schema@3.18.0
+- @claudexor/util@3.18.0
+
+## 3.17.2
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.17.2
+  - @claudexor/util@3.17.2
+
+## 3.17.1
+
+### Patch Changes
+
+- Updated dependencies [72825b9]
+  - @claudexor/schema@3.17.1
+  - @claudexor/util@3.17.1
+
+## 3.17.0
+
+### Patch Changes
+
+- Updated dependencies [951489f]
+  - @claudexor/schema@3.17.0
+  - @claudexor/util@3.17.0
+
+## 3.16.0
+
+### Patch Changes
+
+- Updated dependencies [788ddca]
+  - @claudexor/schema@3.16.0
+  - @claudexor/util@3.16.0
+
+## 3.15.1
+
+### Patch Changes
+
+- @claudexor/schema@3.15.1
+- @claudexor/util@3.15.1
+
+## 3.15.0
+
+### Patch Changes
+
+- @claudexor/schema@3.15.0
+- @claudexor/util@3.15.0
+
+## 3.14.0
+
+### Patch Changes
+
+- Updated dependencies [2c024ac]
+- Updated dependencies [7e615b6]
+- Updated dependencies [fb42a94]
+  - @claudexor/schema@3.14.0
+  - @claudexor/util@3.14.0
+
+## 3.13.0
+
+### Patch Changes
+
+- @claudexor/schema@3.13.0
+- @claudexor/util@3.13.0
+
+## 3.12.10
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.12.10
+  - @claudexor/util@3.12.10
+
+## 3.12.9
+
+### Patch Changes
+
+- Updated dependencies [125aea9]
+  - @claudexor/schema@3.12.9
+  - @claudexor/util@3.12.9
+
+## 3.12.8
+
+### Patch Changes
+
+- @claudexor/schema@3.12.8
+- @claudexor/util@3.12.8
+
+## 3.12.7
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.12.7
+  - @claudexor/util@3.12.7
+
+## 3.12.6
+
+### Patch Changes
+
+- @claudexor/schema@3.12.6
+- @claudexor/util@3.12.6
+
+## 3.12.5
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.12.5
+  - @claudexor/util@3.12.5
+
+## 3.12.4
+
+### Patch Changes
+
+- @claudexor/schema@3.12.4
+- @claudexor/util@3.12.4
+
+## 3.12.3
+
+### Patch Changes
+
+- @claudexor/schema@3.12.3
+- @claudexor/util@3.12.3
+
+## 3.12.2
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.12.2
+  - @claudexor/util@3.12.2
+
+## 3.12.1
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.12.1
+  - @claudexor/util@3.12.1
+
+## 3.12.0
+
+### Patch Changes
+
+- Updated dependencies [217d53f]
+  - @claudexor/schema@3.12.0
+  - @claudexor/util@3.12.0
+
+## 3.11.0
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.11.0
+  - @claudexor/util@3.11.0
+
+## 3.10.5
+
+### Patch Changes
+
+- @claudexor/schema@3.10.5
+- @claudexor/util@3.10.5
+
+## 3.10.4
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.10.4
+  - @claudexor/util@3.10.4
+
+## 3.10.3
+
+### Patch Changes
+
+- @claudexor/schema@3.10.3
+- @claudexor/util@3.10.3
+
+## 3.10.2
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.10.2
+  - @claudexor/util@3.10.2
+
+## 3.10.1
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.10.1
+  - @claudexor/util@3.10.1
+
+## 3.10.0
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.10.0
+  - @claudexor/util@3.10.0
+
+## 3.9.8
+
+### Patch Changes
+
+- Make internal model review opt-in for ordinary Agent work, independently of executor selection. Preserve explicit panels, Best-of, and requested review cycles; persist intent separately from results and retain historical behavior on replay. Deliberately unreviewed changes remain normally applicable with honest Not reviewed status while required checks and patch integrity remain enforced. Expose the same choice through API, CLI, MCP, ACP, and the native composer.
+- Updated dependencies
+  - @claudexor/schema@3.9.8
+  - @claudexor/util@3.9.8
+
+## 3.9.7
+
+### Patch Changes
+
+- @claudexor/schema@3.9.7
+- @claudexor/util@3.9.7
+
+## 3.9.6
+
+### Patch Changes
+
+- @claudexor/schema@3.9.6
+- @claudexor/util@3.9.6
+
+## 3.9.5
+
+### Patch Changes
+
+- @claudexor/schema@3.9.5
+- @claudexor/util@3.9.5
+
+## 3.9.4
+
+### Patch Changes
+
+- @claudexor/schema@3.9.4
+- @claudexor/util@3.9.4
+
+## 3.9.3
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.9.3
+  - @claudexor/util@3.9.3
+
+## 3.9.2
+
+### Patch Changes
+
+- @claudexor/schema@3.9.2
+- @claudexor/util@3.9.2
+
+## 3.9.1
+
+### Patch Changes
+
+- @claudexor/schema@3.9.1
+- @claudexor/util@3.9.1
+
+## 3.9.0
+
+### Minor Changes
+
+- 11a785c: The `claudexor_accounts` MCP tool defaults to the server's cached credential-profiles listing instead of hardcoding the atomic snapshot; `fresh: true` opts into the expensive snapshot form (which itself now honors per-vendor rate-limit cooldowns). The tool description states the cost honestly and the output schema is the union of both forms.
+
+### Patch Changes
+
+- Updated dependencies [d9cccac]
+- Updated dependencies [69500f8]
+- Updated dependencies [e39c57b]
+- Updated dependencies [fd623ff]
+- Updated dependencies [278e436]
+  - @claudexor/schema@3.9.0
+  - @claudexor/util@3.9.0
+
+## 3.8.4
+
+### Patch Changes
+
+- @claudexor/schema@3.8.4
+- @claudexor/util@3.8.4
+
+## 3.8.3
+
+### Patch Changes
+
+- @claudexor/schema@3.8.3
+- @claudexor/util@3.8.3
+
+## 3.8.2
+
+### Patch Changes
+
+- @claudexor/schema@3.8.2
+- @claudexor/util@3.8.2
+
+## 3.8.1
+
+### Patch Changes
+
+- 2794ec7: Remove the engine-owned outer Seatbelt wrapper and restore each harness's
+  native access policy. Delegated mutating runs now keep stable project identity
+  separate from their disposable execution workspace, active requests use
+  `readonly`, `workspace_write`, or explicitly trusted `full`, and historical
+  outer-confinement artifacts remain readable without enabling new retired-mode
+  runs.
+- Updated dependencies [ce6dba1]
+- Updated dependencies [2794ec7]
+  - @claudexor/schema@3.8.1
+  - @claudexor/util@3.8.1
+
+## 3.8.0
+
+### Patch Changes
+
+- Updated dependencies [6054b7d]
+  - @claudexor/schema@3.8.0
+  - @claudexor/util@3.8.0
+
+## 3.7.0
+
+### Patch Changes
+
+- @claudexor/schema@3.7.0
+- @claudexor/util@3.7.0
+
+## 3.6.0
+
+### Patch Changes
+
+- Updated dependencies [895967f]
+  - @claudexor/schema@3.6.0
+  - @claudexor/util@3.6.0
+
+## 3.5.0
+
+### Patch Changes
+
+- Updated dependencies [2316ef8]
+  - @claudexor/util@3.5.0
+  - @claudexor/schema@3.5.0
+
+## 3.4.2
+
+### Patch Changes
+
+- @claudexor/schema@3.4.2
+- @claudexor/util@3.4.2
+
+## 3.4.1
+
+### Patch Changes
+
+- @claudexor/schema@3.4.1
+- @claudexor/util@3.4.1
+
+## 3.4.0
+
+### Patch Changes
+
+- @claudexor/schema@3.4.0
+- @claudexor/util@3.4.0
+
+## 3.3.16
+
+### Patch Changes
+
+- @claudexor/schema@3.3.16
+- @claudexor/util@3.3.16
+
 ## 3.3.15
 
 ### Patch Changes

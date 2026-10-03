@@ -164,6 +164,20 @@
               "default": null,
               "description": "Reasoning effort requested for the reviewer route."
             },
+            "credential_profile_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Credential profile requested/effective for the reviewer route; absent = account pool/default."
+            },
+            "observed_credential_profile_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Credential profile actually reported by the reviewer route; absent when undisclosed."
+            },
             "observed_model": {
               "type": [
                 "string",

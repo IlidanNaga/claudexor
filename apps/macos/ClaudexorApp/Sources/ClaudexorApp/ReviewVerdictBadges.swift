@@ -15,7 +15,7 @@ func reviewVerdictText(_ verdict: ReviewVerdict) -> String {
     case .running: return "Review is running."
     case .failed: return "Review failed."
     case .error: return "Review ended with an error."
-    case .notRun: return "Final review was not run."
+    case .notRun: return "Not reviewed."
     }
 }
 

@@ -1,8 +1,8 @@
 /**
- * Fail-closed publishing contract for the two full-context owner reviews,
- * executed as Cursor operator subagents (owner decision 2026-08-06).
- * Historical schemas remain verifiable as signed archive bytes, but only
- * schema v6 can authorize publication.
+ * Historical signed-review contracts (schemas 2-7). Their original identity,
+ * family and timing checks remain available for reading archived evidence.
+ * They are NOT current publication authority: verify-release-input.mjs uses
+ * only the generic ref syntax helper below and requires maintainer confirmation.
  */
 import { createPublicKey, verify } from "node:crypto";
 import { relative, resolve, sep } from "node:path";
@@ -16,24 +16,14 @@ const REVIEW_WAVE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-
 const UTF8 = new TextDecoder("utf-8", { fatal: true });
 
 export const RELEASE_REVIEW_ATTESTATION_ALGORITHM = "Ed25519";
-export const OWNER_REVIEW_ATTESTATION_SCHEMA_VERSION = 6;
-// v6 transport (owner decision 2026-08-06, program
-// claudexor-runtime-delivery-337, verbatim: «не надо вообще codex
-// использовать… Используй своих субагентов, ты же можешь у себя разные модели
-// вызывать так как ты cursor»): the formal release review pair executes as
-// Cursor OPERATOR SUBAGENTS, not as native Claude Code/Cursor CLI runs
-// through Claudexor. Each slot produces a markdown report plus metadata
-// (model slug, exact ISO-8601 start/finish, pass|warn verdict, review scope,
-// report digest); the two executions must genuinely overlap in wall time. The
-// native-harness protocol `native-fable-full-sol-delta-v2` (schema v5) is
-// retired to the archive list below alongside v2-v4.
-export const OWNER_REVIEW_PROTOCOL = "cursor-operator-fable-sol-v1";
+export const OWNER_REVIEW_ATTESTATION_SCHEMA_VERSION = 7;
+export const OWNER_REVIEW_PROTOCOL = "owner-review-two-model-families-v1";
 export const OWNER_REVIEW_VERDICTS = Object.freeze(["pass", "warn"]);
 // Owner-locked: BOTH slots review the full context under this protocol. A
 // delta, packet-split, or any other partial scope can never satisfy either
 // slot, so "full" is the only value a review entry may carry.
 export const OWNER_REVIEW_SCOPES = Object.freeze(["full"]);
-export const ARCHIVED_OWNER_REVIEW_SCHEMA_VERSIONS = Object.freeze([2, 3, 4, 5]);
+export const ARCHIVED_OWNER_REVIEW_SCHEMA_VERSIONS = Object.freeze([2, 3, 4, 5, 6]);
 export const RELEASE_REVIEW_VERIFIER_ARTIFACT_PATH = "release-review-verifier.mjs";
 export const RELEASE_REVIEW_CLI_ARTIFACT_PATH = "claudexor.bundle.cjs";
 export const RELEASE_REVIEW_RUNTIME_ARTIFACT_PATHS = Object.freeze([
@@ -41,30 +31,34 @@ export const RELEASE_REVIEW_RUNTIME_ARTIFACT_PATHS = Object.freeze([
   RELEASE_REVIEW_CLI_ARTIFACT_PATH,
 ]);
 export const RELEASE_REVIEW_MIN_PLAUSIBLE_MS = 1_000;
-// Exactly two slots; both receive the full context. No substitute model,
-// packet split, or extra critic can satisfy either slot. Each slot accepts
-// exactly one slug from its owner-approved tier set (operator decision
-// 2026-08-06 ~08:29 MSK under the owner authorization of 08:04 MSK «меня
-// удовлетворяют модели fable-5 и gpt-5.6-sol»: two subagent-model catalog
-// flaps within one hour; a hard single-tier pin would have blocked the
-// formal pair on the frozen SHA). The actually used slug is recorded in the
-// reviewer metadata and the signed review entry; a slug outside the set
-// refuses fail-closed. This constant is the single source for BOTH
-// comparison points: the semantic validator below and the sealer.
-export const OWNER_REVIEW_PANEL = Object.freeze([
-  Object.freeze({
-    slot: "fable",
-    allowedModels: Object.freeze([
-      "claude-fable-5-thinking-max",
-      "claude-fable-5-thinking-medium",
-      "claude-fable-5-thinking-high",
-    ]),
-  }),
-  Object.freeze({
-    slot: "sol",
-    allowedModels: Object.freeze(["gpt-5.6-sol-xhigh", "gpt-5.6-sol-max", "gpt-5.6-sol-medium"]),
-  }),
+// Family membership is operator-attested, not inferred from vendor-specific
+// slugs. Record the actual model and harness; this seal proves evidence
+// integrity, not vendor identity. Raw execution evidence belongs in the report.
+export const OWNER_REVIEW_MODEL_FAMILIES = Object.freeze([
+  "grok-4.6",
+  "fable-5",
+  "opus-5",
+  "gpt-5.6-sol",
+  "kimi-k3",
 ]);
+export const OWNER_REVIEW_PANEL = Object.freeze([
+  Object.freeze({ slot: "reviewer-1" }),
+  Object.freeze({ slot: "reviewer-2" }),
+]);
+
+/** Shared metadata/payload validation; deliberately no model-alias catalog. */
+export function validateOwnerReviewModelIdentity(value) {
+  const reasons = [];
+  if (!OWNER_REVIEW_MODEL_FAMILIES.includes(value?.modelFamily)) {
+    reasons.push("model family is outside the owner-approved set");
+  }
+  for (const field of ["model", "harness"]) {
+    if (typeof value?.[field] !== "string" || value[field].trim() === "") {
+      reasons.push(`${field} must be a nonempty string`);
+    }
+  }
+  return reasons;
+}
 
 export function decodeReviewUtf8(value, label = "review evidence") {
   if (typeof value === "string") return value;
@@ -149,7 +143,7 @@ export function verifyReleaseAttestationSignature(
   return { ok: true, reasons: [] };
 }
 
-/** Schemas 2-5 are historical signed records, never publishing authority. */
+/** Schemas 2-6 are historical signed records, never publishing authority. */
 export function verifyArchivedReleaseAttestationSignature(attestation, authority) {
   if (!ARCHIVED_OWNER_REVIEW_SCHEMA_VERSIONS.includes(attestation?.schemaVersion)) {
     return {
@@ -308,7 +302,7 @@ export function validateOwnerReviewAttestationPayload(payload, expected) {
   ) {
     reasons.push("review attestation payload shape is invalid");
   }
-  if (payload.contract !== "owner-review-v6") reasons.push("owner review contract must be v6");
+  if (payload.contract !== "owner-review-v7") reasons.push("owner review contract must be v7");
   if (payload.reviewProtocol !== OWNER_REVIEW_PROTOCOL) {
     reasons.push(`owner review protocol must be ${OWNER_REVIEW_PROTOCOL}`);
   }
@@ -346,7 +340,9 @@ export function validateOwnerReviewAttestationPayload(payload, expected) {
       !isRecord(review) ||
       !hasExactKeys(review, [
         "slot",
+        "modelFamily",
         "model",
+        "harness",
         "startedAt",
         "completedAt",
         "verdict",
@@ -358,11 +354,14 @@ export function validateOwnerReviewAttestationPayload(payload, expected) {
       reasons.push(`owner review ${required.slot} entry shape is invalid`);
       continue;
     }
-    if (review.slot !== required.slot || !required.allowedModels.includes(review.model)) {
-      reasons.push(
-        `owner review ${required.slot} slot/model is outside the owner-approved panel (${required.slot}: ${required.allowedModels.join(" | ")})`,
-      );
+    if (review.slot !== required.slot) {
+      reasons.push(`owner review ${required.slot} slot mismatch`);
     }
+    reasons.push(
+      ...validateOwnerReviewModelIdentity(review).map(
+        (reason) => `owner review ${required.slot} ${reason}`,
+      ),
+    );
     const startedMs = parseExactIso(review.startedAt);
     const completedMs = parseExactIso(review.completedAt);
     if (
@@ -386,6 +385,9 @@ export function validateOwnerReviewAttestationPayload(payload, expected) {
     }
   }
   if (reviews.length === OWNER_REVIEW_PANEL.length && reviews.every((review) => isRecord(review))) {
+    if (new Set(reviews.map((review) => review.modelFamily)).size !== reviews.length) {
+      reasons.push("owner review model families must be distinct");
+    }
     const starts = reviews.map((review) => Date.parse(review.startedAt));
     const completions = reviews.map((review) => Date.parse(review.completedAt));
     if (
@@ -414,7 +416,7 @@ export function validateReleaseAttestation(attestation, authority, expected) {
     return {
       ok: false,
       reasons: [
-        `review attestation schemaVersion ${attestation?.schemaVersion ?? "(missing)"} is not accepted for publish; schemas 2-5 are archive-signature-only`,
+        `review attestation schemaVersion ${attestation?.schemaVersion ?? "(missing)"} is not accepted for publish; schemas 2-6 are archive-signature-only`,
       ],
     };
   }

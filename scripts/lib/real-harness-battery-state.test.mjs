@@ -1,5 +1,6 @@
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   realpathSync,
@@ -7,33 +8,148 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, expect, test } from "vitest";
 import {
+  AccountsUnifiedMigrationFile,
   FrozenTaskContractArtifact,
+  GlobalConfig,
   HarnessEvent,
   RunEvent,
   RunTelemetry,
 } from "../../packages/schema/dist/index.js";
 import {
+  assertExistingDefaultSecondStartupStable,
   assertNoPreexistingDaemon,
   assertRegularFileUnchanged,
+  automaticBatteryHarnesses,
+  batteryProfileReady,
+  batteryReviewerModels,
+  batteryReviewerPanelEntry,
+  canonicalBatteryProfileState,
   describeFileSnapshot,
   durableAttemptRouteEvidence,
   evaluateRequiredNativeRoutes,
   isBatteryRepoRoot,
   isCrossFamilyConvergenceRefusal,
+  nativeBatteryRowReady,
+  probeHarnessAccessRefusal,
+  projectBatteryHarnessReadiness,
+  projectBatteryDaemonLease,
   relevantRunAttemptKeys,
   resolveRealHarnessBatteryLayout,
   runtimeReplacementIdentityFromHandshake,
   sameDaemonLease,
+  selectBatteryProfile,
+  selectRealHarnessBatteryModel,
   snapshotRegularFile,
+  validateExistingDefaultStartupTransition,
   validateBatteryRunArtifacts,
   validateBatteryTaskIdentity,
+  withBatteryReviewerModels,
+  withExplicitBatteryModels,
 } from "./real-harness-battery-state.mjs";
 
 const fixtureRoots = [];
+
+test("offline adapter refusal accepts the exact typed pre-event error", async () => {
+  const adapter = {
+    async *run() {
+      throw Object.assign(new Error("unsupported access"), {
+        code: "access_profile_incompatible",
+      });
+    },
+  };
+
+  await expect(
+    probeHarnessAccessRefusal({
+      adapter,
+      spec: { access: "workspace_write" },
+      wantedCode: "access_profile_incompatible",
+    }),
+  ).resolves.toMatchObject({
+    valid: true,
+    code: "access_profile_incompatible",
+    eventsEmitted: 0,
+  });
+});
+
+test("offline adapter refusal rejects a wrong code or any emitted event", async () => {
+  const wrongCode = {
+    async *run() {
+      throw Object.assign(new Error("wrong refusal"), { code: "harness_unavailable" });
+    },
+  };
+  const lateRefusal = {
+    async *run() {
+      yield { type: "started" };
+      throw Object.assign(new Error("too late"), { code: "access_profile_incompatible" });
+    },
+  };
+
+  await expect(
+    probeHarnessAccessRefusal({
+      adapter: wrongCode,
+      spec: { access: "workspace_write" },
+      wantedCode: "access_profile_incompatible",
+    }),
+  ).resolves.toMatchObject({ valid: false, code: "harness_unavailable", eventsEmitted: 0 });
+  await expect(
+    probeHarnessAccessRefusal({
+      adapter: lateRefusal,
+      spec: { access: "workspace_write" },
+      wantedCode: "access_profile_incompatible",
+    }),
+  ).resolves.toMatchObject({
+    valid: false,
+    code: "access_profile_incompatible",
+    eventsEmitted: 1,
+  });
+});
+
+test("real OpenCode public adapter refuses workspace_write before a trap binary spawns", () => {
+  const f = fixture();
+  const trapBin = join(f.root, "opencode-trap.sh");
+  const trapMarker = join(f.root, "opencode-spawned");
+  writeFileSync(trapBin, '#!/bin/sh\n: > "$CLAUDEXOR_OPENCODE_TRAP_MARKER"\nexit 91\n', {
+    mode: 0o700,
+  });
+  const adapterUrl = pathToFileURL(resolve("packages/harness-opencode/dist/index.js")).href;
+  const helperUrl = pathToFileURL(resolve("scripts/lib/real-harness-battery-state.mjs")).href;
+  const source = [
+    `import { createOpenCodeAdapter } from ${JSON.stringify(adapterUrl)};`,
+    `import { probeHarnessAccessRefusal } from ${JSON.stringify(helperUrl)};`,
+    'const result = await probeHarnessAccessRefusal({ adapter: createOpenCodeAdapter(), spec: { access: "workspace_write" }, wantedCode: "access_profile_incompatible" });',
+    "process.stdout.write(JSON.stringify(result));",
+    "if (!result.valid) process.exitCode = 2;",
+  ].join("\n");
+  const probeEnv = {
+    ...process.env,
+    CLAUDEXOR_OPENCODE_BIN: trapBin,
+    CLAUDEXOR_OPENCODE_TRAP_MARKER: trapMarker,
+  };
+  delete probeEnv.OPENCODE_API_KEY;
+  delete probeEnv.OPENAI_API_KEY;
+  delete probeEnv.ANTHROPIC_API_KEY;
+  const probe = spawnSync(process.execPath, ["--input-type=module", "-e", source], {
+    cwd: resolve("."),
+    env: probeEnv,
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+
+  expect(probe.status).toBe(0);
+  expect(probe.signal).toBeNull();
+  expect(existsSync(trapMarker)).toBe(false);
+  expect(JSON.parse(probe.stdout)).toMatchObject({
+    valid: true,
+    code: "access_profile_incompatible",
+    eventsEmitted: 0,
+  });
+});
 
 afterEach(() => {
   for (const root of fixtureRoots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -136,16 +252,363 @@ test("protected config snapshot detects byte and mode changes", () => {
   expect(() => assertRegularFileUnchanged(path, before)).toThrow(/changed protected state/);
 });
 
+function stateSnapshot(f, name, text, mode = 0o600) {
+  const path = join(f.root, name);
+  writeFileSync(path, text, { mode });
+  return snapshotRegularFile(path);
+}
+
+function configText(profiles = [], extra = "") {
+  const rows = profiles
+    .map(({ harness = "codex", id = `${harness}-default`, locator = `/tmp/${harness}-home` }) =>
+      [
+        `  - profile_id: ${id}`,
+        `    harness_id: ${harness}`,
+        `    display_name: ${harness} default login`,
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: ${locator}`,
+        "    secret_ref: null",
+        "    enabled: true",
+        "    created_at: 2026-08-19T00:00:00.000Z",
+      ].join("\n"),
+    )
+    .join("\n");
+  return `version: 1\n${extra}credential_profiles:${rows ? `\n${rows}` : " []"}\n`;
+}
+
+function configValue(profiles = [], extra = {}) {
+  return {
+    version: 1,
+    ...extra,
+    credential_profiles: profiles.map(
+      ({ harness = "codex", id = `${harness}-default`, locator = `/tmp/${harness}-home` }) => ({
+        profile_id: id,
+        harness_id: harness,
+        display_name: `${harness} default login`,
+        credential_kind: "config_dir_login",
+        isolation_locator: locator,
+        secret_ref: null,
+        enabled: true,
+        created_at: "2026-08-19T00:00:00.000Z",
+      }),
+    ),
+  };
+}
+
+function migrationText({
+  harness = "codex",
+  id = `${harness}-default`,
+  locator = `/tmp/${harness}-home`,
+  phase = "completed",
+  backup = `/tmp/backup-${harness}`,
+} = {}) {
+  return `${JSON.stringify(
+    {
+      [harness]: {
+        phase,
+        row_id: id,
+        legacy_aliases: [null],
+        locator,
+        backup_ref: backup,
+      },
+    },
+    null,
+    2,
+  )}\n`;
+}
+
+function startupTransitionArgs(f, overrides = {}) {
+  const configBefore =
+    overrides.configBefore ?? stateSnapshot(f, "config-before.yaml", configText());
+  const migrationBefore =
+    overrides.migrationBefore ?? snapshotRegularFile(join(f.root, "migration-before-missing.json"));
+  const configAfter =
+    overrides.configAfter ??
+    stateSnapshot(
+      f,
+      "config-after.yaml",
+      configText([{ harness: "codex", locator: "/tmp/codex-home" }]),
+    );
+  const migrationAfter =
+    overrides.migrationAfter ??
+    stateSnapshot(f, "migration-after.json", migrationText({ backup: "/tmp/backup-codex" }));
+  return {
+    configBefore,
+    migrationBefore,
+    configAfter,
+    migrationAfter,
+    configBeforeValue: overrides.configBeforeValue ?? configValue(),
+    configAfterValue:
+      overrides.configAfterValue ?? configValue([{ harness: "codex", locator: "/tmp/codex-home" }]),
+    backupSnapshots: overrides.backupSnapshots ?? {
+      "/tmp/backup-codex": { ...configBefore, value: configValue() },
+    },
+    globalConfigSchema: GlobalConfig,
+    migrationSchema: AccountsUnifiedMigrationFile,
+  };
+}
+
+test("existing-default startup accepts one receipt-bound accounts migration exactly once", () => {
+  const f = fixture();
+  expect(validateExistingDefaultStartupTransition(startupTransitionArgs(f))).toEqual({
+    classification: "one_time_accounts_unified_migration",
+    validatedRows: [
+      {
+        harnessId: "codex",
+        rowId: "codex-default",
+        locator: "/tmp/codex-home",
+        backupRef: "/tmp/backup-codex",
+      },
+    ],
+  });
+});
+
+test("existing-default startup validates a byte-anchored multi-row backup chain", () => {
+  const f = fixture();
+  const profiles = [
+    { harness: "claude", locator: "/tmp/claude-home" },
+    { harness: "codex", locator: "/tmp/codex-home" },
+  ];
+  const configBefore = stateSnapshot(f, "chain-config-before.yaml", configText());
+  const firstIntermediate = stateSnapshot(
+    f,
+    "chain-config-intermediate.yaml",
+    configText(profiles.slice(0, 1)),
+  );
+  const configAfter = stateSnapshot(f, "chain-config-after.yaml", configText(profiles));
+  const migrationAfter = stateSnapshot(
+    f,
+    "chain-migration-after.json",
+    `${JSON.stringify(
+      {
+        claude: {
+          phase: "completed",
+          row_id: "claude-default",
+          legacy_aliases: [null],
+          locator: "/tmp/claude-home",
+          backup_ref: "/tmp/backup-claude",
+        },
+        codex: {
+          phase: "completed",
+          row_id: "codex-default",
+          legacy_aliases: [null],
+          locator: "/tmp/codex-home",
+          backup_ref: "/tmp/backup-codex",
+        },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  expect(
+    validateExistingDefaultStartupTransition(
+      startupTransitionArgs(f, {
+        configBefore,
+        configAfter,
+        migrationAfter,
+        configBeforeValue: configValue(),
+        configAfterValue: configValue(profiles),
+        backupSnapshots: {
+          "/tmp/backup-claude": { ...configBefore, value: configValue() },
+          "/tmp/backup-codex": {
+            ...firstIntermediate,
+            value: configValue(profiles.slice(0, 1)),
+          },
+        },
+      }),
+    ),
+  ).toMatchObject({
+    classification: "one_time_accounts_unified_migration",
+    validatedRows: [
+      { harnessId: "claude", rowId: "claude-default" },
+      { harnessId: "codex", rowId: "codex-default" },
+    ],
+  });
+});
+
+test("existing-default startup accepts an already migrated byte-identical fixture", () => {
+  const f = fixture();
+  const config = stateSnapshot(
+    f,
+    "config-stable.yaml",
+    configText([{ harness: "codex", locator: "/tmp/codex-home" }]),
+  );
+  const migration = stateSnapshot(
+    f,
+    "migration-stable.json",
+    migrationText({ backup: "/tmp/backup-codex" }),
+  );
+  expect(
+    validateExistingDefaultStartupTransition(
+      startupTransitionArgs(f, {
+        configBefore: config,
+        configAfter: config,
+        migrationBefore: migration,
+        migrationAfter: migration,
+        configBeforeValue: configValue([{ harness: "codex", locator: "/tmp/codex-home" }]),
+        configAfterValue: configValue([{ harness: "codex", locator: "/tmp/codex-home" }]),
+      }),
+    ),
+  ).toMatchObject({ classification: "already_migrated_unchanged" });
+});
+
+test("existing-default startup rejects unrelated config changes and missing migration records", () => {
+  const f = fixture();
+  const unrelated = stateSnapshot(
+    f,
+    "config-unrelated.yaml",
+    configText([{ harness: "codex", locator: "/tmp/codex-home" }], "interaction_timeout_ms: 1\n"),
+  );
+  expect(() =>
+    validateExistingDefaultStartupTransition(
+      startupTransitionArgs(f, {
+        configAfter: unrelated,
+        configAfterValue: configValue([{ harness: "codex", locator: "/tmp/codex-home" }], {
+          interaction_timeout_ms: 1,
+        }),
+      }),
+    ),
+  ).toThrow(/outside credential_profiles/);
+
+  const missing = stateSnapshot(f, "migration-empty.json", "{}\n");
+  expect(() =>
+    validateExistingDefaultStartupTransition(startupTransitionArgs(f, { migrationAfter: missing })),
+  ).toThrow(/rows and appended credential profiles do not match/);
+});
+
+test("existing-default startup rejects incomplete, locator-mismatched, and backup-mismatched rows", () => {
+  const f = fixture();
+  const incomplete = stateSnapshot(
+    f,
+    "migration-incomplete.json",
+    migrationText({ phase: "registry_written" }),
+  );
+  expect(() =>
+    validateExistingDefaultStartupTransition(
+      startupTransitionArgs(f, { migrationAfter: incomplete }),
+    ),
+  ).toThrow(/incomplete/);
+
+  const locatorMismatch = stateSnapshot(
+    f,
+    "migration-locator.json",
+    migrationText({ locator: "/tmp/other-home" }),
+  );
+  expect(() =>
+    validateExistingDefaultStartupTransition(
+      startupTransitionArgs(f, { migrationAfter: locatorMismatch }),
+    ),
+  ).toThrow(/matching config_dir_login profile/);
+
+  const args = startupTransitionArgs(f);
+  const wrongBackup = stateSnapshot(
+    f,
+    "wrong-backup.yaml",
+    configText([], "interaction_timeout_ms: 1\n"),
+  );
+  expect(() =>
+    validateExistingDefaultStartupTransition({
+      ...args,
+      backupSnapshots: {
+        "/tmp/backup-codex": {
+          ...wrongBackup,
+          value: configValue([], { interaction_timeout_ms: 1 }),
+        },
+      },
+    }),
+  ).toThrow(/backup does not match/);
+});
+
+test("existing-default second startup rejects any byte or mode mutation", () => {
+  const f = fixture();
+  const config = stateSnapshot(f, "config-first.yaml", configText());
+  const migration = stateSnapshot(f, "migration-first.json", "{}\n");
+  expect(
+    assertExistingDefaultSecondStartupStable({
+      configAfterFirst: config,
+      migrationAfterFirst: migration,
+      configAfterSecond: config,
+      migrationAfterSecond: migration,
+    }),
+  ).toEqual({
+    config: describeFileSnapshot(config),
+    migration: describeFileSnapshot(migration),
+  });
+  const changed = stateSnapshot(f, "config-second.yaml", `${configText()}# changed\n`);
+  expect(() =>
+    assertExistingDefaultSecondStartupStable({
+      configAfterFirst: config,
+      migrationAfterFirst: migration,
+      configAfterSecond: changed,
+      migrationAfterSecond: migration,
+    }),
+  ).toThrow(/second startup changed config/);
+  const modeChanged = stateSnapshot(f, "migration-second.json", "{}\n", 0o640);
+  expect(() =>
+    assertExistingDefaultSecondStartupStable({
+      configAfterFirst: config,
+      migrationAfterFirst: migration,
+      configAfterSecond: config,
+      migrationAfterSecond: modeChanged,
+    }),
+  ).toThrow(/second startup changed accounts-unified/);
+});
+
 test("daemon preflight fails closed on each live ownership surface", () => {
   const clear = {
     statusCode: 1,
     socketIsAlive: false,
-    leaseIsAlive: false,
+    lease: { startAllowed: true, capableOwner: null, physicallyAbsent: true },
   };
   expect(() => assertNoPreexistingDaemon(clear)).not.toThrow();
   expect(() => assertNoPreexistingDaemon({ ...clear, statusCode: 0 })).toThrow(/pre-existing/);
   expect(() => assertNoPreexistingDaemon({ ...clear, socketIsAlive: true })).toThrow(/live socket/);
-  expect(() => assertNoPreexistingDaemon({ ...clear, leaseIsAlive: true })).toThrow(/writer-lease/);
+  expect(() =>
+    assertNoPreexistingDaemon({
+      ...clear,
+      lease: { startAllowed: false, capableOwner: null, physicallyAbsent: false },
+    }),
+  ).toThrow(/writer-lease/);
+});
+
+test("battery writer authority distinguishes start, cleanup owner, and physical release", () => {
+  const owner = { pid: 41, token: "owner" };
+  expect(projectBatteryDaemonLease({ status: "absent", path: "/tmp/d.writer" })).toEqual({
+    startAllowed: true,
+    capableOwner: null,
+    physicallyAbsent: true,
+  });
+  expect(
+    projectBatteryDaemonLease({
+      status: "owned",
+      path: "/tmp/d.writer",
+      owner,
+      capability: { status: "proven_stale", reason: "linux_zombie" },
+    }),
+  ).toEqual({ startAllowed: true, capableOwner: null, physicallyAbsent: false });
+  expect(
+    projectBatteryDaemonLease({
+      status: "owned",
+      path: "/tmp/d.writer",
+      owner,
+      capability: { status: "capable", reason: "identity_match" },
+    }),
+  ).toEqual({ startAllowed: false, capableOwner: owner, physicallyAbsent: false });
+  expect(
+    projectBatteryDaemonLease({
+      status: "owned",
+      path: "/tmp/d.writer",
+      owner,
+      capability: { status: "unknown", reason: "identity_unavailable" },
+    }),
+  ).toEqual({ startAllowed: false, capableOwner: null, physicallyAbsent: false });
+  expect(
+    projectBatteryDaemonLease({
+      status: "unknown",
+      path: "/tmp/d.writer",
+      reason: "owner_malformed",
+    }),
+  ).toEqual({ startAllowed: false, capableOwner: null, physicallyAbsent: false });
 });
 
 test("daemon cleanup authority is bound to the exact writer lease", () => {
@@ -203,6 +666,299 @@ test("native-session acceptance rejects missing and API-fallback routes", () => 
       { ...claude, authMode: null, authSource: null },
     ]),
   ).toMatchObject({ valid: false, nonNative: [{ harnessId: "claude" }] });
+});
+
+function profileEntry(harnessId, profileId, status = {}) {
+  return {
+    profile: {
+      harness_id: harnessId,
+      profile_id: profileId,
+      enabled: status.enabled ?? true,
+      isolation_locator: status.locator ?? null,
+    },
+    status: {
+      availability: status.availability ?? "available",
+      verification: status.verification ?? "passed",
+    },
+  };
+}
+
+function profilePool(harnessId, profileId) {
+  return [{ harness_id: harnessId, next_up: { kind: "profile", profileId } }];
+}
+
+test("pool readiness includes Cursor automatically but keeps Agy named-only", () => {
+  const cursorProfile = profileEntry("cursor", "sol-validator");
+  const exhausted = profileEntry("agy", "preferred", { availability: "unavailable" });
+  const agyProfile = profileEntry("agy", "fallback");
+  expect(batteryProfileReady(exhausted)).toBe(false);
+  expect(selectBatteryProfile([exhausted, agyProfile], "agy", "preferred")).toBe(agyProfile);
+  const cursor = projectBatteryHarnessReadiness({
+    harnessId: "cursor",
+    doctorReport: { status: "degraded" },
+    accountPools: profilePool("cursor", "sol-validator"),
+    profileEntries: [cursorProfile],
+    requiredProfileEntry: cursorProfile,
+  });
+  const agy = projectBatteryHarnessReadiness({
+    harnessId: "agy",
+    doctorReport: { status: "degraded" },
+    accountPools: profilePool("agy", "fallback"),
+    profileEntries: [exhausted, agyProfile],
+    requiredProfileEntry: agyProfile,
+  });
+  expect(cursor).toMatchObject({
+    automaticRouteReady: true,
+    requiredRouteReady: true,
+    automaticSource: "account_pool_profile",
+  });
+  expect(agy).toMatchObject({
+    automaticRouteReady: false,
+    requiredRouteReady: true,
+    requiredSource: "named_profile",
+  });
+  expect(automaticBatteryHarnesses(["cursor", "agy"], { cursor, agy })).toEqual(["cursor"]);
+  expect(selectBatteryProfile([exhausted], "agy", "preferred")).toBeNull();
+});
+
+test("explicit named battery rows are independent from default-route readiness", () => {
+  const ready = profileEntry("codex", "proton0");
+  expect(
+    nativeBatteryRowReady({
+      defaultHarnessReady: false,
+      requiresProfile: true,
+      profileEntry: ready,
+    }),
+  ).toBe(true);
+  expect(
+    nativeBatteryRowReady({
+      defaultHarnessReady: false,
+      requiresProfile: false,
+      profileEntry: ready,
+    }),
+  ).toBe(false);
+  expect(
+    nativeBatteryRowReady({
+      defaultHarnessReady: true,
+      requiresProfile: true,
+      profileEntry: profileEntry("codex", "disabled", { enabled: false }),
+    }),
+  ).toBe(false);
+});
+
+test("non-Agy named readiness cannot replace the required automatic route", () => {
+  const named = profileEntry("codex", "proton0");
+  expect(
+    projectBatteryHarnessReadiness({
+      harnessId: "codex",
+      doctorReport: { status: "degraded" },
+      requiredProfileEntry: named,
+    }),
+  ).toMatchObject({
+    automaticRouteReady: false,
+    requiredRouteReady: false,
+    requiredSource: null,
+  });
+});
+
+test.each([
+  {
+    name: "disabled pool profile",
+    input: (() => {
+      const disabled = profileEntry("cursor", "disabled", { enabled: false });
+      return {
+        harnessId: "cursor",
+        doctorReport: { status: "degraded" },
+        accountPools: profilePool("cursor", "disabled"),
+        profileEntries: [disabled],
+        requiredProfileEntry: disabled,
+      };
+    })(),
+    expected: { automaticRouteReady: false, requiredRouteReady: false },
+  },
+  {
+    name: "missing pool profile",
+    input: {
+      harnessId: "cursor",
+      doctorReport: null,
+      accountPools: profilePool("cursor", "missing"),
+    },
+    expected: { automaticRouteReady: false, requiredRouteReady: false },
+  },
+  {
+    name: "legacy doctor without account pools",
+    input: { harnessId: "claude", doctorReport: { status: "ok" } },
+    expected: {
+      automaticRouteReady: true,
+      requiredRouteReady: true,
+      automaticSource: "doctor",
+    },
+  },
+])("battery readiness handles $name", ({ input, expected }) => {
+  expect(projectBatteryHarnessReadiness(input)).toMatchObject(expected);
+});
+
+test("Cursor profile state prioritizes native SQLite/WAL over a large unrelated HOME", () => {
+  const f = fixture();
+  const profileHome = join(f.root, "cursor-profile");
+  const unrelated = join(profileHome, "Ouroboros", "cache");
+  const nativeState = join(profileHome, ".cursor", "chats", "project", "run");
+  mkdirSync(unrelated, { recursive: true });
+  mkdirSync(nativeState, { recursive: true });
+  for (let index = 0; index < 32; index += 1) {
+    writeFileSync(join(unrelated, `${String(index).padStart(3, "0")}.txt`), "noise");
+  }
+  writeFileSync(join(nativeState, "store.db"), "sqlite");
+  writeFileSync(join(nativeState, "store.db-wal"), "wal");
+
+  const state = canonicalBatteryProfileState(
+    profileEntry("cursor", "sol-validator", { locator: profileHome }),
+    "cursor",
+    { maxEntries: 12 },
+  );
+  expect(state).toMatchObject({
+    valid: true,
+    locator: profileHome,
+    scan: { exhausted: false, maxEntries: 12 },
+  });
+  expect(state.files).toEqual([
+    ".cursor/chats/project/run/store.db",
+    ".cursor/chats/project/run/store.db-wal",
+  ]);
+  expect(state.scan.entriesVisited).toBeLessThanOrEqual(12);
+});
+
+test("Cursor profile state rejects directory and symlink SQLite primaries", () => {
+  const f = fixture();
+  const profileHome = join(f.root, "cursor-profile-invalid");
+  const nativeState = join(profileHome, ".cursor", "chats", "project", "run");
+  mkdirSync(join(nativeState, "directory.db"), { recursive: true });
+  writeFileSync(join(nativeState, "directory.db-wal"), "wal");
+  const target = join(profileHome, "real-but-not-db.txt");
+  writeFileSync(target, "not cursor sqlite state");
+  symlinkSync(target, join(nativeState, "linked.db"));
+  writeFileSync(join(nativeState, "linked.db-wal"), "wal");
+
+  expect(
+    canonicalBatteryProfileState(
+      profileEntry("cursor", "sol-validator", { locator: profileHome }),
+      "cursor",
+    ),
+  ).toMatchObject({ valid: false, files: [] });
+});
+
+test("battery model selection keeps Claude on Haiku and prefers available Agy gpt-oss", () => {
+  expect(
+    selectRealHarnessBatteryModel("claude", ["claude-fable-5", "claude-haiku-4-5"]),
+  ).toMatchObject({ id: "claude-haiku-4-5", source: "preferred" });
+  expect(selectRealHarnessBatteryModel("claude", ["claude-fable-5"]).id).toBeNull();
+  expect(
+    selectRealHarnessBatteryModel("agy", ["gemini-3.7-flash-low", "gpt-oss-120b-medium"]),
+  ).toMatchObject({ id: "gpt-oss-120b-medium", source: "preferred" });
+  expect(selectRealHarnessBatteryModel("agy", ["vendor-fast-flash"])).toMatchObject({
+    id: "vendor-fast-flash",
+    source: "cheapest_catalog_fallback",
+  });
+});
+
+test("every automatic Claude CLI task receives Haiku while explicit non-Fable models are allowed", () => {
+  const selectModel = () => ({ id: "claude-haiku-4-5" });
+  expect(
+    withExplicitBatteryModels(
+      ["ask", "2+2", "--harness", "claude", "--effort", "low"],
+      selectModel,
+    ),
+  ).toEqual([
+    "ask",
+    "2+2",
+    "--harness",
+    "claude",
+    "--effort",
+    "low",
+    "--model",
+    "claude-haiku-4-5",
+  ]);
+  expect(
+    withExplicitBatteryModels(["best-of", "fix", "--harness", "codex,claude,cursor"], selectModel),
+  ).toEqual([
+    "best-of",
+    "fix",
+    "--harness",
+    "codex,claude,cursor",
+    "--reviewer-model",
+    "anthropic=claude-haiku-4-5,openai=gpt-5.4-mini",
+    "--primary-harness",
+    "claude",
+    "--model",
+    "claude-haiku-4-5",
+  ]);
+  expect(() =>
+    withExplicitBatteryModels(
+      ["agent", "fix", "--harness", "claude", "--model", "claude-fable-5"],
+      selectModel,
+    ),
+  ).toThrow(/refuses unsafe Claude model alias/);
+  expect(() =>
+    withExplicitBatteryModels(
+      ["ask", "read image", "--harness", "claude", "--model", "best"],
+      selectModel,
+    ),
+  ).toThrow(/refuses unsafe Claude model alias/);
+  expect(
+    withExplicitBatteryModels(
+      ["ask", "read image", "--harness", "claude", "--model", "claude-sonnet-4-6"],
+      selectModel,
+    ),
+  ).toEqual(["ask", "read image", "--harness", "claude", "--model", "claude-sonnet-4-6"]);
+  expect(() =>
+    withExplicitBatteryModels(["plan", "fix", "--harness", "claude"], () => ({
+      id: null,
+    })),
+  ).toThrow(/requires an explicit catalog-backed Claude Haiku/);
+});
+
+test("mutating CLI and direct bodies cannot omit or select forbidden reviewer models", () => {
+  const expected = {
+    anthropic: "claude-haiku-4-5",
+    openai: "gpt-5.4-mini",
+  };
+  expect(batteryReviewerModels()).toEqual(expected);
+  expect(
+    withExplicitBatteryModels(["agent", "fix", "--harness", "codex"], () => ({ id: null })),
+  ).toEqual([
+    "agent",
+    "fix",
+    "--harness",
+    "codex",
+    "--reviewer-model",
+    "anthropic=claude-haiku-4-5,openai=gpt-5.4-mini",
+  ]);
+  expect(() =>
+    withExplicitBatteryModels(
+      [
+        "best-of",
+        "fix",
+        "--harness",
+        "codex,claude",
+        "--reviewer-model",
+        "anthropic=claude-fable-5,openai=gpt-5.3-codex-spark",
+      ],
+      () => ({ id: "claude-haiku-4-5" }),
+    ),
+  ).toThrow(/refuses non-smoke reviewer models/);
+  expect(withBatteryReviewerModels({ mode: "agent" })).toEqual({
+    mode: "agent",
+    reviewerModels: expected,
+  });
+  expect(() =>
+    withBatteryReviewerModels({
+      mode: "agent",
+      reviewerModels: { anthropic: "claude-fable-5", openai: "gpt-5.3-codex-spark" },
+    }),
+  ).toThrow(/refuses non-smoke reviewer models/);
+  expect(batteryReviewerPanelEntry("claude")).toBe("claude=claude-haiku-4-5:low");
+  expect(batteryReviewerPanelEntry("codex")).toBe("codex=gpt-5.4-mini:low");
+  expect(batteryReviewerPanelEntry("cursor")).toBe("cursor=gpt-5.3-codex-low:low");
 });
 
 test("battery ownership is contained by the synthetic repos root", () => {
@@ -383,16 +1139,39 @@ test("valid no-attempt preflight journal stays neutral without telemetry", () =>
     type: "run.created",
     payload: {},
   };
-  expect(
-    validateBatteryRunArtifacts({
-      job: { runId: "run-1", taskId: "task-1" },
-      task: FrozenTaskContractArtifact.parse(batteryTask()),
-      eventText: `${JSON.stringify(event)}\n`,
-      telemetry: null,
-      telemetryPresent: false,
-      ...artifactSchemas,
-    }),
-  ).toMatchObject({ valid: true, reason: null, telemetry: null });
+  const noStart = validateBatteryRunArtifacts({
+    job: { runId: "run-1", taskId: "task-1" },
+    task: FrozenTaskContractArtifact.parse(batteryTask()),
+    eventText: `${JSON.stringify(event)}\n`,
+    telemetry: null,
+    telemetryPresent: false,
+    ...artifactSchemas,
+  });
+  expect(noStart).toMatchObject({ valid: true, reason: null, telemetry: null });
+  expect(noStart.events.some((item) => item.type === "harness.started")).toBe(false);
+
+  const started = {
+    seq: 2,
+    ts: "2026-08-06T00:00:01Z",
+    run_id: "run-1",
+    task_id: "task-1",
+    type: "harness.started",
+    payload: {
+      harness_id: "cursor",
+      attempt_id: "a01",
+      external_context_policy: "off",
+    },
+  };
+  const withStart = validateBatteryRunArtifacts({
+    job: { runId: "run-1", taskId: "task-1" },
+    task: FrozenTaskContractArtifact.parse(batteryTask()),
+    eventText: `${JSON.stringify(event)}\n${JSON.stringify(started)}\n`,
+    telemetry: null,
+    telemetryPresent: false,
+    ...artifactSchemas,
+  });
+  expect(withStart).toMatchObject({ valid: true, reason: null, telemetry: null });
+  expect(withStart.events.some((item) => item.type === "harness.started")).toBe(true);
 });
 
 test("canonical run events discover admitted and raw required-harness attempts", () => {

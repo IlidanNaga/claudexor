@@ -16,6 +16,7 @@ struct RunEvidenceView: View {
     @State private var retrying = false
     @State private var runAgainDraft: RunAgainDraft?
     @State private var runAgainPrompt = ""
+    @State private var runAgainAccess: AccessProfile?
     @State private var showRunAgain = false
     @State private var runningAgain = false
 
@@ -137,6 +138,9 @@ struct RunEvidenceView: View {
                         }
                         runAgainDraft = draft
                         runAgainPrompt = draft.request["prompt"]?.stringValue ?? task.prompt
+                        runAgainAccess = draft.accessChoice.required
+                            ? nil
+                            : draft.request["access"]?.stringValue.flatMap(AccessProfile.init(wire:))
                         showRunAgain = true
                     }
                 } label: { Label("Run Again…", systemImage: "square.and.pencil") }
@@ -186,6 +190,16 @@ struct RunEvidenceView: View {
                 .frame(minHeight: 180)
                 .padding(Theme.Spacing.sm)
                 .background(Theme.surfaceRaisedHi, in: RoundedRectangle(cornerRadius: Theme.Radius.control))
+            if runAgainDraft?.accessChoice.required == true {
+                Picker("Access", selection: $runAgainAccess) {
+                    Text("Choose access…").tag(nil as AccessProfile?)
+                    Text(AccessProfile.workspaceWrite.label)
+                        .tag(AccessProfile.workspaceWrite as AccessProfile?)
+                    Text(AccessProfile.full.label)
+                        .tag(AccessProfile.full as AccessProfile?)
+                }
+                .help("Choose workspace write, or Full after explicitly trusting this repository.")
+            }
             if let draft = runAgainDraft, !draft.differences.isEmpty {
                 ForEach(Array(draft.differences.enumerated()), id: \.offset) { _, difference in
                     Text("\(difference.field): \(difference.change) — \(difference.reason)")
@@ -200,13 +214,19 @@ struct RunEvidenceView: View {
                     runningAgain = true
                     Task {
                         actionError = await model.startRunAgain(
-                            draft, prompt: runAgainPrompt, locationID: locationID)
+                            draft,
+                            prompt: runAgainPrompt,
+                            access: runAgainAccess,
+                            locationID: locationID)
                         runningAgain = false
                         if actionError == nil { showRunAgain = false }
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(runningAgain || runAgainPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(
+                    runningAgain
+                    || runAgainPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || (runAgainDraft?.accessChoice.required == true && runAgainAccess == nil))
             }
         }
         .padding(Theme.Spacing.xl)

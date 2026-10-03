@@ -4,7 +4,8 @@ const CODEX_RATE_LIMIT_RE =
   /rate.?limit|usage.?limit|usagelimitexceeded|too many requests|quota[ _-]?(?:exceeded|exhausted|reached)|(?:http|status|code)[ :/]?429|429 too many/i;
 const CODEX_TRANSIENT_RE =
   /stream disconnected|request timed out|failed to lookup address information|nodename nor servname|eai_again|enotfound|econnreset|etimedout|temporar(?:y|ily) unavailable|network/i;
-const CODEX_RECONNECT_RE = /^Reconnecting\.\.\.\s+(\d+)\/(\d+)\s+\(request timed out\)\s*$/i;
+const CODEX_RECONNECT_RE =
+  /^Reconnecting\.\.\.\s+(\d+)\/(\d+)\s+\((?:request timed out|stream disconnected before completion: idle timeout waiting for SSE)\)\s*$/i;
 
 export function codexReconnectStatus(
   message: string,

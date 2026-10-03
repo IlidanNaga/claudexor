@@ -235,8 +235,13 @@ describe("delivery", () => {
     chmodSync(wrapper, 0o700);
     const oldPath = process.env.PATH;
     const oldHome = process.env.HOME;
+    const oldExecPath = process.execPath;
     process.env.HOME = testHome;
     process.env.PATH = `${wrapperBin}:${oldPath ?? ""}`;
+    // The runtime PATH contract prepends a launchable runner's real directory.
+    // Disable that unrelated prefix so this fixture deterministically exercises
+    // the managed HOME wrapper even when the host Node lives beside git.
+    process.execPath = join(wrapperDir, "no-such-runner-node");
     try {
       const res = await deliver(repo, patch, { mode: "commit", message: "must stay scoped" });
       expect(res.applied).toBe(false);
@@ -249,6 +254,7 @@ describe("delivery", () => {
       );
       expect((await git(repo, ["rev-parse", "HEAD"])).stdout.trim()).not.toBe(res.commit);
     } finally {
+      process.execPath = oldExecPath;
       process.env.PATH = oldPath;
       process.env.HOME = oldHome;
     }
@@ -434,6 +440,7 @@ describe("final_verify apply-gate consumer (INV-115)", () => {
   function gateWith(
     finalVerify: Record<string, unknown> | null,
     decisionOverrides: Record<string, unknown> = {},
+    inputOverrides: Partial<Parameters<typeof validateApplyGate>[0]> = {},
   ) {
     return validateApplyGate({
       state: "succeeded",
@@ -446,6 +453,7 @@ describe("final_verify apply-gate consumer (INV-115)", () => {
       patch,
       originalRepoRoot: process.cwd(),
       targetRepoRoot: process.cwd(),
+      ...inputOverrides,
     });
   }
 
@@ -463,6 +471,33 @@ describe("final_verify apply-gate consumer (INV-115)", () => {
     expect(gateWith({ attempted: true, applied_cleanly: true, gates_passed: true })).toBeNull();
     expect(gateWith({ attempted: false, reason: "no base sha" })).toContain("fresh final check");
     expect(gateWith(null)).toContain("fresh final check");
+  });
+
+  it("defers only a missing saved verifier for thread contribution preflight", () => {
+    const deferred = { deferFinalVerify: true };
+    const unreviewed = makeOutcomeFacts("succeeded", {
+      review: "not_run",
+      review_requested: false,
+    });
+    expect(gateWith(null, {}, deferred)).toBeNull();
+    expect(gateWith(null, { facts: unreviewed }, deferred)).toBeNull();
+    expect(
+      gateWith(null, { facts: { ...unreviewed, review_requested: undefined } }, deferred),
+    ).toContain("isn't ready to apply");
+    expect(gateWith(null, { facts: { ...unreviewed, checks: "failed" } }, deferred)).toContain(
+      "isn't ready to apply",
+    );
+    expect(gateWith({ attempted: false }, {}, deferred)).toContain("fresh final check");
+    expect(gateWith(null, {}, { ...deferred, finalVerify: null })).toContain("fresh final check");
+    expect(gateWith({ attempted: true, applied_cleanly: false }, {}, deferred)).toContain(
+      "no longer applies",
+    );
+    expect(gateWith(null, {}, { ...deferred, patch: "diff --git a/y b/y\n" })).toContain(
+      "hash does not match",
+    );
+    expect(gateWith(null, {}, { ...deferred, originalRepoRoot: null })).toContain(
+      "original project is unknown",
+    );
   });
 
   it("FAILS CLOSED when the verifier ERRORED (applied_cleanly=null): refuses without an override, allows with accept_risk on the BLOCKED run", () => {

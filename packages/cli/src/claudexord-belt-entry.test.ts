@@ -10,9 +10,13 @@ import {
 } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { CLAUDEXOR_VERSION } from "@claudexor/util";
-import { isBeltServeInvocation, runIfDirectEntry } from "./claudexord-entry.js";
+import {
+  dispatchClaudexordEntry,
+  isBeltServeInvocation,
+  runIfDirectEntry,
+} from "./claudexord-entry.js";
 
 const reapDirs: string[] = [];
 afterAll(() => {
@@ -25,6 +29,77 @@ describe("claudexord belt self-entry", () => {
     expect(isBeltServeInvocation([])).toBe(false);
     expect(isBeltServeInvocation(["mcp", "serve"])).toBe(false);
     expect(isBeltServeInvocation(["--probe", "mcp", "serve-belt"])).toBe(false);
+  });
+
+  it("reserves every setup shape for the shared attach owner and never starts the daemon", async () => {
+    const previousExitCode = process.exitCode;
+    const seen: string[][] = [];
+    let daemonStarts = 0;
+    let beltStarts = 0;
+    try {
+      process.exitCode = undefined;
+      await dispatchClaudexordEntry(
+        async () => {
+          daemonStarts += 1;
+        },
+        ["setup", "invalid"],
+        {
+          setupAttach: async (argv) => {
+            seen.push([...argv]);
+            return 2;
+          },
+          beltServe: async () => {
+            beltStarts += 1;
+            return false;
+          },
+        },
+      );
+      expect(seen).toEqual([["setup", "invalid"]]);
+      expect(process.exitCode).toBe(2);
+      expect(daemonStarts).toBe(0);
+      expect(beltStarts).toBe(0);
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+  });
+
+  it("consumes malformed first-token probe input as usage without starting the daemon", async () => {
+    const previousExitCode = process.exitCode;
+    const stderr: string[] = [];
+    const write = vi.spyOn(process.stderr, "write").mockImplementation((value: unknown) => {
+      stderr.push(String(value));
+      return true;
+    });
+    let daemonStarts = 0;
+    let setupStarts = 0;
+    let beltStarts = 0;
+    try {
+      process.exitCode = undefined;
+      await dispatchClaudexordEntry(
+        async () => {
+          daemonStarts += 1;
+        },
+        ["--probe", "setup"],
+        {
+          setupAttach: async () => {
+            setupStarts += 1;
+            return 0;
+          },
+          beltServe: async () => {
+            beltStarts += 1;
+            return false;
+          },
+        },
+      );
+      expect(process.exitCode).toBe(2);
+      expect(stderr.join("")).toContain("usage: claudexord --probe");
+      expect(daemonStarts).toBe(0);
+      expect(setupStarts).toBe(0);
+      expect(beltStarts).toBe(0);
+    } finally {
+      write.mockRestore();
+      process.exitCode = previousExitCode;
+    }
   });
 
   it("dispatches through a filesystem alias to the same packaged entry", () => {

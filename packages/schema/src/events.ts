@@ -1,6 +1,7 @@
 import { z } from "zod/v3";
-import { FallbackReason, Id } from "./primitives.js";
+import { FallbackReason, Id, ModeKind } from "./primitives.js";
 import { AuthMode } from "./budget.js";
+import { CredentialUnusableObservation } from "./credential-profile.js";
 
 export const ControlJournalEvent = z
   .object({
@@ -38,6 +39,32 @@ export const ThreadHeadPing = z
   );
 export type ThreadHeadPing = z.infer<typeof ThreadHeadPing>;
 
+/**
+ * Payload of the JOURNALED copy of a `run.created` event. The per-run
+ * `events.jsonl` keeps the prompt text; the owning global/project journal
+ * partition stores the prompt's digest and byte length instead, so the durable
+ * stream never carries a prompt body (the accepted command already holds it).
+ */
+export const JournaledRunCreatedPayload = z
+  .object({
+    mode: ModeKind,
+    prompt_sha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .describe("sha256 hex digest of the redacted prompt text."),
+    prompt_bytes: z
+      .number()
+      .int()
+      .nonnegative()
+      .describe("UTF-8 byte length of the redacted prompt text."),
+  })
+  .passthrough()
+  .describe(
+    "Journaled `run.created` payload: the prompt text is replaced by its sha256 digest and byte " +
+      "length in the global/project journal partition; the per-run event log keeps the prompt.",
+  );
+export type JournaledRunCreatedPayload = z.infer<typeof JournaledRunCreatedPayload>;
+
 export const RunEventType = z
   .enum([
     "run.created",
@@ -66,6 +93,25 @@ export const RunEventType = z
     "route.profile.headroom_exceeded",
     "route.profile.rotated",
     "route.profile.rotation_exhausted",
+    /** A7 differential probe: on a rotation-eligible failure the CURRENT
+     * credential subject was probed (existing poller/doctor evidence only —
+     * never a quota-spending mini-run) and found UNUSABLE (dead credential,
+     * not spent quota). Payload: RouteCredentialUnusablePayload. */
+    "route.profile.credential_unusable",
+    /** Unified account model (D-U1): an unpinned run's pool selection — the
+     * quota-aware pool of enabled+ready rows picked this account. */
+    "route.account.pool_selected",
+    /** Q1=A disclosed lane switch: the thread's bound account became
+     * disabled/deleted/revoked/exhausted and the run moved to a pool sibling
+     * (the vendor session starts fresh; continuity hydration is disclosed on
+     * the turn). Never silent. */
+    "route.account.lane_switch",
+    /** Q3=A: the pool is empty or every ready row is exhausted. A null
+     * fallback precedes the typed `credential_pool_exhausted` terminal
+     * (waiting for the earliest reset is the default);
+     * `fallback: "api_key_route"` means the EXPLICIT api_key preference opted
+     * the run onto the typed PAID route (INV-061) — never silently under auto. */
+    "route.account.pool_exhausted",
     "route.transient.exhausted",
     /** A subscription->API (or harness->harness) auth switch driven by a typed
      * quota/money signal. Distinct from a plain harness rotation; never silent. */
@@ -93,6 +139,21 @@ export const RunEventType = z
     "interaction.answered",
     "interaction.timeout",
     "interaction.answer_discarded",
+    /** Live message into a running attempt (`POST /v2/runs/:id/messages`).
+     * `message.accepted` = daemon ADMISSION, journaled through a
+     * failure-propagating append BEFORE any native dispatch (nothing is sent
+     * when it cannot land). `message.delivered` = a correlated native
+     * consumption event was observed. `message.refused` = a typed non-delivery
+     * (`outcome` rejected | not_active | unsupported | delivery_unknown plus
+     * `reason`). A native `accepted` verdict adds no row: it is the receipt the
+     * route returns and replays under the same Idempotency-Key. Payload:
+     * {message_id, attempt_id?, harness_id?, outcome?, reason?, live_input?,
+     *  native_turn_id?, text_sha256, text_bytes, text, title}; the journaled
+     * copy drops `text` (daemon journaled-run-events.ts), the per-run
+     * events.jsonl keeps it, and the timeline shows it as the row detail. */
+    "message.accepted",
+    "message.delivered",
+    "message.refused",
     "plan.progress",
     "plan.questions",
     "plan.brief.materialized",
@@ -184,6 +245,24 @@ export const OutputReadyPayload = z
   .strict()
   .describe("Validated payload of an output.ready run event.");
 export type OutputReadyPayload = z.infer<typeof OutputReadyPayload>;
+
+/**
+ * Typed payload for `route.profile.credential_unusable` (A7): the differential
+ * probe's observation plus the attempt it fired in. The rotation module
+ * validates this before stamping it onto the RunEvent payload, so the
+ * unusable verdict is always evidence-backed — code, source, and expiry come
+ * from the observation itself, never invented at emit time.
+ */
+export const RouteCredentialUnusablePayload = CredentialUnusableObservation.extend({
+  attempt_id: z
+    .string()
+    .nullable()
+    .default(null)
+    .describe("Attempt whose rotation-eligible failure triggered the probe, when known."),
+}).describe(
+  "Typed payload for route.profile.credential_unusable: the differential probe's typed observation of a dead credential, validated before being stamped onto the RunEvent payload.",
+);
+export type RouteCredentialUnusablePayload = z.infer<typeof RouteCredentialUnusablePayload>;
 
 /**
  * Typed payload for `route.fallback.*` events. The orchestrator validates this

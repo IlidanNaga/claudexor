@@ -25,11 +25,24 @@ enum AgentStrategy: String, CaseIterable, Identifiable, Hashable {
     }
     var blurb: String {
         switch self {
-        case .single: return "One primary-biased envelope; apply explicitly after review."
+        case .single: return "One candidate with optional model review; completed changes can be applied normally."
         case .bestOf: return "N candidates in isolated envelopes, cross-reviewed, best wins."
         case .untilClean: return "One envelope repaired until gates/review are clean."
         case .create: return "Scaffold a brand-new repo or component."
         }
+    }
+
+    /// Read-only Agent turns cannot enter a repair/convergence loop. Keep the
+    /// other Agent shapes available and remove only the incompatible control.
+    static func composerCases(access: AccessProfile) -> [AgentStrategy] {
+        access == .readOnly ? allCases.filter { $0 != .untilClean } : allCases
+    }
+
+    /// Reconcile stored UI state when access narrows while the popover is
+    /// closed. A stale Until-clean selection becomes the honest Single shape;
+    /// every other strategy remains the user's selection.
+    func reconciling(access: AccessProfile) -> AgentStrategy {
+        access == .readOnly && self == .untilClean ? .single : self
     }
 }
 
@@ -48,7 +61,7 @@ struct ComposerStrategyResolution: Equatable {
     var delegate: Bool
     /// Plan council (D31); only ever true on `.plan`.
     var council: Bool
-    /// Council membership width (2..4) when `council`; nil otherwise (Best-of
+    /// Council membership width (2..effective cap) when `council`; nil otherwise (Best-of
     /// width stays pool-derived in `sendTurn`, never carried here).
     var councilN: Int?
     /// Agent "until clean" repair strategy.
@@ -57,13 +70,14 @@ struct ComposerStrategyResolution: Equatable {
 
 /// Resolve (intent, knobs) → the request-relevant strategy facts. Meaningless
 /// combinations are made unrepresentable: Delegate is dropped off non-agent
-/// intents, Council off non-plan, member count clamped to the wire's 2..4.
+/// intents, Council off non-plan, member count clamped to the daemon's effective cap.
 func resolveComposerStrategy(
     intent: RunMode,
     agentStrategy: AgentStrategy,
     delegate: Bool,
     councilEnabled: Bool,
-    councilMembers: Int
+    councilMembers: Int,
+    maxCouncilMembers: Int
 ) -> ComposerStrategyResolution {
     switch intent {
     case .plan:
@@ -71,7 +85,7 @@ func resolveComposerStrategy(
             return .init(mode: .plan, delegate: false, council: false, councilN: nil, untilClean: false)
         }
         return .init(mode: .plan, delegate: false, council: true,
-                     councilN: min(max(councilMembers, 2), 4), untilClean: false)
+                     councilN: min(max(councilMembers, 2), maxCouncilMembers), untilClean: false)
     case .agent:
         switch agentStrategy {
         case .single:
@@ -89,6 +103,12 @@ func resolveComposerStrategy(
     }
 }
 
+/// Pending config does not change the running daemon's admission. Only engines
+/// that omit this projection keep the historical four-member composer limit.
+func composerCouncilMemberLimit(_ settings: SettingsSnapshot?) -> Int {
+    settings?.runtime?.concurrency?.effective.maxCouncilMembers ?? 4
+}
+
 /// The repair fields that actually survive serialization for one resolved
 /// composer mode. Hidden/stale controls must pass through this owner too: a
 /// Best-of or Create turn, for example, cannot accidentally look convergent to
@@ -100,9 +120,13 @@ struct ComposerRepairWire: Equatable {
 
 func composerRepairWire(
     mode: RunMode,
+    access: AccessProfile,
     requestedAttempts: Int?,
     requestedUntilClean: Bool
 ) -> ComposerRepairWire {
+    guard access != .readOnly else {
+        return ComposerRepairWire(attempts: nil, untilClean: nil)
+    }
     let flags = mode.strategyFlags
     let isPlainAgent = mode == .agent
     let untilClean = (isPlainAgent && requestedUntilClean) || flags.untilClean
@@ -111,12 +135,30 @@ func composerRepairWire(
         untilClean: untilClean ? true : nil)
 }
 
-/// Select a server-projected Git cell from the exact repair fields that will
-/// ride the wire. This classifies; it never decides whether Git is required.
+/// Select a server-projected Git cell from the exact access and repair fields
+/// that will ride the wire. This classifies; it never decides whether Git is
+/// required.
 func composerRunApplicabilityShape(
     mode: RunMode,
+    access: AccessProfile,
     repair: ComposerRepairWire
 ) -> RunApplicabilityShape {
+    guard access != .readOnly else { return .readOnly }
     guard mode.apiValue == "agent" else { return .readOnly }
     return repair.untilClean == true || repair.attempts != nil ? .agentConvergence : .agentOther
+}
+
+/// Project the composer's explicit review choice. Ordinary Single keeps its
+/// existing repair cap while opting out of model review. Selecting a strategy
+/// that promises review, or a reviewer panel, is itself an explicit review request.
+func composerReviewWire(
+    mode: RunMode,
+    requestedReview: Bool?,
+    hasExplicitPanel: Bool,
+    untilClean: Bool
+) -> Bool? {
+    guard mode.apiValue == "agent" else { return nil }
+    if hasExplicitPanel || mode == .bestOfN || mode == .maxAttempts
+        || mode == .untilClean || untilClean { return true }
+    return requestedReview ?? false
 }

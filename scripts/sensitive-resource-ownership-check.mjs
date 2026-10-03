@@ -21,8 +21,11 @@ const LEGACY_IDENTIFIERS = new Set([
 
 const PATH_MARKERS = [
   /(?:^|[/\\*])\.env(?:rc)?(?:[./\\*]|$)/i,
-  /(?:^|[/\\*])\.(?:anthropic|aws|azure|claude|codex|cursor|docker|gcloud|gnupg|kube|openai|ssh)(?:[/\\*]|$)/i,
+  /(?:^|[/\\*])\.(?:anthropic|aws|azure|claude|codex|cursor|docker|gcloud|gemini|gnupg|kube|openai|ssh)(?:[/\\*]|$)/i,
+  /(?:^|[/\\*])Library[\\/]Keychains(?:[/\\*]|$)/i,
   /(?:^|[/\\*])\.(?:git-credentials|netrc|npmrc|pypirc)(?:[/\\*]|$)/i,
+  /(?:^|[/\\*])antigravity-oauth-token(?:[/\\*]|$)/i,
+  /(?:^|[/\\*])login\.keychain-db(?:[/\\*]|$)/i,
   /(?:^|[/\\*])(?:credentials|secrets)(?:[./\\*_-]|$)/i,
   /(?:^|[/\\*])id_(?:dsa|ecdsa|ed25519|rsa)(?:[./\\*_-]|$)/i,
   /\.(?:jks|key|keystore|p12|pem|pfx)(?:[/\\*]|$)/i,

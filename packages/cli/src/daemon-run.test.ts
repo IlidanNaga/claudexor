@@ -9,12 +9,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CliError } from "./cli-error.js";
 import { ENGINE_STOP_REMEDY, observedEngineSkew, recordEngineSkew } from "./engine-skew.js";
 import {
+  DAEMON_CONTROL_API_FRESH_START_TAIL_MS,
+  DAEMON_START_READY_TIMEOUT_MS,
   connectDaemonIfRunning,
   daemonOutcomeSummary,
   ensureDaemon,
   enqueueAndAwait,
   exitCodeForState,
   mergeDaemonRunOutcome,
+  waitForDaemonReady,
 } from "./daemon-run.js";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -384,6 +387,36 @@ const TYPED_STOPPING_503 = () => ({
   }),
 });
 
+/** A recovery-only daemon's SUCCESSFUL handshake (issue #165 D5 / C7). */
+const RECOVERY_ONLY_200 = () => ({
+  status: 200,
+  body: JSON.stringify({
+    protocolMajor: 3,
+    compatible: true,
+    operationsPath: "/v2/operations",
+    engine: { version: CLAUDEXOR_VERSION, sha: "unknown", entry: "/opt/claudexor/daemon.js" },
+    servingMode: "recovery_only",
+  }),
+});
+
+/** A normally-serving daemon's handshake (stage 4 completed). */
+const NORMAL_200 = () => ({
+  status: 200,
+  body: JSON.stringify({
+    protocolMajor: 3,
+    compatible: true,
+    operationsPath: "/v2/operations",
+    engine: { version: CLAUDEXOR_VERSION, sha: "unknown", entry: "/opt/claudexor/daemon.js" },
+    servingMode: "normal",
+  }),
+});
+
+/** Stage-3→4 startup: the first N handshakes report recovery_only, then normal. */
+const STARTUP_WINDOW_200 = (recoveryHandshakes: number) => {
+  let seen = 0;
+  return () => (seen++ < recoveryHandshakes ? RECOVERY_ONLY_200() : NORMAL_200());
+};
+
 describe("absence vs refusal discrimination (#93)", () => {
   let dir: string;
   let prevConfigDir: string | undefined;
@@ -403,6 +436,7 @@ describe("absence vs refusal discrimination (#93)", () => {
   });
 
   afterEach(async () => {
+    vi.useRealTimers();
     if (socketServer) await new Promise<void>((r) => socketServer!.close(() => r()));
     if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
     socketServer = null;
@@ -430,6 +464,27 @@ describe("absence vs refusal discrimination (#93)", () => {
 
   it("connectDaemonIfRunning: absence (no daemon at all) is null, never a spawn", async () => {
     expect(await connectDaemonIfRunning()).toBeNull();
+  });
+
+  it("pins the control-API fresh-start tail as a NAMED slice of the start budget (C10)", () => {
+    // ensureDaemon waits this bounded tail for the control-api pointer AFTER
+    // the socket answers; it must never grow past the whole start budget.
+    expect(DAEMON_CONTROL_API_FRESH_START_TAIL_MS).toBe(10_000);
+    expect(DAEMON_CONTROL_API_FRESH_START_TAIL_MS).toBeLessThan(DAEMON_START_READY_TIMEOUT_MS);
+  });
+
+  it("waitForDaemonReady: the default budget covers a journal-heavy cold start", async () => {
+    vi.useFakeTimers();
+    let settled = false;
+    const pending = waitForDaemonReady().finally(() => {
+      settled = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(DAEMON_START_READY_TIMEOUT_MS - 15_000);
+    expect(await pending).toBeNull();
   });
 
   it("connectDaemonIfRunning: healthz connect-refused is null and clears the skew record", async () => {
@@ -513,6 +568,67 @@ describe("absence vs refusal discrimination (#93)", () => {
     expect(stderrChunks.join("")).toBe("");
   });
 
+  it("connectDaemonIfRunning: surfaces the handshake servingMode to read-only consumers (C7a)", async () => {
+    socketServer = await fakeDaemonSocket(process.env.CLAUDEXOR_DAEMON_SOCK as string);
+    const api = await fakeControlApi(RECOVERY_ONLY_200);
+    httpServer = api.server;
+    writeDaemonFixture(api.port);
+    const conn = await connectDaemonIfRunning();
+    expect(conn).not.toBeNull();
+    expect(conn!.engine.servingMode).toBe("recovery_only");
+  });
+
+  it("ensureDaemon: a daemon that STAYS recovery-only past the budget fails typed + retryable, never proceeding into route refusals (C7d)", async () => {
+    socketServer = await fakeDaemonSocket(process.env.CLAUDEXOR_DAEMON_SOCK as string);
+    const api = await fakeControlApi(RECOVERY_ONLY_200);
+    httpServer = api.server;
+    writeDaemonFixture(api.port);
+    // Short budget: a genuinely blocked root never opens normal admission, so
+    // the bounded wait must end in the SAME typed error as before, only later.
+    const err: unknown = await ensureDaemon(600).then(
+      () => null,
+      (thrown: unknown) => thrown,
+    );
+    expect(err).toBeInstanceOf(CliError);
+    const problem = err as CliError;
+    expect(problem.code).toBe("daemon_recovery_only");
+    expect(problem.retryable).toBe(true);
+    expect(problem.message).toContain("serving recovery only");
+  });
+
+  it("ensureDaemon: a HEALTHY daemon still in startup stage 4 (transient recovery_only handshake) is waited for, not failed (CR3)", async () => {
+    // D5 stage 3 writes the pointer with admission closed; stage 4 opens
+    // normal admission after journal recovery. ensureDaemon must ride that
+    // window out within its budget instead of throwing daemon_recovery_only
+    // at a healthy auto-start.
+    socketServer = await fakeDaemonSocket(process.env.CLAUDEXOR_DAEMON_SOCK as string);
+    const api = await fakeControlApi(STARTUP_WINDOW_200(2));
+    httpServer = api.server;
+    writeDaemonFixture(api.port);
+    const conn = await ensureDaemon(5_000);
+    expect(conn.engine.servingMode).toBe("normal");
+  });
+
+  it("waitForDaemonReady: reports the TERMINAL servingMode, not the transient stage-3 recovery_only (CR3)", async () => {
+    socketServer = await fakeDaemonSocket(process.env.CLAUDEXOR_DAEMON_SOCK as string);
+    const api = await fakeControlApi(STARTUP_WINDOW_200(2));
+    httpServer = api.server;
+    writeDaemonFixture(api.port);
+    const conn = await waitForDaemonReady(5_000);
+    expect(conn).not.toBeNull();
+    expect(conn!.engine.servingMode).toBe("normal");
+  });
+
+  it("waitForDaemonReady: a genuinely blocked root is reported honestly as recovery_only at the deadline (CR3)", async () => {
+    socketServer = await fakeDaemonSocket(process.env.CLAUDEXOR_DAEMON_SOCK as string);
+    const api = await fakeControlApi(RECOVERY_ONLY_200);
+    httpServer = api.server;
+    writeDaemonFixture(api.port);
+    const conn = await waitForDaemonReady(600);
+    expect(conn).not.toBeNull();
+    expect(conn!.engine.servingMode).toBe("recovery_only");
+  });
+
   it("ensureDaemon: a typed refusal short-circuits (no 10s control-API wait, no NO_CONTROL_API flatten)", async () => {
     socketServer = await fakeDaemonSocket(process.env.CLAUDEXOR_DAEMON_SOCK as string);
     const api = await fakeControlApi(TYPED_426);
@@ -537,6 +653,7 @@ describe("absence vs refusal discrimination (#93)", () => {
     httpServer = api.server;
     writeDaemonFixture(api.port);
     const pidFile = join(dir, "fake-daemon.pid");
+    const sourceFile = join(dir, "fake-daemon.launch-source");
     const entry = join(dir, "fake-daemon-entry.cjs");
     writeFileSync(
       entry,
@@ -560,12 +677,14 @@ describe("absence vs refusal discrimination (#93)", () => {
         "});",
         "server.listen(process.env.CLAUDEXOR_DAEMON_SOCK, () => {",
         "  fs.writeFileSync(process.env.CLAUDEXOR_FAKE_DAEMON_PID_FILE, String(process.pid));",
+        '  fs.writeFileSync(process.env.CLAUDEXOR_FAKE_DAEMON_SOURCE_FILE, process.env.CLAUDEXOR_DAEMON_LAUNCH_SOURCE || "missing");',
         "});",
         "setTimeout(() => process.exit(0), 15000);",
       ].join("\n"),
     );
     process.env.CLAUDEXOR_DAEMON_ENTRY = entry;
     process.env.CLAUDEXOR_FAKE_DAEMON_PID_FILE = pidFile;
+    process.env.CLAUDEXOR_FAKE_DAEMON_SOURCE_FILE = sourceFile;
     try {
       const err: unknown = await ensureDaemon().then(
         () => null,
@@ -574,8 +693,10 @@ describe("absence vs refusal discrimination (#93)", () => {
       expect(err).toBeInstanceOf(CliError);
       expect((err as CliError).code).toBe("incompatible_protocol_major");
       expect((err as CliError).requiredActions).toContain(ENGINE_STOP_REMEDY);
+      expect(readFileSync(sourceFile, "utf8")).toBe("cli_ensure_daemon");
     } finally {
       delete process.env.CLAUDEXOR_FAKE_DAEMON_PID_FILE;
+      delete process.env.CLAUDEXOR_FAKE_DAEMON_SOURCE_FILE;
       // Exact-PID cleanup of OUR fake daemon (it also self-exits after 15s).
       try {
         const pid = Number(readFileSync(pidFile, "utf8"));

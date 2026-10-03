@@ -1,4 +1,5 @@
 import { z } from "zod/v3";
+import { RuntimeConcurrencyCaps } from "./runtime-concurrency.js";
 import {
   AccessProfile,
   AuthPreference,
@@ -111,7 +112,9 @@ export const TrustConfig = z
     allow_full_access: z
       .boolean()
       .default(false)
-      .describe("Per-repo allow required before any run may use the full access profile."),
+      .describe(
+        "Per-repo allow required before a run an operator starts at a surface may use the full access profile. An execution.delegated run carries the external orchestrator's own authority and does not need it.",
+      ),
     /**
      * Provenance ONLY: which repo root this file was written for. The file's
      * key stays the repo-root HASH in its filename — this field never gates
@@ -261,6 +264,7 @@ export const GlobalConfig = z
           .describe(
             "Inactivity watchdog for harness streams: no events for this window aborts the stream and fails the attempt with a typed timeout.",
           ),
+        ...RuntimeConcurrencyCaps.shape,
       })
       .strict()
       .default({})
@@ -297,16 +301,18 @@ export const GlobalConfig = z
       .default({})
       .describe("Disk retention policy for engine-owned runtime artifacts."),
     /**
-     * Durable NON-SECRET credential-profile registry (INV-135): additional
-     * credential identities per harness beyond the engine default. Uniqueness
-     * of (harness_id, profile_id) is enforced here; secret material lives in
-     * the vendor dir or the secret store, never in config.
+     * Durable NON-SECRET named-binding registry (INV-135): additional routing
+     * bindings per harness beyond the engine default. Uniqueness of
+     * (harness_id, profile_id) is enforced here; credential material may live
+     * in Claudexor-owned scoped state, a managed secret store, or a
+     * platform-declared vendor/OS-user store, never in config.
      */
     credential_profiles: z
       .array(CredentialProfile)
       .default([])
       .superRefine((profiles, ctx) => {
         const seen = new Set<string>();
+        const locators = new Set<string>();
         for (const p of profiles) {
           const key = `${p.harness_id}\u0000${p.profile_id}`;
           if (seen.has(key))
@@ -315,10 +321,21 @@ export const GlobalConfig = z
               message: `duplicate credential profile ${p.profile_id} for harness ${p.harness_id}`,
             });
           seen.add(key);
+          // Locator uniqueness (unified account model): two rows sharing one
+          // config dir would be two names for ONE scoped state root — deletion,
+          // routing, and quota attribution could not tell them apart.
+          if (p.isolation_locator) {
+            if (locators.has(p.isolation_locator))
+              ctx.addIssue({
+                code: "custom",
+                message: `credential profiles must not share isolation_locator ${p.isolation_locator}`,
+              });
+            locators.add(p.isolation_locator);
+          }
         }
       })
       .describe(
-        "Durable non-secret credential-profile registry; secret material lives in the vendor dir or the secret store, never in config.",
+        "Durable non-secret named-binding registry; credential material may live in Claudexor-owned scoped state, a managed secret store, or a platform-declared vendor/OS-user store, never in config.",
       ),
     harnesses: z
       .record(
@@ -370,17 +387,25 @@ export const GlobalConfig = z
             /**
              * ONE typed profile-selection policy (INV-135, W5.4): what happens
              * when the selected credential profile hits its vendor limit.
-             * Rotation is OPT-IN and rotates only on typed vendor-limit
-             * signals or proactive headroom breaches — never on ordinary
-             * network errors.
+             * `auto` is the stored default and resolves BY CREDENTIAL KIND at
+             * decision time (`effectiveLimitAction`): rotate for subscription
+             * (`local_session`) subjects, fail for metered API-key or unknown
+             * routes. This SUPERSEDES the earlier "rotation is opt-in" lock
+             * (CONCEPT-CHANGE(INV-135), owner decision 2026-08-17): a spent
+             * subscription window fails over by default, while explicitly
+             * persisted `fail`/`ask`/`rotate` values keep their exact meaning
+             * and are never rewritten — only the interpretation of an ABSENT
+             * key changed. Rotation still fires only on typed vendor-limit
+             * signals, proactive headroom breaches, or the structural
+             * pre-progress predicate — never on ordinary network errors.
              */
             profile_policy: z
               .object({
                 limit_action: z
-                  .enum(["fail", "ask", "rotate"])
-                  .default("fail")
+                  .enum(["auto", "fail", "ask", "rotate"])
+                  .default("auto")
                   .describe(
-                    "On a typed vendor limit: fail the attempt, surface a typed ask, or rotate to the next eligible profile.",
+                    "On a typed vendor limit: auto (kind-aware default — rotate for subscription subjects, fail for metered), fail the attempt, surface a typed ask, or rotate to the next eligible profile.",
                   ),
                 rotation_eligible: z
                   .array(z.string())
@@ -392,7 +417,7 @@ export const GlobalConfig = z
                   .number()
                   .min(0)
                   .max(1)
-                  .default(0.9)
+                  .default(1)
                   .describe(
                     "Preflight headroom bound: a selected profile whose active window is at/over this ratio triggers the limit action BEFORE spawn.",
                   ),

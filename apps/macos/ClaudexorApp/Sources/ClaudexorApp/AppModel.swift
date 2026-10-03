@@ -138,11 +138,12 @@ final class AppModel {
     /// bottom-left accounts popover (list + guided add + per-account login).
     var credentialProfiles: [CredentialProfileEntry] = []
     var remoteCredentialProfiles: [ExecutionLocationID: [CredentialProfileEntry]] = [:]
-    /// Per-harness accounts authority projection (INV-135 / V11b): native
-    /// CLI-login state + the server-computed Active identity. The accounts
-    /// surface reads Enabled/Active from HERE so nothing re-derives the symmetry.
-    var harnessAccounts: [HarnessAccounts] = []
-    var remoteHarnessAccounts: [ExecutionLocationID: [HarnessAccounts]] = [:]
+    /// Per-harness POOL authority (unified account model, INV-135): the
+    /// server-computed `next_up` routing verdict per harness. Account facts
+    /// live on the profile rows; routing facts live HERE — nothing re-derives
+    /// the pool client-side (the `harnessAccounts` pseudo-row is retired).
+    var accountPools: [HarnessAccountPool] = []
+    var remoteAccountPools: [ExecutionLocationID: [HarnessAccountPool]] = [:]
     /// Cached registry hydration is independent of an explicit atomic refresh:
     /// opening Accounts, connect, and mutations use the lighter endpoint and do
     /// not put the whole surface into a foreground Refreshing state.
@@ -236,11 +237,10 @@ final class AppModel {
     @ObservationIgnored var makeRuntimeTransport: @Sendable () -> RuntimeReleaseTransport = { GitHubRuntimeReleaseTransport() }
     @ObservationIgnored var didAutoCheckRuntime = false
     @ObservationIgnored var appVersionOverrideForUpdates: String? // test seam — doc at updateFlowAppVersion
-    /// Optimistic auto-balance toggle value while the settings save round-trips
-    /// (owner dogfood: the switch must flip INSTANTLY, not after the daemon
-    /// replies). Cleared when the save settles; a failed save snaps back.
-    /// Actions live in AppModel+CredentialProfiles.swift.
-    var autoBalanceOverride: Bool?
+    /// Optimistic auto-balance pick (tri-state since A6) while the settings
+    /// save round-trips (owner dogfood: the control must flip INSTANTLY).
+    /// Cleared when the save settles; a failed save snaps back.
+    var autoBalanceOverride: AccountsAutoBalance.Choice?
     /// DRAFT-thread workspace mode: false => in_place (default; turns mutate the live
     /// tree), true => isolated (turns accumulate in a thread worktree, applied later via
     /// "Apply thread"). Fixed at thread creation, so it's only editable in the draft.
@@ -606,27 +606,6 @@ final class AppModel {
         return url.path
     }
 
-    func refreshSecrets(locationID requestedLocationID: ExecutionLocationID? = nil) async {
-        let locationID = requestedLocationID ?? activeExecutionLocation
-        guard let requestClient = gateway(for: locationID) else { return }
-        do {
-            let response = try await requestClient.listSecrets()
-            if locationID == .local {
-                secretBackend = response.backend
-                storedSecrets = response.secrets
-            } else {
-                remoteSecretBackends[locationID] = response.backend
-                remoteStoredSecrets[locationID] = response.secrets
-            }
-        } catch {
-            if locationID == .local {
-                secretBackend = "unknown"
-            } else {
-                remoteSecretBackends[locationID] = "unknown"
-            }
-        }
-    }
-
     /// Model-internal busy bracket for turn-start paths that live in other
     /// files (retryTurn in AppModelTrust.swift): `turnSubmitting` keeps its
     /// private(set) so views can never write it directly.
@@ -641,7 +620,7 @@ final class AppModel {
     func startRun(prompt: String, mode: RunMode, harnesses: [HarnessFamily], primary: HarnessFamily?,
                   routingGoal: String, model: String?, n: Int, capUsd: Double?,
                   access: String = "workspace_write", web: String = "auto",
-                  tests: [TestCommandInvocation] = [], reviewerPanel: [ReviewerPanelEntry]? = nil,
+                  tests: [TestCommandInvocation] = [], review: Bool? = nil, reviewerPanel: [ReviewerPanelEntry]? = nil,
                   protectedPathApprovals: [ProtectedPathApproval]? = nil,
                   repoRootOverride: String? = nil) async {
         guard mode != .unknown else {
@@ -675,6 +654,9 @@ final class AppModel {
         )
         optimistic.repoRoot = launchRepoRoot.isEmpty ? nil : launchRepoRoot
         optimistic.tests = tests
+        optimistic.reviewRequested = composerReviewWire(
+            mode: mode, requestedReview: review, hasExplicitPanel: !(reviewerPanel ?? []).isEmpty,
+            untilClean: mode.strategyFlags.untilClean)
         optimistic.reviewerPanel = reviewerPanel
         optimistic.protectedPathApprovals = protectedPathApprovals
         liveTasks.insert(optimistic, at: 0)
@@ -702,6 +684,7 @@ final class AppModel {
                                       primaryHarness: primary?.rawValue,
                                       routingGoal: routingGoal,
                                       model: model?.isEmpty == false ? model : nil,
+                                      review: optimistic.reviewRequested,
                                       reviewerPanel: reviewerPanel,
                                       n: mode == .bestOfN ? max(n, flags.defaultN ?? 2) : nil,
                                       paidBudget: capUsd.map { .finite(maxUsd: $0) }, access: access,
@@ -736,6 +719,7 @@ final class AppModel {
                     started.runDir = info.runDir
                     started.repoRoot = prev.repoRoot
                     started.tests = prev.tests
+                    started.reviewRequested = prev.reviewRequested
                     started.reviewerPanel = prev.reviewerPanel
                     started.protectedPathApprovals = prev.protectedPathApprovals
                     if let idx { liveTasks[idx] = started } else { liveTasks.insert(started, at: 0) }
@@ -763,6 +747,7 @@ final class AppModel {
                     }
                     row.repoRoot = prev.repoRoot
                     row.tests = prev.tests
+                    row.reviewRequested = prev.reviewRequested
                     row.reviewerPanel = prev.reviewerPanel
                     row.protectedPathApprovals = prev.protectedPathApprovals
                     if let idx { liveTasks[idx] = row } else { liveTasks.insert(row, at: 0) }
@@ -805,38 +790,6 @@ final class AppModel {
     }
 
     // MARK: Threads (chat/session-first)
-
-    /// Returns true when the list now REFLECTS server truth (incl. the honest
-    /// 501 empty state); false on transport failure (last-known rows kept) so
-    /// the ping watermark can surrender instead of dropping future pings.
-    @discardableResult
-    func refreshThreads() async -> Bool {
-        guard let client else { return false }
-        do {
-            let list = try await client.listThreads()
-            threads = list.threads
-            projectListingProblems = list.problems
-            if list.droppedThreads > 0 {
-                // Per-row salvage disclosed: the store carried rows this
-                // app build cannot decode — say so instead of hiding them.
-                threadStatus = "\(list.droppedThreads) thread(s) could not be decoded by this app version and are hidden."
-            } else if threadStatus?.contains("could not be decoded") == true {
-                // The condition is gone; a stale warning must not linger.
-                threadStatus = nil
-            }
-            return true
-        } catch let GatewayError.http(status, _) where status == 501 {
-            // Engine builds without thread support: honestly empty.
-            threads = []
-            projectListingProblems = []
-            return true
-        } catch {
-            // A transport/decode failure is NOT an empty thread list: keep the
-            // last-known rows and surface the error.
-            threadStatus = "Could not refresh threads: \(userMessage(for: error))"
-            return false
-        }
-    }
 
     /// The thread the conversation is currently showing (detail preferred — it is
     /// the freshest copy after a PATCH/turn — falling back to the list summary).
@@ -983,7 +936,7 @@ final class AppModel {
     }
 
     /// Eligible harness pool (Best-of runs this; one candidate per harness): thread
-    /// sticky > global default. Empty => engine auto-pools doctor-ok harnesses.
+    /// sticky > global default. Empty => engine auto-pools doctor-OK or exact-profile-ready lanes.
     var effectiveEligiblePool: [String] {
         let sticky = selectedThreadId == nil ? draftEligiblePool : (currentThread?.eligibleHarnesses ?? [])
         if !sticky.isEmpty { return sticky }
@@ -1372,7 +1325,7 @@ final class AppModel {
         // Best-of width = one candidate per harness in the pool (≥2). A SINGLE-harness
         // pool can't race against itself: send n=1 so the engine single-routes that
         // one harness instead of duplicating it (a wasteful self-race). An EMPTY pool
-        // (auto) keeps the default 2 so the engine auto-pools two doctor-ok harnesses.
+        // (auto) keeps the default 2 so the engine can pool two doctor-OK or exact-profile-ready lanes.
         let raceN: Int?
         if mode == .bestOfN {
             raceN = racePool.count == 1 ? 1 : max(2, racePool.count)
@@ -1386,9 +1339,9 @@ final class AppModel {
         // Until Clean / Max Attempts are SINGLE-candidate repair strategies — the
         // engine routes them to convergence (ignoring n), so they only make sense
         // for a plain agent turn, never for Best-of. access/web/budget are per-turn.
-        let writeMode = !mode.isReadOnly
         let repair = composerRepairWire(
             mode: mode,
+            access: options.access.flatMap(AccessProfile.init(wire:)) ?? .workspaceWrite,
             requestedAttempts: options.maxAttempts,
             requestedUntilClean: options.untilClean)
         let result: RunStartResult
@@ -1426,8 +1379,12 @@ final class AppModel {
                 model: model.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 },
                 // Harness-scoped map: specific beats the scalar and defaults.
                 models: normalizedTurnModels(options.models),
+                review: composerReviewWire(
+                    mode: mode, requestedReview: options.review,
+                    hasExplicitPanel: !(options.reviewerPanel ?? []).isEmpty,
+                    untilClean: repair.untilClean == true),
                 reviewerPanel: options.reviewerPanel,
-                access: writeMode ? options.access : nil,
+                access: !mode.isReadOnly ? options.access : nil,
                 web: options.web,
                 browser: options.browser ? true : nil,
                 planRunId: planRunId,

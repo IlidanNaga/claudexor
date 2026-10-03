@@ -323,14 +323,18 @@ extension AppModel {
     func startRunAgain(
         _ draft: RunAgainDraft,
         prompt: String,
+        access: AccessProfile? = nil,
         locationID: ExecutionLocationID
     ) async -> String? {
         let selectionWasAtTarget = selectedExecutionLocation == locationID
         let targetThreadID = selectedThreadId
         guard let requestClient = gateway(for: locationID) else { return "Engine offline." }
+        if draft.accessChoice.required && access == nil {
+            return "Run Again requires an explicit access choice."
+        }
         do {
             let result = try await requestClient.startRunAgain(
-                request: draft.request, prompt: prompt)
+                request: draft.request, prompt: prompt, access: access?.wire)
             guard isCurrentGateway(requestClient, at: locationID) else {
                 threadStatus =
                     "Run Again was accepted, but the engine connection changed before it could be refreshed."

@@ -1,0 +1,10 @@
+{"type":"thread.started","thread_id":"00000000-0000-7000-0000-000000000000"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll create the plan, read target.txt, and mark the step completed."}}
+{"type":"item.started","item":{"id":"item_1","type":"todo_list","items":[{"text":"Inspect the target.","completed":false}]}}
+{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"/bin/bash -lc 'cat target.txt'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"/bin/bash -lc 'cat target.txt'","aggregated_output":"fixture-plan-check\n","exit_code":0,"status":"completed"}}
+{"type":"item.updated","item":{"id":"item_1","type":"todo_list","items":[{"text":"Inspect the target.","completed":true}]}}
+{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"DONE"}}
+{"type":"item.completed","item":{"id":"item_1","type":"todo_list","items":[{"text":"Inspect the target.","completed":true}]}}
+{"type":"turn.completed","usage":{"input_tokens":50730,"cached_input_tokens":37376,"cache_write_input_tokens":0,"output_tokens":272,"reasoning_output_tokens":146}}

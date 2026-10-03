@@ -19,7 +19,7 @@ struct RemoteNativeLoginReadiness: Equatable {
 /// packages/cli/src/harness-installer.ts). The remote CLI re-enforces the
 /// allowlist itself (usage exit 2 for anything else); this constant only
 /// feeds the Settings install menu and the pre-flight guard.
-let installableRemoteHarnesses = ["claude", "codex", "cursor", "opencode"]
+let installableRemoteHarnesses = ["agy", "claude", "codex", "cursor", "opencode"]
 
 enum RemoteHarnessInstallVerification: String, Decodable, Equatable, Sendable {
     case releaseVerified = "release_verified"
@@ -50,14 +50,9 @@ extension AppModel {
         profileID: String? = nil
     ) async {
         let location = ExecutionLocationID.remote(connectionID)
-        guard remoteConnections.contains(where: { $0.id == connectionID }),
-              let admittedLease = beginRemoteAction(.setupLogin, connectionID: connectionID)
+        guard remoteConnections.contains(where: { $0.id == connectionID }) else { return }
+        guard let admittedLease = beginRemoteAction(.setupLogin, connectionID: connectionID)
         else { return }
-        let transport: SetupJobTransport = harness == .codex ? .daemon : .clientPty
-        let terminalPresentation =
-            transport == .clientPty
-            ? beginRemoteTerminalPresentation(connectionID: connectionID)
-            : nil
         // Admit before the first suspension so invocation order, rather than
         // reconnect scheduling order, defines which login is newest.
         remoteDeviceLogin = nil
@@ -66,31 +61,54 @@ extension AppModel {
         {
             dismissRemoteTerminal(request)
         }
-        retireHarnessProjection(at: location)
-        if remoteClients[location] == nil { await connectRemote(connectionID) }
-        guard let reboundLease = rebindRemoteActionToCurrentGeneration(admittedLease) else {
-            if let terminalPresentation {
-                finishRemoteTerminalPresentation(terminalPresentation)
+        let routingDecision = await RemoteSetupLoginRouting
+            .decisionAfterLoadingCurrentProjection(harness: harness) {
+                if remoteClients[location] == nil { await connectRemote(connectionID) }
+                guard remoteClients[location] != nil else { return nil }
+                if remoteHarnessReadinessFresh[location] != true {
+                    _ = await refreshHarnesses(
+                        fresh: true, locationID: location, markStaleOnFailure: true)
+                }
+                guard remoteHarnessReadinessFresh[location] == true else { return nil }
+                return remoteHarnesses[location]
             }
+        guard let reboundLease = rebindRemoteActionToCurrentGeneration(admittedLease) else {
             finishRemoteAction(admittedLease)
             return
         }
         guard let connection = remoteConnections.first(where: { $0.id == connectionID }),
               let client = remoteClients[location]
         else {
-            if let terminalPresentation {
-                finishRemoteTerminalPresentation(terminalPresentation)
-            }
             finishRemoteAction(reboundLease)
             return
         }
         let lease = reboundLease
+        let transport: SetupJobTransport
+        switch routingDecision {
+        case .unavailable(let message):
+            remoteConnectionMessages[connectionID] = message
+            finishRemoteAction(lease)
+            return
+        case .transport(let selected):
+            transport = selected
+        }
+        let codexLoginFlow: SetupCodexLoginFlow? = harness == .codex
+            ? (transport == .daemon ? .deviceAuth : .browserRedirect)
+            : nil
+        let terminalPresentation =
+            transport == .clientPty
+            ? beginRemoteTerminalPresentation(connectionID: connectionID)
+            : nil
+        // Selection consumed the current daemon projection. Retire it only
+        // after that decision so a cold reconnect cannot be mistaken for a
+        // legacy engine whose decoded row genuinely omitted setupLogin.
+        retireHarnessProjection(at: location)
         let setupTarget = RemoteSetupLoginTarget(
             connectionID: connectionID,
             harness: harness.rawValue,
             profileID: profileID,
             transport: transport.rawValue,
-            loginFlow: harness == .codex ? "device_auth" : nil)
+            loginFlow: codexLoginFlow?.rawValue)
         beginRemoteSetupJobOwnership(lease: lease, target: setupTarget)
         var createdJobID: String?
         var handedOff = false
@@ -108,13 +126,11 @@ extension AppModel {
             }
         }
         do {
-            // Codex device auth remains daemon/API driven. Browser-redirect CLI
-            // logins use the same sealed client_pty job as Claude/Cursor.
             let job = try await client.createSetupJob(SetupJobCreateRequest(
                 harness: harness,
                 action: .login,
                 profileId: profileID,
-                loginFlow: harness == .codex ? .deviceAuth : nil,
+                loginFlow: codexLoginFlow,
                 transport: transport))
             createdJobID = job.jobId
             recordRemoteSetupJob(job.jobId, lease: lease, target: setupTarget)
@@ -136,7 +152,7 @@ extension AppModel {
                 }
                 guard presentRemoteTerminal(
                     terminalPresentation,
-                    title: "\(harness.rawValue.capitalized) login — \(connection.displayName)",
+                    title: "\(HarnessFamily(rawValue: harness.rawValue).label) login — \(connection.displayName)",
                     invocation: invocation,
                     purpose: .setup(lease, job.jobId))
                 else {
@@ -146,7 +162,7 @@ extension AppModel {
                 handedOff = true
             } else {
                 remoteConnectionMessages[connectionID] =
-                    "Codex device login started."
+                    "\(HarnessFamily(rawValue: harness.rawValue).label) sign-in started."
                 remoteDeviceLogin = RemoteDeviceLoginRequest(
                     lease: lease, jobID: job.jobId)
                 handedOff = true
@@ -329,7 +345,7 @@ extension AppModel {
                 "~/.claudexor/remote/current/bin/claudexor harness install "
                 + SSHCommandFactory.posixQuote(prompt.harness) + " --yes"
             settingsRemoteTerminalSheet = RemoteTerminalSheetRequest(
-                title: "Install \(prompt.harness.capitalized) — \(connection.displayName)",
+                title: "Install \(HarnessFamily(rawValue: prompt.harness).label) — \(connection.displayName)",
                 invocation: factory.remoteCommand(command, requestTTY: true),
                 purpose: .install(prompt.lease, prompt.harness))
         } catch {
@@ -346,7 +362,7 @@ extension AppModel {
     ) async {
         guard remoteActionIsCurrent(lease) else { return }
         let connectionID = lease.connectionID
-        let displayName = harness.capitalized
+        let displayName = HarnessFamily(rawValue: harness).label
         guard exitCode == 0 else {
             remoteConnectionMessages[connectionID] =
                 "\(displayName) installer failed with exit code \(exitCode)."
@@ -405,6 +421,9 @@ extension AppModel {
         actionLease: RemoteActionLease? = nil
     ) async -> RemoteNativeLoginReadiness? {
         let location = ExecutionLocationID.remote(connectionID)
+        // The vendor's PRODUCT name (Л-14): `agy.capitalized` reads "Agy",
+        // which is the binary nobody recognises.
+        let label = HarnessFamily(rawValue: harnessID).label
         if remoteClients[location] == nil { await connectRemote(connectionID) }
         guard let client = remoteClients[location] else { return nil }
         if let actionLease {
@@ -421,8 +440,8 @@ extension AppModel {
             let readiness = RemoteNativeLoginReadiness.profile(entry)
             remoteConnectionMessages[connectionID] =
                 readiness.nativeSessionVerified && readiness.harnessRoutable
-                ? "\(harnessID.capitalized) account is signed in and ready."
-                : (entry.status.detail ?? "\(harnessID.capitalized) account is not ready yet.")
+                ? "\(label) account is signed in and ready."
+                : (entry.status.detail ?? "\(label) account is not ready yet.")
             return readiness
         }
         guard await refreshHarnesses(
@@ -444,10 +463,10 @@ extension AppModel {
             harnessRoutable: !harness.routableIntents.isEmpty)
         if readiness.nativeSessionVerified && readiness.harnessRoutable {
             remoteConnectionMessages[connectionID] =
-                "\(harnessID.capitalized) is signed in and ready."
+                "\(label) is signed in and ready."
         } else {
             remoteConnectionMessages[connectionID] =
-                harness.reasons.first ?? "\(harnessID.capitalized) is not ready yet."
+                harness.reasons.first ?? "\(label) is not ready yet."
         }
         return readiness
     }

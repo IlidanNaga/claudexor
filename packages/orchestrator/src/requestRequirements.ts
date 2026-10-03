@@ -13,6 +13,7 @@ export interface BrowserLaneRequirementInput {
   harnessId: string;
   requested: boolean;
   manifestCapable: boolean;
+  requiresFullAccess: boolean;
   webPolicy: ExternalContextPolicy;
   access: AccessProfile;
 }
@@ -54,7 +55,7 @@ export interface AttachmentPoolAdmission {
 
 /** Access profiles that map to an unsandboxed/full-access harness lane. */
 export function isFullAccess(access: AccessProfile): boolean {
-  return access === "full" || access === "external_sandbox_full";
+  return access === "full";
 }
 
 export class RequestRequirementsError extends HarnessUnavailableError {
@@ -70,32 +71,16 @@ export class RequestRequirementsError extends HarnessUnavailableError {
 
 /** One preflight owner for requested-vs-effective lane capability truth. */
 export class RequestRequirementsResolver {
-  /**
-   * Patch producers only read; the engine owns materialization and delivery.
-   *
-   * `externallyConfined` is the delegated-run case: Claudexor puts the harness
-   * process inside its OWN OS sandbox, and macOS refuses a nested one, so the
-   * harness must stand its native sandbox down. `external_sandbox_full` is
-   * exactly that instruction and every adapter already maps it — the engine
-   * states an access profile, it does not branch on a harness name. It applies
-   * only where there was something to confine: a lane the transport already
-   * pinned to `readonly` keeps its own read-only enforcement, and a HOST with
-   * no boundary of its own to offer keeps the harness's, because trading the
-   * harness's sandbox for one that will not be applied is a pure loss. The
-   * caller decides that second condition; this owner only spends it.
-   */
+  /** Patch producers only read; the engine owns materialization and delivery. */
   adapterAccess(
     intent: Intent,
     implementationTransport: ImplementationTransport,
     requestedAccess: AccessProfile,
-    externallyConfined = false,
   ): AccessProfile {
-    const access =
-      implementationTransport === "git_patch_envelope" &&
+    return implementationTransport === "git_patch_envelope" &&
       (intent === "implement" || intent === "synthesize")
-        ? "readonly"
-        : requestedAccess;
-    return externallyConfined && access !== "readonly" ? "external_sandbox_full" : access;
+      ? "readonly"
+      : requestedAccess;
   }
 
   assertConvergenceWorkspace(
@@ -269,7 +254,7 @@ export class RequestRequirementsResolver {
         evidence_refs: ["request.external_context_policy"],
       };
     }
-    if (!isFullAccess(input.access)) {
+    if (input.access === "readonly" || (input.requiresFullAccess && !isFullAccess(input.access))) {
       return {
         capability: "browser",
         harness_id: input.harnessId,
@@ -277,7 +262,10 @@ export class RequestRequirementsResolver {
         requested: true,
         effective: false,
         reason: "access_profile_incompatible",
-        evidence_refs: ["task.access.effective_profile"],
+        evidence_refs: [
+          "manifest.capability_profile.mcp_injection_requires_full_access",
+          "task.access.effective_profile",
+        ],
       };
     }
     return {
@@ -289,6 +277,7 @@ export class RequestRequirementsResolver {
       reason: "effective",
       evidence_refs: [
         "manifest.capabilities.browser_tool",
+        "manifest.capability_profile.mcp_injection_requires_full_access",
         "request.external_context_policy",
         "task.access.effective_profile",
       ],
@@ -385,7 +374,7 @@ export class RequestRequirementsResolver {
       .map((resolution) => `${resolution.harness_id}: ${resolution.reason}`)
       .join("; ");
     throw new RequestRequirementsError(
-      `browser was requested but no selected harness lane can receive it${detail ? ` (${detail})` : ""}; choose a browser-capable lane with web enabled and full access`,
+      `browser was requested but no selected harness lane can receive it${detail ? ` (${detail})` : ""}; choose workspace_write on a browser-capable lane whose native MCP policy allows it, or explicitly trust the repository and choose full`,
       resolutions,
     );
   }

@@ -1,6 +1,8 @@
 {
+  "effort-resolution-downward": "EffortResolution",
   "handshake-response": "ControlHandshakeResponse",
   "handshake-response-unknown-sha": "ControlHandshakeResponse",
+  "handshake-response-recovery-only": "ControlHandshakeResponse",
   "problem-minimal": "ControlProblem",
   "problem-maximal": "ControlProblem",
   "thread-minimal": "ControlThread",

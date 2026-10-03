@@ -6,10 +6,10 @@ import ClaudexorKit
 // Replaces the always-expanded sidebar quota footer with ONE Claude-Code-style
 // control: a compact trigger row (worst readiness dot + account name/count +
 // worst quota % + chevron) that expands into a popover to add + log in accounts
-// in-app (no commands to copy; the native login still auto-opens the official
-// vendor CLI in Terminal), read compact per-account quotas, and toggle
-// auto-balance. Registered profiles come from GET /v2/credential-profiles;
-// default logins from the same doctor/quota models the old footer used.
+// in-app (no commands to copy), read compact per-account quotas, and toggle
+// auto-balance. EVERY row comes from GET /v2/credential-profiles (unified
+// account model — no client-synthesized "CLI login" pseudo-row); the next-up
+// badge comes from the response's `accountPools` pool authority.
 
 /// The sidebar footer (bottom-left): a quiet update chip (M5c shell), the
 /// in-effect credential-profile line, and the accounts trigger. Composed so the footer is
@@ -34,9 +34,10 @@ struct SidebarFooter: View {
 }
 
 /// The in-effect credential-profile line: which account the next turn will use
-/// (the thread/draft pin, else the harness default), shown next to its harness.
-/// Truth from the wire (thread/draft sticky); hidden
-/// when there is no resolved harness.
+/// (a thread/draft pin names its account; unpinned threads follow the
+/// quota-aware pool of enabled accounts and render the stable "Automatic"),
+/// shown next to its harness. Truth from the wire (thread/draft sticky);
+/// hidden when there is no resolved harness.
 struct FooterProfileRow: View {
     @Environment(AppModel.self) private var model
 
@@ -131,6 +132,8 @@ struct AccountsPopover: View {
                               systemImage: "wifi.slash")
                             .font(.caption).foregroundStyle(.secondary)
                     } else {
+                        // Every row is a registry row (unified account model), so
+                        // every login targets that exact account.
                         AccountsSurface(family: nil) { row in
                             if let connectionID = model.activeExecutionLocation.remoteConnectionID,
                                let harness = SetupHarness(rawValue: row.family.setupHarnessId)
@@ -150,7 +153,7 @@ struct AccountsPopover: View {
                             }
                             isPresented = false
                         }
-                        autoBalanceToggle
+                        AccountsAutoBalanceControl()
                     }
                 }
                 .padding(Theme.Spacing.lg)
@@ -191,42 +194,6 @@ struct AccountsPopover: View {
         }
     }
 
-    @ViewBuilder private var autoBalanceToggle: some View {
-        let state = model.autoBalanceState
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: Theme.Spacing.sm) {
-                Toggle(isOn: Binding(
-                    get: { state == .on },
-                    set: { on in Task { await model.setAutoBalance(on) } }
-                )) {
-                    Text("Auto-switch accounts at quota limit").font(.callout)
-                }
-                .toggleStyle(.switch)
-                .tint(Theme.accent)
-                // Per-harness rotate flags disagree → the aggregate is indeterminate:
-                // show "—" rather than misreporting the mixed state as off.
-                .disabled(state == .unavailable)
-                if state == .mixed {
-                    Text("—")
-                        .font(.callout.weight(.semibold)).foregroundStyle(Theme.status(.caution))
-                        .help("Harnesses disagree — turning this on sets them all to rotate.")
-                }
-            }
-            Text(autoBalanceCaption(state))
-                .font(.caption2).foregroundStyle(.secondary)
-        }
-    }
-
-    private func autoBalanceCaption(_ state: AccountsAutoBalance.State) -> String {
-        switch state {
-        case .unavailable:
-            return "Add a second account to a harness to enable auto-switch at its quota limit."
-        case .mixed:
-            return "Harnesses disagree (—) — turning this on sets them all to rotate among enabled accounts."
-        case .on, .off:
-            return "When one account hits its quota, runs continue on another enabled account of the same harness."
-        }
-    }
 }
 
 /// One inline owner for row-level account actions. A new action clears the old
@@ -234,16 +201,19 @@ struct AccountsPopover: View {
 struct AccountsActionNotice: Equatable {
     private(set) var generation: UInt64 = 0
     private(set) var message: String?
+    private(set) var isError = false
 
     mutating func begin() -> UInt64 {
         generation &+= 1
         message = nil
+        isError = false
         return generation
     }
 
-    mutating func settle(_ message: String?, generation: UInt64) {
+    mutating func settle(_ message: String?, isError: Bool = true, generation: UInt64) {
         guard generation == self.generation else { return }
         self.message = message
+        self.isError = isError
     }
 }
 
@@ -255,25 +225,30 @@ struct AccountsSurface: View {
     @Environment(AppModel.self) private var model
     /// nil = every family (popover); set = only that family's accounts.
     let family: HarnessFamily?
-    /// False when the host already IS the default login surface (AuthSheet) —
-    /// only registered profiles are listed there.
-    var includeDefaults = true
     /// Present the login UI for a row's account; the host owns presentation.
     let login: (AccountRowModel) -> Void
     /// Host-owned lifecycle gate (the AuthSheet disables its current target
     /// while setup recovery/action state is unresolved).
     var loginDisabled: (AccountRowModel) -> Bool = { _ in false }
+    /// Family-scoped hosts (the AuthSheet) supply the profile-less BOOTSTRAP
+    /// sign-in shown when the family has no rows yet: the engine ensures the
+    /// `<harness>-default` row and binds the login to it (the job reports the
+    /// resolved profileId). nil hides the affordance (the global popover's
+    /// add flow covers the empty state instead).
+    var bootstrapLogin: (() -> Void)? = nil
+    /// Host-owned gate for the bootstrap sign-in (mirrors `loginDisabled`).
+    var bootstrapLoginDisabled = false
 
     @State private var addDisplayName = ""
-    @State private var addHarnessChoice = "claude"
+    @State private var addHarnessChoice = AccountsPresentation.defaultAddHarnessId
     @State private var addError: String?
     @State private var adding = false
     @State private var pendingDelete: AccountRowModel?
     @State private var deleting = false
     @State private var actionNotice = AccountsActionNotice()
     @State private var quotaSubscription: AccountsQuotaSubscription?
-    /// The add form registers config_dir_login profiles using the same
-    /// harness set the daemon supports.
+    /// The add form registers agy/claude/codex/cursor config_dir_login
+    /// profiles using the same harness set the daemon supports.
     private var addHarness: String? {
         guard let family else { return addHarnessChoice }
         let id = family.setupHarnessId
@@ -282,8 +257,7 @@ struct AccountsSurface: View {
 
     private var rows: [AccountRowModel] {
         AccountsPresentation.rows(model: model).filter { row in
-            (includeDefaults || row.isProfile)
-                && (family == nil || row.harnessId == family?.setupHarnessId)
+            family == nil || row.harnessId == family?.setupHarnessId
         }
     }
 
@@ -292,11 +266,30 @@ struct AccountsSurface: View {
         return false
     }
 
+    /// Harnesses whose pool verdict says the next UNPINNED run rides the policy
+    /// API-key ROUTE (INV-061) — a route, never an account row, so it cannot be
+    /// a "Next up" badge and is disclosed as its own quiet line instead. The
+    /// pure helper limits this to config-dir-login families: for api-key-primary
+    /// ones the key is the ordinary route, not a degradation to announce.
+    private var apiKeyRouteDisclosures: [String] {
+        AccountsPresentation.apiKeyRouteDisclosureHarnessIds(
+            family: family,
+            poolHarnessIds: model.activeAccountPools.map(\.harnessId),
+            isApiKeyRouteNextUp: { model.authoritativeNextUp(for: $0)?.isApiKeyRoute == true })
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
             accountsList
+            ForEach(apiKeyRouteDisclosures, id: \.self) { harness in
+                Label(
+                    "\(HarnessFamily(rawValue: harness).label): the next unpinned run uses the API-key route (no enabled account is ready).",
+                    systemImage: "key")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
             if let notice = actionNotice.message {
-                Text(notice).font(.caption2).foregroundStyle(Theme.status(.negative))
+                Text(notice).font(.caption2).foregroundStyle(
+                    actionNotice.isError ? Theme.status(.negative) : Color.secondary)
                     .textSelection(.enabled)
             }
             if addHarness != nil {
@@ -320,26 +313,26 @@ struct AccountsSurface: View {
             Task { await model.ensureCredentialProfilesLoaded(locationID: locationID) }
         }
         .confirmationDialog(
-            "Remove \(pendingDelete?.displayName ?? "account")?",
+            "Remove \(pendingDelete?.displayName ?? "account") from Claudexor?",
             isPresented: Binding(
                 get: { pendingDelete != nil },
                 set: { if !$0 { pendingDelete = nil } }
             ),
             titleVisibility: .visible
         ) {
-            Button("Remove Account", role: .destructive) {
+            Button("Remove from Claudexor", role: .destructive) {
                 if let row = pendingDelete { Task { await deleteAccount(row) } }
             }
             Button("Cancel", role: .cancel) { pendingDelete = nil }
         } message: {
-            Text("Deletes this account's registration and its own login/key from Claudexor. The default \(pendingDelete?.family.label ?? "vendor") login is untouched.")
+            Text("Claudexor removes this binding and any Claudexor-owned state or managed secret. A vendor credential for this OS user may be left unchanged.")
         }
     }
 
-    /// The Enabled-toggle action for a row (V11b — LIVE). A profile row PATCHes
-    /// its own `enabled`; the CLI-login row drives the harness's
-    /// `native_credentials_enabled` via the settings surface. Both reload the
-    /// projection after (the popover's reload-after-PATCH pattern).
+    /// The Enabled-toggle action for a row — the profile PATCH route,
+    /// uniformly on EVERY row (unified account model: the retired
+    /// `native_credentials_enabled` settings path died with the pseudo-row).
+    /// Reloads the projection after (the popover's reload-after-PATCH pattern).
     private func enabledAction(_ row: AccountRowModel) -> (Bool) -> Void {
         { enabled in
             let generation = actionNotice.begin()
@@ -350,7 +343,7 @@ struct AccountsSurface: View {
         }
     }
 
-    /// One mapping for both symmetric Enabled rows. The caller owns presenting
+    /// One mapping for the uniform Enabled toggle. The caller owns presenting
     /// the returned bounded user message instead of silently discarding it.
     @MainActor
     static func setEnabled(
@@ -358,12 +351,8 @@ struct AccountsSurface: View {
         to enabled: Bool,
         model: AppModel
     ) async -> String? {
-        if let profileId = row.profileId {
-            return await model.setProfileEnabled(
-                harnessId: row.harnessId, profileId: profileId, enabled: enabled)
-        }
-        return await model.setNativeCredentialsEnabled(
-            harnessId: row.harnessId, enabled: enabled)
+        await model.setProfileEnabled(
+            harnessId: row.harnessId, profileId: row.profileId, enabled: enabled)
     }
 
     private var accountsList: some View {
@@ -432,12 +421,32 @@ struct AccountsSurface: View {
             }
             if rows.isEmpty, !loadFailed {
                 GridRow {
-                    Label(model.activeAccountsRegistryLoadState == .loading
-                          ? "Loading accounts…" : "No accounts yet — add one below.",
-                          systemImage: "person.crop.circle.badge.plus")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .gridCellColumns(AccountsPresentation.AccountRowColumn.allCases.count + 1)
+                    VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                        Label(model.activeAccountsRegistryLoadState == .loading
+                              ? "Loading accounts…"
+                              : bootstrapLogin != nil
+                                  ? "No accounts yet — sign in, or add one below."
+                                  : "No accounts yet — add one below.",
+                              systemImage: "person.crop.circle.badge.plus")
+                            .font(.caption).foregroundStyle(.secondary)
+                        // The bootstrap sign-in (unified account model, K.4):
+                        // a profile-less login the engine resolves onto the
+                        // `<harness>-default` row — a cancelled/failed login
+                        // keeps that row cold with its own Sign in affordance.
+                        if let bootstrapLogin,
+                           model.activeAccountsRegistryLoadState != .loading {
+                            Button("Sign in", action: bootstrapLogin)
+                                .buttonStyle(.borderedProminent)
+                                .tint(Theme.accentSolid)
+                                .controlSize(.small)
+                                .disabled(bootstrapLoginDisabled)
+                                .help(bootstrapLoginDisabled
+                                      ? "Login is unavailable until setup state resolves."
+                                      : "Start the official CLI sign-in — the account appears here as its own row.")
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .gridCellColumns(AccountsPresentation.AccountRowColumn.allCases.count + 1)
                 }
             } else if !rows.isEmpty {
                 ForEach(rows) { row in
@@ -445,11 +454,11 @@ struct AccountsSurface: View {
                         row: row,
                         login: { login(row) },
                         loginDisabled: loginDisabled(row),
-                        // V11b: the Enabled toggle is the ONLY routing control — a
-                        // profile row PATCHes its own `enabled`; the CLI-login row
-                        // drives the harness's `native_credentials_enabled`.
+                        // The Enabled toggle is the ONLY routing control — the
+                        // profile PATCH route, uniformly on every row.
                         setEnabled: enabledAction(row),
-                        delete: row.isProfile && !deleting ? { pendingDelete = row } : nil
+                        // Unified account model: Delete on EVERY row.
+                        delete: deleting ? nil : { pendingDelete = row }
                     )
                 }
             }
@@ -465,9 +474,9 @@ struct AccountsSurface: View {
             HStack(spacing: Theme.Spacing.sm) {
                 if family == nil {
                     Picker("", selection: $addHarnessChoice) {
-                        Text("Claude").tag("claude")
-                        Text("Codex").tag("codex")
-                        Text("Cursor").tag("cursor")
+                        ForEach(AccountsPresentation.addableFamilies) { addable in
+                            Text(addable.label).tag(addable.rawValue)
+                        }
                     }
                     .labelsHidden()
                     .fixedSize()
@@ -481,7 +490,7 @@ struct AccountsSurface: View {
                 Text(err).font(.caption2).foregroundStyle(Theme.status(.negative)).textSelection(.enabled)
             }
             HStack {
-                Text("A second \(family?.label ?? "Claude, Codex, or Cursor") subscription — one click opens the official CLI login.")
+                Text(AccountsPresentation.addAccountCaption(family: family))
                     .font(.caption2).foregroundStyle(.secondary)
                 Spacer()
                 Button(adding ? "Adding…" : "Add & log in") { Task { await addAccount() } }
@@ -489,6 +498,9 @@ struct AccountsSurface: View {
                     .tint(Theme.accentSolid)
                     .controlSize(.small)
                     .disabled(adding)
+                    .help(adding
+                          ? "Registering the account — wait for it to finish."
+                          : "Register this account and open its official CLI login.")
             }
         }
     }
@@ -527,14 +539,17 @@ struct AccountsSurface: View {
     }
 
     private func deleteAccount(_ row: AccountRowModel) async {
-        guard let profileId = row.profileId, !deleting else { return }
+        guard !deleting else { return }
         deleting = true
         let generation = actionNotice.begin()
         defer { deleting = false; pendingDelete = nil }
-        // nil = removed cleanly; else the daemon's refusal (409 while a login
-        // job is active) or a disclosed cleanup warning — shown verbatim.
+        // nil = the binding and any Claudexor-owned state or managed secret
+        // were removed (D-U4); a vendor OS-user credential may remain
+        // unchanged. Otherwise the daemon refused — a 409 while a login job is
+        // active, or the typed RETRYABLE 503 `credential_cleanup_failed` that kept the row
+        // registered so Remove can simply be pressed again.
         let notice = await model.deleteCredentialProfile(
-            harnessId: row.harnessId, profileId: profileId)
-        actionNotice.settle(notice, generation: generation)
+            harnessId: row.harnessId, profileId: row.profileId)
+        actionNotice.settle(notice.message, isError: notice.isError, generation: generation)
     }
 }

@@ -9,6 +9,15 @@ import Testing
             var reason: String?
         }
 
+        struct ReviewCase: Decodable {
+            var name: String
+            var swiftMode: String
+            var review: Bool?
+            var untilClean: Bool?
+            var reviewerPanel: [[String: String]]?
+            var requested: Bool
+        }
+
         struct RunControl: Decodable {
             var name: String
             var schemaMode: String
@@ -79,6 +88,7 @@ import Testing
 
         var generatedBy: [String]
         var runControls: [RunControl]
+        var reviewCases: [ReviewCase]
         var attachmentInputs: [AttachmentInput]
         var attachmentCases: [AttachmentCase]
         var attachmentPoolCases: [AttachmentPoolCase]
@@ -92,8 +102,16 @@ import Testing
             )
         )
         let fixture = try JSONDecoder().decode(Fixture.self, from: Data(contentsOf: fixtureURL))
-        #expect(fixture.generatedBy == ["runControlApplicability", "RequestRequirementsResolver"])
+        #expect(fixture.generatedBy == ["runControlApplicability", "resolveRunReviewRequested", "RequestRequirementsResolver"])
 
+        for testCase in fixture.reviewCases {
+            let mode = try #require(RunMode(rawValue: testCase.swiftMode))
+            #expect(composerReviewWire(
+                mode: mode, requestedReview: testCase.review,
+                hasExplicitPanel: !(testCase.reviewerPanel ?? []).isEmpty,
+                untilClean: testCase.untilClean == true) == testCase.requested,
+                Comment(rawValue: testCase.name))
+        }
         for testCase in fixture.runControls {
             let mode = try #require(
                 RunMode(rawValue: testCase.swiftMode),

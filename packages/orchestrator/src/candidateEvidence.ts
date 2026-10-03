@@ -7,12 +7,15 @@ import type { DeclaredFailure } from "./runTerminalResults.js";
 import type { AppliedAttemptFacts } from "./delegatedHome.js";
 import type { SecretDiffRefusal } from "./secretDiff.js";
 import { toolWarnings } from "./attemptTelemetry.js";
+import { directoryHasOutput, type DirectoryCandidate } from "./directoryCandidate.js";
+import { gatesPassed } from "@claudexor/review";
 
 export interface CandidateRun {
   attemptId: string;
   harnessId: string;
   label: string;
   diff: string;
+  files?: DirectoryCandidate;
   answerText?: string;
   reviewCwd?: string;
   baseSha?: string;
@@ -39,9 +42,9 @@ export interface CandidateRun {
    * read prose to recover what the thrower already knew. */
   declaredFailure?: DeclaredFailure;
   /** What this attempt's harness process actually ran under (HOME, access,
-   * credential profile, applied OS boundary). Present on the success path AND
-   * on the per-slot failure path: a delegated caller audits the confinement it
-   * asked for instead of trusting that it happened. */
+   * credential profile, and historical/deliberate outer-boundary evidence).
+   * Present on success and per-slot failure so a delegated caller reads the
+   * applied fact instead of inferring it from the request. */
   applied?: AppliedAttemptFacts;
 }
 
@@ -56,9 +59,11 @@ export interface CandidateRun {
  * exhausted window still exhausted. An unknown reset anywhere makes the run's
  * reset unknown — a partial answer here is worse than none.
  */
-export function unanimousDeclaredFailure(runs: readonly CandidateRun[]): DeclaredFailure | null {
+export function unanimousDeclaredFailure(
+  runs: readonly Pick<CandidateRun, "declaredFailure">[],
+): DeclaredFailure | null {
   const first = runs[0]?.declaredFailure;
-  if (!first?.code) return null;
+  if (!first || (!first.code && first.category !== "config_error")) return null;
   const declared = runs.map((run) => run.declaredFailure);
   const agrees = declared.every((d) => d?.code === first.code && d?.category === first.category);
   if (!agrees) return null;
@@ -82,7 +87,7 @@ export function isWorkingCandidate(run: CandidateRun): boolean {
   return (
     !run.secretDiffRefusal &&
     run.outcomeClass !== "interrupted" &&
-    (!run.errored || run.diff.length > 0)
+    (!run.errored || run.diff.length > 0 || directoryHasOutput(run.files))
   );
 }
 
@@ -108,7 +113,13 @@ export function partitionCandidates(runs: CandidateRun[]): {
   why: string;
 } {
   const working = runs.filter(isWorkingCandidate);
-  const noChanges = runs.every((r) => r.diff.trim().length === 0 && !r.answerText);
+  const noChanges = runs.some((r) => r.files?.noChanges === null)
+    ? null
+    : runs.every((r) =>
+        r.files
+          ? r.files.noChanges === true && !r.answerText
+          : r.diff.trim().length === 0 && !r.answerText,
+      );
   const facts = runs.some((r) => r.outcomeClass === "interrupted")
     ? makeOutcomeFacts("interrupted", { reason: "context_capacity_exhausted", noChanges })
     : makeOutcomeFacts("failed", { reason: "harness_failed", noChanges });
@@ -135,6 +146,15 @@ export function candidateRoster(
     attemptId: r.attemptId,
     harnessId: r.harnessId,
     telemetry: r.telemetry,
+  }));
+}
+
+/** Candidate status projection shared by normal and cancelled race results. */
+export function candidateStatuses(runs: readonly CandidateRun[]) {
+  return runs.map((run) => ({
+    attemptId: run.attemptId,
+    harnessId: run.harnessId,
+    status: gatesPassed(run.gates) && !run.errored ? "green" : "red",
   }));
 }
 
@@ -172,14 +192,26 @@ export function toCandidateEvidence(
     acceptanceCovered,
     acceptanceTotal: 0,
     findings,
-    testsPassed: gates.filter((gate) => gate.status === "passed").length,
-    testsTotal: gates.length,
+    // Test counts come from the CONFIGURED gates only (pre-augmentation): the
+    // synthetic harness pseudo-gate above is lifecycle evidence, and counting
+    // it here made a zero-configured-gate errored run report testsTotal=1 →
+    // "tests=0% / gates 0/1" instead of an honest "n/a / not_configured".
+    testsPassed: run.gates.filter((gate) => gate.status === "passed").length,
+    testsTotal: run.gates.length,
     finalReviewClean,
     reviewVerified,
     toolWarningsCount:
       run.telemetry.outcome?.toolWarningsCount ?? toolWarnings(run.telemetry).length,
-    diffSize: run.diff.split("\n").length,
-    diffBytes: Buffer.byteLength(run.diff, "utf8"),
+    diffSize: run.files ? run.files.changedPaths.length : run.diff.split("\n").length,
+    diffBytes: run.files
+      ? run.files.manifest.entries
+          .filter((entry) => run.files!.changedPaths.includes(entry.path))
+          .reduce(
+            (sum, entry) =>
+              sum + (entry.after?.kind === "file" ? Math.max(1, entry.after.sizeBytes) : 1),
+            0,
+          )
+      : Buffer.byteLength(run.diff, "utf8"),
     costUsd: run.cost,
     ...(run.telemetry.outcome?.workState ? { workState: run.telemetry.outcome.workState } : {}),
   };

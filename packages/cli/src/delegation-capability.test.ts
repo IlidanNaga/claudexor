@@ -14,7 +14,7 @@ function manifest(injects: boolean, requiresFullAccess = false) {
       mcp_injection: injects,
       mcp_injection_requires_full_access: requiresFullAccess,
     },
-    access_profiles_supported: ["workspace_write", "external_sandbox_full"],
+    access_profiles_supported: ["workspace_write", "full"],
   });
 }
 

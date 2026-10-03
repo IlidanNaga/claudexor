@@ -4,7 +4,6 @@ import { StatusProjectionCache, globalConfigVersion } from "./status-projection-
 import { normalizeReadiness, type HarnessStatus } from "@claudexor/gateway";
 import { probeGitCapability } from "@claudexor/workspace";
 import { noProjectRepoRoot } from "@claudexor/util";
-import { validateModel } from "@claudexor/core";
 import type {
   CredentialProfile,
   CredentialProfileStatus,
@@ -13,9 +12,10 @@ import type {
 } from "@claudexor/schema";
 import { withQuotaAvailability } from "@claudexor/schema";
 import { vendorVerifiedProfileStatus } from "@claudexor/orchestrator";
-import { harnessAccountsProjection, profileAccountProjection } from "./accounts-projection.js";
-import { buildGateway, harnessModels } from "./registry.js";
+import { accountPoolsProjection, profileAccountProjection } from "./accounts-projection.js";
+import { buildGateway, buildRegistry, checkHarnessModel } from "./registry.js";
 import { delegationCapabilityFor } from "./delegation-capability.js";
+import { effectiveSetupLoginCapability } from "./setup-login-capability.js";
 
 const NO_PROJECT_ROOT = noProjectRepoRoot();
 
@@ -27,23 +27,24 @@ export type HarnessListInput = {
 
 export async function projectHarnessStatuses(statuses: readonly HarnessStatus[]) {
   const cfg = loadConfig(NO_PROJECT_ROOT);
+  const adapters = buildRegistry({ includeFakes: false });
   return Promise.all(
     statuses.map(async (status) => {
       const configured = cfg.global.harnesses[status.id]?.default_model ?? null;
-      let check: { status: "ok" | "rejected"; message?: string | null } | null = null;
-      if (configured) {
-        const truth = await harnessModels(status.id, NO_PROJECT_ROOT, true);
-        check = validateModel(
-          configured,
-          truth.models.map((model) => model.id),
-          truth.source === "api" ? "api" : "manifest",
-        );
-      }
+      // The doctor's configured-model verdict honours the harness's own
+      // absence declaration (INV-104): an advisory harness passes with the
+      // note in the readiness detail instead of failing on a hint-list miss.
+      const check = configured
+        ? (await checkHarnessModel(status.id, configured, NO_PROJECT_ROOT, true)).check
+        : null;
       return {
         ...status,
         configuredModel: configured,
         configuredModelCheck: check,
         delegation: delegationCapabilityFor(status.manifest),
+        setupLogin: await effectiveSetupLoginCapability(status.id, {
+          getAdapter: (id) => adapters.get(id),
+        }),
         readiness: normalizeReadiness({
           checks: status.checks,
           authSources: status.authSources,
@@ -57,25 +58,34 @@ export async function projectHarnessStatuses(statuses: readonly HarnessStatus[])
 
 /** One server-owned Accounts response builder. The opt-in form refreshes quota
  * first and then derives next_up from that exact returned response; no client
- * can accidentally pair a newer quota card with an older routing identity. */
+ * can accidentally pair a newer quota card with an older routing identity.
+ * Returns the listing service plus the pool-authority read
+ * (`GET /v2/account-pools`) so both share one cached projection. */
 export function createCredentialProfilesService(quotaRegistry: () => QuotaRegistry) {
   const projectProfiles = () => {
     const profiles = loadConfig(NO_PROJECT_ROOT).global.credential_profiles;
-    return Promise.all(profiles.map(profileAccountProjection));
+    return Promise.all(profiles.map((profile) => profileAccountProjection(profile, profiles)));
   };
   // The plain (non-snapshot) form is the UI's poll target: without a cache it
   // ran a doctor probe per registered profile plus a full harness sweep
   // inside harnessAccountsProjection on EVERY tick — the daemon-starving load
   // behind the 2026-08-04 "Daemon unreachable: ReadTimeout" login failure.
-  // The snapshot form stays fully fresh: it is the explicit refresh action,
-  // not the poll path. A login/logout invalidates this cache immediately
+  // The snapshot form is the explicit refresh action, not the poll path; its
+  // profile probes and doctor sweep are always fresh, while the QUOTA leg
+  // rides the registry cycle, which skips a vendor inside its poll
+  // rate-limit cooldown and discloses that additively
+  // (quota.refresh_skipped) instead of re-hammering a 429ing endpoint.
+  // A login/logout invalidates this cache immediately
   // (invalidateStatusProjections), so freshness lags at most the short TTL.
   const buildPollResponse = async () => {
     const quota = quotaRegistry().read();
     const out = withVendorVerification(await projectProfiles(), quota);
     return {
       profiles: out,
-      harnessAccounts: await harnessAccountsProjection(NO_PROJECT_ROOT, quota.snapshots, {
+      // Unified account model: the legacy carrier stays PRESENT and empty for
+      // strict old clients; routing facts ride accountPools.
+      harnessAccounts: [],
+      accountPools: await accountPoolsProjection(NO_PROJECT_ROOT, quota.snapshots, {
         profiles: out,
       }),
     };
@@ -83,7 +93,7 @@ export function createCredentialProfilesService(quotaRegistry: () => QuotaRegist
   const pollCache = new StatusProjectionCache<Awaited<ReturnType<typeof buildPollResponse>>>({
     versionOf: globalConfigVersion,
   });
-  return async (input?: { snapshot?: boolean }) => {
+  const credentialProfiles = async (input?: { snapshot?: boolean }) => {
     if (input?.snapshot === true) {
       const [probed, accountStatuses, git, fencedQuota] = await Promise.all([
         projectProfiles(),
@@ -95,9 +105,6 @@ export function createCredentialProfilesService(quotaRegistry: () => QuotaRegist
         quotaRegistry().refreshWithCursor(),
       ]);
       const statuses = accountStatuses.map((receipt) => receipt.status);
-      const accountIdentities = new Map(
-        accountStatuses.map((receipt) => [receipt.status.id, receipt.identity] as const),
-      );
       const rawQuota = fencedQuota.response;
       const out = withVendorVerification(probed, rawQuota);
       // The explicit refresh proved the live state — drop the stale poll
@@ -106,10 +113,10 @@ export function createCredentialProfilesService(quotaRegistry: () => QuotaRegist
       pollCache.invalidate();
       return {
         profiles: out,
-        harnessAccounts: await harnessAccountsProjection(NO_PROJECT_ROOT, rawQuota.snapshots, {
+        harnessAccounts: [],
+        accountPools: await accountPoolsProjection(NO_PROJECT_ROOT, rawQuota.snapshots, {
           profiles: out,
           statuses,
-          accountIdentities,
         }),
         harnesses: await projectHarnessStatuses(statuses),
         git,
@@ -119,6 +126,10 @@ export function createCredentialProfilesService(quotaRegistry: () => QuotaRegist
     }
     return pollCache.read(buildPollResponse);
   };
+  const accountPools = async () => ({
+    accountPools: (await pollCache.read(buildPollResponse)).accountPools,
+  });
+  return { credentialProfiles, accountPools };
 }
 
 /**

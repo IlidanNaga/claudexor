@@ -98,5 +98,20 @@ describe("normalizeReadiness (W4.7)", () => {
       configuredModelCheck: { status: "ok" },
     });
     expect(ok[0]).toMatchObject({ status: "pass", detail: "model-x" });
+    // An advisory harness admitted a model its list lacks: pass, note beside it.
+    const unverified = normalizeReadiness({
+      checks: [],
+      authSources: [],
+      configuredModel: "model-x",
+      configuredModelCheck: {
+        status: "ok",
+        message: 'model "model-x" is not in this harness\'s manifest known-model list; forwarded',
+      },
+    });
+    expect(unverified[0]).toMatchObject({
+      status: "pass",
+      detail:
+        'model-x: model "model-x" is not in this harness\'s manifest known-model list; forwarded',
+    });
   });
 });

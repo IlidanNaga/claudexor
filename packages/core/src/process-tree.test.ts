@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   descendantProcessGroupIds,
   killWindowsProcessTree,
+  processGroupServiceWithWindowsSupport,
   readProcessTable,
   reapProcessTree,
   resolveKillTreeStrategy,
@@ -129,7 +130,10 @@ describe("readProcessTable", () => {
   });
 });
 
-describe("reapProcessTree", () => {
+// The POSIX ladder is exercised against a simulated POSIX world; on a real
+// win32 host `reapProcessTree` dispatches to the taskkill leg below instead,
+// which has its own suite.
+describe.runIf(process.platform !== "win32")("reapProcessTree", () => {
   it("confirms death after the direct group exits on the cooperative signal", async () => {
     const world = fakeWorld({ alive: [100], coopLethal: true });
     const outcome = await reapProcessTree({
@@ -431,7 +435,7 @@ describe("killWindowsProcessTree", () => {
 
   it("invokes taskkill /PID <pid> /T /F from System32 and reports killed on exit 0", () => {
     calls = [];
-    const result = killWindowsProcessTree(4242, run(0));
+    const result = killWindowsProcessTree(4242, run(0), () => true);
     expect(result).toEqual({ status: "killed", pid: 4242 });
     expect(calls).toHaveLength(1);
     expect(calls[0]?.cmd.toLowerCase()).toContain("system32");
@@ -439,19 +443,43 @@ describe("killWindowsProcessTree", () => {
     expect(calls[0]?.args).toEqual(["/PID", "4242", "/T", "/F"]);
   });
 
-  it("maps exit 128 to not_found (the process was already gone)", () => {
+  it("reports not_found only when the root is absent before taskkill", () => {
     calls = [];
-    expect(killWindowsProcessTree(4242, run(128))).toEqual({ status: "not_found", pid: 4242 });
+    expect(killWindowsProcessTree(4242, run(0), () => false)).toEqual({
+      status: "not_found",
+      pid: 4242,
+    });
+    expect(calls).toHaveLength(0);
   });
 
-  it("reports failed with detail on any other exit and on a thrown spawn", () => {
+  it.each([128, 255])(
+    "uses the live root postcondition after aggregate taskkill exit %i",
+    (status) => {
+      calls = [];
+      const probes = [true, false];
+      expect(killWindowsProcessTree(4242, run(status), () => probes.shift() ?? false)).toEqual({
+        status: "killed",
+        pid: 4242,
+      });
+
+      const failed = killWindowsProcessTree(4242, run(status), () => true);
+      expect(failed.status).toBe("failed");
+      expect(failed.status === "failed" && failed.detail).toContain(`taskkill exited ${status}`);
+    },
+  );
+
+  it("reports failed with detail on any other live-root exit and on a thrown spawn", () => {
     calls = [];
-    const failed = killWindowsProcessTree(4242, run(1, "Access is denied."));
+    const failed = killWindowsProcessTree(4242, run(1, "Access is denied."), () => true);
     expect(failed.status).toBe("failed");
     expect(failed.status === "failed" && failed.detail).toContain("Access is denied.");
-    const thrown = killWindowsProcessTree(4242, () => {
-      throw new Error("spawn blew up");
-    });
+    const thrown = killWindowsProcessTree(
+      4242,
+      () => {
+        throw new Error("spawn blew up");
+      },
+      () => true,
+    );
     expect(thrown.status).toBe("failed");
   });
 
@@ -566,5 +594,34 @@ describe("reapProcessTree on win32 (taskkill leg)", () => {
     });
     expect(windowsKills).toBe(0);
     expect(outcome.state).toBe("confirmed");
+  });
+});
+
+describe("processGroupServiceWithWindowsSupport", () => {
+  it("is the ordinary process-group service off win32", () => {
+    expect(processGroupServiceWithWindowsSupport("linux").captureLeader(process.pid)).toEqual(
+      new ProcessGroupService({ platform: "linux" }).captureLeader(process.pid),
+    );
+  });
+
+  it("captures a real win32 leader on Windows and stays unprovable elsewhere", () => {
+    // The live proof of the birth-time reader: on Windows it must resolve this
+    // very process; on any other host the reader cannot run, so identity stays
+    // unprovable and nothing is ever signalled.
+    const capture = processGroupServiceWithWindowsSupport("win32").captureLeader(process.pid);
+    if (process.platform !== "win32") {
+      expect(capture.status).toBe("unknown");
+      return;
+    }
+    expect(capture).toMatchObject({
+      status: "known",
+      handle: {
+        pgid: process.pid,
+        leader: { platform: "win32", source: "win32_process_times", pid: process.pid },
+      },
+    });
+    if (capture.status !== "known") throw new Error("unreachable");
+    // A birth token, not the pid dressed up as one.
+    expect(capture.handle.leader.startToken).not.toBe(`win32:${process.pid}`);
   });
 });

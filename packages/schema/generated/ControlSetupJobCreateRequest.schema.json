@@ -9,7 +9,8 @@
           "enum": [
             "codex",
             "claude",
-            "cursor"
+            "cursor",
+            "agy"
           ],
           "description": "Harness ids with a managed native-login flow."
         },
@@ -25,7 +26,7 @@
         "profileId": {
           "type": "string",
           "minLength": 1,
-          "description": "Registered config_dir_login profile to log in; absent = the default session."
+          "description": "Registered config_dir_login binding to log in under its exact scoped environment; absent = the default session."
         },
         "loginFlow": {
           "type": "string",

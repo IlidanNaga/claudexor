@@ -36,6 +36,14 @@ import {
   type ControlSetupJob,
 } from "@claudexor/schema";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { parseCodexEvent } from "../../harness-codex/src/parse.js";
+import { parseClaudeEvent } from "../../harness-claude/src/parse.js";
+import {
+  createAttemptTelemetry,
+  observeAttemptTelemetry,
+  attemptTelemetryRecord,
+  aggregateRunTokenUsage,
+} from "../../orchestrator/src/attemptTelemetry.js";
 import { rmSync as __rmSyncReap } from "node:fs";
 import { afterAll as __afterAllReap } from "vitest";
 
@@ -254,16 +262,16 @@ describe("normalizeRunStart prompt validation", () => {
       normalizeRunStartRequest({ ...projectScope(), prompt: "plan it", mode: "plan", n: 3 }),
     ).toThrowError(/council membership width|pass --council/);
   });
-  it("rejects an out-of-range council membership n", () => {
-    expect(() =>
+  it("leaves council width above the default to the startup-frozen config cap", () => {
+    expect(
       normalizeRunStartRequest({
         ...projectScope(),
         prompt: "plan it",
         mode: "plan",
         council: true,
         n: 9,
-      }),
-    ).toThrowError(/between 2 and 4/);
+      }).n,
+    ).toBe(9);
   });
 });
 
@@ -828,11 +836,17 @@ describe("DaemonControlApiServer", () => {
       ]);
       expect(credentialProfiles?.responseSchema).toBe("ControlCredentialProfilesQueryResponse");
       const models = ops.find((o) => o.path === "/v2/harnesses/:id/models");
-      expect(models?.parameters[0]).toMatchObject({
+      expect(models?.parameters.find((parameter) => parameter.name === "route")).toMatchObject({
         name: "route",
         location: "query",
         enum: ["local_session", "api_key"],
       });
+      expect(models?.parameters.find((parameter) => parameter.name === "view")).toMatchObject({
+        name: "view",
+        location: "query",
+        enum: ["accounts"],
+      });
+      expect(models?.responseSchema).toBe("ControlHarnessModelsQueryResponse");
       const runEvents = ops.find((o) => o.path === "/v2/runs/:id/events");
       expect(runEvents?.parameters.map((p) => `${p.name}:${p.location}`)).toEqual([
         "Last-Event-ID:header",
@@ -4314,7 +4328,13 @@ describe("DaemonControlApiServer", () => {
           headers: { authorization: `Bearer ${token}` },
         });
         expect(legacy.status).toBe(200);
-        expect(await legacy.json()).toEqual({ profiles: [], harnessAccounts: [] });
+        // The unified account model adds the additive accountPools key (old
+        // clients ignore it); harnessAccounts stays present for strict clients.
+        expect(await legacy.json()).toEqual({
+          profiles: [],
+          harnessAccounts: [],
+          accountPools: [],
+        });
 
         const snapshot = await apiFetch(`${base}/credential-profiles?snapshot=true`, {
           headers: { authorization: `Bearer ${token}` },
@@ -4626,7 +4646,12 @@ describe("DaemonControlApiServer", () => {
       mode: "agent",
       scope: { kind: "project", root: record.runDir, context: "auto" },
       reviewerPanel: [
-        { harness: "claude", model: "claude-opus-4.8", effort: "max" },
+        {
+          harness: "claude",
+          model: "claude-opus-4.8",
+          effort: "max",
+          credentialProfileId: "review-a",
+        },
         { harness: "cursor", model: "gemini-3.5-flash" },
       ],
       protectedPathApprovals: [
@@ -4638,12 +4663,22 @@ describe("DaemonControlApiServer", () => {
         await apiFetch(`${base}/runs/run-d1`, { headers: { authorization: `Bearer ${token}` } })
       ).json()) as {
         summary: {
-          reviewerPanel?: { harness: string; model?: string; effort?: string }[];
+          reviewerPanel?: {
+            harness: string;
+            model?: string;
+            effort?: string;
+            credentialProfileId?: string;
+          }[];
           protectedPathApprovals?: { path: string; reason?: string }[];
         };
       };
       expect(detail.summary.reviewerPanel).toEqual([
-        { harness: "claude", model: "claude-opus-4.8", effort: "max" },
+        {
+          harness: "claude",
+          model: "claude-opus-4.8",
+          effort: "max",
+          credentialProfileId: "review-a",
+        },
         { harness: "cursor", model: "gemini-3.5-flash" },
       ]);
       expect(detail.summary.protectedPathApprovals).toEqual([
@@ -4967,7 +5002,12 @@ describe("DaemonControlApiServer", () => {
           mode: "agent",
           scope: { kind: "project", root: panelRoot },
           reviewerPanel: [
-            { harness: "claude", model: "claude-opus-4-8", effort: "max" },
+            {
+              harness: "claude",
+              model: "claude-opus-4-8",
+              effort: "max",
+              credentialProfileId: "review-a",
+            },
             { harness: "cursor", model: "gemini-3.1-pro" },
             { harness: "cursor", model: "gemini-3.5-flash" },
             { harness: "cursor", model: "gpt-5.5-xhigh-1M" },
@@ -4977,7 +5017,12 @@ describe("DaemonControlApiServer", () => {
       expect(valid.status).toBe(200);
       expect(enqueued).toMatchObject({
         reviewerPanel: [
-          { harness: "claude", model: "claude-opus-4-8", effort: "max" },
+          {
+            harness: "claude",
+            model: "claude-opus-4-8",
+            effort: "max",
+            credentialProfileId: "review-a",
+          },
           { harness: "cursor", model: "gemini-3.1-pro" },
           { harness: "cursor", model: "gemini-3.5-flash" },
           { harness: "cursor", model: "gpt-5.5-xhigh-1M" },
@@ -5176,6 +5221,118 @@ describe("DaemonControlApiServer", () => {
             ],
           };
         },
+      },
+    );
+  });
+
+  it("preserves explicit current setupLogin null/object on raw HTTP wires", async () => {
+    const { daemon } = fakeDaemon();
+    const statusRow = { id: "agy", status: "unavailable", setupLogin: null };
+    const catalog = {
+      ok: true,
+      version: "3.6.0",
+      generatedAt: "2026-08-19T00:00:00Z",
+      git: {
+        status: "missing",
+        version: null,
+        detail: "Git is not installed.",
+        remediation: "Install Git.",
+      },
+      harnesses: [
+        {
+          id: "agy",
+          enabled: true,
+          displayName: "Antigravity CLI",
+          status: "unavailable",
+          providerFamily: "google",
+          enabledIntents: [],
+          disabledIntents: [],
+          reasons: [],
+          configuredModel: null,
+          configuredModelValid: null,
+          models: { source: "none", count: 0, verifiedAgainst: null },
+          webPolicy: "uncontrolled",
+          attachmentInputs: [],
+          effortLevels: [],
+          accessProfilesSupported: ["readonly", "workspace_write", "full"],
+          readonlyMechanism: "none",
+          delegation: {
+            available: false,
+            reason: "manifest_unsupported",
+            remediation: "Choose another harness.",
+            requiresFullAccess: false,
+          },
+          setupLogin: { mode: "external_terminal" },
+        },
+      ],
+      availableHarnesses: [],
+      modes: ["ask", "plan", "agent"],
+      runControlKeys: [],
+      outputSchemaDialects: [
+        {
+          dialect: "draft-07",
+          uri: "http://json-schema.org/draft-07/schema#",
+          defaultWhenOmitted: true,
+        },
+      ],
+      mutability: {
+        readOnlyModes: ["ask", "plan"],
+        writeModes: ["agent"],
+        isolationKinds: ["envelope", "live"],
+        workspaceModes: ["in_place", "isolated"],
+        accessProfiles: ["readonly", "workspace_write", "full"],
+        applyModes: ["apply", "commit", "branch", "pr"],
+      },
+      cliCommands: [],
+      mcpTools: [],
+      runApplyStates: [],
+    };
+    await withDaemonServer(
+      daemon,
+      async (base) => {
+        const harnessResponse = await apiFetch(`${base}/harnesses`, {
+          headers: { authorization: `Bearer ${token}` },
+        });
+        expect(harnessResponse.status).toBe(200);
+        const harnessRaw = await harnessResponse.text();
+        const harnessBody = JSON.parse(harnessRaw) as { harnesses: Record<string, unknown>[] };
+        expect(Object.hasOwn(harnessBody.harnesses[0]!, "setupLogin")).toBe(true);
+        expect(harnessBody.harnesses[0]?.["setupLogin"]).toBeNull();
+        expect(harnessRaw).toContain('"setupLogin":null');
+
+        const catalogResponse = await apiFetch(`${base}/agent-capabilities`, {
+          headers: { authorization: `Bearer ${token}` },
+        });
+        expect(catalogResponse.status).toBe(200);
+        const catalogRaw = await catalogResponse.text();
+        const catalogBody = JSON.parse(catalogRaw) as { harnesses: Record<string, unknown>[] };
+        expect(Object.hasOwn(catalogBody.harnesses[0]!, "setupLogin")).toBe(true);
+        expect(catalogBody.harnesses[0]?.["setupLogin"]).toEqual({
+          mode: "external_terminal",
+        });
+
+        const snapshotResponse = await apiFetch(`${base}/credential-profiles?snapshot=true`, {
+          headers: { authorization: `Bearer ${token}` },
+        });
+        expect(snapshotResponse.status).toBe(200);
+        const snapshotRaw = await snapshotResponse.text();
+        const snapshotBody = JSON.parse(snapshotRaw) as { harnesses: Record<string, unknown>[] };
+        expect(Object.hasOwn(snapshotBody.harnesses[0]!, "setupLogin")).toBe(true);
+        expect(snapshotBody.harnesses[0]?.["setupLogin"]).toBeNull();
+      },
+      undefined,
+      {
+        harnesses: async () => ({ harnesses: [statusRow] }),
+        agentCapabilities: async () => catalog,
+        credentialProfiles: async () => ({
+          profiles: [],
+          harnessAccounts: [],
+          accountPools: [],
+          harnesses: [statusRow],
+          git: catalog.git,
+          quota: { snapshots: [], absences: [], refreshed_at: null },
+          quotaEventCursor: "quota-wire-setup-login",
+        }),
       },
     );
   });
@@ -7932,6 +8089,25 @@ describe("DaemonControlApiServer", () => {
       profile_id: "work",
       model_mismatch: null,
     };
+    // Follow the real native-parser -> attempt -> run artifact -> HTTP projection.
+    const codex = createAttemptTelemetry("off", false);
+    const claude = createAttemptTelemetry("off", false);
+    parseCodexEvent(
+      { type: "turn.completed", usage: { input_tokens: 100, cached_input_tokens: 80 } },
+      "codex",
+    )!.forEach((event) => observeAttemptTelemetry(codex, event));
+    parseClaudeEvent(
+      {
+        type: "result",
+        usage: { input_tokens: 100, cache_read_input_tokens: 50, cache_creation_input_tokens: 20 },
+      },
+      "claude",
+    )!.forEach((event) => observeAttemptTelemetry(claude, event));
+    telemetry["usage_totals"] = aggregateRunTokenUsage([
+      attemptTelemetryRecord("a01", "codex", codex),
+      attemptTelemetryRecord("a02", "claude", claude),
+    ]);
+    const normalized = { total_tokens: 270, cache_read_tokens: 130, cache_write_tokens: null };
     writeFileSync(telemetryPath, stringifyYaml(telemetry));
     await withDaemonServer(daemon, async (base) => {
       const detail = await apiFetch(`${base}/runs/run-d1`, {
@@ -7939,7 +8115,13 @@ describe("DaemonControlApiServer", () => {
       });
       const summary = (
         (await detail.json()) as {
-          summary: { delegation: unknown; authRoute: { profileId: string | null } };
+          summary: {
+            delegation: unknown;
+            authRoute: { profileId: string | null };
+            inputTokenUsage: unknown;
+            inputTokens: number;
+            cachedInputTokens: number;
+          };
         }
       ).summary;
       expect(summary.delegation).toEqual({
@@ -7950,6 +8132,9 @@ describe("DaemonControlApiServer", () => {
         remediation: null,
       });
       expect(summary.authRoute.profileId).toBe("work");
+      expect(summary.inputTokenUsage).toEqual(normalized);
+      expect(summary.inputTokens).toBe(200);
+      expect(summary.cachedInputTokens).toBe(150);
     });
   });
 
@@ -8345,6 +8530,7 @@ describe("DaemonControlApiServer", () => {
       safeMessage: "Auth failed",
       rawDetailRef: null,
       resetsAt: null,
+      vendorFailure: null,
       logRefs: [],
       eventRefs: [],
       runDir: record.runDir as string,
@@ -9180,6 +9366,314 @@ describe("DaemonControlApiServer", () => {
     );
   });
 
+  it("POST /runs returns an already accepted historical-access handle before retirement validation", async () => {
+    const { daemon, record } = fakeDaemon();
+    const historicalBody = {
+      prompt: "historical pending start",
+      mode: "agent",
+      scope: { kind: "project", root: record.runDir },
+      access: "external_sandbox_full",
+    };
+    let findCalls = 0;
+    let enqueueCalls = 0;
+    const wrapped: DaemonFacadeClient = {
+      ...daemon,
+      async findAccepted(params, options) {
+        findCalls += 1;
+        expect(params).toMatchObject({ access: "external_sandbox_full" });
+        expect(options).toMatchObject({
+          idempotencyKey: "historical-start-accepted",
+          idempotencyRequest: expect.objectContaining({ access: "external_sandbox_full" }),
+        });
+        return record;
+      },
+      async enqueue() {
+        enqueueCalls += 1;
+        throw new Error("an accepted replay must not enqueue");
+      },
+    };
+    await withDaemonServer(wrapped, async (base) => {
+      const response = await apiFetch(`${base}/runs`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "Idempotency-Key": "historical-start-accepted",
+        },
+        body: JSON.stringify(historicalBody),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ jobId: record.id, runId: record.runId });
+      expect(findCalls).toBe(1);
+      expect(enqueueCalls).toBe(0);
+    });
+  });
+
+  it("POST /runs refuses an absent historical-access replay only after both durable probes miss", async () => {
+    const { daemon, record } = fakeDaemon();
+    let findCalls = 0;
+    let enqueueCalls = 0;
+    const wrapped: DaemonFacadeClient = {
+      ...daemon,
+      async findAccepted(params) {
+        findCalls += 1;
+        expect(params).toMatchObject({ access: "external_sandbox_full" });
+        return null;
+      },
+      async enqueue() {
+        enqueueCalls += 1;
+        throw new Error("a retired access request must not enqueue");
+      },
+    };
+    await withDaemonServer(wrapped, async (base) => {
+      const response = await apiFetch(`${base}/runs`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "Idempotency-Key": "historical-start-absent",
+        },
+        body: JSON.stringify({
+          prompt: "historical pending start",
+          mode: "agent",
+          scope: { kind: "project", root: record.runDir },
+          access: "external_sandbox_full",
+        }),
+      });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({
+        code: "retired_access_profile",
+        retryable: false,
+      });
+      expect(findCalls).toBe(2);
+      expect(enqueueCalls).toBe(0);
+    });
+  });
+
+  it("POST /runs keeps a historical replay pending when the race-closing lookup is unreadable", async () => {
+    const { daemon, record } = fakeDaemon();
+    let findCalls = 0;
+    let enqueueCalls = 0;
+    const wrapped: DaemonFacadeClient = {
+      ...daemon,
+      async findAccepted(params) {
+        findCalls += 1;
+        expect(params).toMatchObject({ access: "external_sandbox_full" });
+        if (findCalls === 1) return null;
+        throw new Error("durable command index unavailable");
+      },
+      async enqueue() {
+        enqueueCalls += 1;
+        throw new Error("an unknown replay must not enqueue");
+      },
+    };
+    await withDaemonServer(wrapped, async (base) => {
+      const response = await apiFetch(`${base}/runs`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "Idempotency-Key": "historical-start-unknown",
+        },
+        body: JSON.stringify({
+          prompt: "historical pending start",
+          mode: "agent",
+          scope: { kind: "project", root: record.runDir },
+          access: "external_sandbox_full",
+        }),
+      });
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({
+        code: "idempotency_status_unavailable",
+        retryable: true,
+      });
+      expect(findCalls).toBe(2);
+      expect(enqueueCalls).toBe(0);
+    });
+  });
+
+  // The daemon socket transports code/status/retryable; requiredActions do not cross it.
+  const unregisteredRootError = (root: string) =>
+    Object.assign(new Error(`project is not registered: ${root}`), {
+      code: "project_not_registered",
+      status: 404,
+      retryable: false,
+    });
+
+  it("POST /runs answers a typed 404 for an unregistered root and succeeds after POST /projects", async () => {
+    const { daemon } = fakeDaemon();
+    const root = reapMk(join(tmpdir(), "claudexor-unregistered-root-"));
+    const registered = new Set<string>();
+    const requireRegistered = (params: unknown) => {
+      const scope = (params as { scope?: { kind?: string; root?: string } }).scope;
+      if (scope?.kind === "project" && scope.root && !registered.has(scope.root)) {
+        throw unregisteredRootError(scope.root);
+      }
+    };
+    let enqueueCalls = 0;
+    const wrapped: DaemonFacadeClient = {
+      ...daemon,
+      async findAccepted(params) {
+        requireRegistered(params);
+        return null;
+      },
+      async enqueue(params, options) {
+        requireRegistered(params);
+        enqueueCalls += 1;
+        return daemon.enqueue(params, options);
+      },
+    };
+    const now = new Date().toISOString();
+    const services: DaemonControlApiOptions["services"] = {
+      registerProject: async (input) => {
+        registered.add((input as { root: string }).root);
+        return {
+          schema_version: 2,
+          id: "prj-unregistered",
+          root,
+          created_at: now,
+          updated_at: now,
+        };
+      },
+    };
+    await withDaemonServer(
+      wrapped,
+      async (base) => {
+        const start = () =>
+          apiFetch(`${base}/runs`, {
+            method: "POST",
+            headers: { authorization: `Bearer ${token}`, "Idempotency-Key": "unregistered-root" },
+            body: JSON.stringify({
+              prompt: "hello",
+              mode: "agent",
+              scope: { kind: "project", root },
+            }),
+          });
+        const refused = await start();
+        expect(refused.status).toBe(404);
+        expect(await refused.json()).toMatchObject({
+          code: "project_not_registered",
+          retryable: false,
+          requiredActions: [expect.stringMatching(/POST \/v2\/projects.*scope\.ephemeral=true/)],
+        });
+        expect(enqueueCalls).toBe(0);
+
+        const registration = await apiFetch(`${base}/projects`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+          body: JSON.stringify({ root }),
+        });
+        expect(registration.status).toBe(200);
+
+        const accepted = await start();
+        expect(accepted.status).toBe(200);
+        expect(await accepted.json()).toMatchObject({ jobId: expect.any(String) });
+        expect(enqueueCalls).toBe(1);
+      },
+      undefined,
+      services,
+    );
+  });
+
+  it("POST /runs answers the same typed 404 when the root is unregistered between lookup and enqueue", async () => {
+    const { daemon, record } = fakeDaemon();
+    const wrapped: DaemonFacadeClient = {
+      ...daemon,
+      async findAccepted() {
+        return null;
+      },
+      async enqueue() {
+        throw unregisteredRootError(String(record.runDir));
+      },
+    };
+    await withDaemonServer(wrapped, async (base) => {
+      const response = await apiFetch(`${base}/runs`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "Idempotency-Key": "unregistered-race" },
+        body: JSON.stringify({
+          prompt: "hello",
+          mode: "agent",
+          scope: { kind: "project", root: record.runDir },
+        }),
+      });
+      expect(response.status).toBe(404);
+      expect(await response.json()).toMatchObject({
+        code: "project_not_registered",
+        retryable: false,
+        requiredActions: [expect.stringMatching(/POST \/v2\/projects/)],
+      });
+    });
+  });
+
+  it("Exact Retry answers a typed 404, not the custody 503, when the source root is unregistered", async () => {
+    const { daemon, record } = fakeDaemon();
+    record.state = "succeeded";
+    let enqueueCalls = 0;
+    const wrapped: DaemonFacadeClient = {
+      ...daemon,
+      async findAccepted() {
+        throw unregisteredRootError(String(record.runDir));
+      },
+      async enqueue() {
+        enqueueCalls += 1;
+        throw new Error("an unregistered retry must not enqueue");
+      },
+    };
+    await withDaemonServer(wrapped, async (base) => {
+      const response = await apiFetch(`${base}/runs/run-d1/retry`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "Idempotency-Key": "unregistered-retry" },
+        body: "{}",
+      });
+      expect(response.status).toBe(404);
+      expect(await response.json()).toMatchObject({
+        code: "project_not_registered",
+        retryable: false,
+        requiredActions: [expect.stringMatching(/POST \/v2\/projects/)],
+      });
+      expect(enqueueCalls).toBe(0);
+    });
+  });
+
+  it.each([undefined, false, true])(
+    "preserves recorded review=%s through Retry, Run Again and decision rerun",
+    async (review) => {
+      const { daemon, record } = fakeDaemon();
+      if (review !== undefined) record.params = { ...(record.params as object), review };
+      let enqueued: Record<string, unknown> | undefined;
+      const wrapped: DaemonFacadeClient = {
+        ...daemon,
+        async enqueue(params, options) {
+          enqueued = params as Record<string, unknown>;
+          return daemon.enqueue(params, options);
+        },
+      };
+      await withDaemonServer(wrapped, async (base) => {
+        const headers = {
+          authorization: `Bearer ${token}`,
+          "Idempotency-Key": `review-retry-${String(review)}`,
+        };
+        const retried = await apiFetch(`${base}/runs/run-d1/retry`, {
+          method: "POST",
+          headers,
+          body: "{}",
+        });
+        expect(retried.status).toBe(200);
+        expect(enqueued?.["review"]).toBe(review ?? true);
+        const again = await apiFetch(`${base}/runs/run-d1/run-again`, { headers });
+        expect(again.status).toBe(200);
+        expect(((await again.json()) as { request: { review: boolean } }).request.review).toBe(
+          review ?? true,
+        );
+        const rerun = await apiFetch(`${base}/runs/run-d1/decision`, {
+          method: "POST",
+          headers: { ...headers, "Idempotency-Key": `review-feedback-${String(review)}` },
+          body: JSON.stringify({ action: "rerun_with_feedback", feedback: "Complete the work." }),
+        });
+        expect(rerun.status).toBe(200);
+        expect(enqueued?.["review"]).toBe(review ?? true);
+        if (review === undefined) expect(record.params).not.toHaveProperty("review");
+      });
+    },
+  );
+
   it("Exact Retry creates a fresh idempotent command linked to the immutable source request", async () => {
     const { daemon, record } = fakeDaemon();
     let enqueued: Record<string, unknown> | undefined;
@@ -9899,9 +10393,11 @@ describe("DaemonControlApiServer", () => {
       expect(response.status).toBe(200);
       const body = (await response.json()) as {
         request: Record<string, unknown>;
+        accessChoice: { required: boolean };
         differences: Array<{ field: string }>;
       };
       expect(body.request).toMatchObject({ prompt: "hello", mode: "agent" });
+      expect(body.accessChoice.required).toBe(false);
       // The draft must be POSTable as-is: POST /runs 400s every one of these
       // (planRef/threadId included — a surviving planRef would replay the
       // frozen-plan reference past the boundary, INV-081).
@@ -9917,6 +10413,177 @@ describe("DaemonControlApiServer", () => {
         "planRef",
         "threadId",
       ]);
+    });
+  });
+
+  it("refuses Exact Retry of retired access and makes Run Again require an active choice", async () => {
+    const { daemon, record } = fakeDaemon();
+    record.state = "succeeded";
+    record.params = {
+      ...(record.params as Record<string, unknown>),
+      access: "external_sandbox_full",
+    };
+    let findCalls = 0;
+    let enqueueCalls = 0;
+    const wrapped: DaemonFacadeClient = {
+      ...daemon,
+      async findAccepted(params, options) {
+        findCalls += 1;
+        expect(params).toMatchObject({
+          access: "external_sandbox_full",
+          retryOf: "run-d1",
+        });
+        expect(options).toMatchObject({
+          operation: "run.retry",
+          idempotencyRequest: { retryOf: "run-d1" },
+        });
+        return null;
+      },
+      async enqueue() {
+        enqueueCalls += 1;
+        throw new Error("a retired access retry must not enqueue");
+      },
+    };
+    await withDaemonServer(wrapped, async (base) => {
+      const retry = await apiFetch(`${base}/runs/run-d1/retry`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "Idempotency-Key": "retired-retry" },
+        body: "{}",
+      });
+      expect(retry.status).toBe(409);
+      await expect(retry.json()).resolves.toMatchObject({
+        code: "retired_access_profile",
+        retryable: false,
+      });
+
+      const runAgain = await apiFetch(`${base}/runs/run-d1/run-again`, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(runAgain.status).toBe(200);
+      const draft = (await runAgain.json()) as {
+        request: Record<string, unknown>;
+        accessChoice: { required: boolean };
+        differences: Array<{ field: string }>;
+      };
+      expect(draft.request).not.toHaveProperty("access");
+      expect(draft.accessChoice).toEqual({ required: true });
+      expect(draft.differences).toContainEqual(
+        expect.objectContaining({ field: "access", change: "omitted" }),
+      );
+      expect(findCalls).toBe(2);
+      expect(enqueueCalls).toBe(0);
+    });
+  });
+
+  it("keeps retired Exact Retry pending when the race-closing lookup is unreadable", async () => {
+    const { daemon, record } = fakeDaemon();
+    record.state = "succeeded";
+    record.params = {
+      ...(record.params as Record<string, unknown>),
+      access: "external_sandbox_full",
+    };
+    let findCalls = 0;
+    let enqueueCalls = 0;
+    const wrapped: DaemonFacadeClient = {
+      ...daemon,
+      async findAccepted(params, options) {
+        findCalls += 1;
+        expect(params).toMatchObject({ access: "external_sandbox_full", retryOf: "run-d1" });
+        expect(options).toMatchObject({
+          idempotencyKey: "retired-retry-unknown",
+          operation: "run.retry",
+          idempotencyRequest: { retryOf: "run-d1" },
+        });
+        if (findCalls === 1) return null;
+        throw new Error("durable command index unavailable");
+      },
+      async enqueue() {
+        enqueueCalls += 1;
+        throw new Error("an unknown replay must not enqueue");
+      },
+    };
+    await withDaemonServer(wrapped, async (base) => {
+      const response = await apiFetch(`${base}/runs/run-d1/retry`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "Idempotency-Key": "retired-retry-unknown",
+        },
+        body: "{}",
+      });
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({
+        code: "idempotency_status_unavailable",
+        retryable: true,
+      });
+      expect(findCalls).toBe(2);
+      expect(enqueueCalls).toBe(0);
+    });
+  });
+
+  it("Exact Retry returns an already accepted historical-access handle before retirement validation", async () => {
+    const { daemon, record } = fakeDaemon();
+    record.state = "succeeded";
+    record.params = {
+      ...(record.params as Record<string, unknown>),
+      access: "external_sandbox_full",
+    };
+    const acceptedRetry: DaemonRunRecord = {
+      id: "job-retired-retry-accepted",
+      state: "running",
+      runId: "run-retired-retry-accepted",
+      taskId: "task-retired-retry-accepted",
+      runDir: record.runDir,
+      params: {
+        ...(record.params as Record<string, unknown>),
+        parentRunId: "run-d1",
+        retryOf: "run-d1",
+      },
+    };
+    let findCalls = 0;
+    let enqueueCalls = 0;
+    const wrapped: DaemonFacadeClient = {
+      ...daemon,
+      async findAccepted(params, options) {
+        findCalls += 1;
+        expect(params).toMatchObject({ access: "external_sandbox_full", retryOf: "run-d1" });
+        expect(options).toMatchObject({
+          idempotencyKey: "retired-retry-accepted",
+          operation: "run.retry",
+          idempotencyRequest: { retryOf: "run-d1" },
+        });
+        return acceptedRetry;
+      },
+      async enqueue() {
+        enqueueCalls += 1;
+        throw new Error("an accepted retry replay must not enqueue");
+      },
+      async status(id) {
+        if (id === record.id) return record;
+        if (id === acceptedRetry.id) return acceptedRetry;
+        throw new Error(`missing ${id}`);
+      },
+      async list() {
+        return [record, acceptedRetry];
+      },
+    };
+    await withDaemonServer(wrapped, async (base) => {
+      const response = await apiFetch(`${base}/runs/run-d1/retry`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "Idempotency-Key": "retired-retry-accepted",
+        },
+        body: "{}",
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        retryOf: "run-d1",
+        jobId: acceptedRetry.id,
+        runId: acceptedRetry.runId,
+      });
+      expect(findCalls).toBe(1);
+      expect(enqueueCalls).toBe(0);
     });
   });
 
@@ -10298,6 +10965,45 @@ describe("DaemonControlApiServer", () => {
           return response;
         },
       },
+    );
+  });
+
+  it("serves the account-pool authority read (the unified-accounts feature marker)", async () => {
+    const { daemon } = fakeDaemon();
+    const response = {
+      accountPools: [
+        { harness_id: "claude", next_up: { kind: "profile", profileId: "claude-default" } },
+        { harness_id: "codex", next_up: { kind: "api_key_route" } },
+        { harness_id: "cursor", next_up: { kind: "none", reason: "no enabled account" } },
+      ],
+    };
+    await withDaemonServer(
+      daemon,
+      async (base) => {
+        const read = await apiFetch(`${base}/account-pools`, {
+          headers: { authorization: `Bearer ${token}` },
+        });
+        expect(read.status).toBe(200);
+        expect(await read.json()).toEqual(response);
+        // The operation is discoverable in the catalog: this is the feature
+        // marker old engines lack, so its presence must be generated truth.
+        const catalog = await apiFetch(`${base}/operations`, {
+          headers: { authorization: `Bearer ${token}` },
+        });
+        expect(catalog.status).toBe(200);
+        const operations = (
+          (await catalog.json()) as { operations: Array<{ path: string; id: string }> }
+        ).operations;
+        expect(operations.some((op) => op.path === "/v2/account-pools")).toBe(true);
+        // The generated id is a CROSS-REPO byte contract: the Ouroboros
+        // feature detect hardcodes the literal "get:account-pools", so the
+        // generated catalog id must stay byte-exact.
+        expect(operations.find((op) => op.path === "/v2/account-pools")?.id).toBe(
+          "get:account-pools",
+        );
+      },
+      undefined,
+      { accountPools: async () => response },
     );
   });
 

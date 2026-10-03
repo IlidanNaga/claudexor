@@ -12,6 +12,7 @@
  * variant per DTO, plus every union/enum branch a Swift decoder could
  * plausibly get wrong. Grow this list as cuts land new contracts.
  */
+import { readFileSync } from "node:fs";
 import * as schema from "../../packages/schema/dist/index.js";
 
 const parse = (name, value) => {
@@ -30,6 +31,17 @@ export function buildWireFixtures() {
   const add = (name, schemaName, value) =>
     fixtures.push({ name, schema: schemaName, value: parse(schemaName, value) });
 
+  add(
+    "effort-resolution-downward",
+    "EffortResolution",
+    JSON.parse(
+      readFileSync(
+        new URL("../../packages/schema/fixtures/effort-resolution.json", import.meta.url),
+        "utf8",
+      ),
+    ),
+  );
+
   add("handshake-response", "ControlHandshakeResponse", {
     protocolMajor: schema.CONTROL_PROTOCOL_MAJOR,
     compatible: true,
@@ -44,6 +56,16 @@ export function buildWireFixtures() {
     compatible: true,
     operationsPath: "/v2/operations",
     engine: { version: "3.1.0", sha: "unknown", entry: "/opt/claudexor/daemon.js" },
+  });
+  // Recovery-only admission (issue #165 D5): transport/protocol succeed while
+  // product routes stay closed; Swift must decode servingMode losslessly so
+  // the I-A loop can keep the existing Connecting behavior until normal.
+  add("handshake-response-recovery-only", "ControlHandshakeResponse", {
+    protocolMajor: schema.CONTROL_PROTOCOL_MAJOR,
+    compatible: true,
+    operationsPath: "/v2/operations",
+    engine: { version: "3.4.0", sha: "b".repeat(40), entry: "/opt/claudexor/daemon.js" },
+    servingMode: "recovery_only",
   });
 
   add("problem-minimal", "ControlProblem", {
@@ -387,6 +409,21 @@ export function buildWireFixtures() {
     runtime: {
       reviewerTimeoutMs: 600_000,
       harnessInactivityTimeoutMs: 1_200_000,
+      concurrency: {
+        configured: {
+          maxConcurrent: 48,
+          maxParallelCandidates: 6,
+          maxDeepScanWidth: 16,
+          maxCouncilMembers: 6,
+        },
+        effective: {
+          maxConcurrent: 24,
+          maxParallelCandidates: 4,
+          maxDeepScanWidth: 8,
+          maxCouncilMembers: 4,
+        },
+        restartRequired: true,
+      },
       transientRetry: { maxRetries: 2, initialDelayMs: 1_000, maxDelayMs: 10_000 },
     },
     harnesses: {

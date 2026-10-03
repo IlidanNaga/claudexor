@@ -9,7 +9,7 @@ import { claudexorOwnedRoot } from "@claudexor/util";
  * tree — a locator inside a repository or an arbitrary user dir would put
  * credential state where git or other tools can capture it.
  *
- * The confinement root FOLLOWS the v2 root (release wave round-18 #4): under
+ * The owned root FOLLOWS the v2 root (release wave round-18 #4): under
  * an explicit CLAUDEXOR_CONFIG_DIR override that override IS the complete
  * relocatable root — a hermetic/disposable run must accept profiles inside
  * it and reject the host's real ~/.claudexor (host credential state must not
@@ -40,7 +40,7 @@ export function normalizeThroughExistingAncestor(path: string): string {
 export function canonicalIsolationLocator(locator: string, label: string): string {
   if (!isAbsolute(locator)) throw new Error(`${label} must be absolute: ${locator}`);
   const dir = normalizeThroughExistingAncestor(locator);
-  // Normalize the confinement root the SAME way as the locator (round-19,
+  // Normalize the owned root the SAME way as the locator (round-19,
   // fable checkpoint): a not-yet-created CLAUDEXOR_CONFIG_DIR under a
   // symlinked parent (/var → /private/var on macOS) would otherwise compare
   // unequal to a locator that was resolved through that symlink, and

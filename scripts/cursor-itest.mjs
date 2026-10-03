@@ -219,6 +219,7 @@ async function phaseC() {
     // output. Exact name-set equality catches a missing, renamed, or
     // unexpected extra tool — a bare count never named the delta.
     const expectedTools = [
+      "claudexor_accounts",
       "claudexor_answer_interaction",
       "claudexor_apply_check",
       "claudexor_ask",
@@ -248,7 +249,15 @@ async function phaseC() {
       { count: names.length, missing, extra },
     );
     const runSchema = list.find((t) => t.name === "claudexor_run")?.inputSchema?.properties ?? {};
-    const requiredControls = ["prompt", "repoPath", "model", "effort", "web", "reviewerPanel"];
+    const requiredControls = [
+      "prompt",
+      "repoPath",
+      "model",
+      "effort",
+      "web",
+      "review",
+      "reviewerPanel",
+    ];
     check(
       "C",
       "run schema exposes 0.14+ controls",

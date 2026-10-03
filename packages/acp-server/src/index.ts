@@ -167,8 +167,7 @@ export class AcpServer {
           )) as Record<string, unknown>;
           const summary = summarizeResult(result);
           if (summary) await this.agentMessage(client, params.sessionId, summary);
-          // Plan questions end as turn text; the next prompt continues this thread.
-          // Runtime choice interactions still use the requestPermission bridge.
+          // Plan questions end as turn text and continue next prompt; runtime choices use requestPermission.
           const planReadiness = result.planReadiness as { state?: string } | null | undefined;
           if (planReadiness?.state === "needs_answers") {
             const questions = Array.isArray(result.planQuestions)
@@ -190,6 +189,7 @@ export class AcpServer {
               claudexor: {
                 runId: result.runId ?? null,
                 status,
+                runFacts: result.runFacts ?? null,
                 outcomeFacts,
                 outcomeBanner: result.outcomeBanner ?? null,
                 failure: result.failure ?? null,
@@ -204,7 +204,7 @@ export class AcpServer {
         }
       })
       .onNotification(acp.methods.agent.session.cancel, async ({ params }) => {
-        this.activeRuns.get(params.sessionId)?.abort();
+        this.activeRuns.get(params.sessionId)?.abort("user_cancelled");
       });
 
     const connection = app.connect(stream);

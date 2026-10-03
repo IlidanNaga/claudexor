@@ -2,10 +2,52 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { makeOutcomeFacts } from "@claudexor/schema";
+import { makeOutcomeFacts, SCHEMA_VERSION, validateRunFactsInvariants } from "@claudexor/schema";
 import { makeInteractionBridge } from "./mcp-runner.js";
 
 const addr = { baseUrl: "http://127.0.0.1:1", token: "t" } as never;
+const PUBLIC_RECOVERY_MODES = ["__run_inspect", "__run_status", "__run_result"] as const;
+const BELT_RECOVERY_MODES = ["__run_status", "__run_result"] as const;
+
+function validPlanRunFacts(runId: string) {
+  return validateRunFactsInvariants({
+    schema_version: SCHEMA_VERSION,
+    run_id: runId,
+    task_id: `task-${runId}`,
+    mode: "plan",
+    outcome: makeOutcomeFacts("succeeded"),
+    deliverable: {
+      present: true,
+      kind: "plan",
+      path: "final/plan.md",
+      producer_attempt_id: "p01",
+    },
+    participants: {
+      planners: 1,
+      attempts: [
+        {
+          attempt_id: "p01",
+          harness_id: "codex",
+          role: "planner",
+          deliverable_present: true,
+          status: "success",
+        },
+      ],
+    },
+    gates: {
+      configured: false,
+      required: 0,
+      total: 0,
+      executed: false,
+      state: "not_configured",
+      receipt_attempt_id: null,
+    },
+    review: { state: "not_run", blocker_ids: [], blockers: 0 },
+    apply: { eligibility: null, operator_decision_present: false },
+    required_actions: [],
+    generated_at: "2026-08-14T00:00:00.000Z",
+  });
+}
 
 describe("makeInteractionBridge (MCP daemon-run interaction plumbing)", () => {
   afterEach(() => {
@@ -141,7 +183,32 @@ describe("makeCancelBridge (host cancel -> typed daemon cancel)", () => {
     expect(posts).toHaveLength(1);
     expect(posts[0]).toContain("/runs/run-9/control");
     expect(posts[0]).toContain('"kind":"cancel"');
+    expect(posts[0]).toContain('"reason_code":"host_cancelled"');
   });
+
+  it.each(["user_cancelled", "owner_task_gone"])(
+    "preserves the caller's typed %s cancellation cause",
+    async (reason) => {
+      const fetch = vi.fn(async () => ({ ok: true }));
+      vi.stubGlobal("fetch", fetch);
+      const { makeCancelBridge } = await import("./mcp-runner.js");
+      const controller = new AbortController();
+      controller.abort(reason);
+      await makeCancelBridge(addr, controller.signal)({ runId: "run-cause" });
+      expect(fetch).toHaveBeenCalledWith(
+        expect.stringContaining("/runs/run-cause/control"),
+        expect.objectContaining({
+          body: JSON.stringify({
+            control: {
+              kind: "cancel",
+              reason: "calling surface cancelled the run",
+              reason_code: reason,
+            },
+          }),
+        }),
+      );
+    },
+  );
 
   it("does not mark a failed cancel delivery as acknowledged and retries", async () => {
     let posts = 0;
@@ -203,7 +270,7 @@ describe("mcp daemon body mapping", () => {
     const connectSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
-      engine: { engineVersion: null, engineBuildSha: null },
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
     });
     vi.stubGlobal(
       "fetch",
@@ -274,6 +341,7 @@ describe("mcp daemon body mapping", () => {
     const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
     });
     vi.stubGlobal(
       "fetch",
@@ -307,7 +375,7 @@ describe("mcp daemon body mapping", () => {
       const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
         client: {} as never,
         addr: { baseUrl: "http://x", token: "t" } as never,
-        engine: { engineVersion: null, engineBuildSha: null },
+        engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
       });
       const runDir = mkdtempSync(join(tmpdir(), "claudexor-mcp-detail-problem-"));
       mkdirSync(join(runDir, "final"));
@@ -350,6 +418,48 @@ describe("mcp daemon body mapping", () => {
     },
   );
 
+  it("keeps immediate missing and transport-unavailable detail as null without a problem", async () => {
+    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+    const daemonRun = await import("./daemon-run.js");
+    const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
+      client: {} as never,
+      addr: { baseUrl: "http://x", token: "t" } as never,
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
+    });
+    const enqueueSpy = vi.spyOn(daemonRun, "enqueueAndAwait").mockResolvedValue({
+      runId: "run-soft-absence",
+      runDir: "",
+      status: "succeeded",
+      jobId: "job-soft-absence",
+    });
+    try {
+      for (const unavailable of [false, true]) {
+        vi.stubGlobal(
+          "fetch",
+          vi.fn(async () => {
+            if (unavailable) throw new Error("socket lost");
+            return { ok: false, status: 404, json: async () => ({}) } as never;
+          }),
+        );
+        const result = (await mcpSurfaceRunner()({ mode: "agent", prompt: "go" })) as Record<
+          string,
+          unknown
+        >;
+        expect(result).toMatchObject({
+          runId: "run-soft-absence",
+          runFacts: null,
+          outcomeFacts: null,
+          applyEligibility: null,
+        });
+        expect(result).not.toHaveProperty("detailProblem");
+      }
+    } finally {
+      ensureSpy.mockRestore();
+      enqueueSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("marks an unexpected post-terminal throw with the child terminal evidence for the belt", async () => {
     // Field contract with the delegation belt (childTerminalEvidence): a throw
     // AFTER the terminal is durable discloses the child really ran, so the
@@ -359,7 +469,7 @@ describe("mcp daemon body mapping", () => {
     const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
-      engine: { engineVersion: null, engineBuildSha: null },
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
     });
     const enqueueSpy = vi.spyOn(daemonRun, "enqueueAndAwait").mockResolvedValue({
       runId: "run-done",
@@ -396,7 +506,7 @@ describe("mcp daemon body mapping", () => {
     const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
-      engine: { engineVersion: null, engineBuildSha: null },
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
     });
     const enqueueSpy = vi
       .spyOn(daemonRun, "enqueueAndAwait")
@@ -406,14 +516,298 @@ describe("mcp daemon body mapping", () => {
       });
     try {
       const runner = mcpSurfaceRunner();
-      await runner({ mode: "agent", prompt: "go", externalContextPolicy: "cached" });
+      await runner({
+        mode: "agent",
+        prompt: "go",
+        externalContextPolicy: "cached",
+        credentialProfileId: "work-secondary",
+      });
       await runner({ mode: "plan", prompt: "plan it" });
       expect(bodies[0]?.["web"]).toBe("cached");
+      expect(bodies[0]?.["credentialProfileId"]).toBe("work-secondary");
       expect(bodies[1]?.["mode"]).toBe("plan");
       expect(ensureSpy).toHaveBeenCalledTimes(2);
     } finally {
       ensureSpy.mockRestore();
       enqueueSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each([undefined, "in_place", "isolated"] as const)(
+    "creates a persistent thread and discloses workspace %s",
+    async (workspace) => {
+      const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+      const daemonRun = await import("./daemon-run.js");
+      const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
+        client: {} as never,
+        addr: { baseUrl: "http://x", token: "t" } as never,
+        engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
+      });
+      const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string, init?: { body?: string }) => {
+          requests.push({
+            url,
+            body: JSON.parse(init?.body ?? "{}") as Record<string, unknown>,
+          });
+          return {
+            ok: true,
+            status: 200,
+            json: async () =>
+              url.endsWith("/threads")
+                ? {
+                    id: "th-1",
+                    title: "Audit",
+                    repoRoot: "/tmp/canonical-project",
+                    workspaceMode: workspace ?? "in_place",
+                    createdAt: "2026-09-24T00:00:00Z",
+                    updatedAt: "2026-09-24T00:00:00Z",
+                  }
+                : {
+                    jobId: "job-1",
+                    threadId: "th-1",
+                    turnId: "turn-1",
+                    runId: "run-1",
+                    runDir: "/tmp/run-1",
+                  },
+          } as never;
+        }),
+      );
+      try {
+        const runner = mcpSurfaceRunner();
+        const created = (await runner({
+          mode: "__thread_create",
+          repoPath: "/tmp/project",
+          title: "Audit",
+          ...(workspace ? { workspace } : {}),
+          credentialProfileId: "work-secondary",
+          access: "workspace_write",
+        })) as Record<string, unknown>;
+        const turn = (await runner({
+          mode: "__thread_turn",
+          threadId: "th-1",
+          prompt: "continue",
+          primaryHarness: "codex",
+          model: "gpt-6-sol",
+          effort: "high",
+          credentialProfileId: "work-secondary",
+        })) as Record<string, unknown>;
+
+        expect(requests).toEqual([
+          {
+            url: "http://x/v2/threads",
+            body: {
+              title: "Audit",
+              ...(workspace ? { workspace } : {}),
+              scope: { kind: "project", root: "/tmp/project" },
+              credentialProfileId: "work-secondary",
+              access: "workspace_write",
+            },
+          },
+          {
+            url: "http://x/v2/threads/th-1/turns",
+            body: {
+              prompt: "continue",
+              primaryHarness: "codex",
+              model: "gpt-6-sol",
+              effort: "high",
+              credentialProfileId: "work-secondary",
+            },
+          },
+        ]);
+        expect(created).toMatchObject({
+          threadId: "th-1",
+          repoRoot: "/tmp/canonical-project",
+          workspaceMode: workspace ?? "in_place",
+        });
+        expect(created.summary).toContain("/tmp/canonical-project");
+        expect(created.summary).not.toContain("/tmp/project");
+        expect(created.summary).toContain("No model was started.");
+        if (workspace === "isolated") {
+          expect(created.summary).toContain("isolated persistent worktree");
+          expect(created.summary).toContain("first write turn");
+          expect(created.summary).toContain("thread Apply");
+          expect(created.summary).not.toContain("edit the project directory directly");
+        } else {
+          expect(created.summary).toContain("workspace: in_place");
+          expect(created.summary).toContain("Write turns edit the project directory directly");
+        }
+        expect(turn).toMatchObject({ threadId: "th-1", turnId: "turn-1", runId: "run-1" });
+      } finally {
+        ensureSpy.mockRestore();
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
+  it("reuses the caller's turn key after a lost response, and distinguishes a new turn", async () => {
+    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+    const daemonRun = await import("./daemon-run.js");
+    const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
+      client: {} as never,
+      addr: { baseUrl: "http://x", token: "t" } as never,
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
+    });
+    const seen: Array<{ key: string | null; body: unknown }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        const key = new Headers(init?.headers).get("Idempotency-Key");
+        const body = JSON.parse(String(init?.body));
+        seen.push({ key, body });
+        if (seen.length === 1) throw new Error("connection lost after daemon acceptance");
+        if (seen.length === 3)
+          return {
+            ok: false,
+            status: 409,
+            json: async () => ({ code: "idempotency_conflict", error: "same key, different body" }),
+          } as never;
+        return {
+          ok: true,
+          status: 202,
+          json: async () => ({ jobId: "j", turnId: "t", threadId: "th", state: "queued" }),
+        } as never;
+      }),
+    );
+    try {
+      const runner = mcpSurfaceRunner();
+      const first = {
+        mode: "__thread_turn",
+        threadId: "th",
+        prompt: "first",
+        idempotencyKey: "logical-paid-turn",
+      };
+      await expect(runner(first)).rejects.toThrow("connection lost");
+      expect(await runner(first)).toMatchObject({ turnId: "t", threadId: "th" });
+      await expect(runner({ ...first, prompt: "other" })).rejects.toMatchObject({
+        code: "idempotency_conflict",
+      });
+      expect(
+        await runner({ ...first, prompt: "next", idempotencyKey: "next-intentional-turn" }),
+      ).toMatchObject({ turnId: "t" });
+      expect(seen.map((v) => v.key)).toEqual([
+        "logical-paid-turn",
+        "logical-paid-turn",
+        "logical-paid-turn",
+        "next-intentional-turn",
+      ]);
+      expect(seen[0]?.body).toEqual(seen[1]?.body);
+      expect(seen[2]?.body).not.toEqual(seen[0]?.body);
+    } finally {
+      ensureSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("reads the daemon thread detail without creating a run or starting an absent daemon", async () => {
+    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+    const daemonRun = await import("./daemon-run.js");
+    const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon");
+    const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
+      client: {} as never,
+      addr: { baseUrl: "http://x", token: "t" } as never,
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
+    });
+    const paths: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        paths.push(url);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            thread: {
+              id: "th-1",
+              title: "Audit",
+              repoRoot: "/tmp/project",
+              createdAt: "2026-09-24T00:00:00Z",
+              updatedAt: "2026-09-24T00:00:00Z",
+            },
+            sessions: [],
+            turns: [],
+          }),
+        } as never;
+      }),
+    );
+    try {
+      const runner = mcpSurfaceRunner();
+      const detail = await runner({ mode: "__thread_read", threadId: "th-1" });
+      expect(detail).toMatchObject({
+        summary: "thread th-1: 0 turn(s)",
+        thread: { id: "th-1" },
+        turns: [],
+      });
+      expect(paths).toEqual(["http://x/v2/threads/th-1"]);
+      expect(ensureSpy).not.toHaveBeenCalled();
+      connectSpy.mockResolvedValueOnce(null);
+      const absent = runner({ mode: "__thread_read", threadId: "th-1" });
+      await expect(absent).rejects.toMatchObject({ code: "daemon_unavailable", retryable: true });
+      await expect(absent).rejects.toThrow(/daemon is not running; thread read does not start/);
+      expect(ensureSpy).not.toHaveBeenCalled();
+      connectSpy.mockResolvedValueOnce(null);
+      await expect(
+        mcpSurfaceRunner({ requireExistingDaemon: true })({
+          mode: "__thread_read",
+          threadId: "th-1",
+        }),
+      ).rejects.toThrow(/delegation belt/);
+    } finally {
+      ensureSpy.mockRestore();
+      connectSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("preserves typed thread control problems", async () => {
+    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+    const daemonRun = await import("./daemon-run.js");
+    const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
+      client: {} as never,
+      addr: { baseUrl: "http://x", token: "t" } as never,
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: false,
+        status: 409,
+        json: async () => ({ error: "thread is busy", code: "thread_busy", retryable: true }),
+      })) as never,
+    );
+    try {
+      await expect(
+        mcpSurfaceRunner()({ mode: "__thread_turn", threadId: "th-1", prompt: "continue" }),
+      ).rejects.toMatchObject({ code: "thread_busy" });
+    } finally {
+      ensureSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("rejects malformed successful thread responses", async () => {
+    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+    const daemonRun = await import("./daemon-run.js");
+    const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
+      client: {} as never,
+      addr: { baseUrl: "http://x", token: "t" } as never,
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: true, status: 200, json: async () => ({}) })) as never,
+    );
+    try {
+      await expect(
+        mcpSurfaceRunner()({ mode: "__thread_create", repoPath: "/tmp/project" }),
+      ).rejects.toMatchObject({ code: "invalid_response" });
+      await expect(
+        mcpSurfaceRunner()({ mode: "__thread_turn", threadId: "th-1", prompt: "continue" }),
+      ).rejects.toMatchObject({ code: "invalid_response" });
+    } finally {
+      ensureSpy.mockRestore();
       vi.unstubAllGlobals();
     }
   });
@@ -424,7 +818,7 @@ describe("mcp daemon body mapping", () => {
     const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
-      engine: { engineVersion: null, engineBuildSha: null },
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
     });
     const enqueueSpy = vi.spyOn(daemonRun, "enqueueAndAwait").mockResolvedValue({
       runId: "run-best-of",
@@ -457,7 +851,7 @@ describe("mcp daemon body mapping", () => {
     const connection = {
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
-      engine: { engineVersion: null, engineBuildSha: null },
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" as const },
     };
     const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue(connection);
     const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue(connection);
@@ -513,13 +907,19 @@ describe("mcp daemon body mapping", () => {
     const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
     });
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => ({
         ok: true,
         json: async () => ({
-          summary: { runId: "run-other", delegatedFromRunId: "another-parent" },
+          summary: {
+            jobId: "job-other",
+            runId: "run-other",
+            state: "running",
+            delegatedFromRunId: "another-parent",
+          },
         }),
       })) as never,
     );
@@ -540,38 +940,50 @@ describe("mcp daemon body mapping", () => {
     }
   });
 
-  it("requests a durable handle instead of waiting for terminal when MCP marks a run deferred", async () => {
-    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
-    const daemonRun = await import("./daemon-run.js");
-    const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
-      client: {} as never,
-      addr: { baseUrl: "http://x", token: "t" } as never,
-      engine: { engineVersion: null, engineBuildSha: null },
-    });
-    const enqueueSpy = vi.spyOn(daemonRun, "enqueueAndAwait").mockResolvedValue({
-      runId: "run-durable",
-      runDir: "/tmp/run-durable",
-      status: "running",
-      jobId: "job-durable",
-    });
-    const detailSpy = vi.spyOn(daemonRun, "fetchRunDetail");
-    try {
-      const result = await mcpSurfaceRunner()({ mode: "agent", prompt: "go", deferred: true });
-      expect(enqueueSpy).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.anything(),
-        expect.anything(),
-        expect.objectContaining({ waitForTerminal: false }),
-      );
-      expect(result).toMatchObject({ runId: "run-durable", status: "running" });
-      expect(detailSpy).not.toHaveBeenCalled();
-      expect(ensureSpy).toHaveBeenCalledOnce();
-    } finally {
-      ensureSpy.mockRestore();
-      enqueueSpy.mockRestore();
-      detailSpy.mockRestore();
-    }
-  });
+  it.each([true, false, undefined])(
+    "preserves review=%s when requesting a durable MCP run handle",
+    async (review) => {
+      const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+      const daemonRun = await import("./daemon-run.js");
+      const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
+        client: {} as never,
+        addr: { baseUrl: "http://x", token: "t" } as never,
+        engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
+      });
+      const enqueueSpy = vi.spyOn(daemonRun, "enqueueAndAwait").mockResolvedValue({
+        runId: "run-durable",
+        runDir: "/tmp/run-durable",
+        status: "running",
+        jobId: "job-durable",
+      });
+      const detailSpy = vi.spyOn(daemonRun, "fetchRunDetail");
+      try {
+        const result = await mcpSurfaceRunner()({
+          mode: "agent",
+          prompt: "go",
+          deferred: true,
+          review,
+        });
+        expect(enqueueSpy).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.anything(),
+          expect.anything(),
+          expect.objectContaining({ waitForTerminal: false }),
+        );
+        expect(enqueueSpy.mock.calls[0]?.[2]).toMatchObject(review === undefined ? {} : { review });
+        if (review === undefined)
+          expect(enqueueSpy.mock.calls[0]?.[2]).not.toHaveProperty("review");
+        expect(result).toMatchObject({ runId: "run-durable", status: "running" });
+        expect(result).toMatchObject({ runFacts: null });
+        expect(detailSpy).not.toHaveBeenCalled();
+        expect(ensureSpy).toHaveBeenCalledOnce();
+      } finally {
+        ensureSpy.mockRestore();
+        enqueueSpy.mockRestore();
+        detailSpy.mockRestore();
+      }
+    },
+  );
 
   it("projects detail when a deferred MCP start already observes a failed terminal", async () => {
     const { mcpSurfaceRunner } = await import("./mcp-runner.js");
@@ -593,7 +1005,7 @@ describe("mcp daemon body mapping", () => {
     const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
-      engine: { engineVersion: null, engineBuildSha: null },
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
     });
     const enqueueSpy = vi.spyOn(daemonRun, "enqueueAndAwait").mockResolvedValue({
       runId: "run-fast-failed",
@@ -637,7 +1049,7 @@ describe("mcp daemon body mapping", () => {
     const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
-      engine: { engineVersion: null, engineBuildSha: null },
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
     });
     const enqueueSpy = vi.spyOn(daemonRun, "enqueueAndAwait").mockResolvedValue({
       runId: "run-child",
@@ -646,12 +1058,14 @@ describe("mcp daemon body mapping", () => {
       jobId: "job-child",
     });
     const outcomeFacts = makeOutcomeFacts("succeeded");
+    const runFacts = validPlanRunFacts("run-child");
     const fetchSpy = vi.fn(async () => ({
       ok: true,
       json: async () => ({
         summary: {
           jobId: "job-child",
           runId: "run-child",
+          taskId: "task-run-child",
           state: "succeeded",
           parentRunId: "run-parent",
           delegatedFromRunId: "run-parent",
@@ -665,6 +1079,7 @@ describe("mcp daemon body mapping", () => {
           },
           outcomeFacts,
         },
+        runFacts,
         applyEligibility: {
           eligible: false,
           state: "no_op",
@@ -689,6 +1104,7 @@ describe("mcp daemon body mapping", () => {
         outcomeBanner: "Completed",
         delegation: { reason: "not_requested" },
         outcomeFacts,
+        runFacts,
       });
       expect(fetchSpy).toHaveBeenCalledTimes(1);
     } finally {
@@ -698,12 +1114,168 @@ describe("mcp daemon body mapping", () => {
     }
   });
 
+  it("clears the entire immediate detail snapshot when RunFacts invariants are invalid", async () => {
+    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+    const daemonRun = await import("./daemon-run.js");
+    const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
+      client: {} as never,
+      addr: { baseUrl: "http://x", token: "t" } as never,
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
+    });
+    const enqueueSpy = vi.spyOn(daemonRun, "enqueueAndAwait").mockResolvedValue({
+      runId: "run-invalid",
+      runDir: "/tmp/run-invalid",
+      status: "succeeded",
+      jobId: "job-invalid",
+    });
+    const valid = validPlanRunFacts("run-invalid");
+    const fetchSpy = vi.spyOn(daemonRun, "fetchRunDetail").mockResolvedValue({
+      summary: {
+        runId: "run-invalid",
+        taskId: "task-run-invalid",
+        state: "succeeded",
+        spendUsd: 0.75,
+        outcomeFacts: makeOutcomeFacts("succeeded"),
+        parentRunId: "run-parent",
+        delegatedFromRunId: "run-parent",
+        delegation: {
+          requested: true,
+          effective: true,
+          used: true,
+          reason: null,
+          remediation: null,
+        },
+      },
+      runFacts: {
+        ...valid,
+        participants: { ...valid.participants, planners: 2 },
+      },
+      primaryOutput: { kind: "plan", path: "final/plan.md", text: "must be discarded" },
+      applyEligibility: {
+        eligible: false,
+        state: "no_op",
+        reason: null,
+        requiredAction: null,
+      },
+      outcomeBanner: "must be discarded",
+      planReadiness: { state: "ready", questionCount: 0 },
+      council: {
+        requested: 2,
+        drafted: 2,
+        degraded: false,
+        mergedBy: "codex",
+        members: [
+          { harnessId: "codex", role: "primary", status: "merged", error: null },
+          { harnessId: "cursor", role: "member", status: "drafted", error: null },
+        ],
+      },
+      budget: {
+        paidBudget: { kind: "finite", maxUsd: 2 },
+        spendUsd: 0.75,
+        valuationUsd: 1.25,
+        valuationKnowledge: "estimated",
+        remainingUsd: 1.25,
+        estimated: false,
+        source: "events",
+        evidence: "complete",
+      },
+      failure: {
+        phase: "execute",
+        category: "auth",
+        code: null,
+        harnessId: "codex",
+        attemptId: "p01",
+        safeMessage: "must be discarded",
+        rawDetailRef: null,
+        resetsAt: null,
+        logRefs: [],
+        eventRefs: [],
+        runDir: "/tmp/run-invalid",
+        nextActions: ["must be discarded"],
+      },
+    });
+    try {
+      const result = (await mcpSurfaceRunner()({ mode: "plan", prompt: "go" })) as Record<
+        string,
+        unknown
+      >;
+      expect(result).toMatchObject({
+        runId: "run-invalid",
+        status: "succeeded",
+        summary: "run succeeded",
+        runFacts: null,
+        outcomeFacts: null,
+        applyEligibility: null,
+        spendUsd: null,
+        outcomeBanner: null,
+        planReadiness: null,
+        council: null,
+        failure: null,
+        parentRunId: null,
+        delegatedFromRunId: null,
+        delegation: null,
+        detailProblem: { code: "run_facts_invalid", retryable: false },
+      });
+      expect(result).not.toHaveProperty("budget");
+      expect(result).not.toHaveProperty("primaryOutput");
+      expect(fetchSpy).toHaveBeenCalledOnce();
+    } finally {
+      ensureSpy.mockRestore();
+      enqueueSpy.mockRestore();
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("clears the immediate detail snapshot when a shape-valid receipt carries the wrong run identity", async () => {
+    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+    const daemonRun = await import("./daemon-run.js");
+    const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
+      client: {} as never,
+      addr: { baseUrl: "http://x", token: "t" } as never,
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
+    });
+    const enqueueSpy = vi.spyOn(daemonRun, "enqueueAndAwait").mockResolvedValue({
+      runId: "run-right",
+      runDir: "/tmp/run-right",
+      status: "succeeded",
+      jobId: "job-right",
+    });
+    // HTTP 200 malformed-success without a summary identity, carrying a
+    // receipt that validates in isolation but belongs to a different run: the
+    // immediate call site itself must bind the enqueued identity (the
+    // summary-derived fallback is absent here by construction).
+    const fetchSpy = vi.spyOn(daemonRun, "fetchRunDetail").mockResolvedValue({
+      runFacts: validPlanRunFacts("run-wrong"),
+      outcomeBanner: "must be discarded",
+    });
+    try {
+      const result = (await mcpSurfaceRunner()({ mode: "plan", prompt: "go" })) as Record<
+        string,
+        unknown
+      >;
+      expect(result).toMatchObject({
+        runId: "run-right",
+        status: "succeeded",
+        runFacts: null,
+        outcomeFacts: null,
+        outcomeBanner: null,
+        detailProblem: { code: "run_facts_invalid", retryable: false },
+      });
+      expect(fetchSpy).toHaveBeenCalledOnce();
+    } finally {
+      ensureSpy.mockRestore();
+      enqueueSpy.mockRestore();
+      fetchSpy.mockRestore();
+    }
+  });
+
   it("__runs_list walks the keyset cursor so the count is not undercounted by one page (QA-052)", async () => {
     const { mcpSurfaceRunner } = await import("./mcp-runner.js");
     const daemonRun = await import("./daemon-run.js");
     const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
     });
     // Page 1 caps at 2 with hasMore; page 2 (cursor present) returns the tail.
     const urls: string[] = [];
@@ -746,9 +1318,11 @@ describe("mcp daemon body mapping", () => {
   it("returns the terminal primary output and artifact handles from __run_result", async () => {
     const { mcpSurfaceRunner } = await import("./mcp-runner.js");
     const daemonRun = await import("./daemon-run.js");
+    const runFacts = validPlanRunFacts("run-result");
     const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
     });
     vi.stubGlobal(
       "fetch",
@@ -758,11 +1332,14 @@ describe("mcp daemon body mapping", () => {
           ok: true,
           json: async () => ({
             summary: {
+              jobId: "job-result",
               runId: "run-result",
+              taskId: "task-run-result",
               state: "succeeded",
               runDir: "/tmp/run-result",
               result: { kind: "plan", changed_files: [] },
             },
+            runFacts,
             finalSummary: "generic summary must not replace the plan",
             primaryOutput: {
               kind: "plan",
@@ -798,6 +1375,7 @@ describe("mcp daemon body mapping", () => {
         runDir: "/tmp/run-result",
         status: "succeeded",
         applyEligibility: { eligible: false, state: "no_op" },
+        runFacts,
       });
       expect(result).not.toHaveProperty("primaryOutput");
       expect(result).not.toHaveProperty("artifacts");
@@ -814,12 +1392,218 @@ describe("mcp daemon body mapping", () => {
     }
   });
 
+  it.each(
+    PUBLIC_RECOVERY_MODES.flatMap((mode) =>
+      (["run_facts_invalid", "invalid_service_response"] as const).map(
+        (problemCode) => [mode, problemCode] as const,
+      ),
+    ),
+  )("degrades public %s typed %s to a minimal handle", async (mode, problemCode) => {
+    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+    const daemonRun = await import("./daemon-run.js");
+    const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
+      client: {} as never,
+      addr: { baseUrl: "http://x", token: "t" } as never,
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
+    });
+    const retryable = problemCode === "invalid_service_response";
+    const fetchSpy = vi.fn(async () => ({
+      ok: false,
+      status: 500,
+      json: async () => ({
+        code: problemCode,
+        message: `typed ${problemCode}`,
+        retryable,
+      }),
+    }));
+    vi.stubGlobal("fetch", fetchSpy);
+    try {
+      const result = (await mcpSurfaceRunner()({
+        mode,
+        runId: "run-degraded",
+      })) as Record<string, unknown>;
+      expect(result).toEqual({
+        summary: "run run-degraded: detail unavailable",
+        runId: "run-degraded",
+        runDir: null,
+        status: null,
+        runFacts: null,
+        decisionStatus: null,
+        pendingInteractions: null,
+        outcomeFacts: null,
+        failure: null,
+        outcomeBanner: null,
+        applyEligibility: null,
+        planReadiness: null,
+        council: null,
+        budget: null,
+        parentRunId: null,
+        delegatedFromRunId: null,
+        delegation: null,
+        detailProblem: {
+          code: problemCode,
+          message: `typed ${problemCode}`,
+          retryable,
+        },
+      });
+      expect(fetchSpy).toHaveBeenCalledOnce();
+    } finally {
+      connectSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("also degrades malformed success and wrong receipt identity without partial authority", async () => {
+    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+    const daemonRun = await import("./daemon-run.js");
+    const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
+      client: {} as never,
+      addr: { baseUrl: "http://x", token: "t" } as never,
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
+    });
+    const responses = [
+      {
+        ok: true,
+        status: 200,
+        json: async () => ({ summary: { runId: "run-degraded", state: "succeeded" } }),
+      },
+      {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          summary: {
+            jobId: "job-degraded",
+            runId: "run-degraded",
+            taskId: "task-run-degraded",
+            state: "succeeded",
+          },
+          runFacts: validPlanRunFacts("run-other"),
+        }),
+      },
+    ];
+    const fetchSpy = vi.fn(async () => responses.shift() as never);
+    vi.stubGlobal("fetch", fetchSpy);
+    try {
+      const runner = mcpSurfaceRunner();
+      for (const expectedCode of ["invalid_service_response", "run_facts_invalid"]) {
+        const result = (await runner({
+          mode: "__run_result",
+          runId: "run-degraded",
+        })) as Record<string, unknown>;
+        expect(result).toMatchObject({
+          runId: "run-degraded",
+          runDir: null,
+          status: null,
+          runFacts: null,
+          outcomeFacts: null,
+          failure: null,
+          applyEligibility: null,
+          council: null,
+          budget: null,
+          parentRunId: null,
+          delegatedFromRunId: null,
+          detailProblem: { code: expectedCode },
+        });
+      }
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      connectSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each(
+    PUBLIC_RECOVERY_MODES.flatMap((mode) =>
+      (["404", "auth", "untyped integrity-looking 500", "transport"] as const).map(
+        (failureKind) => [mode, failureKind] as const,
+      ),
+    ),
+  )("keeps public %s %s as a tool error", async (mode, failureKind) => {
+    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+    const daemonRun = await import("./daemon-run.js");
+    const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
+      client: {} as never,
+      addr: { baseUrl: "http://x", token: "t" } as never,
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        if (failureKind === "transport") throw new Error("socket lost");
+        if (failureKind === "404") {
+          return { ok: false, status: 404, json: async () => ({ error: "missing" }) } as never;
+        }
+        if (failureKind === "auth") {
+          return {
+            ok: false,
+            status: 401,
+            json: async () => ({ code: "unauthorized", message: "denied", retryable: false }),
+          } as never;
+        }
+        return {
+          ok: false,
+          status: 500,
+          json: async () => ({ code: "run_facts_invalid", message: "missing typed fields" }),
+        } as never;
+      }),
+    );
+    try {
+      const run = mcpSurfaceRunner()({ mode, runId: "run-error" });
+      if (failureKind === "transport") await expect(run).rejects.toThrow("socket lost");
+      else if (failureKind === "404") await expect(run).rejects.toThrow("missing");
+      else if (failureKind === "auth") {
+        await expect(run).rejects.toMatchObject({ code: "unauthorized" });
+      } else {
+        await expect(run).rejects.toMatchObject({ code: "run_facts_invalid" });
+      }
+    } finally {
+      connectSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each(BELT_RECOVERY_MODES)(
+    "keeps delegation-belt %s fail-closed when detail integrity hides lineage",
+    async (mode) => {
+      const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+      const daemonRun = await import("./daemon-run.js");
+      const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
+        client: {} as never,
+        addr: { baseUrl: "http://x", token: "t" } as never,
+        engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
+      });
+      const fetchSpy = vi.fn(async () => ({
+        ok: false,
+        status: 500,
+        json: async () => ({
+          code: "run_facts_invalid",
+          message: "canonical receipt is invalid",
+          retryable: false,
+        }),
+      }));
+      vi.stubGlobal("fetch", fetchSpy);
+      try {
+        await expect(
+          mcpSurfaceRunner({
+            requireExistingDaemon: true,
+            delegationParentRunId: "run-parent",
+          })({ mode, runId: "run-child" }),
+        ).rejects.toMatchObject({ code: "run_facts_invalid" });
+        expect(fetchSpy).toHaveBeenCalledOnce();
+      } finally {
+        connectSpy.mockRestore();
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
   it("preserves typed RunFailure in recovery projections", async () => {
     const { mcpSurfaceRunner } = await import("./mcp-runner.js");
     const daemonRun = await import("./daemon-run.js");
     const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
     });
     const failure = {
       phase: "execute",
@@ -830,6 +1614,7 @@ describe("mcp daemon body mapping", () => {
       safeMessage: "Authentication expired",
       rawDetailRef: null,
       resetsAt: null,
+      vendorFailure: null,
       logRefs: [],
       eventRefs: [],
       runDir: "/tmp/run-failed",
@@ -843,6 +1628,7 @@ describe("mcp daemon body mapping", () => {
             ok: true,
             json: async () => ({
               summary: {
+                jobId: "job-failed",
                 runId: "run-failed",
                 state: "failed",
                 runDir: "/tmp/run-failed",

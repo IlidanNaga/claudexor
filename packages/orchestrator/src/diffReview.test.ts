@@ -134,7 +134,10 @@ function fixture(): {
 
 function deps(): DiffReviewDeps {
   return {
-    resolveReviewers: async () => [reviewer()],
+    resolveReviewers: async (_root, _preference, onIgnoredSetting) => {
+      onIgnoredSetting?.("reviewer family 'cursor' skipped: inventory unavailable");
+      return [reviewer()];
+    },
     reviewScoped: (input) =>
       reviewCandidate({
         ...input,
@@ -154,6 +157,12 @@ describe("frozen diff review", () => {
     const result = await runDiffReview({ repoRoot: f.repo, frozen: f.frozen }, deps());
 
     expect(result.artifactsDir).toBe(f.artifacts);
+    expect(result.ignoredSettings).toEqual([
+      "reviewer family 'cursor' skipped: inventory unavailable",
+    ]);
+    expect(readFileSync(join(f.artifacts, "ignored-settings.json"), "utf8")).toContain(
+      "inventory unavailable",
+    );
     expect(existsSync(join(f.artifacts, "evidence-metadata.json"))).toBe(true);
     expect(packetFiles(f.packet)).toEqual(before);
     expect(packetFiles(join(f.artifacts, "evidence"))).toEqual(before);
@@ -216,6 +225,7 @@ describe("frozen diff review", () => {
         reviewValuationUsd: 0,
         reviewValuationKnowledge: "unknown",
         reviewUnknownUsd: 0,
+        ignoredSettings: [],
       };
     };
     await expect(

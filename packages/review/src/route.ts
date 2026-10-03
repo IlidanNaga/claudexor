@@ -5,11 +5,13 @@ export interface RouteRequested {
   harness_id: string;
   provider_family: ProviderFamily;
   model_hint?: string | null;
+  credential_profile_id?: string | null;
 }
 
 export interface RouteObserved {
   provider?: string | null;
   model_id?: string | null;
+  credential_profile_id?: string | null;
   evidence_source?: RouteProof["observed"]["evidence_source"];
 }
 
@@ -21,20 +23,34 @@ export function buildRouteProof(
 ): RouteProof {
   const evidenceSource = observed.evidence_source ?? "unavailable";
   const hasObserved = Boolean(observed.model_id) && evidenceSource !== "unavailable";
-  const status = !hasObserved
-    ? "unverified"
-    : evidenceSource === "metadata"
-      ? "accepted_model_arg"
-      : "verified";
+  // A named profile is part of the identity claim, not just diagnostic text.
+  // Model evidence alone cannot prove that the intended account ran: a
+  // missing or different harness-emitted profile id therefore stays
+  // unverified. An unpinned slot deliberately has no identity to compare.
+  const profileMatches =
+    typeof requested.credential_profile_id !== "string" ||
+    observed.credential_profile_id === requested.credential_profile_id;
+  const status =
+    !hasObserved || !profileMatches
+      ? "unverified"
+      : evidenceSource === "metadata"
+        ? "accepted_model_arg"
+        : "verified";
   return RouteProofSchema.parse({
     requested: {
       harness_id: requested.harness_id,
       provider_family: requested.provider_family,
       model_hint: requested.model_hint ?? null,
+      ...(requested.credential_profile_id !== undefined
+        ? { credential_profile_id: requested.credential_profile_id ?? null }
+        : {}),
     },
     observed: {
       provider: observed.provider ?? null,
       model_id: observed.model_id ?? null,
+      ...(observed.credential_profile_id !== undefined
+        ? { credential_profile_id: observed.credential_profile_id ?? null }
+        : {}),
       evidence_source: evidenceSource,
     },
     diversity_against: diversityAgainst,

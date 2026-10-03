@@ -7,10 +7,13 @@ import {
   ControlDeliveryResponse,
   type FinalVerifyRecord,
   type RunApplyState,
+  type WorkspaceFilesManifest,
 } from "@claudexor/schema";
 import { assertNoInlineSecretValues, containsSecretLikeToken, sha256 } from "@claudexor/util";
 import type { DaemonRunRecord } from "./daemon-server.js";
 import { requiredIdempotencyKey, validateAbsoluteRepoRoot } from "./run-start.js";
+import { readFilesWorkProduct } from "./files-work-product.js";
+import { applyFilesResult, checkFilesResult } from "./files-apply-route.js";
 
 export interface DeliveryCommandServices {
   beginDelivery?: (
@@ -121,6 +124,11 @@ export interface RunApplyRouteContext {
   /** Persist applyState=applied on the run's delivery-state artifact after a
    * delivery reports applied=true (round-15 #2) — idempotent, best-effort. */
   markApplied(record: DaemonRunRecord): void;
+  markFilesApplied?(
+    record: DaemonRunRecord,
+    paths: string[],
+    manifest: WorkspaceFilesManifest,
+  ): void;
   /** The run's effective MUTABLE delivery/apply state (delivery_state overlay →
    * work_product snapshot) — the same authority that projects
    * summary.result.applyState. An already-delivered run answers apply/check as
@@ -147,6 +155,15 @@ export async function handleRunApplyRoutes(
       const raw = await ctx.readBody(req);
       assertNoInlineSecretValues(raw);
       const body = ControlApplyCheckRequest.parse(raw);
+      if (readFilesWorkProduct(record)) {
+        const root = ctx.targetRoot(body.target, record);
+        if (!root || validateAbsoluteRepoRoot(root))
+          throw Object.assign(new Error("project root is required for apply check"), {
+            status: 400,
+          });
+        ctx.json(res, 200, await checkFilesResult(ctx, record, root, body.paths));
+        return true;
+      }
       const patch = ctx.readPatch(record);
       if (patch === null)
         throw Object.assign(new Error("no patch artifact for this run"), { status: 404 });
@@ -203,6 +220,13 @@ export async function handleRunApplyRoutes(
     const raw = await ctx.readBody(req);
     assertNoInlineSecretValues(raw);
     const body = ControlApplyRequest.parse(raw);
+    if (readFilesWorkProduct(record)) {
+      const root = ctx.targetRoot(body.target, record);
+      if (!root || validateAbsoluteRepoRoot(root))
+        throw Object.assign(new Error("project root is required for apply"), { status: 400 });
+      ctx.json(res, 200, await applyFilesResult(ctx, record, body, key, root));
+      return true;
+    }
     const patch = ctx.readPatch(record);
     if (patch === null)
       throw Object.assign(new Error("no patch artifact for this run"), { status: 404 });

@@ -23,6 +23,12 @@ struct AuthSheet: View {
     @State private var lastRefreshedTerminalJobId: String?
     @State private var didAutoStartLogin = false
     @State private var showTerminalCaveat = false
+    /// Jobs THIS sheet created (fresh logins and their restarts). A family
+    /// sheet adopting one of these never shows the ownership disclosure — the
+    /// user chose the login here; an adopted foreign named-row job keeps it.
+    @State private var sheetStartedJobIds: Set<String> = []
+    /// Bounded automatic sign-in-link replacements (see `ReissueBudget`).
+    @State private var reissues = AuthSheetPresentation.ReissueBudget()
 
     private var secretName: String? { AuthSheetPresentation.managedSecretSlot(for: family) }
 
@@ -50,16 +56,25 @@ struct AuthSheet: View {
     private var nativeHarness: SetupHarness? { SetupHarness(rawValue: family.setupHarnessId) }
     private var job: SetupJob? { lifecycle.job }
     private var setupTarget: AuthSheetPresentation.SetupTarget {
-        AuthSheetPresentation.setupTarget(requestedProfileId: profileId, job: job)
+        AuthSheetPresentation.setupTarget(
+            requestedProfileId: profileId,
+            job: job,
+            bootstrapProfileId: AccountsPresentation.bootstrapProfileId(for: family),
+            sheetCreatedJob: job.map { sheetStartedJobIds.contains($0.jobId) } ?? false)
     }
-    private var activeJobMatchesTarget: Bool { job.map { $0.profileId == profileId } ?? true }
+    /// A family-level sheet (nil target) follows ANY job it hosts — including a
+    /// bootstrap login the engine resolved onto the `<harness>-default` row; an
+    /// explicit account target matches only its own job.
+    private var activeJobMatchesTarget: Bool {
+        job.map { profileId == nil || $0.profileId == profileId } ?? true
+    }
     private var hasActiveJob: Bool { job?.isActive == true }
     private var activeStateUnknown: Bool {
         lifecycle.connection == .recovering || lifecycle.connection == .streamLost
     }
     private var newSetupDisabled: Bool {
         controller == nil || actionInFlight || hasActiveJob || activeStateUnknown
-            || job?.blocksReplacement == true
+            || job?.blocksReplacement == true || currentInfo?.setupLogin == .unavailable
     }
     private var storeKeyAvailability: AuthSheetPresentation.StoreKeyAvailability {
         .init(gatewayAvailable: model.gateway(for: model.activeExecutionLocation) != nil,
@@ -72,22 +87,15 @@ struct AuthSheet: View {
             actionInFlight: actionInFlight
         )
     }
+    // Close-confirmation copy is pure presentation (AuthSheetClosePolicy).
     private var closeConfirmationTitle: String {
-        if job?.blocksReplacement == true { return "Process termination is unconfirmed" }
-        if activeStateUnknown || actionInFlight { return "Setup state is still resolving" }
-        return "Native login is still active"
+        AuthSheetClosePolicy.confirmationTitle(
+            job: job, stateUnresolved: activeStateUnknown || actionInFlight)
     }
-    private var closeCancellationLabel: String {
-        job == nil ? "Reconnect & Cancel" : "Cancel Login"
-    }
+    private var closeCancellationLabel: String { AuthSheetClosePolicy.cancellationLabel(job: job) }
     private var closeConfirmationMessage: String {
-        if job?.blocksReplacement == true {
-            return "Keep Running closes this sheet without claiming the process stopped. Cancel asks the daemon again and closes only after termination is confirmed. Stay keeps the recovery details visible."
-        }
-        if activeStateUnknown || actionInFlight {
-            return "Claudexor cannot yet prove whether a setup job is active. Keep Running leaves any accepted job in the background. Cancel first reconciles server state and closes only after confirmed termination."
-        }
-        return "Keep Running closes this sheet while the daemon job continues. Cancel Login waits for confirmed process termination before closing."
+        AuthSheetClosePolicy.confirmationMessage(
+            job: job, stateUnresolved: activeStateUnknown || actionInFlight)
     }
 
     var body: some View {
@@ -114,27 +122,34 @@ struct AuthSheet: View {
                         AuthSheetAccountsPanel(
                             family: family,
                             actionInFlight: actionInFlight,
-                            defaultLoginDisabled: newSetupDisabled,
+                            loginDisabled: newSetupDisabled,
+                            // Every row is a registry row (unified account
+                            // model) — drill into that exact account's login.
                             login: { row in
-                                if row.profileId == nil {
-                                    Task { await runLogin() }
-                                } else {
-                                    model.authSheetTarget = AuthSheetTarget(
-                                        family: row.family, profileId: row.profileId, autoStartLogin: true)
-                                }
+                                model.authSheetTarget = AuthSheetTarget(
+                                    family: row.family, profileId: row.profileId, autoStartLogin: true)
                             },
+                            // The empty-family bootstrap sign-in: a profile-less
+                            // login the engine resolves onto the
+                            // `<harness>-default` row (K.4).
+                            bootstrapLogin: AccountsPresentation.supportsBootstrapLogin(family)
+                                ? { Task { await runLogin() } } : nil,
                             recheck: { Task { await recheck() } }
                         )
                     }
                     if let disclosure = lifecycle.deviceCode, let job, job.phase == .awaitingUser {
-                        // Keyed on the JOB's harness, never the sheet's target.
-                        let card = AuthSheetPresentation.loginDisclosureCard(harness: job.harness)
+                        // Keyed on the JOB's harness/deadline, not this target.
                         AuthSheetDeviceCodeCard(
-                            disclosure: disclosure, vendor: card.vendor, waiting: true,
+                            disclosure: disclosure, job: job, waiting: true,
                             actionInFlight: actionInFlight,
                             cancel: { Task { await cancelJob() } },
-                            useBrowserCallback: card.offersBrowserCallback
-                                ? { Task { await switchToBrowserCallback() } } : nil
+                            useBrowserCallback: { Task { await restartLogin(loginFlow: .browserCallback) } },
+                            submitCode: { await submitLoginCode($0) },
+                            autoReissueArmed: reissues.armed,
+                            reissue: { automatic in
+                                reissues.spend(automatic: automatic)
+                                Task { await restartLogin() }
+                            }
                         )
                     }
                     if let job { setupJobPanel(job) }
@@ -231,43 +246,18 @@ struct AuthSheet: View {
             && AccountsPresentation.configDirLoginHarnessIds.contains(family.setupHarnessId)
     }
 
+    // The native-setup panel is pure rendering in AuthSheetNativeSetupPanel.swift.
     private var nativeSetupPanel: some View {
-        Panel {
-            VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-                SectionLabel("Native setup", systemImage: "person.crop.circle")
-                // M9-UX item 4: Log in is THE filled primary; Recheck the quiet secondary.
-                HStack(spacing: Theme.Spacing.sm) {
-                    Button { Task { await runLogin() } } label: {
-                        Label(targetVerified ? "Manage Login" : "Log in", systemImage: "person.crop.circle.badge.checkmark")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Theme.accentSolid)
-                    .controlSize(.large)
-                    .disabled(newSetupDisabled)
-                    .help(targetVerified
-                          ? "Open the native \(family.label) login flow to manage the verified session."
-                          : family.setupHarnessId == "codex"
-                            ? "Start the native \(family.label) device-code login — a one-time code appears here, no Terminal."
-                            : "Start the native \(family.label) login flow — a Terminal window opens automatically.")
-
-                    Button { Task { await recheck() } } label: {
-                        Label("Recheck", systemImage: "arrow.clockwise")
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(actionInFlight)
-                    .help("Run a fresh, non-cached Harness Doctor probe for installed/authenticated/routable status.")
-                    Spacer(minLength: 0)
-                }
-                // The daemon-owned "run in terminal" caveat is secondary — collapsed.
-                DisclosureRow("Advanced — run in terminal", isExpanded: $showTerminalCaveat) {
-                    Text(profileId == nil
-                        ? "Native login is daemon-owned. Completing its Terminal command is not readiness: only the exact native probe and same-harness smoke mark the session ready."
-                        : "Native login is daemon-owned and scoped to this account's own store. Its doctor probe is the verification truth; the default-route capability smoke does not apply.")
-                        .font(.caption2).foregroundStyle(.secondary).padding(.top, Theme.Spacing.xs)
-                }
-                .font(.caption)
-            }
-        }
+        AuthSheetNativeSetupPanel(
+            targetVerified: targetVerified,
+            newSetupDisabled: newSetupDisabled,
+            actionInFlight: actionInFlight,
+            profileId: profileId, family: family,
+            setupLogin: currentInfo?.setupLogin ?? .legacyAbsent,
+            showTerminalCaveat: $showTerminalCaveat,
+            runLogin: { Task { await runLogin() } },
+            recheck: { Task { await recheck() } }
+        )
     }
 
     // Job + connection panels live in AuthSheetJobPanel.swift (pure rendering;
@@ -298,16 +288,13 @@ struct AuthSheet: View {
     }
 
     private func apiKeyPanel(_ name: String) -> some View {
-        Panel {
-            VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-                SectionLabel("API-key fallback", systemImage: "key")
-                SecureField("\(name) key", text: $secretValue).textFieldStyle(.roundedBorder)
-                Button { Task { await storeKey(name) } } label: { Label("Store Key", systemImage: "key.fill") }
-                    .buttonStyle(.bordered)
-                    .disabled(!storeKeyAvailability.enabled)
-                    .help(storeKeyAvailability.panelHelp)
-            }
-        }
+        AuthSheetApiKeyPanel(
+            name: name,
+            secretValue: $secretValue,
+            enabled: storeKeyAvailability.enabled,
+            panelHelp: storeKeyAvailability.panelHelp,
+            storeKey: { Task { await storeKey(name) } }
+        )
     }
 
     /// W4.8: the one state-derived primary action for the footer.
@@ -401,7 +388,19 @@ struct AuthSheet: View {
         guard let controller else { return }
         actionInFlight = true
         defer { actionInFlight = false }
+        let previousJobId = job?.jobId
         await controller.start(harness: family.setupHarnessId, action: "login", profileId: profileId)
+        await recordSheetStartedJob(previousJobId: previousJobId)
+    }
+
+    /// Remember a job this sheet just created (`setupTarget` suppresses the
+    /// ownership disclosure only for these and the bootstrap resolution). A
+    /// refused start keeps the prior job in the snapshot — comparing against
+    /// the pre-start id keeps a foreign adopted job from being claimed.
+    private func recordSheetStartedJob(previousJobId: String?) async {
+        guard let started = await controller?.snapshot().job,
+              started.jobId != previousJobId else { return }
+        sheetStartedJobIds.insert(started.jobId)
     }
 
     /// D-17 audit point 8: the first-class Terminal fallback for the codex
@@ -414,13 +413,14 @@ struct AuthSheet: View {
         defer { actionInFlight = false }
         await controller.start(harness: family.setupHarnessId, action: "login",
                                profileId: job.profileId, loginFlow: .browserRedirect)
+        await recordSheetStartedJob(previousJobId: job.jobId)
     }
 
-    /// D-17 explicit browser-callback opt-in (device-auth-disabled orgs). The
-    /// device-code and browser-callback flows share the app-server "device-code"
-    /// conflict bucket, so a live job must be cancelled before the switch — this
-    /// is never a silent fallback.
-    private func switchToBrowserCallback() async {
+    /// Replace the live login: the D-17 browser-callback opt-in (codex orgs that
+    /// disable device-code), and the re-issue after a sign-in window lapsed
+    /// (`loginFlow` nil). Both share the app-server conflict bucket, so the
+    /// current job is cancelled first — never a silent fallback.
+    private func restartLogin(loginFlow: SetupCodexLoginFlow? = nil) async {
         guard let controller, let job else { return }
         actionInFlight = true
         defer { actionInFlight = false }
@@ -434,7 +434,17 @@ struct AuthSheet: View {
             }
         }
         await controller.start(harness: family.setupHarnessId, action: "login",
-                               profileId: job.profileId, loginFlow: .browserCallback)
+                               profileId: job.profileId, loginFlow: loginFlow)
+        await recordSheetStartedJob(previousJobId: job.jobId)
+    }
+
+    /// Hand the pasted one-time code to the waiting login job: straight to the
+    /// daemon, never stored here or logged. Returns the refusal reason, if any.
+    private func submitLoginCode(_ code: String) async -> String? {
+        guard let controller else { return "Engine offline: reconnect and try again." }
+        actionInFlight = true
+        defer { actionInFlight = false }
+        return await controller.submitInput(code)
     }
 
     private func extendDeadline() async {
@@ -459,15 +469,14 @@ struct AuthSheet: View {
         actionInFlight = true
         defer { actionInFlight = false }
         let matchingJob = activeJobMatchesTarget ? job : nil
-        if await model.refreshCredentialReadiness(
-            for: family, profileId: profileId, after: matchingJob)
-        {
-            status = profileId == nil
-                ? "Exact auth-readiness check completed for \(family.label)."
-                : "Account readiness refreshed for this \(family.label) profile."
-        } else {
-            status = "Exact auth-readiness check failed for \(family.label). Reconnect the engine and try again."
-        }
+        // Follow the job's RESOLVED account: a bootstrap login the engine bound
+        // to the `<harness>-default` row rechecks that exact row, not the
+        // default store the request left unnamed.
+        let targetProfileId = matchingJob != nil ? setupTarget.profileId : profileId
+        let refreshed = await model.refreshCredentialReadiness(
+            for: family, profileId: targetProfileId, after: matchingJob)
+        status = AuthSheetPresentation.recheckStatus(
+            family: family, profileId: targetProfileId, job: matchingJob, succeeded: refreshed)
     }
 
     private func reconnectSetupState() async {
@@ -563,13 +572,4 @@ struct AuthSheet: View {
         "Cancellation reached a terminal result, but process termination was not confirmed. This sheet will stay open; reconnect and run Recheck before starting another login."
     }
 
-}
-
-enum AuthSheetClosePolicy {
-    static func requiresConfirmation(job: SetupJob?, connection: SetupLifecycleConnection,
-                                     actionInFlight: Bool) -> Bool {
-        if actionInFlight { return true }
-        if job?.isActive == true || job?.blocksReplacement == true { return true }
-        return connection == .recovering || connection == .reconnecting || connection == .streamLost
-    }
 }

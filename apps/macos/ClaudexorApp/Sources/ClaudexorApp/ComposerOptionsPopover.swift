@@ -208,6 +208,24 @@ extension ThreadsScreen {
             // parent-owned draft projects the exact values the send path reads.
             if runControlApplicability.reviewers.applicable {
                 OptionSection(title: "Review controls") {
+                    let strategyRequiresReview = agentStrategy == .bestOf || agentStrategy == .untilClean
+                    let panelRequestsReview = !reviewerPanelEntries.isEmpty
+                    Toggle("Review changes", isOn: Binding(
+                        get: { reviewChanges || strategyRequiresReview || panelRequestsReview },
+                        set: { reviewChanges = $0 }
+                    ))
+                    .toggleStyle(.switch).tint(Theme.accent)
+                    .disabled(strategyRequiresReview || panelRequestsReview)
+                    Text(strategyRequiresReview
+                         ? "This strategy includes model review."
+                         : panelRequestsReview
+                            ? "Your reviewer panel enables review. Remove the panel to turn review off."
+                            : reviewChanges
+                                ? "Claudexor selects an internal reviewer panel automatically."
+                                : "No internal reviewers. Completed changes remain applicable and show Not reviewed.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     AdvancedReviewControls(
                         draft: $reviewDraft,
                         harnessChoices: poolFamilies,
@@ -216,9 +234,8 @@ extension ThreadsScreen {
                 }
             }
             // Agent-driven browser (Playwright MCP). Offered only where a pooled
-            // harness can inject it. Arming it forces Full access (codex's sandbox
-            // cancels the navigation otherwise) and is disclosed below — never a
-            // silent escalation.
+            // harness can inject it. Access remains an independent request axis;
+            // the daemon refuses unsupported native harness/access combinations.
             if browserAvailableForCurrentTurn {
                 OptionRow(label: "Browser") {
                     Toggle("", isOn: Binding(
@@ -233,7 +250,7 @@ extension ThreadsScreen {
                     .help("Let the agent drive a real browser (navigate / screenshot / read). Runs headed so you watch the real window live; navigation snapshots are recorded in the run.")
                 }
                 if effectiveBrowserArmed {
-                    Text("Agent browses in a real window · runs at Full access")
+                    Text("Agent browses in a real window · keeps \(effectiveAccess.label)")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .padding(.leading, 2)
@@ -271,7 +288,7 @@ extension ThreadsScreen {
             if composerMode == .agent {
                 OptionSection(title: "Agent strategy") {
                     Picker("", selection: $agentStrategy) {
-                        ForEach(AgentStrategy.allCases) { s in
+                        ForEach(AgentStrategy.composerCases(access: effectiveAccess)) { s in
                             Label(s.label, systemImage: s.glyph).tag(s)
                         }
                     }
@@ -280,7 +297,8 @@ extension ThreadsScreen {
                     .help(agentStrategy.blurb)
                     // Max-attempts caps the single/until-clean repair loop; it is
                     // meaningless for a Best-of race, so it hides there.
-                    if agentStrategy == .single || agentStrategy == .untilClean {
+                    if effectiveAccess != .readOnly
+                        && (agentStrategy == .single || agentStrategy == .untilClean) {
                         HStack(spacing: Theme.Spacing.xl) {
                             Stepper("Max attempts: \(maxAttempts)", value: $maxAttempts, in: 1...8)
                                 .disabled(agentStrategy == .untilClean)
@@ -318,9 +336,9 @@ extension ThreadsScreen {
                     // QA-010: Create scaffolds a brand-new project, so its test
                     // script does not exist until the run writes it — yet the
                     // operator already knows the command they expect (`npm test`).
-                    // Offer ONE optional typed gate field here so acceptance can be
-                    // deterministic instead of review-only. The engine runs it as a
-                    // post-candidate gate; it is never inferred from the prompt.
+                    // Offer ONE optional typed gate field here to add deterministic
+                    // evidence alongside the selected review policy. The engine runs
+                    // it after the candidate; it is never inferred from the prompt.
                     if agentStrategy == .create { testCommandField }
                 }
             }
@@ -332,8 +350,12 @@ extension ThreadsScreen {
                         .toggleStyle(.switch).tint(Theme.accent)
                         .help("Council: each member drafts a plan in its own lane; the primary merges them into one plan and one question set. Solo (off) is the default.")
                     if councilEnabled {
-                        Stepper("Members: \(councilMembers)", value: $councilMembers, in: 2...4)
-                            .help("How many harnesses draft in parallel (2–4).")
+                        let memberSelection = Binding(
+                            get: { resolvedComposerStrategy.councilN ?? 2 },
+                            set: { councilMembers = $0 }
+                        )
+                        Stepper("Members: \(memberSelection.wrappedValue)", value: memberSelection, in: 2...councilMemberLimit)
+                            .help("How many harnesses draft in parallel (2–\(councilMemberLimit)).")
                     }
                 }
             }
@@ -370,7 +392,7 @@ extension ThreadsScreen {
                         .help("Enter a command (the first word is the program), or leave it empty")
                 }
             }
-            .help("Optional deterministic gate run AFTER the candidate scaffolds the project (e.g. `npm test`). Whitespace-separated argv — the first word is the program, the rest its arguments; wrap an argument that contains spaces in quotes (\"my dir\"), and backslash-escape a literal quote. Not a shell: no pipes, globs, or variables. Empty = review-only acceptance.")
+            .help("Optional deterministic gate run AFTER the candidate scaffolds the project (e.g. `npm test`). Whitespace-separated argv — the first word is the program, the rest its arguments; wrap an argument that contains spaces in quotes (\"my dir\"), and backslash-escape a literal quote. Not a shell: no pipes, globs, or variables. Empty adds no test command. Model review follows the review controls above.")
         }
     }
 

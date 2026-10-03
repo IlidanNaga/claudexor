@@ -85,7 +85,7 @@ describe("codexBrowserArgs", () => {
     expect(args).toContain("--headless");
   });
 
-  it("codexExecArgs appends browser overrides before the prompt", () => {
+  it("codexExecArgs appends browser overrides before the stdin prompt operand", () => {
     const args = codexExecArgs({
       access: "workspace_write",
       model_hint: null,
@@ -95,7 +95,8 @@ describe("codexBrowserArgs", () => {
       attachments: [],
       browser: { output_dir: "/runs/r1/browser", headless: false },
     });
-    expect(args[args.length - 1]).toBe("do it");
+    expect(args[args.length - 1]).toBe("-");
+    expect(args).not.toContain("do it");
     expect(args.join(" ")).toContain("mcp_servers.browser.args=");
   });
 
@@ -181,10 +182,9 @@ describe("codexExecArgs image attachments", () => {
     ...(resume ? { resume_session_id: "ses-x" } : {}),
   });
 
-  // Regression: `codex exec -i/--image <FILE>...` is VARIADIC, so a positional
-  // prompt placed directly after `-i <path>` is swallowed as a second "image" and
-  // codex falls back to (empty) stdin -> the model sees neither image nor prompt
-  // (the v0.13 "I don't see the image" bug). A `--` terminator must separate them.
+  // Regression: `codex exec -i/--image <FILE>...` is VARIADIC, so the `-` stdin
+  // prompt operand placed directly after `-i <path>` would be swallowed as a
+  // second image. A `--` terminator must separate them.
   for (const resume of [false, true]) {
     it(`terminates -i with -- so the prompt survives (${resume ? "resume" : "fresh"} path)`, () => {
       const args = codexExecArgs(imageSpec(resume));
@@ -194,7 +194,8 @@ describe("codexExecArgs image attachments", () => {
       expect(args[iIdx + 1]).toBe(imagePath); // path follows -i
       expect(args[iIdx + 2]).toBe("--"); // `--` IMMEDIATELY after the path: no `-c` config wedged between -i and -- (would be eaten by variadic -i)
       expect(dashIdx).toBeGreaterThan(iIdx); // -- comes AFTER -i
-      expect(args[args.length - 1]).toBe("what do you see in the picture?"); // prompt is the final positional, not eaten
+      expect(args[args.length - 1]).toBe("-"); // documented stdin prompt operand, not eaten
+      expect(args).not.toContain("what do you see in the picture?");
     });
   }
 
@@ -219,6 +220,7 @@ describe("codexExecArgs image attachments", () => {
       browser: null,
     });
     expect(args).not.toContain("--");
-    expect(args[args.length - 1]).toBe("plain");
+    expect(args[args.length - 1]).toBe("-");
+    expect(args).not.toContain("plain");
   });
 });

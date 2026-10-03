@@ -40,6 +40,10 @@ export class InteractionStore {
 
   constructor(private readonly journal: DurableJournal) {
     this.replay();
+  }
+
+  /** Resolve replayed pending interactions only after bootstrap activation. */
+  recoverAfterStartup(): void {
     this.interruptAfterRestart();
   }
 
@@ -102,7 +106,7 @@ export class InteractionStore {
   }
 
   private replay(): void {
-    for (const record of this.journal.records()) {
+    for (const record of this.journal.records(0, [REQUESTED, RESOLVED])) {
       if (record.type === REQUESTED) {
         const value = PendingInteractionSchema.parse(record.payload);
         const key = interactionKey(value.runId, value.interactionId);
@@ -248,6 +252,7 @@ export function interactionProjection() {
     name: "interactions",
     create: (journal: DurableJournal) => new InteractionStore(journal),
     validate: (store: InteractionStore) => store.validateProjection(),
+    recover: (store: InteractionStore) => store.recoverAfterStartup(),
   };
 }
 

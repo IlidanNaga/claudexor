@@ -34,12 +34,23 @@ public struct ControlHandshakeResponse: Codable, Sendable, Equatable {
     public let compatible: Bool
     public let operationsPath: String
     public let engine: EngineBuildIdentity
+    /// Product admission (issue #165 D5): "recovery_only" keeps product routes
+    /// closed while recovery control stays reachable. Absent (older daemons)
+    /// means "normal" — decode stays lenient, never a dropped connection.
+    public let servingMode: String?
 
-    public init(protocolMajor: Int, compatible: Bool, operationsPath: String, engine: EngineBuildIdentity) {
+    public init(
+        protocolMajor: Int,
+        compatible: Bool,
+        operationsPath: String,
+        engine: EngineBuildIdentity,
+        servingMode: String? = nil
+    ) {
         self.protocolMajor = protocolMajor
         self.compatible = compatible
         self.operationsPath = operationsPath
         self.engine = engine
+        self.servingMode = servingMode
     }
 }
 
@@ -53,19 +64,27 @@ public struct RunOutcomeFacts: Codable, Sendable, Equatable, Hashable {
     /// succeeded | failed | cancelled | interrupted
     public let lifecycle: String
     /// True when the run finished without changing any files (the ex `no_op`).
-    public let noChanges: Bool
+    public let noChanges: Bool?
     /// ChecksState: not_configured | passed | failed | ...
     public let checks: String
     /// ReviewState: not_run | approved | blocked | ...
     public let review: String
+    /// Frozen review intent; nil preserves historical review requirements.
+    public let reviewRequested: Bool?
     /// Typed reason qualifying a non-clean terminal; null on a clean success.
     public let reason: String?
 
-    public init(lifecycle: String, noChanges: Bool, checks: String, review: String, reason: String?) {
+    private enum CodingKeys: String, CodingKey {
+        case lifecycle, noChanges, checks, review, reason
+        case reviewRequested = "review_requested"
+    }
+
+    public init(lifecycle: String, noChanges: Bool?, checks: String, review: String, reason: String?, reviewRequested: Bool? = nil) {
         self.lifecycle = lifecycle
         self.noChanges = noChanges
         self.checks = checks
         self.review = review
+        self.reviewRequested = reviewRequested
         self.reason = reason
     }
 }
