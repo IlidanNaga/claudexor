@@ -372,6 +372,69 @@ struct ThreadLifecycleTests {
         #expect(ThreadSidebarSections(model.locatedThreads).active.map(\.thread.id) == ["th-1"])
         #expect(model.threadStatus == nil)
     }
+
+    // MARK: A failed list read does not outlive the next successful one
+
+    @MainActor
+    @Test func aFailedRereadIsRetiredByTheNextSuccessfulListAndTheBannerComesBack() async throws {
+        defer { LifecycleStubURLProtocol.handler = nil }
+        let server = LifecycleServer(states: ["th-1": "trashed"], purge: .refuse)
+        let model = lifecycleModel(server)
+        model.threads = [try lifecycleThread(id: "th-1", state: "trashed")]
+        await model.deleteThreadNow(locationID: .local, id: "th-1")
+        let banner = try #require(model.threadStatus)
+        #expect(banner.contains("stays in Trash"))
+
+        // A background re-read fails and takes the status line...
+        server.listUnreachable = true
+        #expect(await model.refreshThreads() == false)
+        #expect(model.threadStatus?.hasPrefix("Could not refresh threads: ") == true)
+        // ...the retry succeeds with the thread still in Trash: the banner is back.
+        server.listUnreachable = false
+        #expect(await model.refreshThreads())
+        #expect(model.threadStatus == banner)
+        // Fails again, then succeeds without the thread: nothing stale is left.
+        server.listUnreachable = true
+        #expect(await model.refreshThreads() == false)
+        server.listUnreachable = false
+        server.setState("th-1", "purged")
+        #expect(await model.refreshThreads())
+        #expect(model.threadStatus == nil)
+    }
+
+    @MainActor
+    @Test func aFailedRefreshWithNothingElsePendingIsShownUntilAListSucceeds() async throws {
+        defer { LifecycleStubURLProtocol.handler = nil }
+        let server = LifecycleServer(states: ["th-1": "active"])
+        server.listUnreachable = true
+        let model = lifecycleModel(server)
+
+        #expect(await model.refreshThreads() == false)
+        #expect(model.threadStatus?.hasPrefix("Could not refresh threads: ") == true)
+        server.listUnreachable = false
+        #expect(await model.refreshThreads())
+        #expect(model.threadStatus == nil)
+    }
+
+    @MainActor
+    @Test func aLocalRefreshFailureThatReplacedARemoteBannerGivesItBackOnTheNextLocalList() async throws {
+        defer { LifecycleStubURLProtocol.handler = nil }
+        // One status line serves every engine: a failed local read replaces
+        // a remote engine's Delete Now banner until the local list comes back.
+        let server = LifecycleServer(states: ["th-1": "trashed"], purge: .refuse)
+        let (model, remote) = remoteLifecycleModel(
+            server, threads: [try lifecycleThread(id: "th-1", state: "trashed")])
+        await model.deleteThreadNow(locationID: remote, id: "th-1")
+        let banner = try #require(model.threadStatus)
+        #expect(banner.contains("stays in Trash"))
+
+        server.listUnreachable = true
+        #expect(await model.refreshThreads() == false)
+        #expect(model.threadStatus?.hasPrefix("Could not refresh threads: ") == true)
+        server.listUnreachable = false
+        #expect(await model.refreshThreads())
+        #expect(model.threadStatus == banner)
+    }
 }
 
 // MARK: - Fixtures

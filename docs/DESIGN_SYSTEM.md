@@ -550,7 +550,9 @@ frequency and volume are. The contracts:
     message wrong retires it: a complete list without the thread, or, for a
     message that points to Trash, a list that shows the thread outside Trash
     (restored, also by another client). A successful Restore or Delete Now
-    clears it. No local-only thread state.
+    clears it. A failed read of the thread list says "Could not refresh
+    threads: …"; the next successful read retires that line, and a Delete Now
+    message it had replaced comes back. No local-only thread state.
     The sidebar's BOTTOM-LEFT
     carries ONE compact accounts control (Claude-Code style, INV-135): a quiet
     single-line trigger — worst-readiness dot + the account name (or "N

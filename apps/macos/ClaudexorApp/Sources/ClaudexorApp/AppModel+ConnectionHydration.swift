@@ -7,6 +7,10 @@ import ClaudexorKit
 // A manual reconnect can therefore retire a delayed success or failure without
 // allowing the previous daemon to repaint the successor's projections.
 extension AppModel {
+    /// What a failed thread-list read leaves in the status line; the next
+    /// successful read retires it (`reconcileThreadStatus`).
+    static let threadRefreshFailurePrefix = "Could not refresh threads: "
+
     func refreshSecrets(locationID requestedLocationID: ExecutionLocationID? = nil) async {
         let locationID = requestedLocationID ?? activeExecutionLocation
         guard let requestClient = gateway(for: locationID) else { return }
@@ -74,7 +78,7 @@ extension AppModel {
             guard requestIsCurrent() else { return false }
             // A transport/decode failure is not an empty thread list: retain
             // last-known rows and surface the failure.
-            threadStatus = "Could not refresh threads: \(userMessage(for: error))"
+            threadStatus = Self.threadRefreshFailurePrefix + userMessage(for: error)
             return false
         }
     }

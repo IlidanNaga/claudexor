@@ -132,15 +132,21 @@ extension AppModel {
     /// Called after every thread list the engine answered for `locationID`,
     /// with what that list could not show. A Delete Now banner about a thread
     /// of that engine leaves once the list makes it wrong; a thread missing
-    /// from a list with gaps confirms nothing, so the banner stays.
+    /// from a list with gaps confirms nothing, so the banner stays. A local
+    /// list also retires an earlier "Could not refresh threads", which shares
+    /// the one status line with every engine's banner: a live banner it had
+    /// replaced comes back.
     func reconcileThreadStatus(at locationID: ExecutionLocationID, listGaps: ThreadListGaps) {
         threadListGaps[locationID] = listGaps
-        guard let banner = deleteNowBanner, banner.locationID == locationID else { return }
-        let now = DeleteNowFailure(
-            listed: threadSummary(banner.threadID, at: locationID), gaps: listGaps)
-        guard !banner.outcome.stillHolds(once: now) else { return }
-        if threadStatus == banner.text { threadStatus = nil }
-        deleteNowBanner = nil
+        if let banner = deleteNowBanner, banner.locationID == locationID,
+           !banner.outcome.stillHolds(once: DeleteNowFailure(
+               listed: threadSummary(banner.threadID, at: locationID), gaps: listGaps)) {
+            if threadStatus == banner.text { threadStatus = nil }
+            deleteNowBanner = nil
+        }
+        if locationID == .local, threadStatus?.hasPrefix(Self.threadRefreshFailurePrefix) == true {
+            threadStatus = deleteNowBanner?.text
+        }
     }
 
     private func clearLifecycleBanner() {
