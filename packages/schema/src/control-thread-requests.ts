@@ -34,8 +34,8 @@ export const ControlThreadCreateRequest = z
   .describe("Request body for POST /threads.");
 export type ControlThreadCreateRequest = z.infer<typeof ControlThreadCreateRequest>;
 
-/** Mutate a thread's title, open/closed state, or sticky routing (rename,
- * archive, switch primary/pool). primaryHarness nullable => clear back to auto. */
+/** Mutate a thread's title, sidebar folder, open/closed state, or sticky routing
+ * (rename, file, archive, switch primary/pool). primaryHarness nullable => clear back to auto. */
 export const ControlThreadUpdateRequest = z
   .object({
     title: z.string().optional().describe("New thread title."),
@@ -58,5 +58,7 @@ export const ControlThreadUpdateRequest = z
       .describe("New sticky write scope; null clears back to the repo trust default."),
   })
   .strict()
-  .describe("Request body for PATCH /threads/:id: rename, archive, or switch sticky routing.");
+  .describe(
+    "Request body for PATCH /threads/:id: rename, file into a sidebar folder, archive, or switch sticky routing.",
+  );
 export type ControlThreadUpdateRequest = z.infer<typeof ControlThreadUpdateRequest>;
