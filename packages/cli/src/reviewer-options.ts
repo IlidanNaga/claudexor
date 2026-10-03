@@ -160,7 +160,7 @@ export function parseReviewerPanelJson(
   const result = ControlReviewerPanelEntry.array().safeParse(parsed);
   if (!result.success) {
     throw new Error(
-      `invalid --reviewer-panel-json value (expected a JSON array of {harness, model?, effort?, credentialProfileId?}: ${result.error.issues.map((issue) => issue.message).join("; ")})`,
+      `invalid --reviewer-panel-json value (expected a JSON array of {harness, model?, effort?, processingPreference?, credentialProfileId?}: ${result.error.issues.map((issue) => issue.message).join("; ")})`,
     );
   }
   if (result.data.length === 0) {

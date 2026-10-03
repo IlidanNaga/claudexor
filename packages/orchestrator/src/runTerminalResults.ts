@@ -1,8 +1,17 @@
+import { ProcessingBudgetAdmissionError } from "./processing-dispatch.js";
+import { classifyBudgetFailure } from "./budgetFailure.js";
 import { join } from "node:path";
 import { cancelReasonFromSignalToken } from "./runTerminals.js";
 import type { ArtifactStore } from "@claudexor/artifact-store";
 import type { EventLog } from "@claudexor/event-log";
-import { RunFailure, RunFailureCode, type ModeKind, type RunOutcomeFacts } from "@claudexor/schema";
+import {
+  RunFailure,
+  RunFailureCode,
+  type ModeKind,
+  type RunOutcomeFacts,
+  type VendorFailureEvidence,
+  HarnessRequestRefusal,
+} from "@claudexor/schema";
 import { redactSecrets } from "@claudexor/util";
 import type { OrchestratorResult } from "./orchestrator.js";
 import { terminalOutcomeFacts } from "./terminalOutcome.js";
@@ -27,9 +36,14 @@ export function writeFailure(
     /** Structural reopen time for a windowed refusal (spent subscription
      * quota); null/omitted when the failure has no such time. */
     resetsAt?: string | null;
+    /** The vendor's own typed failure for the attempt this record speaks for;
+     * null/omitted when no vendor-typed evidence exists. Opaque evidence. */
+    vendorFailure?: VendorFailureEvidence | null;
+    requestRefusal?: HarnessRequestRefusal;
     nextActions?: string[];
   },
 ): void {
+  const vendor = failure.vendorFailure ?? null;
   store.writeYaml(join(paths.finalDir, "failure.yaml"), {
     phase: failure.phase,
     category: failure.category,
@@ -42,15 +56,33 @@ export function writeFailure(
     eventRefs: failure.eventRefs ?? [],
     runDir: failure.runDir ?? paths.root,
     resetsAt: failure.resetsAt ?? null,
-    nextActions: failure.nextActions ?? [],
+    ...(failure.requestRefusal ? { requestRefusal: failure.requestRefusal } : {}),
+    // Vendor text was redacted at event ingress; redact again like safeMessage (INV-062).
+    vendorFailure: vendor && {
+      code: vendor.code === null ? null : redactSecrets(vendor.code),
+      message: vendor.message === null ? null : redactSecrets(vendor.message),
+      source: vendor.source,
+    },
+    nextActions:
+      failure.code === "input_too_large"
+        ? [
+            "Fit the input to the reported transport limit or supply source references",
+            "Choose another compatible harness if the complete input must remain inline",
+          ]
+        : (failure.nextActions ?? []),
   });
 }
 
 /** The typed provenance an error declared about its own terminal. */
 export interface DeclaredFailure {
+  requestRefusal?: HarnessRequestRefusal;
   category?: RunFailure["category"];
   code: RunFailureCode | null;
   resetsAt: string | null;
+}
+
+export function requestRefusalFailure(requestRefusal: HarnessRequestRefusal): DeclaredFailure {
+  return { category: "validation", code: requestRefusal.kind, resetsAt: null, requestRefusal };
 }
 
 /**
@@ -73,12 +105,14 @@ export function declaredFailure(err: unknown): DeclaredFailure {
   const code = RunFailureCode.safeParse(record["code"]);
   const category = RunFailure.shape.category.safeParse(record["category"]);
   const resetsAt = RunFailure.shape.resetsAt.safeParse(record["resetsAt"]);
+  const refusal = HarnessRequestRefusal.safeParse(record["requestRefusal"]);
   return {
     ...(typeof record["category"] === "string" && category.success
       ? { category: category.data }
       : {}),
     code: code.success ? code.data : null,
     resetsAt: resetsAt.success ? resetsAt.data : null,
+    ...(refusal.success ? { requestRefusal: refusal.data } : {}),
   };
 }
 
@@ -194,24 +228,36 @@ export function failTerminally(
     priorFacts?: RunOutcomeFacts;
   } = {},
 ): OrchestratorResult {
-  const message = redactSecrets(err instanceof Error ? err.message : String(err));
+  const budget =
+    err instanceof ProcessingBudgetAdmissionError
+      ? classifyBudgetFailure({ denial: err.denial, terminal: null })
+      : null;
+  if (budget) phase = budget.phase;
+  const message =
+    budget?.safeMessage ?? redactSecrets(err instanceof Error ? err.message : String(err));
   const declared = declaredFailure(err);
-  const failFacts = terminalOutcomeFacts(failureMeta.priorFacts, "failed", "harness_failed");
+  const failFacts = terminalOutcomeFacts(
+    failureMeta.priorFacts,
+    "failed",
+    budget?.reason ?? "harness_failed",
+  );
   store.writeText(
     join(paths.finalDir, "summary.md"),
     `# Run ${runId} (${mode})\n\n- Lifecycle: failed\n- Phase: ${phase}\n\n${message}\n`,
   );
   writeFailure(store, paths, {
     phase,
-    category: declared.category ?? failureMeta.category ?? "internal",
+    category: budget?.category ?? declared.category ?? failureMeta.category ?? "internal",
     code: declared.code,
-    harnessId: failureMeta.harnessId,
-    attemptId: failureMeta.attemptId,
+    harnessId: budget?.harnessId ?? failureMeta.harnessId,
+    attemptId: budget?.attemptId ?? failureMeta.attemptId,
     safeMessage: message,
     rawDetailRef: failureMeta.rawDetailRef,
     runDir: paths.root,
     resetsAt: declared.resetsAt,
-    nextActions: failureMeta.nextActions ?? ["Open diagnostics", "Retry the run"],
+    requestRefusal: declared.requestRefusal,
+    nextActions: budget?.nextActions ??
+      failureMeta.nextActions ?? ["Open diagnostics", "Retry the run"],
   });
   log.emit("output.ready", { kind: "summary", path: "final/summary.md", state: "diagnostic" });
   log.emit("run.failed", {

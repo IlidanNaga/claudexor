@@ -10,14 +10,20 @@ import {
   revParse,
   snapshotTree,
   statusPorcelainMeaningful,
+  applyWorkspaceFiles,
+  readWorkspaceFile,
+  selectedWorkspaceChanges,
+  workspaceFilePath,
 } from "@claudexor/workspace";
-import { newId, redactSecrets } from "@claudexor/util";
+import { newId, redactSecrets, sha256 } from "@claudexor/util";
 import type { FinalVerifyRecord } from "@claudexor/schema";
 import type { GateSpec } from "@claudexor/review";
 import { finalVerifyBlocks, finalVerifyPatch, type VerifyEventLog } from "./final-verifier.js";
+import { finalVerifyFiles, type VerifiableWorkspaceFiles } from "./files-verifier.js";
 
 export * from "./gate.js";
 export * from "./final-verifier.js";
+export * from "./files-verifier.js";
 
 const repositoryMutationTails = new Map<string, Promise<void>>();
 
@@ -107,6 +113,59 @@ export interface VerifiedDeliverResult extends DeliverResult {
   finalVerify: FinalVerifyRecord;
   targetPreimageSha: string;
   refused?: boolean;
+}
+
+/** Directory delivery shares the existing target lease and receipt semantics. */
+export async function verifyAndDeliverFiles(
+  targetRoot: string,
+  candidate: VerifiableWorkspaceFiles,
+  options: { paths?: string[] } = {},
+  gates: GateSpec[] = [],
+  authorize?: (record: FinalVerifyRecord) => string | null,
+  log: VerifyEventLog = { emit: () => undefined },
+): Promise<VerifiedDeliverResult & { appliedPaths: string[] }> {
+  return withRepositoryMutationLease(targetRoot, async () => {
+    const changes = selectedWorkspaceChanges(candidate.manifest, options.paths);
+    const preimage = async () => {
+      const entries = [];
+      for (const entry of changes)
+        entries.push({
+          path: entry.path,
+          state: await readWorkspaceFile(await workspaceFilePath(targetRoot, entry.path, true)),
+        });
+      return sha256(JSON.stringify(entries));
+    };
+    const targetPreimageSha = await preimage();
+    const finalVerify = await finalVerifyFiles(candidate, options.paths, gates, log);
+    const refusal =
+      (await realpath(targetRoot)) !== (await realpath(candidate.manifest.sourceRoot))
+        ? "target does not match the work product source"
+        : finalVerify.applied_cleanly !== true
+          ? (finalVerify.reason ?? "file verification failed")
+          : authorize
+            ? authorize(finalVerify)
+            : finalVerifyBlocks(finalVerify)
+              ? "final verify failed"
+              : null;
+    if (refusal || (await preimage()) !== targetPreimageSha)
+      return {
+        mode: "apply",
+        applied: false,
+        treeMutated: false,
+        appliedPaths: [],
+        refused: true,
+        detail: refusal ?? "target changed after final verify; refusing stale delivery",
+        finalVerify,
+        targetPreimageSha,
+      };
+    const result = await applyWorkspaceFiles(
+      targetRoot,
+      candidate.manifest,
+      candidate.artifactRoot,
+      options.paths,
+    );
+    return { mode: "apply", ...result, refused: !result.applied, finalVerify, targetPreimageSha };
+  });
 }
 
 /** One mutation entry point for manual/thread/race delivery. It verifies the

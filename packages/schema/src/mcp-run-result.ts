@@ -1,11 +1,13 @@
 import { z } from "zod/v3";
 import { ApplyEligibility } from "./apply-eligibility.js";
 import { ControlBudgetSnapshot } from "./control.js";
+import { ControlThreadTurnResponse } from "./control-operation-responses.js";
 import { RunFailure } from "./control-run-failure.js";
 import { RunOutcomeFacts } from "./decision.js";
 import { RunDelegationInfo } from "./delegation.js";
 import { CouncilProjection, PlanReadiness } from "./plan.js";
 import { RunFacts } from "./run-facts.js";
+import { AttemptExecutionEvidence } from "./attempt-execution.js";
 
 export const RunDetailProblem = z
   .object({
@@ -23,6 +25,7 @@ export type RunDetailProblem = z.infer<typeof RunDetailProblem>;
  */
 export const McpRunToolResult = z
   .object({
+    attemptExecution: z.array(AttemptExecutionEvidence).optional(),
     summary: z
       .string()
       .describe("Human-readable outcome summary (same text as the tool's text content)."),
@@ -98,6 +101,7 @@ export type McpRunToolResult = z.infer<typeof McpRunToolResult>;
  */
 export const McpRunHandleResult = z
   .object({
+    attemptExecution: z.array(AttemptExecutionEvidence).optional(),
     summary: z
       .string()
       .describe("Human-readable outcome/status text (same as the tool's text content)."),
@@ -178,3 +182,22 @@ export const McpRunHandleResult = z
   .strict()
   .describe("Structured MCP result for Claudexor durable-run read tools (inspect/status/result).");
 export type McpRunHandleResult = z.infer<typeof McpRunHandleResult>;
+
+const threadTurnSummary = {
+  summary: z
+    .string()
+    .describe("Human-readable turn handle summary (same as the tool's text content)."),
+};
+
+/**
+ * The structured result claudexor_thread_turn returns: the daemon's durable
+ * thread-turn handle (a bound runId, or a queued jobId) plus the text summary.
+ * Each member stays as strict as the daemon handle it mirrors.
+ */
+export const McpThreadTurnResult = z
+  .union([
+    ControlThreadTurnResponse.options[0].extend(threadTurnSummary),
+    ControlThreadTurnResponse.options[1].extend(threadTurnSummary),
+  ])
+  .describe("Structured MCP result for claudexor_thread_turn: the durable thread-turn handle.");
+export type McpThreadTurnResult = z.infer<typeof McpThreadTurnResult>;

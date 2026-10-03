@@ -1,6 +1,6 @@
 {
   "name": "@claudexor/review",
-  "version": "3.10.2",
+  "version": "3.18.0",
   "license": "MIT",
   "description": "Deterministic gates, cross-family review, finding revalidation, route proof, convergence, readiness-debt.",
   "type": "module",
@@ -20,6 +20,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@claudexor/budget": "workspace:*",
     "@claudexor/config": "workspace:*",
     "@claudexor/context": "workspace:*",
     "@claudexor/core": "workspace:*",

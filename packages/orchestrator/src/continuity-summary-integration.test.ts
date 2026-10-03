@@ -11,12 +11,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runCapture } from "@claudexor/core";
-import type { HarnessAdapter } from "@claudexor/core";
+import type { HarnessAdapter, ProcessingAdmission } from "@claudexor/core";
 import { ConformanceReport, HarnessManifest } from "@claudexor/schema";
 import { readThreadSummary } from "@claudexor/workspace";
 import { Orchestrator } from "./orchestrator.js";
 import type { ThreadContinuityContext } from "./orchestrator.js";
 import type { ContinuityDisclosureResult } from "./continuity.js";
+import { summarizeThreadPrefix } from "./continuity-summary.js";
 import { rmSync as __rmSyncReap } from "node:fs";
 import { afterAll as __afterAllReap } from "vitest";
 
@@ -183,5 +184,51 @@ describe("[INV-137] V9c cached summary replaces the one-line collapse in the pac
     );
     expect(boundaryTurn).toBeDefined();
     expect(readThreadSummary(repo, "th-v9c", boundaryTurn as string)).toContain(SUMMARY_MARKER);
+  });
+
+  it("runs a fresh summary with the captured processing receipt and the enclosing lease admission", async () => {
+    const seen: unknown[] = [];
+    const base = bigAnswerLane("lane-processing", "native-processing");
+    const adapter: HarnessAdapter = {
+      ...base,
+      async *run(spec) {
+        seen.push(spec);
+        yield* base.run(spec);
+      },
+    };
+    const processingAdmission: ProcessingAdmission = async (spec) => {
+      seen.unshift("admitted");
+      expect(spec.processing_preference).toBe("standard");
+      expect(spec.processing?.requested).toBe("standard");
+    };
+    const summary = await summarizeThreadPrefix({
+      adapter,
+      turns: [{ id: "t1", prompt: "decision", outputText: "state" }],
+      cwd: "/tmp",
+      env: {},
+      credentialProfile: null,
+      authPreference: "auto",
+      envInheritance: "clean",
+      processing: {
+        processing_preference: "standard",
+        processing: {
+          requested: "standard",
+          submitted: "standard",
+          submittedNative: "standard",
+          observed: "unknown",
+          observedNative: [],
+          reason: null,
+          source: "fixture",
+        },
+        processing_cost_basis: { nativeMode: "standard", kind: "included", source: "fixture" },
+        processing_allow_paid: false,
+      },
+      processingAdmission,
+    });
+    expect(summary).toContain(SUMMARY_MARKER);
+    expect(seen[0]).toBe("admitted");
+    expect((seen[1] as { processing_cost_basis: unknown }).processing_cost_basis).toMatchObject({
+      kind: "included",
+    });
   });
 });

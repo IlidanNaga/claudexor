@@ -36,6 +36,14 @@ import {
   type ControlSetupJob,
 } from "@claudexor/schema";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { parseCodexEvent } from "../../harness-codex/src/parse.js";
+import { parseClaudeEvent } from "../../harness-claude/src/parse.js";
+import {
+  createAttemptTelemetry,
+  observeAttemptTelemetry,
+  attemptTelemetryRecord,
+  aggregateRunTokenUsage,
+} from "../../orchestrator/src/attemptTelemetry.js";
 import { rmSync as __rmSyncReap } from "node:fs";
 import { afterAll as __afterAllReap } from "vitest";
 
@@ -254,16 +262,16 @@ describe("normalizeRunStart prompt validation", () => {
       normalizeRunStartRequest({ ...projectScope(), prompt: "plan it", mode: "plan", n: 3 }),
     ).toThrowError(/council membership width|pass --council/);
   });
-  it("rejects an out-of-range council membership n", () => {
-    expect(() =>
+  it("leaves council width above the default to the startup-frozen config cap", () => {
+    expect(
       normalizeRunStartRequest({
         ...projectScope(),
         prompt: "plan it",
         mode: "plan",
         council: true,
         n: 9,
-      }),
-    ).toThrowError(/between 2 and 4/);
+      }).n,
+    ).toBe(9);
   });
 });
 
@@ -828,11 +836,17 @@ describe("DaemonControlApiServer", () => {
       ]);
       expect(credentialProfiles?.responseSchema).toBe("ControlCredentialProfilesQueryResponse");
       const models = ops.find((o) => o.path === "/v2/harnesses/:id/models");
-      expect(models?.parameters[0]).toMatchObject({
+      expect(models?.parameters.find((parameter) => parameter.name === "route")).toMatchObject({
         name: "route",
         location: "query",
         enum: ["local_session", "api_key"],
       });
+      expect(models?.parameters.find((parameter) => parameter.name === "view")).toMatchObject({
+        name: "view",
+        location: "query",
+        enum: ["accounts"],
+      });
+      expect(models?.responseSchema).toBe("ControlHarnessModelsQueryResponse");
       const runEvents = ops.find((o) => o.path === "/v2/runs/:id/events");
       expect(runEvents?.parameters.map((p) => `${p.name}:${p.location}`)).toEqual([
         "Last-Event-ID:header",
@@ -8075,6 +8089,25 @@ describe("DaemonControlApiServer", () => {
       profile_id: "work",
       model_mismatch: null,
     };
+    // Follow the real native-parser -> attempt -> run artifact -> HTTP projection.
+    const codex = createAttemptTelemetry("off", false);
+    const claude = createAttemptTelemetry("off", false);
+    parseCodexEvent(
+      { type: "turn.completed", usage: { input_tokens: 100, cached_input_tokens: 80 } },
+      "codex",
+    )!.forEach((event) => observeAttemptTelemetry(codex, event));
+    parseClaudeEvent(
+      {
+        type: "result",
+        usage: { input_tokens: 100, cache_read_input_tokens: 50, cache_creation_input_tokens: 20 },
+      },
+      "claude",
+    )!.forEach((event) => observeAttemptTelemetry(claude, event));
+    telemetry["usage_totals"] = aggregateRunTokenUsage([
+      attemptTelemetryRecord("a01", "codex", codex),
+      attemptTelemetryRecord("a02", "claude", claude),
+    ]);
+    const normalized = { total_tokens: 270, cache_read_tokens: 130, cache_write_tokens: null };
     writeFileSync(telemetryPath, stringifyYaml(telemetry));
     await withDaemonServer(daemon, async (base) => {
       const detail = await apiFetch(`${base}/runs/run-d1`, {
@@ -8082,7 +8115,13 @@ describe("DaemonControlApiServer", () => {
       });
       const summary = (
         (await detail.json()) as {
-          summary: { delegation: unknown; authRoute: { profileId: string | null } };
+          summary: {
+            delegation: unknown;
+            authRoute: { profileId: string | null };
+            inputTokenUsage: unknown;
+            inputTokens: number;
+            cachedInputTokens: number;
+          };
         }
       ).summary;
       expect(summary.delegation).toEqual({
@@ -8093,6 +8132,9 @@ describe("DaemonControlApiServer", () => {
         remediation: null,
       });
       expect(summary.authRoute.profileId).toBe("work");
+      expect(summary.inputTokenUsage).toEqual(normalized);
+      expect(summary.inputTokens).toBe(200);
+      expect(summary.cachedInputTokens).toBe(150);
     });
   });
 
@@ -8488,6 +8530,7 @@ describe("DaemonControlApiServer", () => {
       safeMessage: "Auth failed",
       rawDetailRef: null,
       resetsAt: null,
+      vendorFailure: null,
       logRefs: [],
       eventRefs: [],
       runDir: record.runDir as string,
@@ -9442,6 +9485,149 @@ describe("DaemonControlApiServer", () => {
         retryable: true,
       });
       expect(findCalls).toBe(2);
+      expect(enqueueCalls).toBe(0);
+    });
+  });
+
+  // The daemon socket transports code/status/retryable; requiredActions do not cross it.
+  const unregisteredRootError = (root: string) =>
+    Object.assign(new Error(`project is not registered: ${root}`), {
+      code: "project_not_registered",
+      status: 404,
+      retryable: false,
+    });
+
+  it("POST /runs answers a typed 404 for an unregistered root and succeeds after POST /projects", async () => {
+    const { daemon } = fakeDaemon();
+    const root = reapMk(join(tmpdir(), "claudexor-unregistered-root-"));
+    const registered = new Set<string>();
+    const requireRegistered = (params: unknown) => {
+      const scope = (params as { scope?: { kind?: string; root?: string } }).scope;
+      if (scope?.kind === "project" && scope.root && !registered.has(scope.root)) {
+        throw unregisteredRootError(scope.root);
+      }
+    };
+    let enqueueCalls = 0;
+    const wrapped: DaemonFacadeClient = {
+      ...daemon,
+      async findAccepted(params) {
+        requireRegistered(params);
+        return null;
+      },
+      async enqueue(params, options) {
+        requireRegistered(params);
+        enqueueCalls += 1;
+        return daemon.enqueue(params, options);
+      },
+    };
+    const now = new Date().toISOString();
+    const services: DaemonControlApiOptions["services"] = {
+      registerProject: async (input) => {
+        registered.add((input as { root: string }).root);
+        return {
+          schema_version: 2,
+          id: "prj-unregistered",
+          root,
+          created_at: now,
+          updated_at: now,
+        };
+      },
+    };
+    await withDaemonServer(
+      wrapped,
+      async (base) => {
+        const start = () =>
+          apiFetch(`${base}/runs`, {
+            method: "POST",
+            headers: { authorization: `Bearer ${token}`, "Idempotency-Key": "unregistered-root" },
+            body: JSON.stringify({
+              prompt: "hello",
+              mode: "agent",
+              scope: { kind: "project", root },
+            }),
+          });
+        const refused = await start();
+        expect(refused.status).toBe(404);
+        expect(await refused.json()).toMatchObject({
+          code: "project_not_registered",
+          retryable: false,
+          requiredActions: [expect.stringMatching(/POST \/v2\/projects.*scope\.ephemeral=true/)],
+        });
+        expect(enqueueCalls).toBe(0);
+
+        const registration = await apiFetch(`${base}/projects`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+          body: JSON.stringify({ root }),
+        });
+        expect(registration.status).toBe(200);
+
+        const accepted = await start();
+        expect(accepted.status).toBe(200);
+        expect(await accepted.json()).toMatchObject({ jobId: expect.any(String) });
+        expect(enqueueCalls).toBe(1);
+      },
+      undefined,
+      services,
+    );
+  });
+
+  it("POST /runs answers the same typed 404 when the root is unregistered between lookup and enqueue", async () => {
+    const { daemon, record } = fakeDaemon();
+    const wrapped: DaemonFacadeClient = {
+      ...daemon,
+      async findAccepted() {
+        return null;
+      },
+      async enqueue() {
+        throw unregisteredRootError(String(record.runDir));
+      },
+    };
+    await withDaemonServer(wrapped, async (base) => {
+      const response = await apiFetch(`${base}/runs`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "Idempotency-Key": "unregistered-race" },
+        body: JSON.stringify({
+          prompt: "hello",
+          mode: "agent",
+          scope: { kind: "project", root: record.runDir },
+        }),
+      });
+      expect(response.status).toBe(404);
+      expect(await response.json()).toMatchObject({
+        code: "project_not_registered",
+        retryable: false,
+        requiredActions: [expect.stringMatching(/POST \/v2\/projects/)],
+      });
+    });
+  });
+
+  it("Exact Retry answers a typed 404, not the custody 503, when the source root is unregistered", async () => {
+    const { daemon, record } = fakeDaemon();
+    record.state = "succeeded";
+    let enqueueCalls = 0;
+    const wrapped: DaemonFacadeClient = {
+      ...daemon,
+      async findAccepted() {
+        throw unregisteredRootError(String(record.runDir));
+      },
+      async enqueue() {
+        enqueueCalls += 1;
+        throw new Error("an unregistered retry must not enqueue");
+      },
+    };
+    await withDaemonServer(wrapped, async (base) => {
+      const response = await apiFetch(`${base}/runs/run-d1/retry`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "Idempotency-Key": "unregistered-retry" },
+        body: "{}",
+      });
+      expect(response.status).toBe(404);
+      expect(await response.json()).toMatchObject({
+        code: "project_not_registered",
+        retryable: false,
+        requiredActions: [expect.stringMatching(/POST \/v2\/projects/)],
+      });
       expect(enqueueCalls).toBe(0);
     });
   });

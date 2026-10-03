@@ -17,6 +17,12 @@ describe("resolveDecisionBody", () => {
       action: "override_needs_human",
     });
     expect(resolve(["run-1", "--revert"])).toMatchObject({ ok: true, action: "revert_run" });
+    expect(resolve(["run-1", "--discard"])).toMatchObject({
+      ok: true,
+      action: "discard",
+      body: { action: "discard" },
+    });
+    expect(resolve(["run-1", "--discard", "--revert"])).toMatchObject({ ok: false });
     expect(resolve(["run-1", "--accept-clean-patch"])).toMatchObject({
       ok: true,
       action: "accept_clean_patch",

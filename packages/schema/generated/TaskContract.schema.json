@@ -552,6 +552,15 @@
           "default": {},
           "description": "Resolved harness-scoped model map for this run (harness id to model id); empty means every route uses its per-harness settings default."
         },
+        "processing_preference": {
+          "type": "string",
+          "enum": [
+            "standard",
+            "fast",
+            "economy"
+          ],
+          "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
+        },
         "routing_efforts": {
           "type": "object",
           "additionalProperties": {

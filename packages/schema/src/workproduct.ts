@@ -2,13 +2,13 @@ import { z } from "zod/v3";
 import { Id } from "./primitives.js";
 
 // Staged-field rule: the enum ships only kinds runs actually PRODUCE
-// (patch / new_repo / report). Delivery-as-branch/commit/pr is a different,
+// (patch / new_repo / report / files). Delivery-as-branch/commit/pr is a different,
 // fully-consumed vocabulary (`ControlApplyRequest.mode`) — those values were
 // never work-product kinds with a producer, so they do not live here.
 export const WorkProductKind = z
-  .enum(["patch", "new_repo", "report"])
+  .enum(["patch", "new_repo", "report", "files"])
   .describe(
-    "Kind of work product a run produces: a patch against the base tree, a newly created repository, or a report document.",
+    "Kind of work product: Git patch, new repository, report, or complete directory file manifest with retained bytes.",
   );
 export type WorkProductKind = z.infer<typeof WorkProductKind>;
 
@@ -28,6 +28,6 @@ export const WorkProduct = z
     meta: z.record(z.string(), z.unknown()).default({}).describe("Kind-specific metadata."),
   })
   .describe(
-    "The deliverable a run produced (patch, new repo, or report), referenced by apply/delivery verbs.",
+    "The deliverable a run produced, referenced by apply/delivery verbs; files uses files.manifest and meta.manifest_sha256.",
   );
 export type WorkProduct = z.infer<typeof WorkProduct>;

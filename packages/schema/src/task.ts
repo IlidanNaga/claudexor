@@ -14,6 +14,7 @@ import {
 } from "./primitives.js";
 import { PaidBudget, RoutingGoal } from "./budget.js";
 import { EffortHint } from "./harness.js";
+import { ProcessingPreference } from "./processing.js";
 
 export const TestCommandInvocation = z
   .object({
@@ -344,6 +345,7 @@ export const TaskContract = z
       .describe(
         "Resolved harness-scoped model map for this run (harness id to model id); empty means every route uses its per-harness settings default.",
       ),
+    processing_preference: ProcessingPreference.optional(),
     /** QA-035: the RESOLVED reasoning-effort per admitted lane, frozen at
      * contract build so Exact Retry replays the effort that actually governed
      * the run instead of re-reading (possibly changed) settings. Empty = no

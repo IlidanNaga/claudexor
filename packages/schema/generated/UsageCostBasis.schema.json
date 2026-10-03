@@ -1,0 +1,31 @@
+{
+  "$ref": "#/definitions/UsageCostBasis",
+  "definitions": {
+    "UsageCostBasis": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "cash",
+            "valuation",
+            "unknown"
+          ]
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "User-supplied string that must contain visible content, not just whitespace."
+        }
+      },
+      "required": [
+        "kind",
+        "source"
+      ],
+      "additionalProperties": false,
+      "description": "Observed meaning of this usage.cost_usd amount, separate from prospective processing billing. List-price valuation is not a cash or credit debit receipt. Native paid-credit consumption remains unknown when the vendor exposes no amount evidence."
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

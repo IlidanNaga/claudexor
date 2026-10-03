@@ -386,13 +386,14 @@
                             "type": "string",
                             "enum": [
                               "patch",
+                              "files",
                               "answer",
                               "plan",
                               "report",
                               "none"
                             ],
                             "default": "none",
-                            "description": "What the turn actually produced: a patch, an answer, a plan (no files changed), a report, or nothing."
+                            "description": "What the turn actually produced: a Git patch, directory files, an answer, a plan, a report, or nothing."
                           },
                           "diffStat": {
                             "anyOf": [
@@ -449,9 +450,10 @@
                               "not_applied",
                               "applied",
                               "applied_review_blocked",
-                              "reverted"
+                              "reverted",
+                              "discarded"
                             ],
-                            "description": "Honest application state of a run's changes: not_applied (no in-place mutation), applied (applied and review clean), applied_review_blocked (applied but review blocked/unconverged), or reverted.",
+                            "description": "Honest application state: not_applied (delivery pending), applied, applied_review_blocked, reverted, or discarded (remaining copied output deliberately not applied).",
                             "default": "not_applied"
                           },
                           "preTurnSha": {
@@ -504,7 +506,10 @@
                                 "description": "Terminal lifecycle of the run."
                               },
                               "noChanges": {
-                                "type": "boolean",
+                                "type": [
+                                  "boolean",
+                                  "null"
+                                ],
                                 "default": false,
                                 "description": "True when the run finished without changing any files (the ex no_op fact)."
                               },

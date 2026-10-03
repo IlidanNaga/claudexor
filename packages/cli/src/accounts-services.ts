@@ -4,7 +4,6 @@ import { StatusProjectionCache, globalConfigVersion } from "./status-projection-
 import { normalizeReadiness, type HarnessStatus } from "@claudexor/gateway";
 import { probeGitCapability } from "@claudexor/workspace";
 import { noProjectRepoRoot } from "@claudexor/util";
-import { validateModel } from "@claudexor/core";
 import type {
   CredentialProfile,
   CredentialProfileStatus,
@@ -14,7 +13,7 @@ import type {
 import { withQuotaAvailability } from "@claudexor/schema";
 import { vendorVerifiedProfileStatus } from "@claudexor/orchestrator";
 import { accountPoolsProjection, profileAccountProjection } from "./accounts-projection.js";
-import { buildGateway, buildRegistry, harnessModels } from "./registry.js";
+import { buildGateway, buildRegistry, checkHarnessModel } from "./registry.js";
 import { delegationCapabilityFor } from "./delegation-capability.js";
 import { effectiveSetupLoginCapability } from "./setup-login-capability.js";
 
@@ -32,15 +31,12 @@ export async function projectHarnessStatuses(statuses: readonly HarnessStatus[])
   return Promise.all(
     statuses.map(async (status) => {
       const configured = cfg.global.harnesses[status.id]?.default_model ?? null;
-      let check: { status: "ok" | "rejected"; message?: string | null } | null = null;
-      if (configured) {
-        const truth = await harnessModels(status.id, NO_PROJECT_ROOT, true);
-        check = validateModel(
-          configured,
-          truth.models.map((model) => model.id),
-          truth.source === "api" ? "api" : "manifest",
-        );
-      }
+      // The doctor's configured-model verdict honours the harness's own
+      // absence declaration (INV-104): an advisory harness passes with the
+      // note in the readiness detail instead of failing on a hint-list miss.
+      const check = configured
+        ? (await checkHarnessModel(status.id, configured, NO_PROJECT_ROOT, true)).check
+        : null;
       return {
         ...status,
         configuredModel: configured,

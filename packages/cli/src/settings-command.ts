@@ -78,7 +78,11 @@ export async function settingsCommand(args: ParsedArgs, json: boolean): Promise<
     }
     const snapshot = await settingsRequest(addr, "POST", patch);
     if (json) printJson(snapshot);
-    else print(`updated ${key}`);
+    else {
+      print(`updated ${key}`);
+      // An advisory harness admitted a model its list lacks: say so once.
+      for (const note of snapshot.notes) print(`note: ${note}`);
+    }
     return 0;
   } catch (error) {
     return renderCliFailure(json, error, { messagePrefix: "claudexor settings:" });
@@ -247,6 +251,15 @@ function printSettings(settings: ReturnType<typeof ControlSettingsSnapshot.parse
     `interaction_timeout_ms: ${formatInteractionTimeoutSetting(settings.interactionTimeoutMs)}`,
   );
   print(`runtime.reviewer_timeout_ms: ${settings.runtime.reviewerTimeoutMs}`);
+  const concurrency = settings.runtime.concurrency;
+  if (concurrency) {
+    print(
+      `runtime.concurrency.configured: regular=${concurrency.configured.maxConcurrent} candidates=${concurrency.configured.maxParallelCandidates} deep_scan=${concurrency.configured.maxDeepScanWidth} council=${concurrency.configured.maxCouncilMembers}`,
+    );
+    print(
+      `runtime.concurrency.effective: regular=${concurrency.effective.maxConcurrent} candidates=${concurrency.effective.maxParallelCandidates} deep_scan=${concurrency.effective.maxDeepScanWidth} council=${concurrency.effective.maxCouncilMembers} restart_required=${concurrency.restartRequired}`,
+    );
+  }
   print(`runtime.transient_retry.max_retries: ${settings.runtime.transientRetry.maxRetries}`);
   print(
     `runtime.transient_retry.initial_delay_ms: ${settings.runtime.transientRetry.initialDelayMs}`,

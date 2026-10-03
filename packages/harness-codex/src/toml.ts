@@ -1,3 +1,6 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { defaultNativeCodexHome } from "./auth.js";
 /**
  * A TOML basic-string literal for a `-c key=value` override. `developer_instructions`
  * is a documented additive Codex config key (layered as a developer block BEFORE
@@ -22,4 +25,21 @@ export function tomlBasicString(value: string): string {
     else out += ch;
   }
   return out + '"';
+}
+
+/**
+ * True only when the config codex WILL load (the scoped `CODEX_HOME` if set,
+ * else `~/.codex`) actually defines `[mcp_servers.node_repl]`. We only ever
+ * disable node_repl when it already exists — a `-c mcp_servers.node_repl.*`
+ * override against a config that has NO node_repl creates a partial entry with
+ * no transport and codex refuses to load it ("invalid transport in
+ * mcp_servers.node_repl"), which broke every scoped-home / api_key / MCP run.
+ */
+export function codexConfigHasNodeRepl(codexHome: string | null | undefined): boolean {
+  const cfg = join(codexHome || defaultNativeCodexHome(), "config.toml");
+  try {
+    return existsSync(cfg) && readFileSync(cfg, "utf8").includes("[mcp_servers.node_repl]");
+  } catch {
+    return false;
+  }
 }

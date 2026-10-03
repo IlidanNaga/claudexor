@@ -8,3 +8,6 @@ export * from "./anchor-store.js";
 export * from "./manager.js";
 export * from "./lanes.js";
 export * from "./thread-tree.js";
+export * from "./directory-workspace.js";
+export * from "./files-io.js";
+export * from "./files-apply.js";

@@ -2,6 +2,7 @@ import { z } from "zod/v3";
 import { BillingKnowledge, CostKnowledge } from "./auth.js";
 import { Id, Intent } from "./primitives.js";
 import { EffortHint, SignalQuality } from "./harness.js";
+import { ProcessingCostBasis } from "./processing.js";
 
 export const PaidBudget = z
   .discriminatedUnion("kind", [
@@ -13,6 +14,7 @@ export type PaidBudget = z.infer<typeof PaidBudget>;
 
 export const CostEvidence = z
   .object({
+    processing: ProcessingCostBasis.optional(),
     knowledge: CostKnowledge,
     billing: BillingKnowledge,
     source: z.string().min(1),
@@ -22,6 +24,20 @@ export const CostEvidence = z
   .strict()
   .describe("Incremental-cash cost knowledge with its source and evidence provenance.");
 export type CostEvidence = z.infer<typeof CostEvidence>;
+
+export const UsageCostSummary = z
+  .object({
+    cashUsd: z.number().nonnegative(),
+    valuationUsd: z.number().nonnegative(),
+    unknownUsd: z.number().nonnegative(),
+    cashKnowledge: CostKnowledge,
+    valuationKnowledge: CostKnowledge,
+  })
+  .strict()
+  .describe(
+    "Observed usage components. An amount of unknown meaning is not charged cash; separately proven included service can still establish exact zero incremental cash.",
+  );
+export type UsageCostSummary = z.infer<typeof UsageCostSummary>;
 
 export const AuthMode = z
   .enum(["local_session", "api_key", "unknown"])

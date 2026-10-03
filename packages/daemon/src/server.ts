@@ -2,11 +2,16 @@ import { type Server, type Socket, createServer } from "node:net";
 
 import {
   ControlRunStartRequest,
+  TurnEnqueueProblem,
+  type TurnEnqueueProblem as TurnEnqueueProblemValue,
+  delegatedParentOf,
   resolveRunReviewRequested,
   normalizeCancelReasonCode,
   isTerminalLifecycle,
   type CancelReasonCode,
+  type RuntimeConcurrencyCaps,
 } from "@claudexor/schema";
+import { daemonHealth, daemonConcurrencyLimit } from "./daemon-health.js";
 import { RpcFollowers } from "./rpc-followers.js";
 import {
   assertNoInlineSecretValues,
@@ -27,11 +32,10 @@ import {
   findAcceptedCommand,
   publicAcceptedCommand,
 } from "./command-rpc.js";
-import { productCommandRecords, prunableCommandIds } from "./command-retention.js";
+import { prunableCommandIds, selectProductCommands } from "./command-retention.js";
 import { clearStaleUnixSocketPath, listenOnDaemonEndpoint } from "./daemon-listen.js";
 import {
   admitDelegatedRequest,
-  delegatedParentOf,
   isDelegatedChildRecord,
   type DelegationAdmissionAuthority,
 } from "./delegation-admission.js";
@@ -57,10 +61,6 @@ import {
   replacementRefusal,
   type RuntimeReplacementAuthority,
 } from "./daemon-shutdown-rpc.js";
-import {
-  TurnEnqueueProblem,
-  type TurnEnqueueProblem as TurnEnqueueProblemValue,
-} from "@claudexor/schema";
 export { JOB_STATES, jobStateFromResult, socketAlive, type JobRecord };
 
 export interface RunContext {
@@ -76,6 +76,8 @@ export interface DaemonOptions extends RuntimeReplacementAuthority {
   token: string;
   runner: RunnerFn;
   maxConcurrent?: number;
+  /** Startup-frozen strategy caps; absent embedders retain historical defaults. */
+  runtimeConcurrencyCaps?: RuntimeConcurrencyCaps;
   commands: CommandAuthority;
   delegationAuthority?: DelegationAdmissionAuthority;
   maxHistory?: number;
@@ -103,10 +105,8 @@ export interface DaemonOptions extends RuntimeReplacementAuthority {
   ) => void | Promise<void>;
 }
 
-// Daemon job state is EXACTLY the run LIFECYCLE (D8): outcome quality
-// (checks/review/reason) lives on the run's facts, projected by the control
-// plane — the job state machine never re-encodes it.
-/** Unix-socket worker pool; scheduling stays in the injected Orchestrator. */
+/** Daemon scheduling uses run lifecycle (D8); outcome quality stays on RunFacts.
+ * The injected Orchestrator owns work within a job. */
 export class DaemonServer {
   private server?: Server;
   private readonly followers = new RpcFollowers();
@@ -125,7 +125,9 @@ export class DaemonServer {
     this.resolveShutdown = resolve;
   });
 
-  constructor(private readonly opts: DaemonOptions) {}
+  constructor(private readonly opts: DaemonOptions) {
+    this.maxConcurrent = daemonConcurrencyLimit(opts);
+  }
 
   async start(): Promise<void> {
     if (this.stopping) {
@@ -161,9 +163,9 @@ export class DaemonServer {
     await this.opts.startupBarrier?.("before_registry_load");
     if (this.stopping) throw this.stoppingError("daemon startup was cancelled before listen");
     // With product admission closed (issue #165 D5 stage 3) the command
-    // projections are not activated yet; the registry materializes lazily
-    // once normal admission opens.
-    if (servingModeOf(this.opts.servingMode) === "normal") commandStores(this.opts.commands);
+    // projections are not activated yet; the registry materializes (and its
+    // history is pruned) once normal admission opens — see pruneHistory().
+    if (servingModeOf(this.opts.servingMode) === "normal") this.pruneHistory();
     await this.opts.startupBarrier?.("after_registry_load");
     if (this.stopping) throw this.stoppingError("daemon startup was cancelled after registry load");
     if (!pipeEndpoint) clearStaleUnixSocketPath(this.opts.socketPath);
@@ -301,17 +303,16 @@ export class DaemonServer {
     if (shutdown) return shutdown;
     const servingMode = servingModeOf(this.opts.servingMode);
     if (method === "claudexor.health") {
-      return {
-        ok: true,
-        uptime_ms: Date.now() - this.startedAt,
-        queue: this.queue.length,
-        running: this.active > 0,
-        active: this.active,
-        // Command projections are not activated while admission is closed.
-        jobs: servingMode === "normal" ? this.allRecords().length : 0,
-        stopping: this.stopping,
+      return daemonHealth(
+        this.startedAt,
+        this.queue.length,
+        this.active,
+        servingMode === "normal" ? this.allRecords().length : 0,
+        this.stopping,
         servingMode,
-      };
+        this.maxConcurrent,
+        this.opts.runtimeConcurrencyCaps,
+      );
     }
     // Issue #165 D5: with product admission closed, every product RPC gets
     // one typed refusal; health above and the shutdown RPCs stay reachable.
@@ -374,7 +375,7 @@ export class DaemonServer {
         return publicAcceptedCommand(this.opts.commands, params);
       }
       case "claudexor.list":
-        return productCommandRecords(this.allRecords()).map(publicJobRecord);
+        return selectProductCommands(this.allRecords(), params?.query).map(publicJobRecord);
       case "claudexor.cancel": {
         return this.cancelJob(String(params?.id), normalizeCancelReasonCode(params?.reason_code));
       }
@@ -401,9 +402,7 @@ export class DaemonServer {
     }
   }
 
-  private get maxConcurrent(): number {
-    return this.opts.maxConcurrent ?? 12;
-  }
+  private readonly maxConcurrent: number;
 
   /** Daemon-owned cancellation primitive used by RPC and the Delegate drain
    * barrier. It is safe to repeat and preserves queued-admission cleanup. */
@@ -428,7 +427,8 @@ export class DaemonServer {
     return Object.assign(new Error(message), { code: "daemon_stopping", status: 503 });
   }
 
-  private pruneHistory(): void {
+  /** Age/cap and params-byte command retention: at normal admission and after every terminal. */
+  pruneHistory(): void {
     const removed = prunableCommandIds(
       this.allRecords(),
       this.opts.maxHistory ?? 500,

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { DurableJournal } from "@claudexor/journal";
 import { withQuotaAvailability } from "@claudexor/schema";
-import { hashJson } from "@claudexor/util";
+import { hashJson, sha256 } from "@claudexor/util";
 import { JournalManager } from "./journal-manager.js";
 import { quotaProjection } from "./quota-projection.js";
 import { QuotaRegistry } from "./quota-registry.js";
@@ -886,13 +886,94 @@ describe("QuotaRegistry", () => {
     expect(raw.snapshots[0]).not.toHaveProperty("availability");
     expect(journal.records()[0]?.payload).not.toHaveProperty("availability");
     expect(journal.records().at(-1)?.payload).toMatchObject({
-      projection_signature: JSON.stringify({
-        snapshots: raw.snapshots,
-        absences: raw.absences,
-      }),
+      projection_signature: sha256(
+        JSON.stringify({
+          snapshots: raw.snapshots,
+          absences: raw.absences,
+        }),
+      ),
     });
 
     journal.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("journals an upsert only when the evidence changes; observed_at alone stays in memory", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-upsert-on-change-")));
+    const now = () => new Date("2026-07-28T00:10:00.000Z");
+    const journal = new DurableJournal({ rootDir: root, partition: "global" });
+    const registry = new QuotaRegistry(journal, [], now);
+    const upserts = () => journal.records(0, ["quota.snapshot.upserted"]).length;
+    registry.upsert(quotaSnapshot("claude", "work", 0.4));
+    expect(upserts()).toBe(1);
+    // Same evidence, later observation: no frame, but the live projection
+    // shows the fresh observation time and a marker still publishes it.
+    const reobserved = {
+      ...quotaSnapshot("claude", "work", 0.4),
+      observed_at: now().toISOString(),
+    };
+    registry.upsert(reobserved);
+    expect(upserts()).toBe(1);
+    expect(registry.read().snapshots[0]?.observed_at).toBe(reobserved.observed_at);
+    expect(journal.records(0, ["quota.projection.updated"]).length).toBe(2);
+    // Changed usage or a freshness flip is evidence and lands a frame.
+    registry.upsert({
+      ...reobserved,
+      constraints: quotaSnapshot("claude", "work", 0.5).constraints,
+    });
+    expect(upserts()).toBe(2);
+    registry.upsert({ ...reobserved, freshness: "stale" });
+    expect(upserts()).toBe(3);
+    // A second subject is independent evidence.
+    registry.upsert(quotaSnapshot("codex", "other", 0.1));
+    expect(upserts()).toBe(4);
+    journal.close();
+
+    // Replay carries the observation time of the last journaled change.
+    const replay = new DurableJournal({ rootDir: root, partition: "global" });
+    const recovered = new QuotaRegistry(replay, [], now);
+    const claude = recovered
+      .read()
+      .snapshots.find((snapshot) => snapshot.subject.subject_id === "work");
+    expect(claude).toMatchObject({ observed_at: reobserved.observed_at, freshness: "stale" });
+    replay.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("keeps the scoped prepare+upsert pair adjacent and change-gated", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-scoped-gate-")));
+    const now = () => new Date("2026-07-28T00:00:01.000Z");
+    const journal = new DurableJournal({ rootDir: root, partition: "global" });
+    const registry = new QuotaRegistry(journal, [], now);
+    const scoped = (usedRatio: number, observedAt: string) => ({
+      ...quotaSnapshot("claude", null, usedRatio),
+      observed_at: observedAt,
+      constraints: [
+        {
+          ...quotaSnapshot("claude", null, usedRatio).constraints[0]!,
+          applies_to_models: ["fable"],
+        },
+      ],
+    });
+    registry.upsert(scoped(0.3, "2026-07-28T00:00:00.000Z"));
+    registry.upsert(scoped(0.3, "2026-07-28T00:00:01.000Z"));
+    registry.upsert(scoped(0.7, "2026-07-28T00:00:02.000Z"));
+    const types = journal.records().map((record) => [record.seq, record.type] as const);
+    const pairs = types.filter(([, type]) => type === "quota.snapshot.scoped_prepared");
+    expect(pairs).toHaveLength(2);
+    for (const [seq] of pairs) {
+      expect(types.find(([candidate]) => candidate === seq + 1)?.[1]).toBe(
+        "quota.snapshot.upserted",
+      );
+    }
+    journal.close();
+    const replay = new DurableJournal({ rootDir: root, partition: "global" });
+    const recovered = new QuotaRegistry(replay, [], now);
+    expect(recovered.read().snapshots[0]?.constraints[0]).toMatchObject({
+      used_ratio: 0.7,
+      applies_to_models: ["fable"],
+    });
+    replay.close();
     rmSync(root, { recursive: true, force: true });
   });
 

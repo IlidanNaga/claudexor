@@ -1,0 +1,167 @@
+import type {
+  CostKnowledge,
+  HarnessEvent,
+  ProcessingCostBasis,
+  ProcessingReceipt,
+  UsageCostBasis,
+} from "@claudexor/schema";
+
+type AuthMode = "local_session" | "api_key" | null;
+type ProcessingEvidence = Pick<HarnessEvent, "processing" | "processing_cost_basis">;
+
+export interface UsageCostTotals {
+  cashUsd: number;
+  valuationUsd: number;
+  unknownUsd: number;
+  cashEstimated: boolean;
+  valuationEstimated: boolean;
+}
+
+/** Observed amount meaning is independent from prospective billing. A native
+ * premium tariff alone never turns a token estimate into a debit receipt. */
+export function usageAmountKind(
+  route: AuthMode,
+  amount: UsageCostBasis | undefined,
+  processing?: ProcessingReceipt,
+  billing?: ProcessingCostBasis,
+): UsageCostBasis["kind"] {
+  if (amount) return amount.kind;
+  if (route === "api_key") return "cash";
+  return ordinaryIncluded(route, processing, billing) ? "valuation" : "unknown";
+}
+
+function ordinaryIncluded(
+  route: AuthMode,
+  processing?: ProcessingReceipt,
+  billing?: ProcessingCostBasis,
+): boolean {
+  if (route !== "local_session") return false;
+  if (billing?.kind === "included") return true;
+  if (
+    processing?.reason === "processing_control_unavailable" &&
+    (billing === undefined || billing.kind === "unknown")
+  )
+    return true;
+  if (
+    ((processing?.submitted === "standard" &&
+      processing.observed !== "fast" &&
+      processing.observed !== "mixed") ||
+      (processing?.requested === null &&
+        processing.submitted === null &&
+        processing.reason !== "native_explicit" &&
+        !processing.reason?.startsWith("paid_processing_"))) &&
+    (billing === undefined || billing.kind === "unknown")
+  )
+    return true;
+  return processing === undefined && billing === undefined;
+}
+
+/** Event-local accounting evidence shared by attempts and reviewers. The
+ * BudgetLedger remains the sole authority for family spend and reservations. */
+export class UsageCostTracker {
+  readonly totals: UsageCostTotals;
+  unknownPaidUsd = 0;
+  private processing?: ProcessingReceipt;
+  private billing?: ProcessingCostBasis;
+  private active = false;
+  private activeSawEvent = false;
+  private activePaid = false;
+  private activeCashReceipt = false;
+  private intervalKey: string | null = null;
+  private sawRoute = false;
+  private sawUnknownUsage = false;
+  private sawValuation = false;
+  private unresolvedPaid = false;
+  private unknownPaidAmount = false;
+
+  constructor(totals?: UsageCostTotals) {
+    this.totals = totals ?? {
+      cashUsd: 0,
+      valuationUsd: 0,
+      unknownUsd: 0,
+      cashEstimated: false,
+      valuationEstimated: false,
+    };
+  }
+
+  startAttempt(evidence: ProcessingEvidence = {}): void {
+    if (this.active) this.finishAttempt();
+    this.active = true;
+    this.activeSawEvent = false;
+    this.activePaid = false;
+    this.activeCashReceipt = false;
+    this.intervalKey = null;
+    this.processing = evidence.processing;
+    this.billing = evidence.processing_cost_basis;
+  }
+
+  observeEvent(route: AuthMode, evidence: ProcessingEvidence = {}): void {
+    this.processing = evidence.processing ?? this.processing;
+    this.billing = evidence.processing_cost_basis ?? this.billing;
+    if (!this.active) return;
+    this.activeSawEvent = true;
+    this.sawRoute ||= route !== null;
+    if (route === null) return;
+    const key = `${route}:${this.billing?.kind ?? (this.processing ? "unknown" : "legacy")}`;
+    if (this.intervalKey !== null && key !== this.intervalKey) {
+      this.unresolvedPaid ||= this.activePaid && !this.activeCashReceipt;
+      this.activePaid = false;
+      this.activeCashReceipt = false;
+    }
+    this.intervalKey = key;
+    this.activePaid ||= !ordinaryIncluded(route, this.processing, this.billing);
+  }
+
+  observeUsage(route: AuthMode, usd: number, estimated: boolean, event?: HarnessEvent): void {
+    if (!Number.isFinite(usd) || usd < 0) return;
+    const kind = usageAmountKind(
+      route,
+      event?.usage?.cost_basis,
+      event?.processing ?? this.processing,
+      event?.processing_cost_basis ?? this.billing,
+    );
+    if (kind === "cash") {
+      this.activeCashReceipt = true;
+      this.totals.cashUsd += usd;
+      this.totals.cashEstimated ||= estimated;
+    } else if (kind === "valuation") {
+      this.sawValuation = true;
+      this.totals.valuationUsd += usd;
+      this.totals.valuationEstimated ||= estimated;
+    } else {
+      this.sawUnknownUsage = true;
+      const paid = !ordinaryIncluded(
+        route,
+        event?.processing ?? this.processing,
+        event?.processing_cost_basis ?? this.billing,
+      );
+      this.unknownPaidAmount ||= paid;
+      if (paid) this.unknownPaidUsd += usd;
+      this.totals.unknownUsd += usd;
+    }
+  }
+
+  finishAttempt(): void {
+    this.unresolvedPaid ||=
+      this.activeSawEvent &&
+      (this.intervalKey === null || (this.activePaid && !this.activeCashReceipt));
+    this.active = false;
+  }
+
+  snapshot(): { cashKnowledge: CostKnowledge; valuationKnowledge: CostKnowledge } {
+    const cashUnknown =
+      this.unknownPaidAmount ||
+      this.unresolvedPaid ||
+      (this.activeSawEvent && this.activePaid && !this.activeCashReceipt) ||
+      !this.sawRoute;
+    return {
+      cashKnowledge: cashUnknown ? "unknown" : this.totals.cashEstimated ? "estimated" : "exact",
+      valuationKnowledge:
+        this.sawUnknownUsage || !this.sawValuation
+          ? "unknown"
+          : this.totals.valuationEstimated
+            ? "estimated"
+            : "exact",
+    };
+  }
+}

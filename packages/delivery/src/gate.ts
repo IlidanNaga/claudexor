@@ -6,6 +6,7 @@ import type {
   RunApplyState,
   WorkProduct,
   WorkState,
+  WorkspaceFilesManifest,
 } from "@claudexor/schema";
 import { parseUnifiedDiff } from "@claudexor/core";
 import { reviewAllowsApply } from "@claudexor/schema";
@@ -25,6 +26,8 @@ export interface ApplyGateInput {
   decision: DecisionRecord | null;
   workProduct: WorkProduct | null;
   patch: string;
+  filesManifest?: WorkspaceFilesManifest;
+  manifestSha256?: string;
   /** Repo root recorded by the run (contract/params); null when unknown. */
   originalRepoRoot: string | null;
   /** Repo the caller wants to apply into. */
@@ -35,7 +38,7 @@ export interface ApplyGateInput {
    * valid only when its recorded patch hash matches the artifact — a typed,
    * server-owned unblock, never client-faked state.
    */
-  operatorDecision?: { action: string; patch_sha256?: string } | null;
+  operatorDecision?: { action: string; patch_sha256?: string; manifest_sha256?: string } | null;
   /** Fresh verifier result for this delivery attempt. When omitted, the
    * persisted decision result is used for read-only eligibility projection. */
   finalVerify?: FinalVerifyRecord | null;
@@ -139,8 +142,9 @@ function hasValidRiskOverride(input: ApplyGateInput): boolean {
     isNeedsDecision(input.decision) &&
     !!d &&
     (d.action === "accept_risk" || d.action === "override_needs_human") &&
-    typeof d.patch_sha256 === "string" &&
-    d.patch_sha256 === sha256(input.patch)
+    (input.workProduct?.kind === "files"
+      ? typeof d.manifest_sha256 === "string" && d.manifest_sha256 === input.manifestSha256
+      : typeof d.patch_sha256 === "string" && d.patch_sha256 === sha256(input.patch))
   );
 }
 
@@ -164,6 +168,7 @@ function isOverrideVerifyPending(input: ApplyGateInput): boolean {
 }
 
 export function validateApplyGate(input: ApplyGateInput): string | null {
+  if (input.applyState === "discarded") return "This result was discarded.";
   // An operator risk override is meaningful ONLY on a needs-decision run —
   // review blocked or checks failed (INV-111, Bible §11): the decision
   // endpoint records decisions exclusively for such runs, so any other
@@ -229,13 +234,23 @@ export function validateApplyGate(input: ApplyGateInput): string | null {
     }
   }
   if (!input.workProduct) return "work product is required before apply";
-  if (input.workProduct.kind !== "patch")
+  const files = input.workProduct.kind === "files";
+  if (
+    files &&
+    (input.filesManifest?.isolation !== "envelope" || input.filesManifest.complete !== true)
+  )
+    return "only a complete copied files result can be applied";
+  if (!files && input.workProduct.kind !== "patch")
     return `work product kind ${input.workProduct.kind} is not applyable as a patch`;
-  const recorded = input.workProduct.meta?.["patch_sha256"];
+  const recorded = input.workProduct.meta?.[files ? "manifest_sha256" : "patch_sha256"];
   if (typeof recorded !== "string" || recorded.length === 0)
-    return "work product patch hash is required before apply";
-  if (recorded !== sha256(input.patch))
-    return "patch artifact hash does not match the recorded work product";
+    return files
+      ? "work product manifest hash is required before apply"
+      : "work product patch hash is required before apply";
+  if (recorded !== (files ? input.manifestSha256 : sha256(input.patch)))
+    return files
+      ? "manifest hash does not match the recorded work product"
+      : "patch artifact hash does not match the recorded work product";
   if (!input.originalRepoRoot) return "run original project is unknown; refusing apply";
   try {
     if (realpathSync(input.originalRepoRoot) !== realpathSync(input.targetRepoRoot)) {
@@ -244,6 +259,9 @@ export function validateApplyGate(input: ApplyGateInput): string | null {
   } catch {
     return "run original project cannot be verified; refusing apply";
   }
+  // Files use schema-relative paths and the file delivery owner's no-follow
+  // ancestor resolution. Unchanged baseline links are not mutations to fence.
+  if (files) return null;
   // Workspace confinement (defense-in-depth on top of `git apply`): every
   // patched path must resolve INSIDE the target repo root.
   for (const path of patchPaths(input.patch)) {
@@ -269,6 +287,13 @@ export function deriveApplyEligibility(input: ApplyGateInput): ApplyEligibility 
   // the review outcome for `applied_review_blocked` lives on the outcome banner
   // and the separate Revert affordance, not on this apply verdict.
   const applyState = input.applyState ?? null;
+  if (applyState === "discarded")
+    return {
+      eligible: false,
+      state: "discarded",
+      reason: "This result was discarded.",
+      requiredAction: null,
+    };
   if (applyState === "applied" || applyState === "applied_review_blocked") {
     return {
       eligible: false,

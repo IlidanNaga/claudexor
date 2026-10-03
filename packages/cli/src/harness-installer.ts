@@ -38,6 +38,11 @@
  *   earn its `ok:true`, so exit zero without a resolvable launcher and a
  *   matching `--version` is a typed failure, and `installedBinary` /
  *   `installedVersion` are present on every local success.
+ * - on Windows the local target installs only where the pinned npm package
+ *   yields a verified package-native image (codex): npm's own `.cmd` shim is
+ *   never the launcher, the embedded Node's `node_modules/npm/bin/npm-cli.js`
+ *   runs the install, and the proof executes the image the shared harness
+ *   PATH resolves; other vendors refuse typed before any side effect.
  * - `--json` keeps stdout pure: exactly ONE JSON object. In json mode every
  *   human progress line goes to stderr and child processes (npm/curl/the
  *   vendor script) run with their stdout routed onto stderr, so vendor
@@ -47,8 +52,14 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { composeBaseEnv } from "@claudexor/core";
+import { join, resolve } from "node:path";
+import {
+  composeBaseEnv,
+  embeddedNpmCli,
+  pickAllowlistedEnv,
+  WINDOWS_RUNTIME_ENV_KEYS,
+  windowsNativeImageSegments,
+} from "@claudexor/core";
 import { flagBool, flagStr, type ParsedArgs } from "./args.js";
 import { CliError, renderCliFailure } from "./cli-error.js";
 import { print, printJson, printUsageError } from "./cli-io.js";
@@ -120,16 +131,25 @@ function verificationFailure(
   };
 }
 
-/** The managed toolchain root and its npm/PATH contract are POSIX-only in this
- * release, so the local target refuses on Windows instead of installing into a
- * prefix nothing would then resolve. The remote target is unaffected. */
-function localPlatformRefusal(platform: NodeJS.Platform): HarnessInstallRunResult | null {
+/** A local Windows install is supported exactly where the pinned npm package
+ * yields a verified package-native image for this architecture (core's
+ * `windowsNativeImageSegments`); every other vendor refuses typed BEFORE any
+ * side effect rather than installing a shim nothing can spawn without a shell
+ * (issue #191). The remote target is unaffected. */
+function localPlatformRefusal(
+  harness: InstallableHarness,
+  platform: NodeJS.Platform,
+  arch: string,
+): HarnessInstallRunResult | null {
   if (platform !== "win32") return null;
-  return {
-    exitCode: 1,
-    code: "unsupported_platform",
-    refusal: "--target local is not supported on Windows by this release; nothing was executed",
-  };
+  const pin = NPM_PINS[harness];
+  if (pin && windowsNativeImageSegments(pin.npmPackage, arch) !== null) return null;
+  const refusal = pin
+    ? windowsNativeImageSegments(pin.npmPackage, "x64") !== null
+      ? `${harness} has no native Windows image for the ${arch} architecture in its pinned npm package; nothing was executed`
+      : `${harness} local Windows installation is not supported by this release: its pinned npm package has no Claudexor-verified native Windows image, and an npm .cmd shim is never spawned without a shell (issue #191); nothing was executed`
+    : `--target local is not supported on Windows for ${harness} by this release; nothing was executed`;
+  return { exitCode: 1, code: "unsupported_platform", refusal };
 }
 
 /** An unexpected throw is still ONE typed JSON object, never a stack trace on
@@ -165,6 +185,8 @@ export function runHarnessInstaller(
     lock?: boolean;
     lockTimeoutMs?: number;
     platform?: NodeJS.Platform;
+    /** The runner Node's architecture (npm selects the platform package by it). */
+    arch?: string;
     /** Test/integration source before the clean allowlist and target-aware PATH
      * normalization are applied. Provider credentials are still scrubbed. */
     sourceEnv?: NodeJS.ProcessEnv;
@@ -174,11 +196,16 @@ export function runHarnessInstaller(
     json?: boolean;
   } = {},
 ): HarnessInstallRunResult {
-  const home = resolve(options.home ?? homedir());
+  // Anchored on the SAME `HOME` the harness PATH producer reads, so the prefix
+  // this installs into is the prefix doctor/login/run resolve — on Windows
+  // `homedir()` follows USERPROFILE and would silently diverge from a scoped
+  // HOME.
+  const home = resolve(options.home ?? ((options.sourceEnv ?? process.env).HOME || homedir()));
   const target = options.target ?? "remote";
   const platform = options.platform ?? process.platform;
+  const arch = options.arch ?? process.arch;
   if (target === "local") {
-    const unsupported = localPlatformRefusal(platform);
+    const unsupported = localPlatformRefusal(harness, platform, arch);
     if (unsupported) return unsupported;
   }
   const spawn = options.spawn ?? spawnSync;
@@ -202,21 +229,19 @@ export function runHarnessInstaller(
   };
   const environment = {
     ...composeBaseEnv("clean", resolutionSource, runnerNodePath, platform),
+    // npm and the vendor image cannot start on Windows without the process
+    // environment the OS itself resolves against (the login/setup lanes
+    // forward the same named set).
+    ...(platform === "win32"
+      ? pickAllowlistedEnv(resolutionSource, WINDOWS_RUNTIME_ENV_KEYS, platform)
+      : {}),
     HOME: home,
   };
   const pin = NPM_PINS[harness];
   const script = scriptInstaller(harness);
   let npmCLI: string | undefined;
   if (pin) {
-    npmCLI = resolve(
-      dirname(runnerNodePath),
-      "..",
-      "lib",
-      "node_modules",
-      "npm",
-      "bin",
-      "npm-cli.js",
-    );
+    npmCLI = embeddedNpmCli(runnerNodePath, platform);
     if (!(options.exists ?? existsSync)(npmCLI)) {
       return {
         exitCode: 1,
@@ -227,7 +252,7 @@ export function runHarnessInstaller(
       };
     }
   }
-  const proofRuntime = { runnerNodePath, platform, resolutionSource, environment, spawn };
+  const proofRuntime = { runnerNodePath, platform, arch, resolutionSource, environment, spawn };
   // The remote target runs in a PTY the operator is watching and keeps the
   // historical exit-code contract. Only the unattended local target has to
   // prove what it installed.
@@ -450,11 +475,13 @@ export function harnessInstallCommand(
     return printUsageError(json, `${INSTALL_USAGE}\nclaudexor: --target must be local or remote`);
   }
   const target = targetValue ?? "remote";
-  const disclosure = harnessInstallerDisclosure(harness, target);
+  const platform = runnerOptions.platform ?? process.platform;
+  const arch = runnerOptions.arch ?? process.arch;
+  const disclosure = harnessInstallerDisclosure(harness, target, platform, arch);
   // Refuse the unsupported layout BEFORE the dry run, so a machine caller's
   // disclosure never advertises an install this host cannot perform.
   if (target === "local") {
-    const unsupported = localPlatformRefusal(runnerOptions.platform ?? process.platform);
+    const unsupported = localPlatformRefusal(harness, platform, arch);
     if (unsupported) {
       if (json)
         printJson({ ok: false, dryRun: flagBool(args, "dry-run"), ...unsupported, ...disclosure });

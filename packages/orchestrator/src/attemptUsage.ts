@@ -26,7 +26,9 @@ export function processAttemptUsage(input: {
     usd: usage.cost_usd,
     estimated: usage.estimated === true,
   });
-  const paidOrUnknown = input.telemetry.usageCost.cashUsd + input.telemetry.usageCost.unknownUsd;
+  const paidOrUnknown =
+    input.telemetry.usageCost.cashUsd +
+    (input.telemetry.usageCost.unknownPaidUsd ?? input.telemetry.usageCost.unknownUsd);
   if (paidOrUnknown > 0 && input.budgetGuard?.(paidOrUnknown)) {
     input.emit?.("budget.observation", {
       harness_id: input.harnessId,

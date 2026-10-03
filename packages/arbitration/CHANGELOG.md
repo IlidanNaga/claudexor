@@ -1,5 +1,165 @@
 # @claudexor/arbitration
 
+## 3.18.0
+
+### Patch Changes
+
+- @claudexor/schema@3.18.0
+
+## 3.17.2
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.17.2
+
+## 3.17.1
+
+### Patch Changes
+
+- Updated dependencies [72825b9]
+  - @claudexor/schema@3.17.1
+
+## 3.17.0
+
+### Patch Changes
+
+- Updated dependencies [951489f]
+  - @claudexor/schema@3.17.0
+
+## 3.16.0
+
+### Patch Changes
+
+- Updated dependencies [788ddca]
+  - @claudexor/schema@3.16.0
+
+## 3.15.1
+
+### Patch Changes
+
+- @claudexor/schema@3.15.1
+
+## 3.15.0
+
+### Patch Changes
+
+- @claudexor/schema@3.15.0
+
+## 3.14.0
+
+### Patch Changes
+
+- Updated dependencies [2c024ac]
+- Updated dependencies [7e615b6]
+- Updated dependencies [fb42a94]
+  - @claudexor/schema@3.14.0
+
+## 3.13.0
+
+### Patch Changes
+
+- @claudexor/schema@3.13.0
+
+## 3.12.10
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.12.10
+
+## 3.12.9
+
+### Patch Changes
+
+- Updated dependencies [125aea9]
+  - @claudexor/schema@3.12.9
+
+## 3.12.8
+
+### Patch Changes
+
+- @claudexor/schema@3.12.8
+
+## 3.12.7
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.12.7
+
+## 3.12.6
+
+### Patch Changes
+
+- @claudexor/schema@3.12.6
+
+## 3.12.5
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.12.5
+
+## 3.12.4
+
+### Patch Changes
+
+- @claudexor/schema@3.12.4
+
+## 3.12.3
+
+### Patch Changes
+
+- @claudexor/schema@3.12.3
+
+## 3.12.2
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.12.2
+
+## 3.12.1
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.12.1
+
+## 3.12.0
+
+### Patch Changes
+
+- Updated dependencies [217d53f]
+  - @claudexor/schema@3.12.0
+
+## 3.11.0
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.11.0
+
+## 3.10.5
+
+### Patch Changes
+
+- @claudexor/schema@3.10.5
+
+## 3.10.4
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.10.4
+
+## 3.10.3
+
+### Patch Changes
+
+- @claudexor/schema@3.10.3
+
 ## 3.10.2
 
 ### Patch Changes

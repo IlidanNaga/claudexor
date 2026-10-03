@@ -213,8 +213,19 @@ const operations: ControlOperationDescriptor[] = [
     mutability: "read_only",
     responseKind: "binary",
   }),
-  j("GET", "/v2/harnesses/:id/models", "read_only", null, "ControlHarnessModelsResponse", {
+  j("GET", "/v2/harnesses/:id/models", "read_only", null, "ControlHarnessModelsQueryResponse", {
     parameters: [
+      queryParam({
+        name: "view",
+        enum: ["accounts"],
+        description:
+          "Opt in to all enabled account catalogs with separate availability and provenance; omission preserves the legacy response.",
+      }),
+      queryParam({
+        name: "credentialProfileId",
+        schemaRef: "Id",
+        description: "Restrict the accounts view to this exact enabled credential profile.",
+      }),
       queryParam({
         name: "route",
         enum: ["local_session", "api_key"],
@@ -318,6 +329,16 @@ const operations: ControlOperationDescriptor[] = [
     "ControlInteractionAnswerRequest",
     "ControlInteractionAnswerResponse",
     { idempotency: "natural" },
+  ),
+  j(
+    "POST",
+    "/v2/runs/:id/messages",
+    "mutating",
+    "ControlRunMessageRequest",
+    "ControlRunMessageResponse",
+    // key_required (not natural): a replayed message would be delivered twice;
+    // the Idempotency-Key is the message id and the stored receipt is replayed.
+    { idempotency: "key_required" },
   ),
   j("GET", "/v2/runs/:id/produced", "read_only", null, "ControlArtifactListResponse"),
   descriptor({

@@ -109,11 +109,14 @@ export async function resolveThreadExecutionWorkspace(input: {
   access?: AccessProfile;
   accessDefault?: AccessProfile;
   requestedInPlace: boolean;
+  workspaceKind?: "git" | "directory";
   protectedPaths: readonly string[];
   threads: ThreadWorkspaceAuthority;
   ensureWorktree?: (repoRoot: string, threadId: string) => Promise<ThreadWorktreeResult>;
 }): Promise<ThreadExecutionWorkspace> {
   const thread = input.threadId ? input.threads.getThread(input.threadId) : undefined;
+  if (input.workspaceKind === "directory")
+    return { inPlace: input.requestedInPlace, promoted: false };
   if (!thread || !input.threadId) {
     return { inPlace: input.requestedInPlace, promoted: false };
   }

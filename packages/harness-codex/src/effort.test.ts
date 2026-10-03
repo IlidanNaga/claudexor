@@ -227,7 +227,7 @@ describe("codex effort probe degrades gracefully", () => {
 
   it("the snapshot matches every visible model in the pinned CLI capture and keeps historical coverage", () => {
     const capture = JSON.parse(
-      readFileSync(new URL("../fixtures/models-0.153.3.json", import.meta.url), "utf8"),
+      readFileSync(new URL("../fixtures/models-0.156.1.json", import.meta.url), "utf8"),
     ) as { data: unknown[] };
     const recorded = readModelListEfforts(capture.data);
     expect(recorded).not.toBeNull();
@@ -257,7 +257,7 @@ describe("the effort probe is cached, not re-spawned per call", () => {
   function stubAdapter(probeEfforts: () => Promise<CodexEffortCatalog | null>, nowMs = () => 0) {
     let calls = 0;
     const adapter = createCodexAdapter({
-      detectVersion: async () => "codex-cli 0.153.3",
+      detectVersion: async () => "codex-cli 0.156.1",
       probeLogin: async () => ({ authed: true, method: "chatgpt", probeError: null }),
       hasApiKey: () => false,
       probeEfforts: async () => {
@@ -297,7 +297,7 @@ describe("the effort probe is cached, not re-spawned per call", () => {
       "max",
       "ultra",
     ]);
-    expect(manifest.capabilities.effort_levels_verified_against).toBe("0.153.3");
+    expect(manifest.capabilities.effort_levels_verified_against).toBe("0.156.1");
     expect(manifest.capabilities.known_models_verified_against).toBe(CODEX_VENDOR_CLI_VERSION);
     expect(manifest.capabilities.known_models).toEqual(
       expect.arrayContaining(Object.keys(CODEX_EFFORT_SNAPSHOT.models)),
@@ -309,7 +309,7 @@ describe("the effort probe is cached, not re-spawned per call", () => {
     clearCodexEffortCache();
     const { adapter } = stubAdapter(async () => CODEX_EFFORT_SNAPSHOT);
     const manifest = await adapter.discover();
-    expect(manifest.capabilities.effort_levels_verified_against).toBe("codex-cli 0.153.3");
+    expect(manifest.capabilities.effort_levels_verified_against).toBe("codex-cli 0.156.1");
     clearCodexEffortCache();
   });
 });
@@ -476,17 +476,26 @@ describe("a malformed model/list is a FAILED probe, not a narrowed ladder", () =
     expect(readModelListEfforts(payload)).toBeNull();
   });
 
-  it("still SKIPS mere absence: a model advertising no effort surface is normal", () => {
+  it("keeps explicit empty effort arrays distinct from absent metadata", () => {
     const payload = [
       { id: "gpt-8" },
       { id: "", supportedReasoningEfforts: [{ reasoningEffort: "low" }] },
       { id: "gpt-9", supportedReasoningEfforts: [] },
-      { id: "gpt-7", supportedReasoningEfforts: [{}, { reasoningEffort: "high" }] },
+      { id: "gpt-7", supportedReasoningEfforts: [{ reasoningEffort: "high" }] },
     ];
     expect(readModelListEfforts(payload)).toEqual({
-      models: { "gpt-7": { levels: ["high"], default: null } },
+      models: {
+        "gpt-7": { levels: ["high"], default: null },
+        "gpt-9": { levels: [], default: null },
+      },
       defaultModel: null,
+      unverifiedModels: ["gpt-8"],
     });
+    expect(
+      readModelListEfforts([
+        { id: "partial", supportedReasoningEfforts: [{}, { reasoningEffort: "high" }] },
+      ]),
+    ).toBeNull();
   });
 
   it("records the vendor's default model from `isDefault: true`, and only from a literal true", () => {
@@ -514,6 +523,7 @@ describe("a malformed model/list is a FAILED probe, not a narrowed ladder", () =
     expect(flaggedNoSurface).toEqual({
       models: { "gpt-9": { levels: ["high"], default: null } },
       defaultModel: "gpt-plain",
+      unverifiedModels: ["gpt-plain"],
     });
     // Same with an explicitly EMPTY advertised list.
     expect(
@@ -700,7 +710,7 @@ describe("an effort dropped AFTER preflight is disclosed on the run (INV-105)", 
       model_hint: "gpt-9",
       effort_hint: "hyperdrive",
     });
-    expect(dropped?.type).toBe("message");
+    expect(dropped?.type).toBe("status");
     expect(dropped?.payload?.["ignored_settings"]).toEqual([
       expect.stringContaining("effort=hyperdrive"),
     ]);
@@ -722,11 +732,11 @@ describe("an effort dropped AFTER preflight is disclosed on the run (INV-105)", 
     ).toBeNull();
   });
 
-  it("the RUN discloses the drop and sends no flag when the profile-resolved catalog rejects the level", async () => {
+  it("the RUN records a rejection and does not spawn when the final catalog cannot place the level", async () => {
     clearCodexEffortCache();
     let cliArgs: string[] | undefined;
     const adapter = createCodexAdapter({
-      detectVersion: async () => "codex-cli 0.153.3",
+      detectVersion: async () => "codex-cli 0.156.1",
       probeLogin: async () => ({ authed: true, method: "chatgpt", probeError: null }),
       hasApiKey: () => false,
       probeEfforts: async () => profileCatalog,
@@ -751,25 +761,30 @@ describe("an effort dropped AFTER preflight is disclosed on the run (INV-105)", 
       auth_preference: "auto",
     });
     const events: HarnessEvent[] = [];
-    for await (const ev of adapter.run(spec)) events.push(ev);
+    await expect(
+      (async () => {
+        for await (const ev of adapter.run(spec)) events.push(ev);
+      })(),
+    ).rejects.toThrow(/cannot place/);
     const disclosure = events.find((ev) => Array.isArray(ev.payload?.["ignored_settings"]));
     expect(disclosure?.payload?.["ignored_settings"]).toEqual([
       expect.stringContaining("effort=hyperdrive"),
     ]);
     // ...and the child was really spawned WITHOUT any effort flag.
-    expect(cliArgs?.some((a) => a.startsWith("model_reasoning_effort="))).toBe(false);
+    expect(cliArgs).toBeUndefined();
+    expect(events[0]?.effort_resolution?.resolution).toBe("rejected");
     clearCodexEffortCache();
   });
 });
 
 describe("the snapshot fallback drives arg emission ONLY on the version it was captured from (INV-105)", () => {
   it("snapshot trust is exact-version, and an unknown/unparseable version never vouches", () => {
-    expect(codexSnapshotTrustedForVersion("0.153.3")).toBe(true);
-    expect(codexSnapshotTrustedForVersion("codex-cli 0.153.3")).toBe(true);
+    expect(codexSnapshotTrustedForVersion("0.156.1")).toBe(true);
+    expect(codexSnapshotTrustedForVersion("codex-cli 0.156.1")).toBe(true);
     expect(codexSnapshotTrustedForVersion("codex-cli 0.98.0")).toBe(false);
     // A LONGER dotted token is a different version, not a prefix match.
-    expect(codexSnapshotTrustedForVersion("0.153.3.1")).toBe(false);
-    expect(codexSnapshotTrustedForVersion("0.153.30")).toBe(false);
+    expect(codexSnapshotTrustedForVersion("0.156.1.1")).toBe(false);
+    expect(codexSnapshotTrustedForVersion("0.156.10")).toBe(false);
     expect(codexSnapshotTrustedForVersion(null)).toBe(false);
     expect(codexSnapshotTrustedForVersion("codex (version unknown)")).toBe(false);
   });
@@ -971,7 +986,7 @@ describe("an effort the run CLAMPED is disclosed too (INV-105) — a moved level
       model_hint: "gpt-cap",
       effort_hint: "ultra",
     });
-    expect(clamped?.type).toBe("message");
+    expect(clamped?.type).toBe("status");
     expect(clamped?.text).toContain("clamped");
     expect(clamped?.payload?.["ignored_settings"]).toEqual([
       expect.stringContaining("effort=ultra"),
@@ -1035,7 +1050,7 @@ describe("an effort the run CLAMPED is disclosed too (INV-105) — a moved level
     clearCodexEffortCache();
     let cliArgs: string[] | undefined;
     const adapter = createCodexAdapter({
-      detectVersion: async () => "codex-cli 0.153.3",
+      detectVersion: async () => "codex-cli 0.156.1",
       probeLogin: async () => ({ authed: true, method: "chatgpt", probeError: null }),
       hasApiKey: () => false,
       probeEfforts: async () => catalog,
@@ -1071,4 +1086,21 @@ describe("an effort the run CLAMPED is disclosed too (INV-105) — a moved level
     expect(cliArgs?.some((a) => a === 'model_reasoning_effort="xhigh"')).toBe(true);
     clearCodexEffortCache();
   });
+});
+
+it("describes effort preparation without claiming a dispatch or observed vendor use", () => {
+  const catalog = {
+    models: {
+      fixture: { levels: ["low", "high"], default: "low" },
+      sibling: { levels: ["low", "medium", "high"], default: "low" },
+    },
+    defaultModel: "fixture",
+  };
+  const spec = { session_id: "prepared", model_hint: "fixture", effort_hint: "medium" };
+  expect(codexEffortClampedEvent(catalog, spec)?.text).toBe(
+    "[effort] clamped: effort=medium (clamped to low: the requested level is not advertised by model fixture, so preparation selected low, the resolved supported level)",
+  );
+  expect(codexEffortIgnoredEvent({ models: {}, defaultModel: null }, spec)?.text).toContain(
+    "no effort flag is prepared; the vendor default is left unspecified",
+  );
 });

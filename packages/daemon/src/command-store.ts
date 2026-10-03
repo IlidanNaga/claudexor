@@ -21,7 +21,10 @@ import {
 } from "@claudexor/schema";
 import { fsyncDirectory, hashJson } from "@claudexor/util";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { commandScopeRoots } from "./command-scope-roots.js";
 import { idempotencyWireProjection } from "./idempotency-wire-projection.js";
+import { POST_TERMINAL_AUDIT_EVENT_TYPES } from "./journaled-run-events.js";
+import { durableTerminalRunEvents } from "./run-event-terminal-index.js";
 import { JOB_STATES, type JobRecord } from "./server.js";
 import {
   lstatOrNull,
@@ -35,8 +38,12 @@ interface AcceptedCommand {
   requestDigest: string;
 }
 
+/** Params are immutable after acceptance, so a journaled update omits them and
+ * replay merges the accepted params back. Legacy journals carry full records. */
+type JournaledUpdate = Omit<JobRecord, "params"> & { params?: unknown };
+
 interface CommandUpdate {
-  record: JobRecord;
+  record: JournaledUpdate;
 }
 
 const ACCEPTED = "command.accepted";
@@ -47,6 +54,7 @@ const PRUNED = "command.pruned";
 export class CommandStore {
   private readonly recordsById = new Map<string, JobRecord>();
   private readonly idByKeyDigest = new Map<string, { id: string; requestDigest: string }>();
+  private readonly prunedRoots = new Set<string>();
 
   constructor(
     private readonly journal: DurableJournal,
@@ -119,16 +127,29 @@ export class CommandStore {
   update(id: string, patch: Partial<JobRecord>): JobRecord {
     const current = this.recordsById.get(id);
     if (!current) throw new Error(`no such job: ${id}`);
-    const next = { ...current, ...structuredClone(patch), id: current.id };
-    this.journal.append<CommandUpdate>(UPDATED, { record: persisted(next) });
+    const next = { ...current, ...structuredClone(patch), id: current.id, params: current.params };
+    const { params: _params, ...journaled } = persisted(next);
+    this.journal.append<CommandUpdate>(UPDATED, { record: journaled });
     this.recordsById.set(id, next);
     return next;
   }
 
   prune(ids: readonly string[]): void {
     if (ids.length === 0) return;
-    this.journal.append(PRUNED, { ids: [...ids] });
+    // The tombstone keeps the pruned commands' project roots (the startup
+    // orphan sweep still reaches a root whose every command was pruned) and
+    // their run ids (the fold retires those runs' journaled events with them).
+    const records = ids.map((id) => this.recordsById.get(id));
+    const roots = commandScopeRoots(records);
+    const runIds = records.flatMap((record) => (record?.runId ? [record.runId] : []));
+    this.journal.append(PRUNED, { ids: [...ids], roots, run_ids: runIds });
     this.drop(ids);
+    for (const root of roots) this.prunedRoots.add(root);
+  }
+
+  /** Project roots of commands this store pruned, across restarts and folds. */
+  prunedScopeRoots(): string[] {
+    return [...this.prunedRoots];
   }
 
   /**
@@ -169,16 +190,26 @@ export class CommandStore {
           requestDigest: payload.requestDigest,
         });
       } else if (entry.type === UPDATED) {
-        const record = (entry.payload as CommandUpdate).record;
-        validateRecord(record);
-        if (!this.recordsById.has(record.id)) throw new Error("command update precedes acceptance");
+        const journaled = (entry.payload as CommandUpdate).record;
+        validateRecord(journaled);
+        const current = this.recordsById.get(journaled.id);
+        if (!current) throw new Error("command update precedes acceptance");
+        const record: JobRecord =
+          "params" in journaled
+            ? (journaled as JobRecord)
+            : { ...journaled, params: current.params };
         this.recordsById.set(record.id, structuredClone(record));
       } else if (entry.type === PRUNED) {
-        const ids = (entry.payload as { ids?: unknown }).ids;
+        const { ids, roots } = entry.payload as { ids?: unknown; roots?: unknown };
         if (!Array.isArray(ids) || ids.some((id) => typeof id !== "string")) {
           throw new Error("invalid command prune record");
         }
         this.drop(ids);
+        // Legacy tombstones carry no roots; a malformed roots list adds nothing.
+        if (Array.isArray(roots)) {
+          for (const root of roots)
+            if (typeof root === "string" && root) this.prunedRoots.add(root);
+        }
       }
     }
   }
@@ -256,23 +287,10 @@ export class CommandStore {
     });
   }
 
-  private durableTerminalEvents(): Map<string, RunEvent> {
-    const terminals = new Map<string, RunEvent>();
-    for (const entry of this.journal.records(0, ["run.event"])) {
-      if (entry.type !== "run.event") continue;
-      const event = RunEventSchema.parse(entry.payload);
-      if (
-        event.type === "run.completed" ||
-        event.type === "run.failed" ||
-        event.type === "run.blocked"
-      ) {
-        if (terminals.has(event.run_id)) {
-          throw new Error(`multiple durable terminal events for run ${event.run_id}`);
-        }
-        terminals.set(event.run_id, event);
-      }
-    }
-    return terminals;
+  /** The partition's durable terminals, from the pass shared with the
+   * RunEventStore projection (parsed once per generation, extended on append). */
+  private durableTerminalEvents(): ReadonlyMap<string, RunEvent> {
+    return durableTerminalRunEvents(this.journal);
   }
 
   private recoverTerminalArtifacts(record: JobRecord, terminal: RunEvent): RunFacts {
@@ -470,7 +488,7 @@ function isBufferPrefix(whole: Buffer, prefix: Buffer): boolean {
 }
 
 function isPostTerminalControlAudit(type: string): boolean {
-  return type === "control.requested" || type === "control.applied" || type === "control.rejected";
+  return POST_TERMINAL_AUDIT_EVENT_TYPES.has(type);
 }
 
 function terminalResultMatches(
@@ -533,7 +551,7 @@ function persisted(record: JobRecord): JobRecord {
   return structuredClone(record);
 }
 
-function validateRecord(record: JobRecord): void {
+function validateRecord(record: Omit<JobRecord, "params">): void {
   if (!record || typeof record !== "object" || !record.id || !record.createdAt) {
     throw new Error("invalid command record");
   }

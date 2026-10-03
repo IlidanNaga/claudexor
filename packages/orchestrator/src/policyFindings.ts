@@ -9,6 +9,7 @@ import { summarizeDiffPaths as diffStats } from "@claudexor/core";
 import type { ProtectedPathApproval, ReviewFinding } from "@claudexor/schema";
 import { ReviewFinding as ReviewFindingSchema } from "@claudexor/schema";
 import { newId } from "@claudexor/util";
+import { directoryChangedEntries, type DirectoryCandidate } from "./directoryCandidate.js";
 
 /**
  * Deterministic policy findings from the typed diff (no LLM, no regex over
@@ -17,7 +18,7 @@ import { newId } from "@claudexor/util";
  * finding cites the matched files as evidence (BIBLE: evidence beats summaries).
  */
 export function policyFindings(
-  run: { diff: string },
+  run: { diff: string; files?: DirectoryCandidate },
   reviewVerified: boolean,
   protectedPaths: string[] = [],
   autoProtectedPaths: string[] = [],
@@ -28,7 +29,16 @@ export function policyFindings(
   findings: ReviewFinding[];
   risk: { level: string; reasons: string[]; changedFiles: number };
 } {
-  const stats = diffStats(run.diff);
+  const changes = run.files ? directoryChangedEntries(run.files.manifest) : null;
+  const stats = changes
+    ? {
+        paths: changes.map((entry) => entry.path),
+        touchedPaths: changes.map((entry) => entry.path),
+        existingPaths: changes.filter((entry) => entry.before !== null).map((entry) => entry.path),
+        additions: 0,
+        deletions: 0,
+      }
+    : diffStats(run.diff);
   // Path policy gates match stats.touchedPaths — the one owner of "what the
   // diff touches" (core diff.ts, G1 class); a gate matching a narrower
   // projection is an EXPLICIT decision, never an accident. deny_paths: ANY

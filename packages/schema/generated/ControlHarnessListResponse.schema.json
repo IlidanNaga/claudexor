@@ -360,6 +360,47 @@
                             },
                             "default": []
                           },
+                          "input_limits": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "scope": {
+                                  "type": "string",
+                                  "const": "turn_text",
+                                  "description": "All text input items in one native turn; separate instructions are excluded."
+                                },
+                                "unit": {
+                                  "type": "string",
+                                  "const": "unicode_scalars"
+                                },
+                                "limit": {
+                                  "type": "integer",
+                                  "exclusiveMinimum": 0,
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                },
+                                "source": {
+                                  "type": "string",
+                                  "minLength": 1
+                                },
+                                "verified_against": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "description": "Native runtime version against which the bound was observed."
+                                }
+                              },
+                              "required": [
+                                "scope",
+                                "unit",
+                                "limit",
+                                "source",
+                                "verified_against"
+                              ],
+                              "additionalProperties": false,
+                              "description": "Adapter-owned observed input bound, not a predictive refusal or a model-window claim."
+                            }
+                          },
                           "mcp_injection": {
                             "type": "boolean",
                             "default": false,
@@ -369,15 +410,38 @@
                             "type": "boolean",
                             "default": false,
                             "description": "An injected MCP server can only reach the daemon (belt) at full access; below it the harness sandbox cancels the call. true => Delegate below full access degrades to ordinary Agent with a durable typed receipt."
+                          },
+                          "live_input": {
+                            "type": "string",
+                            "enum": [
+                              "mid_turn",
+                              "next_tool_boundary",
+                              "none"
+                            ],
+                            "description": "How a live message enters a running session: mid_turn (consumed inside the active turn), next_tool_boundary (queued until the same turn's next tool boundary), none (no truthful channel; the engine answers unsupported).",
+                            "default": "none"
                           }
                         },
                         "additionalProperties": false,
                         "default": {},
-                        "description": "Structured per-harness facts the engine consumes: auth routing, isolation containment, readonly mechanism, finite attachment inputs, and MCP injection."
+                        "description": "Structured per-harness facts the engine consumes: auth routing, isolation containment, readonly mechanism, finite attachment inputs, MCP injection, and live input into a running session."
                       },
                       "capabilities": {
                         "type": "object",
                         "properties": {
+                          "processing_preferences": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "standard",
+                                "fast",
+                                "economy"
+                              ],
+                              "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
+                            },
+                            "description": "Service preferences translated by this adapter; model/account support is separate."
+                          },
                           "plan": {
                             "type": "boolean",
                             "default": false,
@@ -529,6 +593,26 @@
                             "default": null,
                             "description": "Vendor CLI version the effort ladders were last verified against; null = never verified / not applicable."
                           },
+                          "model_inventory_routes": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "local_session",
+                                "api_key"
+                              ]
+                            },
+                            "minItems": 1,
+                            "description": "Credential routes supported by the adapter's live models() producer; omitted preserves all-route support. Other routes use manifest known_models, never another account's live inventory."
+                          },
+                          "model_inventory_absence": {
+                            "type": "string",
+                            "enum": [
+                              "authoritative",
+                              "advisory"
+                            ],
+                            "description": "Whether an absence from this harness's model lists (the live models() answer and the manifest known_models alike) proves a model is ABSENT; omitted = authoritative (an unlisted model is refused). advisory = absence is not proof, so an explicit model is forwarded to the vendor and disclosed instead of refused."
+                          },
                           "known_models": {
                             "type": "array",
                             "items": {
@@ -566,7 +650,7 @@
                               ]
                             },
                             "default": [],
-                            "description": "Manifest-declared model ids/aliases this harness accepts (bare string = every credential route; object form scopes a model to specific routes), used as the model truth source when the adapter has no live inventory; explicit models outside the truth source are refused."
+                            "description": "Manifest-declared model ids/aliases this harness accepts (bare string = every credential route; object form scopes a model to specific routes), used as the model truth source when the adapter has no live inventory and judged under model_inventory_absence: an authoritative harness refuses an explicit model outside it, an advisory harness forwards it with a note."
                           },
                           "known_models_verified_against": {
                             "type": [
@@ -603,7 +687,7 @@
                             "full",
                             "inherit_native"
                           ],
-                          "description": "Active filesystem/command access profile for a run: readonly (no writes), workspace_write (use the harness's native workspace-write policy), full (unrestricted; requires the per-repo trust allow), inherit_native (defer to the harness's own native settings)."
+                          "description": "Active filesystem/command access profile for a run: readonly (no writes), workspace_write (use the harness's native workspace-write policy), full (unrestricted; requires the per-repo trust allow for a run an operator starts at a surface, not for an execution.delegated run), inherit_native (defer to the harness's own native settings)."
                         },
                         "default": [],
                         "description": "Access profiles the adapter can enforce."
@@ -807,7 +891,7 @@
                           "ok",
                           "rejected"
                         ],
-                        "description": "Whether the configured model passes the strict truth-source check."
+                        "description": "Whether the configured model is admitted (listed, or unlisted on an advisory harness) or refused by an authoritative list."
                       },
                       "message": {
                         "type": [
@@ -828,7 +912,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Strict truth-source check of configuredModel; null when no model is configured."
+                "description": "Truth-source check of configuredModel under the harness's own absence declaration; ok with a message is an advisory admission; null when no model is configured."
               },
               "delegation": {
                 "anyOf": [

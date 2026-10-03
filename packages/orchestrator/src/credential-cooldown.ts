@@ -50,7 +50,7 @@ export interface QuotaBlock {
  * never dispatch into a window the projection already calls unavailable.
  *
  * Two deliberate contrasts with `profileHeadroomBreach` (which stays fresh-only
- * for its 0.9 proactive threshold):
+ * for its configured usage threshold):
  * - STALE evidence blocks too. A cooldown/reset instant is absolute clock
  *   truth: the registry keeps a stale snapshot alive exactly because its
  *   `cooldown_until` still extends into the future (activeSnapshots), and a

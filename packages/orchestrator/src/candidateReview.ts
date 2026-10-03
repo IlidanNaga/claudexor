@@ -1,4 +1,10 @@
+import {
+  reviewerProcessingAdmission,
+  ProcessingBudgetAdmissionError,
+} from "./processing-dispatch.js";
+import type { BudgetDenial } from "./budgetFailure.js";
 import { join } from "node:path";
+import { reviewerProcessingCost } from "./processing-routing.js";
 import type { ArtifactStore, RunPaths } from "@claudexor/artifact-store";
 import type { BudgetLedger } from "@claudexor/budget";
 import { reviewUsageCostSettlement, attemptCostEvidence } from "@claudexor/budget";
@@ -22,6 +28,7 @@ import { policyFindings } from "./policyFindings.js";
 import { renderTestsEvidence } from "./contract-gates.js";
 import { reviewerTimeoutMs, envInheritance, type ResolvedConfigLike } from "./runSupport.js";
 import type { OrchestratorDeps, RunInput } from "./orchestrator.js";
+import { prepareDirectoryReview } from "./directoryCandidate.js";
 
 /** Direct embedders may explicitly inject a panel. Accepted wire requests have
  * their boolean already frozen, so later global panel defaults cannot enable it. */
@@ -122,6 +129,8 @@ interface ReviewRunsInput {
   taskId?: string;
   signal?: AbortSignal;
   reservationEstimateUsd?: number;
+  /** Convergence verifies its full candidate even when a repair made no change. */
+  reviewUnchanged?: boolean;
 }
 interface ReviewRunsDeps {
   prepareReviewEvidenceDir: (source: string, cwd: string) => string;
@@ -163,9 +172,14 @@ export async function reviewCandidateRuns(
   }
   const evidences: CandidateEvidence[] = [];
   for (const run of runs) {
-    const candidateCwd = run.reviewCwd ?? cwd;
+    let candidateCwd = run.reviewCwd ?? cwd;
     const candidateEvidenceDir = deps.prepareReviewEvidenceDir(reviewDir, candidateCwd);
+    let directoryReview: Awaited<ReturnType<typeof prepareDirectoryReview>> | undefined;
     try {
+      if (run.files) {
+        directoryReview = await prepareDirectoryReview(run.files, candidateEvidenceDir);
+        candidateCwd = directoryReview.cwd;
+      }
       writeText(
         join(candidateEvidenceDir, "TESTS.txt"),
         renderTestsEvidence(contract, run.gates).trim() + "\n",
@@ -174,7 +188,9 @@ export async function reviewCandidateRuns(
       // spend a reviewer panel on "(empty diff)" (a trivial greeting in agent mode used to
       // cost two reviewers). It still flows through policy gates and arbitration
       // (so a failing test gate or no_op outcome is unchanged), just unreviewed.
-      const hasDiff = run.diff.trim().length > 0;
+      const hasDiff =
+        input.reviewUnchanged ||
+        (run.files ? run.files.noChanges !== true : run.diff.trim().length > 0);
       // Reviewer panels spend real money: reserve before, settle the observed cost.
       const reviewLease =
         hasDiff && reviewers.length > 0
@@ -183,14 +199,22 @@ export async function reviewCandidateRuns(
               attemptId: run.attemptId,
               intent: "review",
               harnessId: "review-panel",
-              cost: attemptCostEvidence("review-panel", run.attemptId, reservationEstimateUsd),
+              cost: attemptCostEvidence(
+                "review-panel",
+                run.attemptId,
+                reservationEstimateUsd,
+                "unknown",
+                reviewerProcessingCost(reviewers),
+              ),
             })
           : undefined;
+      let processingDenial: BudgetDenial | null = null;
       const result =
         hasDiff && reviewers.length > 0 && (reviewLease?.granted ?? true)
           ? await deps.reviewScoped({
               candidateLabel: run.label,
               diff: run.diff,
+              ...(directoryReview ? { candidatePaths: directoryReview.paths } : {}),
               evidenceDir: candidateEvidenceDir,
               artifactsDir: join(paths.reviewsDir, `${run.attemptId}-reviewers`),
               cwd: candidateCwd,
@@ -199,6 +223,22 @@ export async function reviewCandidateRuns(
               envInheritance: envInheritance(deps.config(cwd)),
               signal,
               onReviewerEvent: (event) => log.emit(event.type, { ...event }),
+              onBeforeDispatch:
+                ledger && reviewLease?.granted
+                  ? reviewerProcessingAdmission(
+                      ledger,
+                      reviewLease.lease!.lease_id,
+                      reviewers,
+                      run.attemptId,
+                      (denial) => {
+                        processingDenial ??= denial;
+                      },
+                    )
+                  : undefined,
+              onUsageCost: (usd) => {
+                if (reviewLease?.granted) ledger?.updateHold(reviewLease.lease!.lease_id, usd);
+                return ledger?.tier() === "hard";
+              },
             })
           : {
               findings: [],
@@ -250,6 +290,7 @@ export async function reviewCandidateRuns(
           harness_id: "review-panel",
         });
       }
+      if (processingDenial) throw new ProcessingBudgetAdmissionError(processingDenial);
       const revalidated = await revalidateFindings(result.findings, {
         candidateRoot: candidateCwd,
         evidenceDir: candidateEvidenceDir,
@@ -300,6 +341,7 @@ export async function reviewCandidateRuns(
         toCandidateEvidence(run, contract, allFindings, reviewClean, candidateReviewVerified),
       );
     } finally {
+      await directoryReview?.dispose();
       deps.recordReviewEvidenceCleanup(
         store,
         join(paths.reviewsDir, `${run.attemptId}-evidence-cleanup.yaml`),

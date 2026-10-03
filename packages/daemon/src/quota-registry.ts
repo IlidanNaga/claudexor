@@ -1,5 +1,5 @@
 import type { DurableJournal } from "@claudexor/journal";
-import { hashJson } from "@claudexor/util";
+import { hashJson, sha256 } from "@claudexor/util";
 import {
   ControlQuotaResponse,
   HarnessEvent,
@@ -7,15 +7,15 @@ import {
   QuotaAbsence as QuotaAbsenceSchema,
   QuotaSnapshot as QuotaSnapshotSchema,
   REACTIVE_COOLDOWN_SOURCE,
-  vendorResetDayCooldownEnd,
   type CredentialRoute,
   type QuotaAbsence,
   type QuotaSnapshot,
   type QuotaSubject,
 } from "@claudexor/schema";
 import {
-  isExpiredScopedCooldown,
   legacyV320Snapshot,
+  reactiveCooldownSnapshot,
+  sameQuotaEvidence,
   snapshotKey,
   staleAt,
   withoutExpiredScopedCooldowns,
@@ -448,6 +448,16 @@ export class QuotaRegistry {
 
   private recordUpsert(value: QuotaSnapshot): void {
     const snapshot = QuotaSnapshotSchema.parse(value);
+    // Upsert-on-change: a poll that re-observed unchanged evidence moves only
+    // the observation time, which stays live in memory (the projection marker
+    // still publishes it) without a journal frame. After a restart the replayed
+    // snapshot therefore carries the time of its last journaled change until
+    // the first admission poll re-observes it.
+    const current = this.snapshots.get(snapshotKey(snapshot));
+    if (current && sameQuotaEvidence(current, snapshot)) {
+      this.apply(snapshot);
+      return;
+    }
     // Runtime updates share this journal with the prior installed engine during
     // rollback. v3.2.0's strict schemas predate applies_to_models AND the
     // cursor_rate_limit source. Prepare the exact current snapshot under a new
@@ -517,7 +527,10 @@ export class QuotaRegistry {
   private projectionSignature(response: ReturnType<QuotaRegistry["read"]>): string {
     // refreshed_at is request metadata, not projection identity. Snapshot
     // freshness and absence coverage are logical facts and remain included.
-    return JSON.stringify({ snapshots: response.snapshots, absences: response.absences });
+    // The marker carries the digest, never the projection: consumers only
+    // compare signatures for equality (a legacy JSON-string marker simply
+    // differs once, publishing one extra clock-transition marker).
+    return sha256(JSON.stringify({ snapshots: response.snapshots, absences: response.absences }));
   }
 
   validateProjection(): void {
@@ -529,21 +542,10 @@ export class QuotaRegistry {
     credentialRoute: CredentialRoute,
     event: ReturnType<typeof HarnessEvent.parse>,
   ): void {
-    const reset = event.rate_limit?.resets_at ?? null;
-    const delay = event.rate_limit?.retry_delay_ms ?? null;
-    const now = this.now();
-    // A day-granular vendor reset (A1 payload) bounds the cooldown at end-of-day UTC.
-    const cooldownUntil =
-      reset ??
-      vendorResetDayCooldownEnd(event.payload) ??
-      new Date(now.getTime() + (typeof delay === "number" ? delay : 5 * 60_000)).toISOString();
     const source = REACTIVE_COOLDOWN_SOURCE[harness] ?? "codex_rollout";
     // The event's profile stamp scopes the cooldown to ITS subject (round-11):
     // a profiled limit never cools the default subject down (or vice versa).
     const profileId = event.credential_profile_id ?? null;
-    const constraintId = event.rate_limit?.constraint_id
-      ? `cooldown:${event.rate_limit.constraint_id}`
-      : "cooldown";
     const existing = [...this.snapshots.values()].find(
       (snapshot) =>
         snapshot.subject.harness === harness &&
@@ -551,35 +553,9 @@ export class QuotaRegistry {
         (snapshot.subject.subject_id ?? null) === profileId &&
         snapshot.source === source,
     );
-    this.upsert({
-      subject: existing?.subject ?? {
-        harness,
-        credential_route: credentialRoute,
-        plan_label: null,
-        subject_id: profileId,
-      },
-      source,
-      observed_at: event.ts,
-      freshness: "fresh",
-      constraints: [
-        ...(existing?.constraints.filter(
-          (constraint) =>
-            constraint.id !== constraintId &&
-            !isExpiredScopedCooldown(source, constraint, now.getTime()),
-        ) ?? []),
-        {
-          id: constraintId,
-          label: "Cooldown",
-          ...(event.rate_limit?.applies_to_models !== undefined
-            ? { applies_to_models: event.rate_limit.applies_to_models }
-            : {}),
-          used_ratio: null,
-          window_seconds: null,
-          resets_at: reset,
-          cooldown_until: cooldownUntil,
-        },
-      ],
-    });
+    this.upsert(
+      reactiveCooldownSnapshot({ harness, credentialRoute, event, source, existing }, this.now()),
+    );
   }
 
   private apply(snapshot: QuotaSnapshot): void {

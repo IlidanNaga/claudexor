@@ -1,12 +1,21 @@
 import { z } from "zod/v3";
 import { AccessProfile, ModeKind, ProviderFamily } from "./primitives.js";
-import { AdapterStatus, EffortHint, ReadonlyMechanism, WriteMechanism } from "./harness.js";
+import {
+  AdapterStatus,
+  EffortHint,
+  LiveInputCapability,
+  ReadonlyMechanism,
+  WriteMechanism,
+} from "./harness.js";
 import { WorkspaceMode } from "./thread.js";
 import { AttachmentInputClass } from "./attachment.js";
 import { OutputSchemaDialect } from "./output-schema-dialect.js";
 import { DelegationCapability } from "./delegation.js";
 import { GitCapability } from "./git-capability.js";
 import { SetupLoginCapability } from "./readiness.js";
+import { WorkspaceKind } from "./files-manifest.js";
+import { ProcessingPreference } from "./processing.js";
+import { CatalogInputLimit } from "./harness-input.js";
 
 /**
  * AgentCapabilityCatalog — the machine-readable answer to "what can this
@@ -80,6 +89,9 @@ export type CatalogModelSummary = z.infer<typeof CatalogModelSummary>;
 
 export const CatalogHarness = z
   .object({
+    inputLimits: z.array(CatalogInputLimit).optional(),
+    processingPreferences: z.array(ProcessingPreference).optional(),
+    accountCatalog: z.boolean().optional(),
     id: z
       .string()
       .describe("Harness id (codex, claude, cursor, opencode, raw-api, openrouter, ...)."),
@@ -111,7 +123,9 @@ export const CatalogHarness = z
     configuredModelValid: z
       .boolean()
       .nullable()
-      .describe("Strict truth-source check of configuredModel (null when no model is configured)."),
+      .describe(
+        "Admission of configuredModel under the harness's own absence declaration (INV-104): false = refused by an authoritative list, or no list could be read; true = listed, or unlisted on an advisory harness (forwarded to the vendor; the settings write and doctor readiness carry that note); null when no model is configured.",
+      ),
     models: CatalogModelSummary,
     webPolicy: z
       .enum(["native", "tools", "uncontrolled", "none"])
@@ -133,6 +147,9 @@ export const CatalogHarness = z
     ),
     delegation: DelegationCapability.describe(
       "Whether this installed runtime can offer Delegate through this harness.",
+    ),
+    liveInput: LiveInputCapability.default("none").describe(
+      "How a live message enters one of this harness's RUNNING sessions (POST /v2/runs/:id/messages): mid_turn | next_tool_boundary | none. The harness maximum from its capability profile; the POST answers for the specific run. Omitted by engines older than 3.16.0 (= none).",
     ),
     setupLogin: SetupLoginCapability.nullable()
       .optional()
@@ -163,6 +180,7 @@ export type CatalogCliCommand = z.infer<typeof CatalogCliCommand>;
 
 export const CatalogMutabilityMatrix = z
   .object({
+    workspaceKinds: z.array(WorkspaceKind).optional(),
     readOnlyModes: z
       .array(ModeKind)
       .describe("Canonical modes that never mutate the project tree (ask/plan)."),
@@ -178,7 +196,7 @@ export const CatalogMutabilityMatrix = z
     accessProfiles: z
       .array(AccessProfile)
       .describe(
-        "Access vocabulary; `full` additionally requires the per-repo trust allow (claudexor trust --allow-full-access).",
+        "Access vocabulary; `full` additionally requires the per-repo trust allow (claudexor trust --allow-full-access) for a run an operator starts at a surface, not for an execution.delegated run.",
       ),
     applyModes: z
       .array(z.enum(["apply", "commit", "branch", "pr"]))

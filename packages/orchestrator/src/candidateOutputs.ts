@@ -194,10 +194,25 @@ export function stageFileBackedContext(worktreePath: string, content?: string): 
 export function buildFileBackedSynthesisInput(input: {
   instructions: string;
   findings: readonly string[];
-  candidates: readonly { label: string; attemptId: string; diff: string }[];
+  candidates: readonly {
+    label: string;
+    attemptId: string;
+    diff: string;
+    files?: {
+      manifestPath: string;
+      manifestSha256: string;
+      artifactRoot: string;
+      manifest: unknown;
+    };
+  }[];
 }): { prompt: string; content: string } {
   const diffs = input.candidates
-    .map((candidate) => `### ${candidate.label} (${candidate.attemptId})\n${candidate.diff}`)
+    .map((candidate) => {
+      const files = candidate.files
+        ? `\n\nComplete directory candidate files are retained at ${candidate.files.artifactRoot}; read the manifest at ${candidate.files.manifestPath} (sha256 ${candidate.files.manifestSha256}) and inspect every referenced postimage before editing.\n${JSON.stringify(candidate.files.manifest)}`
+        : "";
+      return `### ${candidate.label} (${candidate.attemptId})\n${candidate.diff}${files}`;
+    })
     .join("\n\n");
   return {
     prompt:

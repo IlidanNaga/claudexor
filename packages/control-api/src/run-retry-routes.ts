@@ -11,7 +11,7 @@ import {
   TaskContract,
   restoreRecordedRunReviewRequest,
 } from "@claudexor/schema";
-import type { EffortHint } from "@claudexor/schema";
+import type { EffortHint, ProcessingPreference } from "@claudexor/schema";
 import type {
   DaemonControlApiOptions,
   DaemonFacadeClient,
@@ -107,6 +107,9 @@ async function exactRetry(
       // non-primary lane keeps its own effort (the old scalar collapse dropped
       // it). Frozen entries merge UNDER anything the caller stated explicitly.
       ...(frozen.efforts ? { efforts: { ...frozen.efforts, ...(original.efforts ?? {}) } } : {}),
+      ...(original.processingPreference === undefined && frozen.processingPreference !== undefined
+        ? { processingPreference: frozen.processingPreference }
+        : {}),
       parentRunId: source.runId ?? source.id,
       retryOf: source.runId ?? source.id,
     });
@@ -391,6 +394,7 @@ function paramsRecord(rec: DaemonRunRecord): Record<string, unknown> {
 function readFrozenRouting(source: DaemonRunRecord): {
   models?: Record<string, string>;
   efforts?: Record<string, EffortHint>;
+  processingPreference?: ProcessingPreference;
 } {
   if (!source.runDir) return {};
   let contract: TaskContract;
@@ -407,7 +411,13 @@ function readFrozenRouting(source: DaemonRunRecord): {
     Object.keys(contract.routing_efforts).length > 0
       ? (contract.routing_efforts as Record<string, EffortHint>)
       : undefined;
-  return { ...(models ? { models } : {}), ...(efforts ? { efforts } : {}) };
+  return {
+    ...(models ? { models } : {}),
+    ...(efforts ? { efforts } : {}),
+    ...(contract.processing_preference !== undefined
+      ? { processingPreference: contract.processing_preference }
+      : {}),
+  };
 }
 
 interface SourceTurnProvenance {

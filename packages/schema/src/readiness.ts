@@ -88,14 +88,18 @@ export const HarnessStatusDto = z
       .nullable()
       .default(null)
       .describe("The user's configured per-harness default model, if any."),
-    /** Strict truth-source check of `configuredModel`: null when no model
-     * is configured; a rejection carries the actionable message so UIs render
-     * the same honesty `claudexor doctor` prints. */
+    /** Truth-source check of `configuredModel` under the harness's own absence
+     * declaration (INV-104): null when no model is configured; `ok` with a
+     * message is an advisory admission (unlisted, forwarded to the vendor); a
+     * rejection carries the actionable message so UIs render the same honesty
+     * `claudexor doctor` prints. */
     configuredModelCheck: z
       .object({
         status: z
           .enum(["ok", "rejected"])
-          .describe("Whether the configured model passes the strict truth-source check."),
+          .describe(
+            "Whether the configured model is admitted (listed, or unlisted on an advisory harness) or refused by an authoritative list.",
+          ),
         message: z
           .string()
           .nullable()
@@ -104,7 +108,9 @@ export const HarnessStatusDto = z
       })
       .nullable()
       .default(null)
-      .describe("Strict truth-source check of configuredModel; null when no model is configured."),
+      .describe(
+        "Truth-source check of configuredModel under the harness's own absence declaration; ok with a message is an advisory admission; null when no model is configured.",
+      ),
     delegation: DelegationCapability.nullable()
       .default(null)
       .describe(

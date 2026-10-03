@@ -769,7 +769,7 @@ function spentProfileSnapshot(
       {
         id: "five_hour",
         label: "5 hour",
-        used_ratio: 0.97,
+        used_ratio: 1,
         window_seconds: 18_000,
         resets_at: resetsAt,
         cooldown_until: null,
@@ -6393,7 +6393,7 @@ describe("Orchestrator", () => {
             {
               id: "five_hour",
               label: "5 hour",
-              used_ratio: 0.97,
+              used_ratio: 1,
               window_seconds: 18000,
               resets_at: null,
               cooldown_until: null,
@@ -6504,7 +6504,7 @@ describe("Orchestrator", () => {
               {
                 id: "five_hour",
                 label: "5 hour",
-                used_ratio: 0.97,
+                used_ratio: 1,
                 window_seconds: 18000,
                 resets_at: null,
                 cooldown_until: null,
@@ -6523,8 +6523,8 @@ describe("Orchestrator", () => {
         credentialProfileId: "a",
         onEvent: (event) => events.push(event.type),
       });
-      // Default policy = fail FAILS (release wave tier1 #4): a FRESH breach
-      // refuses before spawn with typed evidence; no adapter ever launches.
+      // The default threshold refuses a fresh, fully spent window before
+      // spawn with typed evidence; no adapter ever launches.
       expect(legacyOutcome(res)).toBe("failed");
       expect(seen).toEqual([]);
       expect(events).toContain("route.profile.headroom_exceeded");
@@ -7129,7 +7129,7 @@ describe("Orchestrator", () => {
               {
                 id: "weekly_scoped:Fable",
                 label: "7 day (Fable)",
-                used_ratio: 0.97,
+                used_ratio: 1,
                 window_seconds: 604800,
                 resets_at: resetsAt,
                 cooldown_until: null,
@@ -7882,9 +7882,8 @@ describe("Orchestrator", () => {
 
   it("discloses a requested effort on a harness with no declared ladder via ignored_settings (INV-105)", async () => {
     const repo = await initRepo();
-    // realLikeAdapter declares NO effort_levels — a configured per-harness
-    // effort must be DISCLOSED as ignored on harness.started, never silently
-    // dropped (and never forwarded to a CLI that has no such flag).
+    // A carrier-less adapter must disclose omission and retain the preference
+    // in final typed telemetry, without injecting assistant conversation text.
     const registry = new Map<string, HarnessAdapter>([
       ["codex", realLikeAdapter("codex", "openai")],
     ]);
@@ -7904,7 +7903,18 @@ describe("Orchestrator", () => {
       const events = readFileSync(join(res.runDir, "events.jsonl"), "utf8");
       expect(events).toContain("ignored_settings");
       expect(events).toContain("effort=high");
-      expect(events).toContain("effort_levels is empty");
+      const telemetry = new ArtifactStore(repo).readYaml<{
+        attempts: Array<{ effort_resolution: unknown }>;
+      }>(join(res.runDir, "final", "telemetry.yaml"));
+      expect(telemetry?.attempts[0]?.effort_resolution).toEqual({
+        requested: "high",
+        submitted: null,
+        resolution: "omitted",
+        source: "adapter",
+        parameter: null,
+        observed: null,
+        observedSource: null,
+      });
     } finally {
       if (prev === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
       else process.env.CLAUDEXOR_CONFIG_DIR = prev;
@@ -10994,7 +11004,7 @@ describe("Orchestrator", () => {
       mode: "plan",
       council: true,
       harnesses: ["cursor"],
-      n: 1,
+      n: 2, // Requested minimum; one available lane is disclosed as degraded.
     });
     expect(legacyOutcome(res)).toBe("success");
     expect(homesByIntent["plan"]).toBeTruthy();
@@ -11039,7 +11049,7 @@ describe("Orchestrator", () => {
       mode: "plan",
       council: true,
       harnesses: ["cursor"],
-      n: 1,
+      n: 2, // Requested minimum; one available lane is disclosed as degraded.
     });
     expect(legacyOutcome(res)).toBe("failed");
     // Root cause 3: the proven-success p01 draft is NEVER labeled failed.
@@ -11550,15 +11560,15 @@ describe("Orchestrator", () => {
         yield { type: "completed", session_id: spec.session_id, ts };
       },
     });
-    // `note` is OPTIONAL string in the CALLER's schema. Strictify would make it
-    // `string|null` required, so `{"note":null}` would falsely PASS the vendor
-    // form. Validated against the ORIGINAL, null is not a string → failed.
+    // `note` is OPTIONAL string in the CALLER's schema. Strictify makes it
+    // `string|null` required on the vendor wire; the engine restores that
+    // adapter-created null to omission before validating the ORIGINAL schema.
     const schema = {
       type: "object",
       properties: { note: { type: "string" } },
       required: [],
     };
-    const bad = await new Orchestrator({
+    const restored = await new Orchestrator({
       registry: new Map([["schema-capable", makeAdapter(JSON.stringify({ note: null }))]]),
       reviewers: [],
     }).run({
@@ -11569,9 +11579,31 @@ describe("Orchestrator", () => {
       n: 1,
       outputSchema: schema,
     });
-    expect(readFileSync(join(bad.runDir, "final", "structured_output.yaml"), "utf8")).toContain(
-      "status: failed",
+    expect(
+      readFileSync(join(restored.runDir, "final", "structured_output.yaml"), "utf8"),
+    ).toContain("status: passed");
+    expect(
+      readFileSync(join(restored.runDir, "final", "structured_output.yaml"), "utf8"),
+    ).toContain("normalized_optional_nulls: 1");
+    expect(JSON.parse(readFileSync(join(restored.runDir, "final", "output.json"), "utf8"))).toEqual(
+      {},
     );
+
+    const required = { ...schema, required: ["note"] };
+    const rejected = await new Orchestrator({
+      registry: new Map([["schema-capable", makeAdapter(JSON.stringify({ note: null }))]]),
+      reviewers: [],
+    }).run({
+      repoRoot: repo,
+      prompt: "x",
+      mode: "agent",
+      harnesses: ["schema-capable"],
+      n: 1,
+      outputSchema: required,
+    });
+    expect(
+      readFileSync(join(rejected.runDir, "final", "structured_output.yaml"), "utf8"),
+    ).toContain("status: failed");
     // The same schema with the field ABSENT (its optionality) is conformant.
     const ok = await new Orchestrator({
       registry: new Map([["schema-capable", makeAdapter(JSON.stringify({}))]]),
@@ -12330,6 +12362,58 @@ describe("Orchestrator", () => {
           access: "full",
         }),
       ).rejects.toThrow(/allow_full_access/);
+      // The refusal is TYPED: surfaces key the one-time-grant remedy on the
+      // code + 403, never on substring-matching the human message.
+      await expect(
+        orch.run({
+          repoRoot: repo,
+          prompt: "x",
+          mode: "agent",
+          harnesses: ["fake-success"],
+          n: 1,
+          access: "full",
+        }),
+      ).rejects.toMatchObject({ code: "trust_full_access_required", status: 403 });
+    } finally {
+      delete process.env.CLAUDEXOR_CONFIG_DIR;
+    }
+  });
+
+  it("admits a delegated access=full run with no trust record and records the full profile", async () => {
+    // The trust allow is a consent ceremony for the operator at a surface. A run
+    // marked execution.delegated has no such operator: an external orchestrator
+    // owns the workspace and carries its own authority, so it needs no trust
+    // record. The effective profile must still be recorded honestly as full, so
+    // admitting the run never becomes a silent downgrade to workspace_write.
+    const dir = reapMk(join(tmpdir(), "claudexor-orch-delegated-full-"));
+    writeFileSync(join(dir, "task.txt"), "do the thing\n");
+    // Scoped config dir with NO trust file, so the run proves the skip rather
+    // than inheriting an allow from the developer's real home.
+    const configDir = reapMk(join(tmpdir(), "claudexor-orch-delegated-notrust-"));
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    try {
+      const registry = new Map<string, HarnessAdapter>([
+        ["fake-success", createFakeHarness("fake-success")],
+      ]);
+      const orch = new Orchestrator({ registry, reviewers: reviewers() });
+      const res = await orch.run({
+        repoRoot: dir,
+        executionRoot: dir,
+        prompt: "x",
+        mode: "agent",
+        harnesses: ["fake-success"],
+        attempts: 2,
+        inPlace: true,
+        access: "full",
+        delegated: true,
+      });
+      expect(res.lifecycle).toBe("succeeded");
+      expect(readFileSync(join(res.runDir, "context", "task.yaml"), "utf8")).toContain(
+        "effective_profile: full",
+      );
+      expect(readFileSync(join(res.runDir, "final", "telemetry.yaml"), "utf8")).toContain(
+        "effective_access: full",
+      );
     } finally {
       delete process.env.CLAUDEXOR_CONFIG_DIR;
     }
@@ -14417,6 +14501,9 @@ describe("delegation belt injection (D32)", () => {
       delegationBelt: belt,
       runId: "run-current-delegate",
       parentRunId: "run-prior-thread-turn",
+      processingPreference: "standard",
+      workspaceKind: "directory",
+      scopePaths: ["README.md"],
     });
     // The engine rebinds the belt's parent-budget env to the resolved run
     // budget (default = unlimited here), preserving the descriptor's other env.
@@ -14429,6 +14516,9 @@ describe("delegation belt injection (D32)", () => {
     // parent envelope and never a raw path proposed by the harness.
     expect(list[0]!.env.CLAUDEXOR_DELEGATION_REPO_ROOT).toBe(repo);
     expect(JSON.parse(list[0]!.env.CLAUDEXOR_DELEGATION_BUDGET)).toEqual({ kind: "unlimited" });
+    expect(list[0]!.env.CLAUDEXOR_DELEGATION_PROCESSING_PREFERENCE).toBe("standard");
+    expect(list[0]!.env.CLAUDEXOR_DELEGATION_WORKSPACE_KIND).toBe("directory");
+    expect(JSON.parse(list[0]!.env.CLAUDEXOR_DELEGATION_SCOPE_PATHS)).toEqual(["README.md"]);
   });
 
   it("rebinds the belt budget to the configured global cap when the request supplied none (config-cap inheritance)", async () => {

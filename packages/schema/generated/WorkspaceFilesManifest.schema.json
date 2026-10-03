@@ -1,0 +1,160 @@
+{
+  "$ref": "#/definitions/WorkspaceFilesManifest",
+  "definitions": {
+    "WorkspaceFilesManifest": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "sourceRoot": {
+          "type": "string",
+          "minLength": 1
+        },
+        "executionRoot": {
+          "type": "string",
+          "minLength": 1
+        },
+        "isolation": {
+          "type": "string",
+          "enum": [
+            "live",
+            "envelope"
+          ]
+        },
+        "scopePaths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "complete": {
+          "type": "boolean",
+          "description": "Complete bytes for the declared footprint, not a whole-source-tree claim."
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "$ref": "#/definitions/WorkspaceFilesManifest/properties/scopePaths/items"
+              },
+              "before": {
+                "anyOf": [
+                  {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "file"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^sha256:[a-f0-9]{64}$"
+                          },
+                          "sizeBytes": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "mode": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "artifactPath": {
+                            "$ref": "#/definitions/WorkspaceFilesManifest/properties/entries/items/properties/path"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "sha256",
+                          "sizeBytes",
+                          "mode"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "directory"
+                          },
+                          "mode": {
+                            "type": "integer",
+                            "minimum": 0
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "mode"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "symlink"
+                          },
+                          "target": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "target"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "string",
+                    "const": "unknown"
+                  }
+                ],
+                "description": "Null proves absence; unknown means this path has no captured application preimage."
+              },
+              "after": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/WorkspaceFilesManifest/properties/entries/items/properties/before/anyOf/0"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "path",
+              "before",
+              "after"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "version",
+        "sourceRoot",
+        "executionRoot",
+        "isolation",
+        "scopePaths",
+        "complete",
+        "entries"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

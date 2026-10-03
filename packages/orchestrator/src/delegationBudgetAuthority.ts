@@ -91,6 +91,7 @@ export class DelegationBudgetAuthority {
       valuationUsd: number,
       cashEstimated: boolean,
       valuationKnowledge: "exact" | "estimated" | "unknown",
+      cashKnowledge: "exact" | "estimated" | "unknown",
     ) => void,
   ): BudgetLedger {
     const parent = this.parents.get(parentRunId);

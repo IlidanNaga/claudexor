@@ -9,6 +9,7 @@ import {
   SCHEMA_VERSION,
   TaskContract,
   WorkProduct,
+  WorkspaceFilesManifest,
   needsDecision,
   requiredActionsFor,
   validateRunFactsInvariants,
@@ -449,12 +450,22 @@ export function buildRunFacts(
     join(ctx.paths.arbitrationDir, "operator_decision.yaml"),
   );
   const patch = readTextSafe(join(ctx.paths.finalDir, "patch.diff")) ?? "";
+  const manifestText =
+    workProduct?.kind === "files" && workProduct.files.manifest
+      ? readTextSafe(join(ctx.paths.root, workProduct.files.manifest))
+      : null;
+  const filesManifest = manifestText
+    ? WorkspaceFilesManifest.parse(JSON.parse(manifestText))
+    : undefined;
+  const manifestSha256 = manifestText ? sha256(manifestText) : undefined;
   const operatorDecisionMatchesPatch =
     !!operatorDecision &&
-    patch.trim().length > 0 &&
+    (patch.trim().length > 0 || filesManifest !== undefined) &&
     (operatorDecision["action"] === "accept_risk" ||
       operatorDecision["action"] === "override_needs_human") &&
-    operatorDecision["patch_sha256"] === sha256(patch);
+    (filesManifest
+      ? operatorDecision["manifest_sha256"] === manifestSha256
+      : operatorDecision["patch_sha256"] === sha256(patch));
   const deliverable = canonicalDeliverable({
     ctx,
     mode: ctx.mode,
@@ -491,21 +502,25 @@ export function buildRunFacts(
   });
   const decisionWithCanonicalFacts = decision ? { ...decision, facts: outcome } : null;
   const applyEligibility =
-    patch.trim() && contract && decisionWithCanonicalFacts
+    (patch.trim() || filesManifest) && contract && decisionWithCanonicalFacts
       ? deriveApplyEligibility({
           state: outcome.lifecycle,
           decision: decisionWithCanonicalFacts,
           workProduct,
           patch,
+          filesManifest,
+          manifestSha256,
           originalRepoRoot: contract.repo.root,
           targetRepoRoot: contract.repo.root,
           operatorDecision:
-            operatorDecisionPresent && typeof operatorDecision?.["patch_sha256"] === "string"
-              ? {
-                  action: String(operatorDecision["action"]),
-                  patch_sha256: operatorDecision["patch_sha256"],
-                }
-              : null,
+            operatorDecisionPresent && filesManifest
+              ? { action: String(operatorDecision?.["action"]), manifest_sha256: manifestSha256 }
+              : operatorDecisionPresent && typeof operatorDecision?.["patch_sha256"] === "string"
+                ? {
+                    action: String(operatorDecision["action"]),
+                    patch_sha256: operatorDecision["patch_sha256"],
+                  }
+                : null,
           applyState: applyStateOf(workProduct),
           workState: outcome.work_state ?? null,
         })

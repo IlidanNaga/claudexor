@@ -1,0 +1,95 @@
+{
+  "$ref": "#/definitions/ProcessingCapability",
+  "definitions": {
+    "ProcessingCapability": {
+      "type": "object",
+      "properties": {
+        "modes": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "standard",
+                  "fast",
+                  "economy"
+                ],
+                "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "nativeModes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "mode": {
+                "$ref": "#/definitions/ProcessingCapability/properties/modes/anyOf/0/items"
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S",
+                "description": "User-supplied string that must contain visible content, not just whitespace."
+              }
+            },
+            "required": [
+              "mode",
+              "id"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "defaultNativeMode": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProcessingCapability/properties/nativeModes/items/properties/id"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "User-supplied string that must contain visible content, not just whitespace."
+        },
+        "eligible": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "source": {
+          "$ref": "#/definitions/ProcessingCapability/properties/nativeModes/items/properties/id"
+        },
+        "observedAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "description": "ISO-8601 timestamp string."
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ISO-8601 timestamp string."
+        }
+      },
+      "required": [
+        "modes",
+        "nativeModes",
+        "defaultNativeMode",
+        "eligible",
+        "source",
+        "observedAt"
+      ],
+      "additionalProperties": false,
+      "description": "Exact model/account service evidence. Null modes or eligibility means unknown, not unsupported; native IDs remain adapter-owned. Transport support is declared separately."
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

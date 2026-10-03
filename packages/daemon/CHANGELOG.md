@@ -1,5 +1,257 @@
 # @claudexor/daemon
 
+## 3.18.0
+
+### Patch Changes
+
+- Updated dependencies [b00408e]
+  - @claudexor/core@3.18.0
+  - @claudexor/journal@3.18.0
+  - @claudexor/schema@3.18.0
+  - @claudexor/util@3.18.0
+
+## 3.17.2
+
+### Patch Changes
+
+- Preserve native input-size refusals without account retries or unrelated quota resets, publish measured ASK input budgets, distinguish proven undelivered Codex model requests, and move large Claude and AGY inputs off process arguments.
+- Updated dependencies
+  - @claudexor/schema@3.17.2
+  - @claudexor/core@3.17.2
+  - @claudexor/journal@3.17.2
+  - @claudexor/util@3.17.2
+
+## 3.17.1
+
+### Patch Changes
+
+- 72825b9: Resolve effort preferences at the final native route using the strongest supported level at or below a known request, with an explicitly recorded minimum or vendor-default omission when applicable. Preserve advertised future values, original preferences and model identities. Add shared typed effort evidence to model results and final attempt telemetry; keep adaptation disclosures in logs.
+
+  Preserve strict legacy model results unless creation opts into `captureEffortEvidence=true`, binding that choice to idempotency while keeping exact stored bytes and digest acknowledgement. Keep effort verification metadata in negotiated account catalogs only. Refuse unplaceable effort without retrying another route, clean temporary Codex authorization on preparation exit, and describe prepared controls without claiming dispatch.
+
+- Updated dependencies [72825b9]
+  - @claudexor/schema@3.17.1
+  - @claudexor/core@3.17.1
+  - @claudexor/journal@3.17.1
+  - @claudexor/util@3.17.1
+
+## 3.17.0
+
+### Patch Changes
+
+- 951489f: `POST /v2/runs` and Exact Retry for a project root that was never registered now answer a typed `404 project_not_registered` (not retryable, with the remedy: register the root with `POST /v2/projects` or declare `scope.ephemeral`) instead of a retryable `503 idempotency_status_unavailable`.
+- Updated dependencies [092ec2b]
+- Updated dependencies [951489f]
+  - @claudexor/core@3.17.0
+  - @claudexor/schema@3.17.0
+  - @claudexor/journal@3.17.0
+  - @claudexor/util@3.17.0
+
+## 3.16.0
+
+### Minor Changes
+
+- 788ddca: Add `POST /v2/runs/:id/messages`: a live message into a running run's active attempt with journal-first admission, typed outcomes (delivered, accepted, rejected, not_active, unsupported, delivery_unknown) plus reasons, and a key-required idempotent receipt. Each harness declares its live-input channel as `capability_profile.live_input`, projected as `liveInput` in the agent-capability catalog.
+
+### Patch Changes
+
+- Updated dependencies [788ddca]
+  - @claudexor/schema@3.16.0
+  - @claudexor/core@3.16.0
+  - @claudexor/journal@3.16.0
+  - @claudexor/util@3.16.0
+
+## 3.15.1
+
+### Patch Changes
+
+- @claudexor/core@3.15.1
+- @claudexor/journal@3.15.1
+- @claudexor/schema@3.15.1
+- @claudexor/util@3.15.1
+
+## 3.15.0
+
+### Patch Changes
+
+- Updated dependencies [3bc8af4]
+  - @claudexor/core@3.15.0
+  - @claudexor/journal@3.15.0
+  - @claudexor/schema@3.15.0
+  - @claudexor/util@3.15.0
+
+## 3.14.0
+
+### Patch Changes
+
+- Updated dependencies [2c024ac]
+- Updated dependencies [7e615b6]
+- Updated dependencies [fb42a94]
+  - @claudexor/core@3.14.0
+  - @claudexor/schema@3.14.0
+  - @claudexor/journal@3.14.0
+  - @claudexor/util@3.14.0
+
+## 3.13.0
+
+### Patch Changes
+
+- @claudexor/core@3.13.0
+- @claudexor/journal@3.13.0
+- @claudexor/schema@3.13.0
+- @claudexor/util@3.13.0
+
+## 3.12.10
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.12.10
+  - @claudexor/core@3.12.10
+  - @claudexor/journal@3.12.10
+  - @claudexor/util@3.12.10
+
+## 3.12.9
+
+### Patch Changes
+
+- Updated dependencies [125aea9]
+  - @claudexor/schema@3.12.9
+  - @claudexor/core@3.12.9
+  - @claudexor/journal@3.12.9
+  - @claudexor/util@3.12.9
+
+## 3.12.8
+
+### Patch Changes
+
+- @claudexor/core@3.12.8
+- @claudexor/journal@3.12.8
+- @claudexor/schema@3.12.8
+- @claudexor/util@3.12.8
+
+## 3.12.7
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.12.7
+  - @claudexor/core@3.12.7
+  - @claudexor/journal@3.12.7
+  - @claudexor/util@3.12.7
+
+## 3.12.6
+
+### Patch Changes
+
+- @claudexor/core@3.12.6
+- @claudexor/journal@3.12.6
+- @claudexor/schema@3.12.6
+- @claudexor/util@3.12.6
+
+## 3.12.5
+
+### Patch Changes
+
+- State a served-model mismatch on a model operation as the typed `modelMismatch` result fact without changing its outcome, rank an account that recently answered a model's request with a different model after the other selectable accounts for later Auto selections (a 30-minute in-memory observation that never excludes an account, a pin or a preferred account), and send a turn the same account served with another model through its canonical content and tool calls instead of refusing the next request with `invalid_continuation`.
+- Updated dependencies
+  - @claudexor/schema@3.12.5
+  - @claudexor/core@3.12.5
+  - @claudexor/journal@3.12.5
+  - @claudexor/util@3.12.5
+
+## 3.12.4
+
+### Patch Changes
+
+- @claudexor/core@3.12.4
+- @claudexor/journal@3.12.4
+- @claudexor/schema@3.12.4
+- @claudexor/util@3.12.4
+
+## 3.12.3
+
+### Patch Changes
+
+- @claudexor/core@3.12.3
+- @claudexor/journal@3.12.3
+- @claudexor/schema@3.12.3
+- @claudexor/util@3.12.3
+
+## 3.12.2
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.12.2
+  - @claudexor/core@3.12.2
+  - @claudexor/journal@3.12.2
+  - @claudexor/util@3.12.2
+
+## 3.12.1
+
+### Patch Changes
+
+- Reading ONE run no longer serializes every retained run. The daemon's retained-command list RPC takes an optional query addressing a single subject (one run id, or one parent's direct Delegate children) and selects before it redacts, so `GET /v2/runs/:id` stops recursively projecting the prompts of unrelated runs; the unqualified read and the global `GET /v2/runs` page are unchanged, and an engine older than the query answers in full so callers keep applying their own selection.
+- Updated dependencies
+  - @claudexor/schema@3.12.1
+  - @claudexor/core@3.12.1
+  - @claudexor/journal@3.12.1
+  - @claudexor/util@3.12.1
+
+## 3.12.0
+
+### Minor Changes
+
+- 217d53f: The daemon stops writing dead history into its journal and forgets it on replay. Per-token harness deltas no longer reach the journal (the per-run event log and the live stream keep them), the journaled `run.created` carries the prompt's digest instead of its text, `command.updated` frames omit the immutable params, quota snapshots are journaled only when their evidence changes and the projection marker carries a digest, and the retained params of terminal commands are capped by a code constant. Every partition replays and compacts through the daemon's fold policy, so startup memory follows the retained state rather than the file (a resolved question and its request are forgotten together, so answering an already-resolved question after a restart reports `not_found` rather than `already_resolved` — both non-delivery statuses; within one process life `already_resolved` is unchanged); crash-GC reads project roots from the already prepared command projection instead of replaying the journal a second time, journaled run events are validated once per generation, and journal maintenance re-requests itself when the file crosses the threshold again while logging typed declines and `journal.records_retired` receipts. An engine from before this change refuses a served root loudly. A restart on an already-compacted partition no longer rewrites it to reclaim nothing, and the daemon reports its own memory (rss, heap, external) on the normal-admission line and on every maintenance receipt. Legacy `command.pruned` tombstones carry no run ids, so terminals of runs pruned before this release stay retained (none on the acceptance root); runs that never received a journaled terminal keep their pre-release progress frames until their command is pruned (then the tombstone's run_ids retire them — bounded by the 500 / 30-day / 256 MiB rule); two such runs hold about 3.1k `harness.event` frames on the acceptance root.
+
+### Patch Changes
+
+- Updated dependencies [217d53f]
+- Updated dependencies [1b1476c]
+  - @claudexor/schema@3.12.0
+  - @claudexor/journal@3.12.0
+  - @claudexor/core@3.12.0
+  - @claudexor/util@3.12.0
+
+## 3.11.0
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.11.0
+  - @claudexor/core@3.11.0
+  - @claudexor/journal@3.11.0
+  - @claudexor/util@3.11.0
+
+## 3.10.5
+
+### Patch Changes
+
+- @claudexor/core@3.10.5
+- @claudexor/journal@3.10.5
+- @claudexor/schema@3.10.5
+- @claudexor/util@3.10.5
+
+## 3.10.4
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.10.4
+  - @claudexor/core@3.10.4
+  - @claudexor/journal@3.10.4
+  - @claudexor/util@3.10.4
+
+## 3.10.3
+
+### Patch Changes
+
+- @claudexor/core@3.10.3
+- @claudexor/journal@3.10.3
+- @claudexor/schema@3.10.3
+- @claudexor/util@3.10.3
+
 ## 3.10.2
 
 ### Patch Changes

@@ -1,49 +1,80 @@
-import { replayFrames, type JournalRecord } from "./frame-codec.js";
-import { readDescriptor, readIntent, removeFile, truncatePendingSuffix } from "./journal-files.js";
+import { descriptorSize, readFrames, type FrameReadResult } from "./frame-reader.js";
+import {
+  readIntent,
+  removeFile,
+  truncatePendingSuffix,
+  type AppendIntent,
+} from "./journal-files.js";
+import type { JournalFold } from "./journal-fold.js";
 import { JournalRecoveryRequiredError, journalRecoveryAt } from "./journal-recovery-state.js";
 
+export interface RecoveredJournal {
+  retained: FrameReadResult["retained"];
+  epoch: string | null;
+  nextSeq: number;
+  previousFrameHash: string;
+  knownFileBytes: number;
+  discardedBytes: number;
+  retiredCount: number;
+  retiredBytes: number;
+}
+
 /** Recover only the original canonical file. A compaction candidate is never
- * consulted as recovery authority. Returns decoded ACK history for its writer. */
+ * consulted as recovery authority. Returns the retained ACK history for its
+ * writer plus the chain state of the last frame on disk. A positional-read
+ * failure propagates with its own message; only intent handling is labelled. */
 export function recoverJournal(
   fd: number,
   path: string,
-  partition: string,
+  options: { partition: string; fold?: JournalFold },
   intentPath: string,
-): {
-  records: JournalRecord[];
-  knownFileBytes: number;
-  discardedBytes: number;
-} {
-  let bytes = readDescriptor(fd);
-  let discardedBytes = 0;
+): RecoveredJournal {
+  const size = descriptorSize(fd);
+  let intent: AppendIntent | null;
   try {
-    const intent = readIntent(intentPath);
-    if (intent) {
-      const prefix = replayFrames(bytes.subarray(0, intent.offset), partition);
-      if (
-        intent.offset > bytes.length ||
-        bytes.length > intent.offset + intent.length ||
-        prefix.error ||
-        prefix.incompleteOffset !== null
-      ) {
-        throw required(intent.offset, "append intent does not match the journal prefix");
-      }
-      discardedBytes = bytes.length - intent.offset;
-      if (discardedBytes > 0) {
-        truncatePendingSuffix(fd, path, intent.offset, bytes.length);
-        bytes = bytes.subarray(0, intent.offset);
-      }
-      removeFile(intentPath);
-    }
+    intent = readIntent(intentPath);
   } catch (error) {
-    if (error instanceof JournalRecoveryRequiredError) throw error;
     throw required(0, `append intent is malformed: ${String(error)}`);
   }
-  const decoded = replayFrames(bytes, partition);
-  if (decoded.incompleteOffset !== null)
-    throw required(decoded.incompleteOffset, "unexplained suffix without append intent");
-  if (decoded.error) throw required(decoded.error.offset, decoded.error.reason);
-  return { records: decoded.records, knownFileBytes: bytes.length, discardedBytes };
+  if (!intent) {
+    const decoded = readFrames(fd, options.partition, { fold: options.fold });
+    if (decoded.incompleteOffset !== null)
+      throw required(decoded.incompleteOffset, "unexplained suffix without append intent");
+    if (decoded.error) throw required(decoded.error.offset, decoded.error.reason);
+    return recovered(decoded, size, 0);
+  }
+  if (intent.offset > size || size > intent.offset + intent.length) {
+    throw required(intent.offset, "append intent does not match the journal prefix");
+  }
+  const decoded = readFrames(fd, options.partition, { limit: intent.offset, fold: options.fold });
+  if (decoded.error || decoded.incompleteOffset !== null) {
+    throw required(intent.offset, "append intent does not match the journal prefix");
+  }
+  const discardedBytes = size - intent.offset;
+  try {
+    if (discardedBytes > 0) truncatePendingSuffix(fd, path, intent.offset, size);
+    removeFile(intentPath);
+  } catch (error) {
+    throw required(intent.offset, `append intent recovery failed: ${String(error)}`);
+  }
+  return recovered(decoded, intent.offset, discardedBytes);
+}
+
+function recovered(
+  decoded: FrameReadResult,
+  knownFileBytes: number,
+  discardedBytes: number,
+): RecoveredJournal {
+  return {
+    retained: decoded.retained,
+    epoch: decoded.epoch,
+    nextSeq: decoded.nextSeq,
+    previousFrameHash: decoded.previousFrameHash,
+    knownFileBytes,
+    discardedBytes,
+    retiredCount: decoded.retiredCount,
+    retiredBytes: decoded.retiredBytes,
+  };
 }
 
 function required(byteOffset: number, reason: string): JournalRecoveryRequiredError {

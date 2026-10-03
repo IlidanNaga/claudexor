@@ -1,7 +1,9 @@
 import { lstatSync, type Stats } from "node:fs";
 import { join } from "node:path";
 import type { DecisionRecord, RunFacts, RunTelemetry, WorkProduct } from "@claudexor/schema";
-import { readTextSafe } from "@claudexor/util";
+import { readTextSafe, sha256 } from "@claudexor/util";
+import { WorkspaceFilesManifest } from "@claudexor/schema";
+import { sameWorkspaceFile } from "@claudexor/workspace";
 import type { AnnouncedRunContext } from "./runTerminals.js";
 import type { OrchestratorResult } from "./orchestrator.js";
 
@@ -26,6 +28,21 @@ export function canonicalDeliverable(args: {
     kind: NonNullable<RunFacts["deliverable"]["kind"]>;
     path: string;
   }> = [];
+  if (args.workProduct?.kind === "files") {
+    const path = args.workProduct.files.manifest;
+    const text = path ? readTextSafe(join(args.ctx.paths.root, path)) : null;
+    if (!text || sha256(text) !== args.workProduct.meta.manifest_sha256)
+      throw new Error("Files work product manifest is missing or changed");
+    const manifest = WorkspaceFilesManifest.parse(JSON.parse(text));
+    if (
+      manifest.complete &&
+      (args.workProduct.meta.no_changes === false ||
+        manifest.entries.some(
+          (entry) => entry.after !== null && !sameWorkspaceFile(entry.before, entry.after),
+        ))
+    )
+      candidates.push({ kind: "files", path });
+  }
   const structuredOutput = { kind: "structured_output" as const, path: "final/output.json" };
   if (args.mode === "plan") {
     candidates.push({ kind: "plan", path: "final/plan.md" });

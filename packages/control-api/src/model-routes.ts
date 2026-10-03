@@ -1,7 +1,9 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   ControlModelSourcesResponse,
+  ControlModelSourcesAccountsResponse,
   ControlModelCatalogResponse,
+  ControlModelAccountCatalogResponse,
   ModelCallRequest,
   ControlModelOperationCreateRequest,
   ControlModelOperationDetail,
@@ -13,7 +15,7 @@ import {
 } from "@claudexor/schema";
 import type { OperationDraft } from "./operation-draft.js";
 import { queryParam } from "./operation-parameters.js";
-import { assertOnlyQueryParams, singleQuery } from "./query.js";
+import { assertOnlyQueryParams, optionalBooleanQuery, singleQuery } from "./query.js";
 import { requiredIdempotencyKey } from "./run-start.js";
 import { routeValue, serviceResponse } from "./route-stages.js";
 import { writeBinaryResponse } from "./binary-response.js";
@@ -21,13 +23,19 @@ import type { ResourceRouteContext } from "./resource-routes.js";
 
 /** Model operations are commands, not Agent Runs. No tool execution or conversation state. */
 export interface ModelRouteServices {
-  modelSources(): Promise<unknown>;
+  modelSources(view?: "accounts"): Promise<unknown>;
   modelCatalog(
     source: string,
     credentialProfileId?: string,
     requestedModel?: string,
   ): Promise<unknown>;
-  createModelOperation(request: ModelPayloadRef, idempotencyKey: string): Promise<unknown>;
+  modelAccountCatalog(source: string, credentialProfileId?: string): Promise<unknown>;
+  createModelOperation(
+    request: ModelPayloadRef,
+    idempotencyKey: string,
+    captureFailureEvidence?: boolean,
+    captureEffortEvidence?: boolean,
+  ): Promise<unknown>;
   getModelOperation(id: string): Promise<unknown>;
   readModelResult(id: string): Promise<{ bytes: Buffer; sha256: string }>;
   acknowledgeModelResult(id: string, sha256: string): Promise<unknown>;
@@ -46,33 +54,61 @@ export async function handleModelRoute(
   const services = ctx.services;
   if (method === "GET" && path === "/model-sources") {
     if (!services?.modelSources) return false;
-    const value = await routeValue(ctx, res, 500, () => services.modelSources!());
+    const input = await routeValue(ctx, res, 400, () => {
+      const query = new URL(req.url ?? "/", "http://localhost");
+      assertOnlyQueryParams(query, ["view"]);
+      return catalogView(query);
+    });
+    if (!input.ok) return true;
+    const value = await routeValue(ctx, res, 500, () =>
+      input.value === "accounts" ? services.modelSources!("accounts") : services.modelSources!(),
+    );
     if (!value.ok) return true;
     return serviceResponse(ctx, res, "modelSources", () =>
-      ctx.json(res, 200, ControlModelSourcesResponse.parse(value.value)),
+      ctx.json(
+        res,
+        200,
+        (input.value === "accounts"
+          ? ControlModelSourcesAccountsResponse
+          : ControlModelSourcesResponse
+        ).parse(value.value),
+      ),
     );
   }
   const catalogMatch = /^\/model-sources\/([^/]+)\/models$/.exec(path);
   if (method === "GET" && catalogMatch) {
-    if (!services?.modelCatalog) return false;
     const input = await routeValue(ctx, res, 400, () => {
       const query = new URL(req.url ?? "/", "http://localhost");
-      assertOnlyQueryParams(query, ["credentialProfileId", "requestedModel"]);
+      assertOnlyQueryParams(query, ["credentialProfileId", "requestedModel", "view"]);
       const profile = singleQuery(query, "credentialProfileId");
       const model = singleQuery(query, "requestedModel");
+      const view = catalogView(query);
+      if (view === "accounts" && model !== undefined)
+        throw new Error("requestedModel is only valid for selected-account discovery");
       return {
         source: Id.parse(decodeURIComponent(catalogMatch[1]!)),
         profile: profile === undefined ? undefined : Id.parse(profile),
         model: model === undefined ? undefined : ModelCallRequest.shape.model.parse(model),
+        view,
       };
     });
     if (!input.ok) return true;
+    if (input.value.view === "accounts" ? !services?.modelAccountCatalog : !services?.modelCatalog)
+      return false;
     const value = await routeValue(ctx, res, 500, () =>
-      services.modelCatalog!(input.value.source, input.value.profile, input.value.model),
+      input.value.view === "accounts"
+        ? services!.modelAccountCatalog!(input.value.source, input.value.profile)
+        : services!.modelCatalog!(input.value.source, input.value.profile, input.value.model),
     );
     if (!value.ok) return true;
     return serviceResponse(ctx, res, "modelCatalog", () =>
-      ctx.json(res, 200, ControlModelCatalogResponse.parse(value.value)),
+      ctx.json(
+        res,
+        200,
+        input.value.view === "accounts"
+          ? publicModelAccountCatalog(value.value)
+          : legacyModelCatalog(value.value),
+      ),
     );
   }
   if (method === "POST" && path === "/model-operations") {
@@ -80,10 +116,27 @@ export async function handleModelRoute(
     const input = await routeValue(ctx, res, 400, async () => ({
       key: requiredIdempotencyKey(req),
       body: ControlModelOperationCreateRequest.parse(await ctx.readBody(req)),
+      effort: optionalBooleanQuery(
+        new URL(req.url ?? "/", "http://localhost"),
+        "captureEffortEvidence",
+      ),
+      capture: optionalBooleanQuery(
+        new URL(req.url ?? "/", "http://localhost"),
+        "captureFailureEvidence",
+      ),
     }));
     if (!input.ok) return true;
     const value = await routeValue(ctx, res, 500, () =>
-      services.createModelOperation!(input.value.body.request, input.value.key),
+      input.value.effort === true
+        ? services.createModelOperation!(
+            input.value.body.request,
+            input.value.key,
+            input.value.capture === true ? true : undefined,
+            true,
+          )
+        : input.value.capture === true
+          ? services.createModelOperation!(input.value.body.request, input.value.key, true)
+          : services.createModelOperation!(input.value.body.request, input.value.key),
     );
     if (!value.ok) return true;
     return serviceResponse(ctx, res, "createModelOperation", () =>
@@ -153,6 +206,53 @@ export async function handleModelRoute(
   );
 }
 
+function catalogView(query: URL): "accounts" | undefined {
+  const view = singleQuery(query, "view");
+  if (view !== undefined && view !== "accounts") throw new Error("view must be accounts");
+  return view;
+}
+
+/** The pre-negotiation shape of `GET /model-sources/:id/models`: a legacy client
+ * keeps its strict schema, so everything the account view carries beyond it —
+ * `processing` and effort verification per row, declared client version per catalog — are stripped
+ * here and only here. */
+function legacyModelCatalog(value: unknown) {
+  const {
+    clientVersion: _clientVersion,
+    clientVersionSource: _clientVersionSource,
+    ...catalog
+  } = ControlModelCatalogResponse.parse(value);
+  return {
+    ...catalog,
+    models: catalog.models.map(
+      ({
+        processing: _processing,
+        reasoningEffortsVerified: _effortVerified,
+        reasoningEffortPreferenceOrder: _preferenceOrder,
+        ...model
+      }) => model,
+    ),
+  };
+}
+
+/** Preference order is operation-local adaptation evidence, not a new public
+ * catalog field. Preserve the negotiated account shape as well as the legacy one. */
+function publicModelAccountCatalog(value: unknown) {
+  const view = ControlModelAccountCatalogResponse.parse(value);
+  return {
+    ...view,
+    accounts: view.accounts.map((account) => ({
+      ...account,
+      catalog: account.catalog && {
+        ...account.catalog,
+        models: account.catalog.models.map(
+          ({ reasoningEffortPreferenceOrder: _preferenceOrder, ...model }) => model,
+        ),
+      },
+    })),
+  };
+}
+
 /** Kept alongside the actual route contract; the common catalog projects IDs and auth. */
 export const MODEL_OPERATION_DRAFTS: OperationDraft[] = [
   {
@@ -160,19 +260,33 @@ export const MODEL_OPERATION_DRAFTS: OperationDraft[] = [
     path: "/v2/model-sources",
     mutability: "read_only",
     requestSchema: null,
-    responseSchema: "ControlModelSourcesResponse",
+    responseSchema: "ControlModelSourcesQueryResponse",
     responseKind: "json",
     summary: "List raw model transports, independent of agent harnesses.",
+    parameters: [
+      queryParam({
+        name: "view",
+        enum: ["accounts"],
+        description:
+          "Opt in to account catalog and processing transport capabilities; omitted preserves the legacy source shape.",
+      }),
+    ],
   },
   {
     method: "GET",
     path: "/v2/model-sources/:id/models",
     mutability: "read_only",
     requestSchema: null,
-    responseSchema: "ControlModelCatalogResponse",
+    responseSchema: "ControlModelCatalogQueryResponse",
     responseKind: "json",
     summary: "Read a selected account's raw model catalog and context evidence.",
     parameters: [
+      queryParam({
+        name: "view",
+        enum: ["accounts"],
+        description:
+          "Enumerate every enabled account's separate inventory and availability; omitted selects one account using the inference pool criteria. Account view cannot be combined with requestedModel.",
+      }),
       queryParam({
         name: "credentialProfileId",
         description: "Pin a managed profile; omitted selects the engine's Auto account.",
@@ -193,6 +307,20 @@ export const MODEL_OPERATION_DRAFTS: OperationDraft[] = [
     responseSchema: "ControlModelOperationDetail",
     responseKind: "json",
     summary: "Accept one idempotent model generation without an agent run.",
+    parameters: [
+      queryParam({
+        name: "captureEffortEvidence",
+        enum: ["true", "false"],
+        description:
+          "Retain typed effort preparation and observation evidence in the private result. Omitted or false preserves the legacy result shape; the choice is bound to idempotency.",
+      }),
+      queryParam({
+        name: "captureFailureEvidence",
+        enum: ["true", "false"],
+        description:
+          "Retain exact failed-response bytes and exception details in the private result. Omitted or false preserves the legacy result shape.",
+      }),
+    ],
     idempotency: "key_required",
     completion: "durable_handle",
   },

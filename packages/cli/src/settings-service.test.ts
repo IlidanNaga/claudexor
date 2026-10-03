@@ -33,12 +33,22 @@ writeFileSync(
 );
 chmodSync(stubBin, 0o755);
 process.env["CLAUDEXOR_CODEX_BIN"] = stubBin;
+// Same shape for agy: its manifest hint list is the AUTHORITATIVE truth source
+// the strict refusal test needs now that codex declares absence advisory.
+const agyBin = join(stubDir, "agy");
+writeFileSync(
+  agyBin,
+  '#!/bin/sh\ncase "$1" in\n  --version) echo "agy 0.0.0-stub" ;;\n  *) exit 1 ;;\nesac\n',
+);
+chmodSync(agyBin, 0o755);
+process.env["CLAUDEXOR_AGY_BIN"] = agyBin;
 const {
   applyHarnessSettingsPatches,
   assertSettingsPatchValid,
   assertRoutingGoalTiersConsistent,
   commitSettingsUpdate,
   mergeSettingsPatch,
+  settingsSnapshot,
 } = await import("./settings-service.js");
 const { loadConfig, updateGlobalConfig } = await import("@claudexor/config");
 
@@ -57,6 +67,34 @@ describe("interaction timeout patch presence", () => {
     expect(
       mergeSettingsPatch(disabled, ControlSettingsUpdateRequest.parse({})).interaction_timeout_ms,
     ).toBeNull();
+  });
+});
+
+describe("startup-frozen concurrency projection", () => {
+  it("shows configured versus effective caps and restartRequired", () => {
+    const dir = reapMk(join(tmpdir(), "claudexor-concurrency-settings-"));
+    const prev = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = dir;
+    try {
+      updateGlobalConfig((cfg) => ({
+        ...cfg,
+        runtime: { ...cfg.runtime, max_concurrent: 30 },
+      }));
+      const snapshot = settingsSnapshot("/tmp/no-project", {
+        max_concurrent: 24,
+        max_parallel_candidates: 4,
+        max_deep_scan_width: 8,
+        max_council_members: 4,
+      });
+      expect(snapshot.runtime.concurrency).toMatchObject({
+        configured: expect.objectContaining({ maxConcurrent: 30 }),
+        effective: expect.objectContaining({ maxConcurrent: 24 }),
+        restartRequired: true,
+      });
+    } finally {
+      if (prev === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = prev;
+    }
   });
 });
 
@@ -101,11 +139,13 @@ describe("assertSettingsPatchValid", () => {
     ).rejects.toThrow(/not persistable/);
   });
 
-  it("refuses a model outside the harness truth source with the actionable message (HTTP 400 path)", async () => {
+  it("refuses a model outside an AUTHORITATIVE harness's truth source with the actionable message (HTTP 400 path)", async () => {
+    // agy declares nothing about absence, so its manifest hint list is a
+    // complete enumeration and a miss is a typed refusal (INV-104).
     await expect(
       assertSettingsPatchValid(
         ControlSettingsUpdateRequest.parse({
-          harnesses: { codex: { defaultModel: "ghost-model-9000" } },
+          harnesses: { agy: { defaultModel: "ghost-model-9000" } },
         }),
         AUTO_NO_TIERS,
       ),
@@ -113,11 +153,37 @@ describe("assertSettingsPatchValid", () => {
     // A truth-listed model passes.
     await expect(
       assertSettingsPatchValid(
-        ControlSettingsUpdateRequest.parse({ harnesses: { codex: { defaultModel: "gpt-5.5" } } }),
+        ControlSettingsUpdateRequest.parse({
+          harnesses: { agy: { defaultModel: "gemini-3.7-flash-high" } },
+        }),
         AUTO_NO_TIERS,
       ),
     ).resolves.toBeDefined();
-  }, 30_000); // codex discover() spawns the vendor CLI; its startup latency is environmental
+  }, 30_000); // discover() spawns the (stubbed) vendor CLI; startup latency is environmental
+
+  it("persists a model an ADVISORY harness's list lacks and hands the caller the note (INV-104)", async () => {
+    // codex declares absence advisory: its hint list proves presence only, so
+    // the write goes through and the note travels instead of a 400.
+    const notes: string[] = [];
+    await expect(
+      assertSettingsPatchValid(
+        patchCodex({ defaultModel: "gpt-ghost-9000" }),
+        AUTO_NO_TIERS,
+        notes,
+      ),
+    ).resolves.toBeDefined();
+    expect(notes).toEqual([
+      "harness 'codex' defaultModel 'gpt-ghost-9000' (truth source: manifest): " +
+        'model "gpt-ghost-9000" is not in this harness\'s manifest known-model list; ' +
+        "this harness's list cannot prove a model is absent, so the request is forwarded to the vendor",
+    ]);
+    // A listed model passes silently: presence is proof.
+    const silent: string[] = [];
+    await expect(
+      assertSettingsPatchValid(patchCodex({ defaultModel: "gpt-5.5" }), AUTO_NO_TIERS, silent),
+    ).resolves.toBeDefined();
+    expect(silent).toEqual([]);
+  }, 30_000);
 
   it("refuses an effort outside the declared ladder", async () => {
     // raw-api discovers without a vendor binary and declares NO effort ladder;
@@ -137,25 +203,15 @@ describe("assertSettingsPatchValid", () => {
     }
   });
 
-  // INV-104 pairing: the effort ladder belongs to the MODEL, and a settings write
-  // may carry either half of the pair alone — so only the MERGED pair can be
-  // judged. The codex manifest (snapshot fallback under the stub) gives the
-  // asymmetry these need: gpt-5.5 stops at `xhigh` while the harness-wide union
-  // reaches `ultra` because gpt-5.6-sol advertises it.
-  // One `it` per patch shape, so a regression names the shape it broke instead of
-  // stopping at whichever assertion happened to come first.
-  // codex discover() spawns the (stubbed) vendor CLI, so each gets the same
-  // environmental-latency budget as the other manifest-backed cases.
-  it("shape 1: effort-only patch refused when the STORED model's ladder is narrower", async () => {
-    // `ultra` IS on the harness-wide union, so judging the patch against the union
-    // (or against a null model, which is what an absent patch.defaultModel means)
-    // accepted a value gpt-5.5 rejects.
+  // Every patch shape preserves the preference for the final account/model.
+  // Discovery may describe a different account; it cannot erase the request.
+  it("shape 1: effort-only patch preserves a preference above the stored model ladder", async () => {
     await expect(
       assertSettingsPatchValid(patchCodex({ effort: "ultra" }), {
         ...AUTO_NO_TIERS,
         harnesses: storedCodex({ defaultModel: "gpt-5.5" }),
       }),
-    ).rejects.toThrow(/harness 'codex' model 'gpt-5\.5' does not accept effort 'ultra'/);
+    ).resolves.toBeDefined();
   }, 30_000);
 
   it("shape 2: effort-only patch accepted when it is inside the STORED model's ladder", async () => {
@@ -167,15 +223,14 @@ describe("assertSettingsPatchValid", () => {
     ).resolves.toBeDefined();
   }, 30_000);
 
-  it("shape 3: defaultModel-only patch refused when the STORED effort is unsupported", async () => {
-    // The patch carries no effort at all, so effort validation used to be skipped
-    // entirely and the stored `ultra` silently became unsupported for the new model.
+  it("shape 3: defaultModel-only patch preserves the stored preference for dispatch", async () => {
+    // A model-only patch retains the stored preference for dispatch adaptation.
     await expect(
       assertSettingsPatchValid(patchCodex({ defaultModel: "gpt-5.5" }), {
         ...AUTO_NO_TIERS,
         harnesses: storedCodex({ defaultModel: "gpt-5.6-sol", effort: "ultra" }),
       }),
-    ).rejects.toThrow(/harness 'codex' model 'gpt-5\.5' does not accept effort 'ultra'/);
+    ).resolves.toBeDefined();
     // …and the same patch is fine once the stored effort fits the new model.
     await expect(
       assertSettingsPatchValid(patchCodex({ defaultModel: "gpt-5.5" }), {
@@ -197,7 +252,7 @@ describe("assertSettingsPatchValid", () => {
         ...AUTO_NO_TIERS,
         harnesses: storedCodex({ defaultModel: "gpt-5.6-sol", effort: "ultra" }),
       }),
-    ).rejects.toThrow(/harness 'codex' model 'gpt-5\.5' does not accept effort 'ultra'/);
+    ).resolves.toBeDefined();
   }, 30_000);
 
   it("an effective model the manifest records no ladder for keeps the harness-wide union", async () => {
@@ -482,7 +537,60 @@ describe("commitSettingsUpdate atomic validate+write (A-1 TOCTOU race)", () => {
     );
   });
 
-  it("an effort-only write is judged against the PERSISTED default model", async () => {
+  it("a quality-tier route on an ADVISORY harness persists an unlisted model with the tier note; a listed one is silent", async () => {
+    const notes: string[] = [];
+    await expect(
+      assertSettingsPatchValid(
+        ControlSettingsUpdateRequest.parse({
+          qualityTiers: {
+            implement: [[{ harness: "codex", model: "gpt-ghost-9000", effort: "high" }]],
+          },
+        }),
+        { goal: "auto" as const, qualityTiers: {}, harnesses: {} },
+        notes,
+      ),
+    ).resolves.toBeDefined();
+    expect(notes).toEqual([
+      expect.stringMatching(
+        /^quality tier route 'codex\/gpt-ghost-9000' \(truth source: manifest\): model "gpt-ghost-9000" is not in this harness's manifest known-model list; /,
+      ),
+    ]);
+    const silent: string[] = [];
+    await expect(
+      assertSettingsPatchValid(
+        oneTierPatch(),
+        { goal: "auto" as const, qualityTiers: {}, harnesses: {} },
+        silent,
+      ),
+    ).resolves.toBeDefined();
+    expect(silent).toEqual([]);
+  }, 30_000);
+
+  it("commitSettingsUpdate returns the admission notes the write produced", async () => {
+    await withSeededConfig({ goal: "auto", qualityTiers: {} }, async (root) => {
+      const notes = await commitSettingsUpdate(
+        root,
+        ControlSettingsUpdateRequest.parse({
+          harnesses: { codex: { defaultModel: "gpt-ghost-9000" } },
+        }),
+      );
+      expect(notes).toEqual([
+        expect.stringMatching(
+          /^harness 'codex' defaultModel 'gpt-ghost-9000' \(truth source: manifest\): model "gpt-ghost-9000" is not in this harness's manifest known-model list; /,
+        ),
+      ]);
+      expect(loadConfig(root).global.harnesses["codex"]?.default_model).toBe("gpt-ghost-9000");
+      // A listed model persists with no note; the read-back is silent.
+      expect(
+        await commitSettingsUpdate(
+          root,
+          ControlSettingsUpdateRequest.parse({ harnesses: { codex: { defaultModel: "gpt-5.5" } } }),
+        ),
+      ).toEqual([]);
+    });
+  }, 30_000);
+
+  it("an effort-only write persists its original preference for final-route adaptation", async () => {
     // End-to-end proof that the stored per-harness settings actually reach the
     // validator: a unit test on `assertSettingsPatchValid` alone would still pass
     // if `commitSettingsUpdate` handed it an empty harnesses map.
@@ -500,8 +608,8 @@ describe("commitSettingsUpdate atomic validate+write (A-1 TOCTOU race)", () => {
             root,
             ControlSettingsUpdateRequest.parse({ harnesses: { codex: { effort: "ultra" } } }),
           ),
-        ).rejects.toThrow(/model 'gpt-5\.5' does not accept effort 'ultra'/);
-        expect(loadConfig(root).global.harnesses["codex"]?.effort).toBeNull();
+        ).resolves.toBeDefined();
+        expect(loadConfig(root).global.harnesses["codex"]?.effort).toBe("ultra");
         // The same write against a model that advertises `ultra` persists.
         await commitSettingsUpdate(
           root,
@@ -514,7 +622,7 @@ describe("commitSettingsUpdate atomic validate+write (A-1 TOCTOU race)", () => {
     );
   }, 30_000); // codex discover() spawns the vendor CLI; its startup latency is environmental
 
-  it("two concurrent writes can never persist a stranded model/effort pair", async () => {
+  it("two concurrent writes preserve model identity and effort preference independently", async () => {
     // The pair is merged-effective too, so it needs the SAME under-lock re-check the
     // goal/tiers invariant gets. A narrows the model (valid against the seed: the
     // stored `high` is fine for gpt-5.5); B raises the effort (valid against the
@@ -544,11 +652,11 @@ describe("commitSettingsUpdate atomic validate+write (A-1 TOCTOU race)", () => {
             ControlSettingsUpdateRequest.parse({ harnesses: { codex: { effort: "ultra" } } }),
           ),
         ]);
-        expect(results.filter((r) => r.status === "rejected")).toHaveLength(1);
-        // Whichever writer landed second is refused, so the persisted pair is
-        // always one the model actually accepts.
+        expect(results.filter((r) => r.status === "rejected")).toHaveLength(0);
+        // Adaptation occurs at dispatch, without rewriting either stored preference.
         const stored = loadConfig(root).global.harnesses["codex"];
-        expect(stored?.default_model === "gpt-5.5" && stored?.effort === "ultra").toBe(false);
+        expect(stored?.default_model).toBe("gpt-5.5");
+        expect(stored?.effort).toBe("ultra");
       },
     );
   }, 30_000);

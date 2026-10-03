@@ -1,6 +1,6 @@
 import { existsSync, lstatSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, delimiter, dirname, extname, isAbsolute, join } from "node:path";
+import { basename, delimiter, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { isLaunchableExecutable } from "./executable-inspection.js";
 
 /**
@@ -73,6 +73,101 @@ export function managedNodeRoot(home: string): string {
 }
 
 /**
+ * Where an npm GLOBAL prefix keeps its packages — npm's own rule, spelled
+ * once: `<prefix>/lib/node_modules` on POSIX, `<prefix>/node_modules` on
+ * Windows (where the launcher shims land in the prefix root itself).
+ */
+export function npmGlobalPackagesDir(prefix: string, platform: NodeJS.Platform): string {
+  return platform === "win32" ? join(prefix, "node_modules") : join(prefix, "lib", "node_modules");
+}
+
+/**
+ * The npm entrypoint bundled INSIDE a Node distribution, next to the runtime
+ * that will execute it: `<root>/lib/node_modules/npm/bin/npm-cli.js` beside
+ * `<root>/bin/node` on POSIX, `<dir>/node_modules/npm/bin/npm-cli.js` beside
+ * `<dir>/node.exe` on Windows (the official zip layout). The local installer
+ * runs exactly this file on exactly that Node and never an ambient PATH npm.
+ */
+export function embeddedNpmCli(execPath: string, platform: NodeJS.Platform): string {
+  const runtimeDir = dirname(resolve(execPath));
+  return platform === "win32"
+    ? join(runtimeDir, "node_modules", "npm", "bin", "npm-cli.js")
+    : resolve(runtimeDir, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js");
+}
+
+/**
+ * Windows npm installs ship `.cmd`/sh/ps1 shims and never an executable image
+ * (issue #191), and Claudexor never spawns a harness through a shell. The
+ * launcher a Windows install yields is therefore the vendor's OWN image inside
+ * its npm platform package — ONE row per exact pin whose platform-package
+ * layout was read from the real published package, keyed by the npm package
+ * the installer pins. A vendor absent here has no Claudexor-runnable Windows
+ * image and the local installer refuses it typed instead of installing a shim.
+ * The path is relative to the prefix's global packages dir.
+ */
+const WINDOWS_TARGET_TRIPLES = {
+  x64: "x86_64-pc-windows-msvc",
+  arm64: "aarch64-pc-windows-msvc",
+} as const;
+export type WindowsNativeArch = keyof typeof WINDOWS_TARGET_TRIPLES;
+
+const WINDOWS_NATIVE_IMAGE_PACKAGES: Readonly<
+  Record<string, (arch: WindowsNativeArch) => readonly string[]>
+> = {
+  // @openai/codex 0.156.1: npm's global install nests the optional platform
+  // dependency under the main package's node_modules (observed on the pinned
+  // macOS global install). `bin/codex.js` resolves it from that package and
+  // executes `vendor/<triple>/bin/codex.exe`; Windows CI proves the real layout.
+  "@openai/codex": (arch) => [
+    "@openai",
+    "codex",
+    "node_modules",
+    "@openai",
+    `codex-win32-${arch}`,
+    "vendor",
+    WINDOWS_TARGET_TRIPLES[arch],
+    "bin",
+  ],
+};
+
+export function isWindowsNativeArch(arch: string): arch is WindowsNativeArch {
+  return Object.hasOwn(WINDOWS_TARGET_TRIPLES, arch);
+}
+
+/** Segments from an npm global packages dir to the package-native image dir,
+ * or null when no verified Windows image layout exists for that pin/arch. */
+export function windowsNativeImageSegments(
+  npmPackage: string,
+  arch: string,
+): readonly string[] | null {
+  if (!isWindowsNativeArch(arch)) return null;
+  const layout = Object.hasOwn(WINDOWS_NATIVE_IMAGE_PACKAGES, npmPackage)
+    ? WINDOWS_NATIVE_IMAGE_PACKAGES[npmPackage]
+    : undefined;
+  return layout ? layout(arch) : null;
+}
+
+/** The absolute package-native image dir inside an npm prefix on Windows. */
+export function windowsNativeImageDir(
+  prefix: string,
+  npmPackage: string,
+  arch: string,
+): string | null {
+  const segments = windowsNativeImageSegments(npmPackage, arch);
+  return segments ? join(npmGlobalPackagesDir(prefix, "win32"), ...segments) : null;
+}
+
+/** Every verified package-native image dir under the managed toolchain root —
+ * the win32 entries the harness PATH carries so a bare `codex` resolves to the
+ * vendor's `codex.exe` on every local surface (doctor, login, run, quota). */
+export function managedWindowsNativeImageDirs(home: string, arch: string): string[] {
+  const root = managedNodeRoot(home);
+  return Object.keys(WINDOWS_NATIVE_IMAGE_PACKAGES)
+    .map((npmPackage) => windowsNativeImageDir(root, npmPackage, arch))
+    .filter((dir): dir is string => dir !== null);
+}
+
+/**
  * Single producer for the PATH every local harness discovery/run surface should
  * use. Surfaces may still inherit other env vars, but binary resolution must not
  * depend on whether the daemon was launched from a GUI app, login shell, or CLI.
@@ -83,6 +178,7 @@ export function normalizedHarnessPath(
   source: NodeJS.ProcessEnv = process.env,
   execPath: string = process.execPath,
   platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch,
 ): string {
   const home = source.HOME || homedir();
   const runnerDir = managedRunnerNodeDir(execPath, platform);
@@ -97,6 +193,10 @@ export function normalizedHarnessPath(
       ? [join(home, ".claudexor", "remote", "vendor", "bin")]
       : []),
     join(managedNodeRoot(home), "bin"),
+    // Windows: the managed prefix holds no image in any bin dir, only the
+    // vendor's own image inside its platform package (see
+    // WINDOWS_NATIVE_IMAGE_PACKAGES); that dir is the local install's launcher.
+    ...(platform === "win32" ? managedWindowsNativeImageDirs(home, arch) : []),
     join(home, ".local", "bin"),
     // Cursor's vendor installer may choose this legacy vendor-owned prefix
     // instead of ~/.local/bin; discovery and execution must resolve either.
@@ -154,7 +254,16 @@ export function resolveHarnessBinary(
     for (const name of names) if (isLaunchableExecutable(name, platform)) return name;
     return null;
   }
-  for (const dir of normalizedHarnessPath(source, execPath, platform).split(delimiter)) {
+  return resolveOnPath(names, normalizedHarnessPath(source, execPath, platform), platform);
+}
+
+/** First launchable candidate on an EXACT PATH string, no normalization. */
+function resolveOnPath(
+  names: string[],
+  pathValue: string,
+  platform: NodeJS.Platform,
+): string | null {
+  for (const dir of pathValue.split(delimiter)) {
     if (!dir) continue;
     for (const name of names) {
       const candidate = join(dir, name);
@@ -162,6 +271,68 @@ export function resolveHarnessBinary(
     }
   }
   return null;
+}
+
+/**
+ * Which exact bytes a harness child will execute, as a stat-only identity:
+ * the realpath of the binary `resolveHarnessBinary` picks, plus its inode,
+ * size and mtime. No spawn, no read — one `realpath` and one `stat`.
+ *
+ * Every probe memo keyed by this identity re-reads the binary the moment it
+ * changes on disk WITHOUT a daemon restart, which is what the release-free
+ * model/effort discovery needs: the native installer re-points a `versions/`
+ * symlink (realpath changes), an npm reinstall rewrites the file in place
+ * (size/mtime change), a Homebrew upgrade moves to a new cellar dir. `ino` is
+ * 0 on some Windows volumes and stays in the key only as a tie-breaker; the
+ * memos' own TTLs bound what a shim layout can hide from a stat.
+ *
+ * Null when the binary does not resolve (nothing to spawn) or cannot be
+ * stat'd (raced away between resolve and stat).
+ */
+export interface HarnessBinaryIdentity {
+  path: string;
+  ino: number;
+  size: number;
+  mtimeMs: number;
+}
+
+export function harnessBinaryIdentity(
+  bin: string,
+  source: NodeJS.ProcessEnv = process.env,
+): HarnessBinaryIdentity | null {
+  return identityOfResolved(resolveHarnessBinary(bin, source));
+}
+
+/**
+ * The same identity for a child whose env patch REPLACED the PATH: the spawn
+ * layer composes the normalized host PATH and then applies the caller's patch
+ * verbatim, so such a child resolves the binary on the patch value alone. A
+ * probe that keys its memo by identity must resolve exactly that way, or it
+ * describes a different binary than the run executes.
+ */
+export function harnessBinaryIdentityOnPath(
+  bin: string,
+  pathValue: string,
+  platform: NodeJS.Platform = process.platform,
+): HarnessBinaryIdentity | null {
+  const names = binaryNameCandidates(bin, platform);
+  if (isAbsolute(bin)) {
+    for (const name of names)
+      if (isLaunchableExecutable(name, platform)) return identityOfResolved(name);
+    return null;
+  }
+  return identityOfResolved(resolveOnPath(names, pathValue, platform));
+}
+
+function identityOfResolved(resolved: string | null): HarnessBinaryIdentity | null {
+  if (resolved === null) return null;
+  try {
+    const path = realpathSync(resolved);
+    const stat = statSync(path);
+    return { path, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs };
+  } catch {
+    return null;
+  }
 }
 
 /**

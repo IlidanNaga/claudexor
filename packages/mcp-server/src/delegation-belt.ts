@@ -18,7 +18,13 @@
  * local snapshot only refuses obvious overdraw earlier. The policy checks are
  * PURE functions so they are unit testable without a live daemon.
  */
-import { MAX_DELEGATED_CHILDREN, type PaidBudget } from "@claudexor/schema";
+import {
+  MAX_DELEGATED_CHILDREN,
+  ProcessingPreference,
+  WorkspaceKind,
+  WorkspaceScopePath,
+  type PaidBudget,
+} from "@claudexor/schema";
 import { DELEGATION_ENV, redactSecrets } from "@claudexor/util";
 import type { McpTool, McpToolAnnotations, McpToolOutput, RunnerFn } from "./index.js";
 
@@ -40,6 +46,9 @@ export interface DelegationPolicy {
   /** The parent run's remaining paid-budget headroom at belt-launch. Each
    * sub-run is bounded by what is left of it after prior sub-runs. */
   parentBudget: PaidBudget;
+  processingPreference?: ProcessingPreference;
+  workspaceKind?: WorkspaceKind;
+  scopePaths?: string[];
 }
 
 export const DEFAULT_MAX_SUBRUNS = MAX_DELEGATED_CHILDREN;
@@ -144,7 +153,24 @@ export function readDelegationPolicy(env: NodeJS.ProcessEnv): DelegationPolicy {
       /* fail closed: keep finite(0) */
     }
   }
+  const processing = ProcessingPreference.safeParse(env[DELEGATION_ENV.processingPreference]);
+  const kind = WorkspaceKind.safeParse(env[DELEGATION_ENV.workspaceKind]);
+  if (env[DELEGATION_ENV.processingPreference] !== undefined && !processing.success)
+    throw new Error("invalid captured delegation processingPreference");
+  if (env[DELEGATION_ENV.workspaceKind] !== undefined && !kind.success)
+    throw new Error("invalid captured delegation workspaceKind");
+  let scopePaths: string[] | undefined;
+  if (env[DELEGATION_ENV.scopePaths] !== undefined) {
+    try {
+      scopePaths = WorkspaceScopePath.array().parse(JSON.parse(env[DELEGATION_ENV.scopePaths]!));
+    } catch {
+      throw new Error("invalid captured delegation scopePaths");
+    }
+  }
   return {
+    ...(processing.success ? { processingPreference: processing.data } : {}),
+    ...(kind.success ? { workspaceKind: kind.data } : {}),
+    ...(scopePaths !== undefined ? { scopePaths } : {}),
     parentRunId:
       typeof env[DELEGATION_ENV.parentRunId] === "string" &&
       env[DELEGATION_ENV.parentRunId]!.trim().length > 0
@@ -169,6 +195,9 @@ export function delegationEnv(opts: {
   depth: number;
   maxSubRuns: number;
   parentBudget: PaidBudget;
+  processingPreference?: ProcessingPreference;
+  workspaceKind?: WorkspaceKind;
+  scopePaths?: string[];
 }): Record<string, string> {
   return {
     [DELEGATION_ENV.parentRunId]: opts.parentRunId,
@@ -176,6 +205,15 @@ export function delegationEnv(opts: {
     [DELEGATION_ENV.depth]: String(opts.depth),
     [DELEGATION_ENV.maxSubRuns]: String(opts.maxSubRuns),
     [DELEGATION_ENV.budget]: JSON.stringify(opts.parentBudget),
+    ...(opts.processingPreference !== undefined
+      ? { [DELEGATION_ENV.processingPreference]: opts.processingPreference }
+      : {}),
+    ...(opts.workspaceKind !== undefined
+      ? { [DELEGATION_ENV.workspaceKind]: opts.workspaceKind }
+      : {}),
+    ...(opts.scopePaths !== undefined
+      ? { [DELEGATION_ENV.scopePaths]: JSON.stringify(opts.scopePaths) }
+      : {}),
   };
 }
 
@@ -308,6 +346,14 @@ export function beltClaudexorTools(
             delegatedFromRunId: policy.parentRunId,
             repoPath: policy.repoRoot,
             paidBudget: decision.budget,
+            ...(policy.processingPreference !== undefined
+              ? { processingPreference: policy.processingPreference }
+              : {}),
+            execution: {
+              isolation: "envelope",
+              ...(policy.workspaceKind ? { workspaceKind: policy.workspaceKind } : {}),
+              ...(policy.scopePaths !== undefined ? { scopePaths: policy.scopePaths } : {}),
+            },
           },
           ctx.signal ? { signal: ctx.signal } : {},
         );

@@ -82,6 +82,7 @@ export const RunOutcomeFacts = z
       .describe("Terminal lifecycle of the run."),
     noChanges: z
       .boolean()
+      .nullable()
       .default(false)
       .describe("True when the run finished without changing any files (the ex no_op fact)."),
     checks: ChecksState.default("not_configured"),
@@ -145,6 +146,10 @@ export type VerificationBasis = z.infer<typeof VerificationBasis>;
  */
 export const FinalVerifyRecord = z
   .object({
+    base_manifest_sha256: z
+      .string()
+      .optional()
+      .describe("Exact directory manifest verified; not a Git commit identifier."),
     attempted: z.boolean().describe("Whether the final verify was attempted."),
     /** Base the verify tree was created from (the winner envelope's base_sha). */
     base_sha: z

@@ -365,7 +365,7 @@ function normalizeReviewerRelativePath(value: string): string | null {
 }
 
 interface ReviewerCandidateInventory {
-  mode: "git_visible" | "diff_only";
+  mode: "git_visible" | "diff_only" | "explicit_manifest";
   reason: string | null;
   copyPaths: Set<string>;
 }
@@ -374,7 +374,14 @@ export async function buildReviewerCandidateInventory(
   sourceRoot: string,
   postimagePaths: Set<string>,
   requireGit: boolean,
+  candidatePaths?: string[],
 ): Promise<ReviewerCandidateInventory> {
+  if (candidatePaths)
+    return {
+      mode: "explicit_manifest",
+      reason: null,
+      copyPaths: reviewerCopyPathClosure(candidatePaths),
+    };
   const result = await runCaptureRaw(
     "git",
     ["-C", sourceRoot, "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--"],

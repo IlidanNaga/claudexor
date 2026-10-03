@@ -967,6 +967,7 @@ describe("WorkspaceManager", () => {
     const mgr = new WorkspaceManager(repo);
     const env1 = await mgr.create({ taskId: "task-gc", attemptId: "a01", baseRef: "HEAD" });
     const branch = env1.branch_name;
+    if (!branch) throw new Error("Git envelope must carry its real branch");
     expect((await git(env1.worktree_path, ["rev-parse", "--verify", branch])).code).toBe(0);
     expect((await git(repo, ["rev-parse", "--verify", branch])).code).not.toBe(0);
     await mgr.dispose(env1);

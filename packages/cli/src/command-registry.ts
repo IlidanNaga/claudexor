@@ -120,7 +120,7 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
   {
     id: "plan",
     positionalPatterns: [{ min: 0, max: null }],
-    usageArgs: '"<prompt>" [--council [--n 2..4]]',
+    usageArgs: '"<prompt>" [--council [--n N]]',
     summary: "Read-only planning report (--council: multi-harness drafts merged into one plan)",
     flags: [...RUN_FLAGS_BY_MODE.plan],
     mutability: "read",
@@ -189,11 +189,12 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
     positionalPatterns: [{ min: 1, max: 1 }],
     usageArgs: "<run_id> <action-flags>",
     summary:
-      'Decide a blocked run: --accept-risk|--override|--revert|--accept-clean-patch [--apply-mode m]|--rerun --feedback "<text>"',
+      'Record a run decision: --accept-risk|--override|--revert|--discard|--accept-clean-patch [--apply-mode m]|--rerun --feedback "<text>"',
     flags: [
       "accept-risk",
       "override",
       "revert",
+      "discard",
       "accept-clean-patch",
       "rerun",
       "apply-mode",

@@ -6,12 +6,13 @@ import type {
   Thread,
   ThreadTurn,
 } from "@claudexor/schema";
-import { isEphemeralRunScope } from "@claudexor/schema";
+import { isEphemeralRunScope, PROJECT_NOT_REGISTERED_REQUIRED_ACTIONS } from "@claudexor/schema";
 import { hashJson, isClaudexorOwnedRuntimePath } from "@claudexor/util";
 import type { CommandStore } from "./command-store.js";
 import type { JournalManager, JournalProjectionSlot } from "./journal-manager.js";
 import type { JournalManagerOptions } from "./journal-manager-lifecycle.js";
 import type { InteractionStore } from "./interactions.js";
+import { isJournaledRunEvent, journaledRunEventCopy } from "./journaled-run-events.js";
 import {
   type OperatorDecisionRecord,
   type OperatorDecisionStore,
@@ -173,8 +174,19 @@ export class ProjectPartitions implements CommandAuthority {
     return this.decisionStoreForRequest(params).record(decision, idempotency);
   }
 
+  /**
+   * Durable sink for run events. Only the lifecycle-significant subset is
+   * journaled (`JOURNALED_RUN_EVENT_TYPES`); a filtered event is returned
+   * untouched and can never fail its producer. The journaled `run.created`
+   * carries the prompt digest, never the prompt text.
+   */
   recordRunEvent(params: unknown, event: RunEvent): RunEvent {
-    return this.runEventStoreForRequest(params).record(event);
+    if (isJournaledRunEvent(event)) {
+      this.runEventStoreForRequest(params).record(journaledRunEventCopy(event));
+    }
+    // The producer keeps its own event (prompt included) for events.jsonl and
+    // the live bus; only the journal copy carries the digest.
+    return event;
   }
 
   forRequest(params: unknown): CommandStore {
@@ -511,6 +523,8 @@ export class ProjectPartitions implements CommandAuthority {
       throw Object.assign(new Error(`project is not registered: ${root}`), {
         code: "project_not_registered",
         status: 404,
+        retryable: false,
+        requiredActions: [...PROJECT_NOT_REGISTERED_REQUIRED_ACTIONS],
       });
     }
     return this.partitions.ensure(project.id);

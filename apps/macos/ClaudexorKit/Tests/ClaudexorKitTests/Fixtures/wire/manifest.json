@@ -1,4 +1,5 @@
 {
+  "effort-resolution-downward": "EffortResolution",
   "handshake-response": "ControlHandshakeResponse",
   "handshake-response-unknown-sha": "ControlHandshakeResponse",
   "handshake-response-recovery-only": "ControlHandshakeResponse",

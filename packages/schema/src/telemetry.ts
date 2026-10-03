@@ -1,3 +1,4 @@
+import { EffortResolution } from "./effort.js";
 import { z } from "zod/v3";
 import {
   RecordedAccessProfile,
@@ -12,21 +13,17 @@ import {
 import { OutputSchemaDialect } from "./output-schema-dialect.js";
 import { DeepScanSynthesis } from "./deep-scan.js";
 import { ToolKind } from "./tool-ref.js";
-import { AuthMode, RouteRankingRationale } from "./budget.js";
+import { AuthMode, RouteRankingRationale, UsageCostSummary } from "./budget.js";
 import { AuthRouteReason, AuthSourceKind } from "./auth.js";
 import { RequestRequirementResolution } from "./request-requirements.js";
 import { WorkState } from "./work-report.js";
+import { ProcessingReceipt, ProcessingCostBasis } from "./processing.js";
 import { RunDelegationInfo } from "./delegation.js";
 import { RunFacts } from "./run-facts.js";
+import { InputTokenUsage, HarnessRequestRefusal } from "./harness.js";
 
-/**
- * Run telemetry artifact (`final/telemetry.yaml`).
- *
- * The orchestrator is the ONLY computer of web/tool evidence. Surfaces
- * (control-api, CLI, app) project this artifact; they must not re-derive
- * evidence from raw events. Legacy runs without the artifact render an honest
- * "telemetry unavailable" state instead of a recomputed guess.
- */
+/** Engine-owned final/telemetry.yaml: surfaces project, never re-derive evidence.
+ * Legacy runs without this artifact disclose unavailable telemetry. */
 
 export const WebEvidenceStatus = z
   .enum(["none", "attempted", "satisfied", "failed", "unverified"])
@@ -36,9 +33,7 @@ export type WebEvidenceStatus = z.infer<typeof WebEvidenceStatus>;
 export const WebEvidenceRecord = z
   .object({
     required: z.boolean().default(false).describe("Explicit stored web requirement."),
-    /** Requested policy for the run. */
     policy: ExternalContextPolicy.default("auto").describe("Requested web policy for the run."),
-    /** Mode actually executed by the harness route (e.g. claude `cached` upgrades to `live`, disclosed). */
     effective_mode: ExternalContextPolicy.default("auto").describe(
       "Policy actually executed by the harness route (disclosed upgrades, e.g. cached to live).",
     ),
@@ -277,6 +272,7 @@ export const StructuredOutputConformance = z
       .describe(
         "Artifact path of the materialized structured output: final/output.json when conformant, final/output.invalid.json when parsed but non-conformant; null when the answer never parsed.",
       ),
+    normalized_optional_nulls: z.number().int().nonnegative().default(0),
     generated_at: IsoTimestamp.describe("When the receipt was generated."),
   })
   .describe(
@@ -294,6 +290,10 @@ export const TokenUsage = z
     "Token usage summed from harness usage events; money is tracked separately in the budget ledger, not here. Each field is null until a harness reports it, so unreported never reads as 0. The relation between cached_input_tokens and input_tokens is harness-specific; do not derive a grand total.",
   );
 export type TokenUsage = z.infer<typeof TokenUsage>;
+
+const AttemptTokenUsage = TokenUsage.extend({
+  input_token_usage: InputTokenUsage.optional(),
+});
 
 /**
  * Runtime readiness receipt for the Claudexor delegation belt (D32) on one
@@ -380,13 +380,13 @@ export type BrowserEvidenceRecord = z.infer<typeof BrowserEvidenceRecord>;
 
 export const AttemptTelemetryRecord = z
   .object({
+    request_refusal: HarnessRequestRefusal.optional(),
+    effort_resolution: EffortResolution.optional(),
+    processing: ProcessingReceipt.optional(),
+    processing_cost_basis: ProcessingCostBasis.optional(),
+    usage_cost: UsageCostSummary.optional(),
     attempt_id: Id.describe("Attempt id."),
     harness_id: Id.describe("Harness that ran the attempt."),
-    /**
-     * Model identity the harness stream actually reported (route evidence).
-     * Null when the stream never disclosed one; surfaces must render that as
-     * unverified, never as a guess.
-     */
     observed_model: z
       .string()
       .nullable()
@@ -488,7 +488,7 @@ export const AttemptTelemetryRecord = z
      * armed for this attempt. Absent when the browser was not injected. */
     browser: BrowserEvidenceRecord.optional(),
     /** Token usage summed across this attempt's usage events. */
-    usage: TokenUsage.default({}),
+    usage: AttemptTokenUsage.default({}),
   })
   .describe(
     "Telemetry for one attempt: route evidence, web evidence, tool errors, dropped events, and outcome.",
@@ -535,7 +535,7 @@ export const RunTelemetry = z
       .nonnegative()
       .default(0)
       .describe("Sum of attempt tool warnings; rendered separately from terminal state."),
-    usage_totals: TokenUsage.default({}),
+    usage_totals: AttemptTokenUsage.default({}),
     /** The run's auth ROUTE RECEIPT (INV-061 disclosure): requested preference,
      * the effective route/source the deciding attempt disclosed, and a
      * deterministic reason — computed ONCE here; summary/CLI project it

@@ -45,6 +45,7 @@ export function structuredRunResult(result: unknown): Record<string, unknown> {
     if (!summary && typeof v === "string" && v.trim()) summary = v.trim();
   }
   return {
+    ...(Array.isArray(r["attemptExecution"]) ? { attemptExecution: r["attemptExecution"] } : {}),
     summary,
     runId: typeof r["runId"] === "string" && r["runId"] ? r["runId"] : null,
     runDir: typeof r["runDir"] === "string" && r["runDir"] ? r["runDir"] : null,

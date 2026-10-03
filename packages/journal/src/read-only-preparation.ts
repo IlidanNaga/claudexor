@@ -6,13 +6,15 @@ import {
   fstatSync,
   lstatSync,
   openSync,
-  readFileSync,
+  readSync,
   readdirSync,
   readlinkSync,
   realpathSync,
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
-import { ZERO_HASH, replayFrames, type JournalRecord } from "./frame-codec.js";
+import { ZERO_HASH, type JournalRecord } from "./frame-codec.js";
+import { readFrames, type FrameReadResult } from "./frame-reader.js";
+import type { JournalFold } from "./journal-fold.js";
 
 export interface JournalPreparationReceipt {
   fingerprint: string;
@@ -33,6 +35,9 @@ export type PreparedJournalRecovery =
       discardedTailBytes: number;
     };
 
+/** Chain state (`epoch`/`nextSeq`/`previousFrameHash`) is the disk state after
+ * the last frame; `records` is the retained set after the optional fold, and
+ * `retiredCount`/`retiredBytes` say what that fold dropped while replaying. */
 export interface PreparedJournalInspection {
   receipt: JournalPreparationReceipt;
   recovery: PreparedJournalRecovery;
@@ -41,6 +46,8 @@ export interface PreparedJournalInspection {
   nextSeq: number;
   previousFrameHash: string;
   knownFileBytes: number;
+  retiredCount: number;
+  retiredBytes: number;
 }
 
 interface AppendIntent {
@@ -49,13 +56,24 @@ interface AppendIntent {
   length: number;
 }
 
+/** Bytes are retained only for files small enough to be an append intent; the
+ * journal itself is hashed in chunks and later decoded positionally. */
+const RETAINED_FILE_BYTES = 1024;
+const HASH_CHUNK_BYTES = 1024 * 1024;
+
+interface FileObservation {
+  size: number;
+  observation: string;
+  bytes?: Buffer;
+}
+
 interface TreeSnapshot {
   fingerprint: string;
   preparationIdentity: string;
   rootExists: boolean;
   partitionExists: boolean;
   entries: Set<string>;
-  files: Map<string, Buffer>;
+  files: Map<string, FileObservation>;
   problems: string[];
 }
 
@@ -66,10 +84,11 @@ export function inspectPreparedJournal(input: {
   intentPath: string;
   partition: string;
   initialEpoch: string;
+  fold?: JournalFold;
 }): PreparedJournalInspection {
   const tree = snapshotTree(input.rootDir, input.partitionDir);
-  const journalBytes = tree.files.get(input.journalPath);
-  const intentBytes = tree.files.get(input.intentPath);
+  const journal = tree.files.get(input.journalPath);
+  const intent = tree.files.get(input.intentPath);
   const unexpected = [...tree.entries].filter(
     (path) => path !== input.journalPath && path !== input.intentPath,
   );
@@ -77,54 +96,59 @@ export function inspectPreparedJournal(input: {
   let byteOffset = 0;
   let deferredRepair: JournalPreparationReceipt["deferredRepair"] = null;
 
-  if (
-    !problem &&
-    journalBytes === undefined &&
-    (intentBytes !== undefined || tree.partitionExists)
-  ) {
-    if (intentBytes !== undefined || unexpected.length > 0) {
+  if (!problem && journal === undefined && (intent !== undefined || tree.partitionExists)) {
+    if (intent !== undefined || unexpected.length > 0) {
       problem = "journal file is missing while partition state exists";
     }
   }
 
-  let logicalBytes = journalBytes ?? Buffer.alloc(0);
-  if (!problem && intentBytes !== undefined) {
+  const size = journal?.size ?? 0;
+  let prefix: AppendIntent | null = null;
+  if (!problem && intent !== undefined) {
     try {
-      const intent = parseIntent(intentBytes);
-      const prefix = replayFrames(logicalBytes.subarray(0, intent.offset), input.partition);
-      if (
-        intent.offset > logicalBytes.length ||
-        logicalBytes.length > intent.offset + intent.length ||
-        prefix.error ||
-        prefix.incompleteOffset !== null
-      ) {
+      prefix = parseIntent(intent);
+      if (prefix.offset > size || size > prefix.offset + prefix.length) {
         problem = "append intent does not match the journal prefix";
-        byteOffset = intent.offset;
-      } else {
-        deferredRepair = {
-          kind: "discard_unacknowledged_append",
-          discardedBytes: logicalBytes.length - intent.offset,
-        };
-        logicalBytes = logicalBytes.subarray(0, intent.offset);
+        byteOffset = prefix.offset;
       }
     } catch (error) {
       problem = `append intent is malformed: ${safeMessage(error)}`;
     }
   }
 
-  const decoded = replayFrames(logicalBytes, input.partition);
-  if (!problem && decoded.incompleteOffset !== null) {
+  let decoded: FrameReadResult | null = null;
+  if (!problem && journal !== undefined) {
+    try {
+      decoded = readObservedJournal(input.journalPath, journal, input.partition, {
+        limit: prefix?.offset,
+        fold: input.fold,
+      });
+    } catch (error) {
+      problem = `journal cannot be read safely: ${safeMessage(error)}`;
+    }
+  }
+  if (!problem && prefix && decoded) {
+    if (decoded.error || decoded.incompleteOffset !== null) {
+      problem = "append intent does not match the journal prefix";
+      byteOffset = prefix.offset;
+    } else {
+      deferredRepair = {
+        kind: "discard_unacknowledged_append",
+        discardedBytes: size - prefix.offset,
+      };
+    }
+  }
+  if (!problem && decoded?.incompleteOffset != null) {
     problem = "unexplained suffix without append intent";
     byteOffset = decoded.incompleteOffset;
   }
-  if (!problem && decoded.error) {
+  if (!problem && decoded?.error) {
     problem = decoded.error.reason;
     byteOffset = decoded.error.offset;
   }
 
-  const records = problem ? [] : decoded.records;
-  const last = records.at(-1);
-  const virtual = !tree.rootExists || !tree.partitionExists || journalBytes === undefined;
+  const ready = !problem && decoded ? decoded : null;
+  const virtual = !tree.rootExists || !tree.partitionExists || journal === undefined;
   return {
     receipt: {
       fingerprint: tree.fingerprint,
@@ -140,12 +164,37 @@ export function inspectPreparedJournal(input: {
           discardedTailBytes: 0,
         }
       : { status: "ready", discardedTailBytes: 0 },
-    records,
-    epoch: last?.epoch ?? input.initialEpoch,
-    nextSeq: (last?.seq ?? 0) + 1,
-    previousFrameHash: last?.frameHash ?? ZERO_HASH,
-    knownFileBytes: logicalBytes.length,
+    records: ready?.retained ?? [],
+    epoch: ready?.epoch ?? input.initialEpoch,
+    nextSeq: ready?.nextSeq ?? 1,
+    previousFrameHash: ready?.previousFrameHash ?? ZERO_HASH,
+    knownFileBytes: deferredRepair ? (prefix as AppendIntent).offset : size,
+    retiredCount: ready?.retiredCount ?? 0,
+    retiredBytes: ready?.retiredBytes ?? 0,
   };
+}
+
+/** Decode the journal that the tree walk already observed: the descriptor must
+ * still be the same file before and after the positional read. */
+function readObservedJournal(
+  path: string,
+  observed: FileObservation,
+  partition: string,
+  options: { limit: number | undefined; fold: JournalFold | undefined },
+): FrameReadResult {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    if (observationMetadata(fstatSync(fd, { bigint: true })) !== observed.observation) {
+      throw new Error("journal changed since it was inspected");
+    }
+    const decoded = readFrames(fd, partition, options);
+    if (observationMetadata(fstatSync(fd, { bigint: true })) !== observed.observation) {
+      throw new Error("journal changed while being decoded");
+    }
+    return decoded;
+  } finally {
+    closeSync(fd);
+  }
 }
 
 export function fingerprintPreparedJournal(
@@ -162,7 +211,7 @@ export function fingerprintPreparedJournal(
 function snapshotTree(rootDir: string, partitionDir: string): TreeSnapshot {
   const contentHash = createHash("sha256");
   const identityHash = createHash("sha256");
-  const files = new Map<string, Buffer>();
+  const files = new Map<string, FileObservation>();
   const entries = new Set<string>();
   const problems: string[] = [];
   if (!inspectTrustedParent(dirname(resolve(rootDir)), identityHash, problems)) {
@@ -230,7 +279,7 @@ function walkPartition(
   before: BigIntStats,
   contentHash: ReturnType<typeof createHash>,
   identityHash: ReturnType<typeof createHash>,
-  files: Map<string, Buffer>,
+  files: Map<string, FileObservation>,
   entries: Set<string>,
   problems: string[],
 ): void {
@@ -291,7 +340,7 @@ function inspectEntry(
   label: string,
   contentHash: ReturnType<typeof createHash>,
   identityHash: ReturnType<typeof createHash>,
-  files: Map<string, Buffer>,
+  files: Map<string, FileObservation>,
   problems: string[],
   allowFile: boolean,
 ): { kind: "missing" | "other" } | { kind: "directory" | "file"; stat: BigIntStats } {
@@ -363,7 +412,8 @@ function inspectEntry(
       ) {
         throw new Error("pathname identity changed while being read");
       }
-      const bytes = readFileSync(fd);
+      const retain = opened.size <= BigInt(RETAINED_FILE_BYTES);
+      const bytes = hashDescriptor(fd, contentHash, retain);
       const after = fstatSync(fd, { bigint: true });
       if (
         BigInt(bytes.length) !== opened.size ||
@@ -375,8 +425,11 @@ function inspectEntry(
       if (observationMetadata(stat) !== observationMetadata(namedAfter)) {
         throw new Error("pathname identity changed after being read");
       }
-      files.set(path, bytes);
-      contentHash.update(bytes);
+      files.set(path, {
+        size: Number(opened.size),
+        observation: observationMetadata(opened),
+        ...(retain ? { bytes: bytes.retained } : {}),
+      });
     } finally {
       closeSync(fd);
     }
@@ -388,13 +441,34 @@ function inspectEntry(
   return { kind: "file", stat };
 }
 
+/** Stream the descriptor through the content hash in bounded chunks. The
+ * fingerprint is the digest of the same byte sequence a whole-file read would
+ * hash, without retaining the file. */
+function hashDescriptor(
+  fd: number,
+  contentHash: ReturnType<typeof createHash>,
+  retain: boolean,
+): { length: number; retained: Buffer } {
+  const chunk = Buffer.allocUnsafe(HASH_CHUNK_BYTES);
+  const kept: Buffer[] = [];
+  let length = 0;
+  for (;;) {
+    const read = readSync(fd, chunk, 0, chunk.length, length);
+    if (read === 0) break;
+    contentHash.update(chunk.subarray(0, read));
+    if (retain) kept.push(Buffer.from(chunk.subarray(0, read)));
+    length += read;
+  }
+  return { length, retained: retain ? Buffer.concat(kept) : Buffer.alloc(0) };
+}
+
 function finishSnapshot(input: {
   contentHash: ReturnType<typeof createHash>;
   identityHash: ReturnType<typeof createHash>;
   rootExists: boolean;
   partitionExists: boolean;
   entries: Set<string>;
-  files: Map<string, Buffer>;
+  files: Map<string, FileObservation>;
   problems: string[];
 }): TreeSnapshot {
   const fingerprint = input.contentHash.digest("hex");
@@ -491,9 +565,9 @@ function entryType(stat: BigIntStats): string {
   return "other";
 }
 
-function parseIntent(bytes: Buffer): AppendIntent {
-  if (bytes.length > 1024) throw new Error("unsafe file");
-  const value = JSON.parse(bytes.toString("utf8")) as unknown;
+function parseIntent(intent: FileObservation): AppendIntent {
+  if (!intent.bytes || intent.size > RETAINED_FILE_BYTES) throw new Error("unsafe file");
+  const value = JSON.parse(intent.bytes.toString("utf8")) as unknown;
   if (
     !isRecord(value) ||
     value.v !== 1 ||

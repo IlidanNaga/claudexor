@@ -1,5 +1,149 @@
 # @claudexor/synthesis
 
+## 3.18.0
+
+### Patch Changes
+
+- @claudexor/arbitration@3.18.0
+
+## 3.17.2
+
+### Patch Changes
+
+- @claudexor/arbitration@3.17.2
+
+## 3.17.1
+
+### Patch Changes
+
+- @claudexor/arbitration@3.17.1
+
+## 3.17.0
+
+### Patch Changes
+
+- @claudexor/arbitration@3.17.0
+
+## 3.16.0
+
+### Patch Changes
+
+- @claudexor/arbitration@3.16.0
+
+## 3.15.1
+
+### Patch Changes
+
+- @claudexor/arbitration@3.15.1
+
+## 3.15.0
+
+### Patch Changes
+
+- @claudexor/arbitration@3.15.0
+
+## 3.14.0
+
+### Patch Changes
+
+- @claudexor/arbitration@3.14.0
+
+## 3.13.0
+
+### Patch Changes
+
+- @claudexor/arbitration@3.13.0
+
+## 3.12.10
+
+### Patch Changes
+
+- @claudexor/arbitration@3.12.10
+
+## 3.12.9
+
+### Patch Changes
+
+- @claudexor/arbitration@3.12.9
+
+## 3.12.8
+
+### Patch Changes
+
+- @claudexor/arbitration@3.12.8
+
+## 3.12.7
+
+### Patch Changes
+
+- @claudexor/arbitration@3.12.7
+
+## 3.12.6
+
+### Patch Changes
+
+- @claudexor/arbitration@3.12.6
+
+## 3.12.5
+
+### Patch Changes
+
+- @claudexor/arbitration@3.12.5
+
+## 3.12.4
+
+### Patch Changes
+
+- @claudexor/arbitration@3.12.4
+
+## 3.12.3
+
+### Patch Changes
+
+- @claudexor/arbitration@3.12.3
+
+## 3.12.2
+
+### Patch Changes
+
+- @claudexor/arbitration@3.12.2
+
+## 3.12.1
+
+### Patch Changes
+
+- @claudexor/arbitration@3.12.1
+
+## 3.12.0
+
+### Patch Changes
+
+- @claudexor/arbitration@3.12.0
+
+## 3.11.0
+
+### Patch Changes
+
+- @claudexor/arbitration@3.11.0
+
+## 3.10.5
+
+### Patch Changes
+
+- @claudexor/arbitration@3.10.5
+
+## 3.10.4
+
+### Patch Changes
+
+- @claudexor/arbitration@3.10.4
+
+## 3.10.3
+
+### Patch Changes
+
+- @claudexor/arbitration@3.10.3
+
 ## 3.10.2
 
 ### Patch Changes

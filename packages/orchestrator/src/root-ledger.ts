@@ -16,12 +16,14 @@ export function createRootLedger(args: {
     valuationUsd: number,
     cashEstimated: boolean,
     valuationKnowledge: "exact" | "estimated" | "unknown",
+    cashKnowledge: "exact" | "estimated" | "unknown",
   ) =>
     args.log.emit("budget.cash", {
       cash_spend_usd: cashSpendUsd,
       valuation_usd: valuationUsd,
       estimated: cashEstimated,
       valuation_knowledge: valuationKnowledge,
+      cash_knowledge: cashKnowledge,
     });
   const ledger = args.input.delegatedFromRunId
     ? args.authority?.attachChild(

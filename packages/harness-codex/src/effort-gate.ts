@@ -4,10 +4,12 @@
  * so each file keeps a single altitude: the probe answers "what does the
  * vendor advertise", this module answers "what may THIS run trust".
  */
-import type { HarnessEvent, HarnessRunSpec } from "@claudexor/schema";
+import { effortResolutionEvent, resolveEffortEvidence } from "@claudexor/core";
+import type { EffortResolution, HarnessEvent, HarnessRunSpec } from "@claudexor/schema";
 import {
   CODEX_EFFORT_SNAPSHOT_VERIFIED_AGAINST,
   codexEffortDisclosureEvent,
+  codexEffortInputs,
   codexEffortsForEnv,
   type CodexEffortCatalog,
   type CodexEffortProbe,
@@ -22,7 +24,7 @@ import {
  * `claudeSnapshotTrustedForVersion`.
  *
  * The installed version string is whatever `codex --version` printed
- * (e.g. `codex-cli 0.153.3`), so the comparison extracts the full dotted
+ * (e.g. `codex-cli 0.156.1`), so the comparison extracts the full dotted
  * numeric token and requires it to EQUAL the snapshot stamp exactly. An
  * unknown or unparseable version can never vouch for the snapshot.
  */
@@ -79,11 +81,33 @@ export async function codexRunEffortResolution(
   },
   envPatch?: Record<string, string | null | undefined>,
   abortSignal?: AbortSignal,
-): Promise<{ catalog: CodexEffortCatalog; disclosure: HarnessEvent | null }> {
+): Promise<{
+  catalog: CodexEffortCatalog;
+  disclosure: HarnessEvent | null;
+  resolution: EffortResolution;
+  event: HarnessEvent;
+}> {
   const efforts = await codexEffortsForEnv(deps, envPatch);
   const catalog =
     efforts.live || !spec.effort_hint
       ? efforts.catalog
       : codexCatalogForRun(efforts, await deps.detectVersion(abortSignal, envPatch));
-  return { catalog, disclosure: codexEffortDisclosureEvent(catalog, spec) };
+  const { advertised, ladder, unverifiable } = codexEffortInputs(catalog, spec.model_hint);
+  const untrusted = !efforts.live && catalog !== efforts.catalog;
+  const resolution = resolveEffortEvidence(
+    spec.effort_hint,
+    advertised,
+    ladder,
+    untrusted ? "adapter" : efforts.live ? "live_probe" : "versioned_snapshot",
+    "model_reasoning_effort",
+    unverifiable || untrusted,
+  );
+  const disclosure = codexEffortDisclosureEvent(catalog, spec);
+  const event = {
+    ...((["downward", "floor"].includes(resolution.resolution) || untrusted) && disclosure
+      ? disclosure
+      : effortResolutionEvent(spec.session_id, resolution)),
+    effort_resolution: resolution,
+  };
+  return { catalog, resolution, event, disclosure };
 }

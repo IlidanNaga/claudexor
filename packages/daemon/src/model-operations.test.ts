@@ -1,7 +1,8 @@
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { createServer } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DurableJournal } from "@claudexor/journal";
 import type { ModelAdapter } from "@claudexor/core";
@@ -19,6 +20,8 @@ import { DaemonServer } from "./server.js";
 import { ResourceStore } from "./resource-store.js";
 import { ModelOperations } from "./model-operations.js";
 import { DaemonControlApiServer } from "../../control-api/src/daemon-server.js";
+import { createCodexModelAdapter } from "../../harness-codex/src/model.js";
+import effortFixture from "../../schema/fixtures/effort-resolution.json" with { type: "json" };
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -116,6 +119,7 @@ async function fixture(
   };
   return {
     root,
+    journal,
     store,
     resources,
     operations,
@@ -131,6 +135,591 @@ async function fixture(
 }
 
 describe("model operations over the existing daemon command substrate", () => {
+  it("refines a journaled send only after native connection non-delivery, retaining its attempt and replay", async () => {
+    const listener = createServer();
+    await new Promise<void>((resolve) => listener.listen(0, "127.0.0.1", resolve));
+    const address = listener.address();
+    if (!address || typeof address === "string") throw new Error("fixture listener missing");
+    await new Promise<void>((resolve) => listener.close(() => resolve()));
+    const nativeFetch = globalThis.fetch;
+    const posts = vi.fn();
+    const adapter = createCodexModelAdapter({
+      now: () => 1900000000000,
+      clientVersion: async () => ({ version: "0.156.1", source: "verified_transport" }),
+      readAuthFile: async () =>
+        JSON.stringify({
+          auth_mode: "chatgpt",
+          tokens: {
+            account_id: "fixture",
+            access_token: `fixture.${Buffer.from('{"exp":2100000000}').toString("base64url")}.signature`,
+          },
+        }),
+      fetch: async (_url, init) => {
+        if (init?.method !== "POST") return Response.json({ models: [{ slug: "test-model" }] });
+        const running = f.store.records()[0]!;
+        expect(f.operations.inspect(running.id).dispatch).toMatchObject({
+          state: "started",
+          startedAt: expect.any(String),
+        });
+        posts();
+        return nativeFetch(`http://127.0.0.1:${address.port}`, init);
+      },
+    });
+    const f = await fixture((input, context) =>
+      adapter.invoke(input, {
+        ...context,
+        profile: {
+          ...context.profile,
+          isolation_locator: join(process.env.CLAUDEXOR_CONFIG_DIR!, "profiles", "fixture"),
+        },
+      }),
+    );
+    const created = await f.operations.create(f.upload(), "connection-proof");
+    const done = await f.terminal(created.id);
+    expect(done).toMatchObject({
+      state: "failed",
+      dispatch: {
+        state: "not_started",
+        startedAt: expect.any(String),
+        route: { model: "test-model" },
+      },
+      problem: {
+        code: "transport_not_delivered",
+        retryable: true,
+        context: {
+          generationStarted: false,
+          stage: "fetch",
+          errorCode: "ECONNREFUSED",
+          requestDelivery: { basis: "connect_failure", handedOffBytes: null },
+        },
+      },
+    });
+    const stored = f.operations.readResult(created.id);
+    expect(ModelCallResult.parse(JSON.parse(stored.bytes.toString()))).toMatchObject({
+      outcome: "failed",
+      message: null,
+      usage: { input_tokens: null },
+      cost: { knowledge: "unknown", cashUsd: null },
+    });
+    const replay = await f.operations.create(f.upload(), "connection-proof");
+    expect(replay.id).toBe(created.id);
+    expect(replay.dispatch).toEqual(done.dispatch);
+    expect(f.operations.readResult(created.id).bytes.equals(stored.bytes)).toBe(true);
+    expect(posts).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a publication failure after a no-generation proof unresolved", async () => {
+    const f = await fixture(async (_request, context) => {
+      await context.onDispatch(route);
+      return {
+        ...result(),
+        outcome: "failed",
+        message: null,
+        problem: {
+          code: "transport_not_delivered",
+          message: "fixture proof",
+          retryable: true,
+          fieldErrors: {},
+          requiredActions: [],
+          evidenceRefs: [],
+          context: {
+            generationStarted: false,
+            requestDelivery: { state: "not_delivered", basis: "incomplete_upload" },
+          },
+        },
+      };
+    });
+    const ref = f.upload();
+    vi.spyOn(f.resources, "publishModel").mockImplementation(() => {
+      throw new Error("fixture publication unavailable");
+    });
+    const created = await f.operations.create(ref, "proof-not-published");
+    const done = await f.terminal(created.id);
+    expect(done).toMatchObject({
+      state: "interrupted",
+      dispatch: { state: "unknown", startedAt: expect.any(String) },
+      response: { state: "absent" },
+    });
+  });
+
+  it.each([undefined, false, true])(
+    "captures effort only with negotiated intent (%s) through HTTP, restart, replay and ACK",
+    async (captureEffortEvidence) => {
+      const posts = vi.fn();
+      const adapter = createCodexModelAdapter({
+        now: () => 1900000000000,
+        clientVersion: async () => ({ version: "0.156.1", source: "verified_transport" }),
+        readAuthFile: async () =>
+          JSON.stringify({
+            auth_mode: "chatgpt",
+            tokens: {
+              account_id: "fixture",
+              access_token: `fixture.${Buffer.from('{"exp":2100000000}').toString("base64url")}.signature`,
+            },
+          }),
+        fetch: async (_url, init) => {
+          if (init?.method === "POST") {
+            posts(JSON.parse(await new Response(init.body).text()).reasoning.effort);
+            return new Response(
+              `data: ${JSON.stringify({ type: "response.completed", response: { model: "test-model", output: [] } })}\n\n`,
+            );
+          }
+          return Response.json({
+            models: [
+              {
+                slug: "test-model",
+                supported_reasoning_levels: [{ effort: "low" }, { effort: "xhigh" }],
+              },
+              {
+                slug: "sibling",
+                supported_reasoning_levels: [
+                  { effort: "low" },
+                  { effort: "xhigh" },
+                  { effort: "ultra" },
+                ],
+              },
+            ],
+          });
+        },
+      });
+      const f = await fixture((input, context) =>
+        adapter.invoke(input, {
+          ...context,
+          profile: {
+            ...context.profile,
+            isolation_locator: join(process.env.CLAUDEXOR_CONFIG_DIR!, "profiles", "fixture"),
+          },
+        }),
+      );
+      const api = new DaemonControlApiServer({
+        token: "fixture-control",
+        daemon: f.client,
+        services: {
+          createModelOperation: f.operations.create.bind(f.operations),
+          getModelOperation: async (id) => f.operations.inspect(id),
+          readModelResult: async (id) => f.operations.readResult(id),
+          acknowledgeModelResult: async (id, digest) => f.operations.acknowledge(id, digest),
+        },
+      });
+      const address = await api.start();
+      cleanup.push(() => api.stop());
+      const endpoint = `http://${address.host}:${address.port}/v2/model-operations`;
+      const headers = {
+        Authorization: "Bearer fixture-control",
+        "X-Claudexor-Protocol-Major": "3",
+        "Content-Type": "application/json",
+        "Idempotency-Key": "effort-custody",
+      };
+      const body = request();
+      body.options.reasoningEffort = effortFixture.requested;
+      const ref = f.upload(body);
+      const captureQuery =
+        captureEffortEvidence === undefined
+          ? ""
+          : `?captureEffortEvidence=${captureEffortEvidence}`;
+      const post = (query = captureQuery) =>
+        fetch(`${endpoint}${query}`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ request: ref }),
+        });
+      const createdResponse = await post();
+      expect(createdResponse.status).toBe(202);
+      const created = ControlModelOperationDetail.parse(await createdResponse.json());
+      await f.terminal(created.id);
+      const response = await fetch(`${endpoint}/${created.id}/result`, { headers });
+      expect(response.status).toBe(200);
+      const bytes = Buffer.from(await response.arrayBuffer());
+      const parsed = JSON.parse(bytes.toString());
+      if (captureEffortEvidence === true) expect(parsed.effortResolution).toEqual(effortFixture);
+      else expect(parsed).not.toHaveProperty("effortResolution");
+      // Frozen pre-effort top-level strict result fields, including real provider echoes.
+      expect(Object.keys(parsed).sort()).toEqual(
+        [
+          "appliedOptions",
+          "cost",
+          ...(captureEffortEvidence ? ["effortResolution"] : []),
+          "message",
+          "outcome",
+          "problem",
+          "route",
+          "usage",
+        ].sort(),
+      );
+      expect(parsed.appliedOptions).toEqual({});
+      const stored = f.operations.readResult(created.id);
+      const digest = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+      expect(stored.bytes.equals(bytes)).toBe(true);
+      expect(stored.sha256).toBe(digest);
+      expect(response.headers.get("etag")).toBe(`"${digest}"`);
+      expect(f.operations.readResult(created.id).bytes.equals(bytes)).toBe(true);
+      expect(((await (await post()).json()) as { id: string }).id).toBe(created.id);
+      expect((await post(`?captureEffortEvidence=${captureEffortEvidence !== true}`)).status).toBe(
+        409,
+      );
+      const params = f.store.get(created.id)!.params;
+      if (captureEffortEvidence === true)
+        expect(params).toHaveProperty("captureEffortEvidence", true);
+      else expect(params).not.toHaveProperty("captureEffortEvidence");
+      await api.stop();
+      await f.server.stop();
+      f.operations.close();
+      f.journal.close();
+      const journal = new DurableJournal({ rootDir: join(f.root, "journal"), partition: "global" });
+      const store = new CommandStore(journal);
+      const resources = new ResourceStore(join(f.root, "resources"));
+      const reopened = new ModelOperations({
+        commands: { current: () => store },
+        resources: () => resources,
+        enqueue: async () => {
+          throw new Error("replay cannot enqueue");
+        },
+        cancel: async () => {
+          throw new Error("replay cannot cancel");
+        },
+        resolve: async () => {
+          throw new Error("replay cannot resolve a provider");
+        },
+      });
+      cleanup.push(async () => {
+        reopened.close();
+        journal.close();
+      });
+      expect(reopened.readResult(created.id).bytes.equals(bytes)).toBe(true);
+      expect(
+        (await reopened.create(ref, "effort-custody", undefined, captureEffortEvidence)).id,
+      ).toBe(created.id);
+      await expect(
+        reopened.create(ref, "effort-custody", undefined, captureEffortEvidence !== true),
+      ).rejects.toMatchObject({ code: "idempotency_conflict" });
+      const restartedApi = new DaemonControlApiServer({
+        token: "fixture-control",
+        daemon: f.client,
+        services: {
+          readModelResult: async (id) => reopened.readResult(id),
+          acknowledgeModelResult: async (id, sha) => reopened.acknowledge(id, sha),
+        },
+      });
+      const restartedAddress = await restartedApi.start();
+      cleanup.push(() => restartedApi.stop());
+      const restartedEndpoint = `http://${restartedAddress.host}:${restartedAddress.port}/v2/model-operations/${created.id}`;
+      const recovered = await fetch(`${restartedEndpoint}/result`, { headers });
+      expect(Buffer.from(await recovered.arrayBuffer()).equals(bytes)).toBe(true);
+      expect(recovered.headers.get("etag")).toBe(`"${digest}"`);
+      const ack = await fetch(`${restartedEndpoint}/ack`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ sha256: digest }),
+      });
+      expect(ack.status).toBe(200);
+      expect(((await ack.json()) as { response: { state: string } }).response.state).toBe(
+        "acknowledged",
+      );
+      expect(
+        (await reopened.create(ref, "effort-custody", undefined, captureEffortEvidence)).response
+          .state,
+      ).toBe("acknowledged");
+      expect(resources.listModelResources()).toEqual([]);
+      expect(posts.mock.calls).toEqual([[effortFixture.submitted]]);
+    },
+  );
+
+  it("binds capture intent while retaining historical false/omitted idempotency", async () => {
+    const captures: Array<boolean | undefined> = [];
+    const f = await fixture(async (_input, context) => {
+      captures.push(context.captureFailureEvidence);
+      await context.onDispatch(route);
+      return result();
+    });
+    const legacy = await f.operations.create(f.upload(), "legacy-capture");
+    await f.terminal(legacy.id);
+    expect(f.store.get(legacy.id)!.params).not.toHaveProperty("captureFailureEvidence");
+    expect((await f.operations.create(f.upload(), "legacy-capture", false)).id).toBe(legacy.id);
+    await expect(f.operations.create(f.upload(), "legacy-capture", true)).rejects.toMatchObject({
+      code: "idempotency_conflict",
+    });
+    const modern = await f.operations.create(f.upload(), "modern-capture", true);
+    await f.terminal(modern.id);
+    expect(f.store.get(modern.id)!.params).toHaveProperty("captureFailureEvidence", true);
+    expect((await f.operations.create(f.upload(), "modern-capture", true)).id).toBe(modern.id);
+    await expect(f.operations.create(f.upload(), "modern-capture")).rejects.toMatchObject({
+      code: "idempotency_conflict",
+    });
+    expect(captures).toEqual([undefined, true]);
+  });
+
+  it("carries a large real adapter failure through HTTP, journal restart, ACK and expiry in one result", async () => {
+    const wire = Buffer.from(
+      `data: {private-wire-marker}\n\n${"received suffix 🦉".repeat(40_000)}`,
+    );
+    expect(wire.length).toBeGreaterThan(256 * 1024);
+    const posts = vi.fn();
+    const adapter = createCodexModelAdapter({
+      readAuthFile: async () =>
+        JSON.stringify({
+          tokens: {
+            access_token: `fixture.${Buffer.from('{"exp":2100000000}').toString("base64url")}.signature`,
+            account_id: "fixture",
+          },
+        }),
+      refresh: async () => {
+        throw new Error("no auth refresh in this fixture");
+      },
+      fetch: async (_url, init) => {
+        if (init?.method === "POST") {
+          posts();
+          return new Response(wire, { headers: { "x-request-id": "retained-failure" } });
+        }
+        return Response.json({ models: [{ slug: "test-model" }] });
+      },
+    });
+    const f = await fixture((input, context) =>
+      adapter.invoke(input, {
+        ...context,
+        profile: {
+          ...context.profile,
+          isolation_locator: join(process.env.CLAUDEXOR_CONFIG_DIR!, "profiles", "fixture"),
+        },
+      }),
+    );
+    const api = new DaemonControlApiServer({
+      token: "fixture-control",
+      daemon: f.client,
+      services: {
+        createModelOperation: f.operations.create.bind(f.operations),
+        getModelOperation: async (id) => f.operations.inspect(id),
+        readModelResult: async (id) => f.operations.readResult(id),
+        acknowledgeModelResult: async (id, digest) => f.operations.acknowledge(id, digest),
+      },
+    });
+    const address = await api.start();
+    cleanup.push(() => api.stop());
+    const endpoint = `http://${address.host}:${address.port}/v2/model-operations`;
+    const headers = {
+      Authorization: "Bearer fixture-control",
+      "X-Claudexor-Protocol-Major": "3",
+      "Content-Type": "application/json",
+      "Idempotency-Key": "large-failure",
+    };
+    const createdResponse = await fetch(`${endpoint}?captureFailureEvidence=true`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ request: f.upload() }),
+    });
+    expect(createdResponse.status).toBe(202);
+    const created = ControlModelOperationDetail.parse(await createdResponse.json());
+    const done = await f.terminal(created.id);
+    expect(done).toMatchObject({
+      state: "interrupted",
+      dispatch: { state: "unknown" },
+      response: { state: "ready" },
+      problem: { context: { stage: "json", receivedBytes: wire.length } },
+    });
+    const response = await fetch(`${endpoint}/${created.id}/result`, { headers });
+    expect(response.status).toBe(200);
+    const bytes = Buffer.from(await response.arrayBuffer());
+    expect(response.headers.get("content-length")).toBe(String(bytes.length));
+    const captured = ModelCallResult.parse(JSON.parse(bytes.toString()));
+    expect(Buffer.from(captured.failureEvidence!.bodyBase64, "base64").equals(wire)).toBe(true);
+    expect(captured.failureEvidence!.errors[0].name).toBe("SyntaxError");
+    expect(JSON.stringify(done)).not.toContain("private-wire-marker");
+    expect(JSON.stringify(f.store.records())).not.toContain(captured.failureEvidence!.bodyBase64);
+    expect(f.resources.listModelResources()).toHaveLength(1);
+    expect((await f.operations.create(f.upload(), "large-failure", true)).id).toBe(created.id);
+    expect(f.operations.readResult(created.id).bytes.equals(bytes)).toBe(true);
+    await api.stop();
+    await f.server.stop();
+    f.operations.close();
+    f.journal.close();
+
+    const journal = new DurableJournal({ rootDir: join(f.root, "journal"), partition: "global" });
+    const store = new CommandStore(journal);
+    const resources = new ResourceStore(join(f.root, "resources"));
+    let now = new Date();
+    const reopened = new ModelOperations({
+      commands: { current: () => store },
+      resources: () => resources,
+      now: () => now,
+      enqueue: async () => {
+        throw new Error("replay cannot enqueue");
+      },
+      cancel: async () => {
+        throw new Error("replay cannot cancel");
+      },
+      resolve: async () => {
+        throw new Error("replay cannot resolve a provider");
+      },
+    });
+    cleanup.push(async () => {
+      reopened.close();
+      journal.close();
+    });
+    expect(reopened.readResult(created.id).bytes.equals(bytes)).toBe(true);
+    expect(reopened.reconcileResources().released).toEqual([]);
+    const ref = ModelOperationParams.parse(store.get(created.id)!.params).request;
+    expect((await reopened.create(ref, "large-failure", true)).id).toBe(created.id);
+    const digest = reopened.readResult(created.id).sha256;
+    expect(reopened.acknowledge(created.id, digest).response.state).toBe("acknowledged");
+    expect(resources.listModelResources()).toEqual([]);
+    expect((await reopened.create(ref, "large-failure", true)).response.state).toBe("acknowledged");
+    expect(posts).toHaveBeenCalledTimes(1);
+
+    // The same evidence-bearing resource follows ordinary unacknowledged expiry.
+    const pendingRef = resources.publishModel(bytes);
+    const pending = structuredClone(store.get(created.id)!);
+    pending.id = "expiry-failure";
+    store.accept({
+      id: pending.id,
+      params: pending.params,
+      idempotencyKey: pending.id,
+      clientId: "fixture",
+    });
+    const expiresAt = new Date(now.getTime() + 1000).toISOString();
+    store.update(pending.id, {
+      state: "interrupted",
+      result: {
+        ...(pending.result as object),
+        response: { state: "ready", ref: pendingRef, readyAt: now.toISOString(), expiresAt },
+      },
+    });
+    expect(reopened.readResult(pending.id).bytes.equals(bytes)).toBe(true);
+    now = new Date(expiresAt);
+    expect(reopened.inspect(pending.id).response.state).toBe("expired");
+    expect(reopened.reconcileResources().errors).toEqual([]);
+    expect(resources.listModelResources()).toEqual([]);
+  });
+
+  it.each(["completed", "incomplete"] as const)(
+    "keeps %s provider finality but fails an unusable message",
+    async (outcome) => {
+      const f = await fixture(async (_input, context) => {
+        await context.onDispatch(route);
+        return {
+          ...result(),
+          outcome,
+          message: null,
+          problem: {
+            code: "response_rejected",
+            message: "Message could not be used",
+            context: { stage: "message" },
+            retryable: false,
+            fieldErrors: {},
+            requiredActions: [],
+            evidenceRefs: [],
+          },
+        };
+      });
+      const created = await f.operations.create(f.upload(), `rejected-${outcome}`);
+      expect(await f.terminal(created.id)).toMatchObject({
+        state: "failed",
+        dispatch: { state: "response_received" },
+        usage: { input_tokens: 3, output_tokens: 2 },
+      });
+      expect(JSON.parse(f.operations.readResult(created.id).bytes.toString())).toMatchObject({
+        outcome,
+        message: null,
+        problem: { code: "response_rejected" },
+      });
+    },
+  );
+
+  it("retains a confirmed processing refusal as a physically sent response and never starts Standard itself", async () => {
+    const posts = vi.fn();
+    const fetcher = vi.fn<typeof fetch>(async (_url, init) => {
+      if (init?.method === "POST") {
+        posts(JSON.parse(await new Response(init.body).text()).service_tier);
+        return Response.json(
+          { error: { code: "resource_unavailable", param: "service_tier" } },
+          { status: 429, headers: { "x-request-id": "custody-refusal" } },
+        );
+      }
+      return Response.json({ models: [{ slug: "test-model", service_tiers: [{ id: "flex" }] }] });
+    });
+    const token = `fixture.${Buffer.from(JSON.stringify({ exp: 2100000000 })).toString("base64url")}.signature`;
+    const adapter = createCodexModelAdapter({
+      fetch: fetcher,
+      now: () => 1900000000000,
+      readAuthFile: async () =>
+        JSON.stringify({
+          auth_mode: "chatgpt",
+          tokens: { account_id: "fixture-account", access_token: token },
+        }),
+    });
+    const f = await fixture((input, context) =>
+      adapter.invoke(input, {
+        ...context,
+        profile: {
+          ...context.profile,
+          isolation_locator: join(process.env.CLAUDEXOR_CONFIG_DIR!, "profiles", "fixture"),
+        },
+      }),
+    );
+    const body = request();
+    body.options.processingPreference = "economy";
+    const ref = f.upload(body);
+    const created = await f.operations.create(ref, "processing-refusal");
+    const done = await f.terminal(created.id);
+    expect(done).toMatchObject({
+      state: "failed",
+      dispatch: { state: "response_received", startedAt: expect.any(String) },
+      response: { state: "ready" },
+      problem: {
+        code: "processing_unavailable",
+        context: {
+          generationStarted: false,
+          processingFallback: "standard",
+          processingRefusal: "capacity",
+          httpStatus: 429,
+          vendorCode: "resource_unavailable",
+          requestId: "custody-refusal",
+        },
+      },
+    });
+    const stored = f.operations.readResult(created.id);
+    const reread = f.operations.readResult(created.id);
+    expect(stored.bytes.equals(reread.bytes)).toBe(true);
+    const result = ModelCallResult.parse(JSON.parse(stored.bytes.toString()));
+    expect(result.processing).toMatchObject({
+      requested: "economy",
+      submitted: "economy",
+      submittedNative: "flex",
+      observed: "unknown",
+    });
+    expect(result.cost).toMatchObject({ knowledge: "unknown", cashUsd: null });
+    expect((await f.operations.create(ref, "processing-refusal")).id).toBe(created.id);
+    f.operations.acknowledge(created.id, stored.sha256);
+    expect((await f.operations.create(ref, "processing-refusal")).response.state).toBe(
+      "acknowledged",
+    );
+    expect(posts.mock.calls).toEqual([["flex"]]);
+  });
+  it("keeps turn state in result custody across rejoin and ACK, outside public receipts", async () => {
+    const nativeContinuation = {
+      route,
+      format: "codex.turn.v1",
+      payload: { turnState: "private-turn-token" },
+    };
+    const invoke = vi.fn<ModelAdapter["invoke"]>(async (input, context) => {
+      expect(input.nativeContinuation).toBeNull();
+      await context.onDispatch(route);
+      return { ...result(), outcome: "unknown", message: null, nativeContinuation };
+    });
+    const f = await fixture(invoke);
+    const ref = f.upload({ ...request(), nativeContinuation: null });
+    const created = await f.operations.create(ref, "turn-state-rejoin");
+    const done = await f.terminal(created.id);
+    expect(JSON.stringify(done)).not.toContain("private-turn-token");
+    expect(JSON.stringify(f.store.records())).not.toContain("private-turn-token");
+    const first = f.operations.readResult(created.id);
+    expect(JSON.parse(first.bytes.toString()).nativeContinuation).toEqual(nativeContinuation);
+    expect((await f.operations.create(ref, "turn-state-rejoin")).id).toBe(created.id);
+    expect(f.operations.readResult(created.id).bytes.equals(first.bytes)).toBe(true);
+    f.operations.acknowledge(created.id, first.sha256);
+    expect((await f.operations.create(ref, "turn-state-rejoin")).response.state).toBe(
+      "acknowledged",
+    );
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
   it.each([{ stop_reason: "end_turn" }, { refusal: "The prior provider refused." }])(
     "reports invalid uploaded model bytes through HTTP as pre-admission 400: %j",
     async (extra) => {

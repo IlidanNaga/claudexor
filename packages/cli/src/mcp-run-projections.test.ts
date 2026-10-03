@@ -27,6 +27,7 @@ const failure = {
   safeMessage: "Authentication expired",
   rawDetailRef: null,
   resetsAt: null,
+  vendorFailure: null,
   logRefs: [],
   eventRefs: [],
   runDir: "/tmp/run",
@@ -154,6 +155,27 @@ describe("MCP run detail projections", () => {
     expect(() => projectRecoveryRunDetail("__run_result", "run-other", detail)).toThrow(
       /identity does not match/,
     );
+  });
+  it("keeps compact execution evidence valid on strict MCP recovery outputs", () => {
+    const attemptExecution = [
+      {
+        attemptId: "a01",
+        harnessId: "claude",
+        usageCost: {
+          cashUsd: 0,
+          valuationUsd: 0.25,
+          unknownUsd: 0,
+          cashKnowledge: "unknown",
+          valuationKnowledge: "estimated",
+        },
+      },
+    ];
+    const projected = projectRecoveryRunDetail("__run_result", "run-1", {
+      summary: { runId: "run-1", taskId: "task-1", state: "succeeded" },
+      runFacts: terminalReceipt,
+      attemptExecution,
+    });
+    expect(McpRunHandleResult.parse(projected).attemptExecution).toEqual(attemptExecution);
   });
 
   it("validates lineage before active-state receipt short-circuit, then returns honest null", () => {

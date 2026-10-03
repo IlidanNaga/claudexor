@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import {
+  type BigIntStats,
   chmodSync,
   closeSync,
   existsSync,
@@ -19,7 +20,7 @@ import {
   writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DurableJournal,
@@ -97,7 +98,62 @@ function preparedState(value: PreparedJournal): {
   return { state: value.state(), records: value.records(), receipt: value.preparation() };
 }
 
+/** The receipt format before the journal was read positionally: whole-file
+ * bytes hashed in walk order. The streamed hash must stay byte-identical. */
+function referenceReceipt(rootDir: string, partitionDir: string) {
+  const content = createHash("sha256");
+  const identity = createHash("sha256");
+  const meta = (stat: BigIntStats) => {
+    const type = stat.isDirectory() ? "directory" : "file";
+    const semantic = [type, stat.mode & 0o777n, stat.uid, stat.gid];
+    const id = [stat.dev, stat.ino, type, stat.mode & 0o777n, stat.uid, stat.gid];
+    if (type === "file") {
+      semantic.push(stat.nlink, stat.size);
+      id.push(stat.nlink);
+    }
+    return { semantic: semantic.join(":"), identity: id.join(":") };
+  };
+  const parent = lstatSync(dirname(resolve(rootDir)), { bigint: true });
+  identity.update(`trusted-parent\0${meta(parent).identity}\0`);
+  const entry = (path: string, label: string) => {
+    const stat = lstatSync(path, { bigint: true });
+    content.update(`${label}\0${meta(stat).semantic}\0`);
+    identity.update(`${label}\0${meta(stat).identity}\0`);
+    if (stat.isFile()) content.update(readFileSync(path));
+  };
+  entry(rootDir, "root");
+  entry(partitionDir, "partition");
+  for (const name of readdirSync(partitionDir).sort()) entry(join(partitionDir, name), name);
+  const fingerprint = content.digest("hex");
+  identity.update(`content\0${fingerprint}\0`);
+  return { fingerprint, preparationIdentity: identity.digest("hex") };
+}
+
 describe("DurableJournal read-only preparation", () => {
+  it("keeps fingerprint and preparationIdentity byte-identical to the whole-file receipt", () => {
+    const journalRoot = join(root, "receipt-identity");
+    const seeded = new DurableJournal({ rootDir: journalRoot, partition: "global" });
+    seeded.appendBatch(
+      Array.from({ length: 3000 }, (_, index) => ({
+        type: "history",
+        payload: { index, text: "receipt ".repeat(128) },
+      })),
+    );
+    const partitionDir = seeded.partitionDir;
+    seeded.close();
+    expect(statSync(seeded.path).size).toBeGreaterThan(2 * 1024 * 1024);
+    const prepared = prepareJournal({ rootDir: journalRoot, partition: "global" });
+    const receipt = prepared.preparation();
+    prepared.close();
+    expect(receipt).toMatchObject(referenceReceipt(journalRoot, partitionDir));
+    writeFileSync(join(partitionDir, "append.pending.json"), '{"v":1,"offset":0,"length":1}\n', {
+      mode: 0o600,
+    });
+    const withIntent = prepareJournal({ rootDir: journalRoot, partition: "global" });
+    expect(withIntent.preparation()).toMatchObject(referenceReceipt(journalRoot, partitionDir));
+    withIntent.close();
+  });
+
   it("keeps a missing registered partition virtual until explicit activation", () => {
     const journalRoot = join(root, "journal");
     const partitionDir = journalPartitionDirectory(journalRoot, "project:missing");

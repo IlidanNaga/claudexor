@@ -352,6 +352,7 @@ public struct RequestRequirementResolution: Codable, Sendable, Equatable {
 /// `paidBudget` replaces the old flat `maxUsd` — the cap is `.finite`/`.unlimited`.
 public struct BudgetSnapshot: Codable, Sendable, Equatable {
     public let paidBudget: PaidBudget
+    public let cashKnowledge: String?
     /// CASH spend so far in USD; null when unknown.
     public let spendUsd: Double?
     /// Subscription VALUATION in USD (QA-023c): what this run's native-subscription
@@ -386,9 +387,10 @@ public struct BudgetSnapshot: Codable, Sendable, Equatable {
     public init(paidBudget: PaidBudget, spendUsd: Double?, remainingUsd: Double?,
                 estimated: Bool, source: String,
                 valuationUsd: Double? = nil, valuationKnowledge: String = "unknown",
-                evidence: String = "complete") {
+                evidence: String = "complete", cashKnowledge: String? = nil) {
         self.paidBudget = paidBudget
-        self.spendUsd = spendUsd
+        self.cashKnowledge = cashKnowledge
+        self.spendUsd = cashKnowledge == "unknown" ? nil : spendUsd
         self.valuationUsd = valuationUsd
         self.valuationKnowledge = valuationKnowledge
         self.remainingUsd = remainingUsd
@@ -399,17 +401,15 @@ public struct BudgetSnapshot: Codable, Sendable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case paidBudget, spendUsd, valuationUsd, valuationKnowledge, remainingUsd,
-             estimated, source, evidence
+             estimated, source, evidence, cashKnowledge
     }
 
-    // Custom decode so a legacy/version-skewed engine that omits the Ф2 valuation
-    // and evidence fields still decodes: the defaults MIRROR the server zod defaults
-    // EXACTLY (valuation nil / knowledge "unknown" / evidence "complete", per
-    // control.ts BudgetSnapshot) — decoding evidence differently would fork the contract.
+    // Legacy defaults mirror ControlBudgetSnapshot; explicit unknown cash stays nil.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         paidBudget = try c.decode(PaidBudget.self, forKey: .paidBudget)
-        spendUsd = try c.decodeIfPresent(Double.self, forKey: .spendUsd) ?? nil
+        cashKnowledge = try c.decodeIfPresent(String.self, forKey: .cashKnowledge)
+        spendUsd = cashKnowledge == "unknown" ? nil : try c.decodeIfPresent(Double.self, forKey: .spendUsd)
         valuationUsd = try c.decodeIfPresent(Double.self, forKey: .valuationUsd) ?? nil
         valuationKnowledge = try c.decodeIfPresent(String.self, forKey: .valuationKnowledge) ?? "unknown"
         remainingUsd = try c.decodeIfPresent(Double.self, forKey: .remainingUsd) ?? nil

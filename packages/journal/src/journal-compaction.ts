@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { closeSync, constants, openSync, rmSync } from "node:fs";
 import { gzipSync } from "node:zlib";
-import { encodeJournalPayload } from "./append-batch.js";
+import { cloneJson, encodeJournalPayload } from "./append-batch.js";
 import {
   COMPACTED_SNAPSHOT,
   HASH_BYTES,
@@ -16,9 +16,43 @@ import {
 } from "./frame-codec.js";
 import { appendAndSync } from "./journal-files.js";
 
+export interface JournalCompactionReceipt {
+  beforeBytes: number;
+  afterBytes: number;
+  /** Records in the installed file: the retained prefix plus the caught-up tail. */
+  records: number;
+  retainedCount: number;
+  retiredCount: number;
+  /** Serialized logical bytes of the retired records (informational; the daemon
+   * reports it as `journal.records_retired`). */
+  retiredBytes: number;
+}
+
+export type JournalCompactionDeclineReason =
+  "aborted" | "below_threshold" | "empty" | "capacity" | "no_reclaim";
+
+/** A declined maintenance pass leaves the original file untouched. */
+export interface JournalCompactionDeclined {
+  declined: true;
+  reason: JournalCompactionDeclineReason;
+  compressedBytes?: number;
+  /** The cap that fired: the frame payload cap for `capacity`, the current
+   * file size for `no_reclaim`. */
+  cap?: number;
+}
+
+export type JournalCompactionOutcome = JournalCompactionReceipt | JournalCompactionDeclined;
+
+export function declinedCompaction(
+  reason: JournalCompactionDeclineReason,
+  detail: Omit<JournalCompactionDeclined, "declined" | "reason"> = {},
+): JournalCompactionDeclined {
+  return { declined: true, reason, ...detail };
+}
+
 export interface JournalCompactionResult {
   path: string;
-  receipt: { beforeBytes: number; afterBytes: number; records: number };
+  receipt: JournalCompactionReceipt;
   records: JournalRecord[];
   epoch: string;
   nextSeq: number;
@@ -104,6 +138,9 @@ export function prepareJournalCompaction(input: {
       beforeBytes: input.knownFileBytes,
       afterBytes: frame.length,
       records: logical.length,
+      retainedCount: logical.length,
+      retiredCount: 0,
+      retiredBytes: 0,
     },
     records,
     epoch,
@@ -176,6 +213,23 @@ export function compactedJournalRecord(
   };
 }
 
+/** A typed capacity refusal names the cap that actually fired. */
+export function capacityError(kind: string, cap: number): Error {
+  return Object.assign(new Error(`journal compaction exceeds the existing ${kind} cap`), {
+    code: "journal_compaction_capacity",
+    cap,
+  });
+}
+
+export function capacityCapOf(error: unknown): number | undefined {
+  return typeof error === "object" &&
+    error !== null &&
+    "cap" in error &&
+    typeof error.cap === "number"
+    ? error.cap
+    : undefined;
+}
+
 export function isCompactionCapacityError(error: unknown): boolean {
   if (
     error instanceof RangeError &&
@@ -192,8 +246,4 @@ export function isCompactionCapacityError(error: unknown): boolean {
       error.code === "ERR_STRING_TOO_LONG" ||
       error.code === "journal_compaction_capacity")
   );
-}
-
-function cloneJson<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
 }

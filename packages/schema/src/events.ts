@@ -1,5 +1,5 @@
 import { z } from "zod/v3";
-import { FallbackReason, Id } from "./primitives.js";
+import { FallbackReason, Id, ModeKind } from "./primitives.js";
 import { AuthMode } from "./budget.js";
 import { CredentialUnusableObservation } from "./credential-profile.js";
 
@@ -38,6 +38,32 @@ export const ThreadHeadPing = z
       "the authoritative thread summary instead of trusting event content.",
   );
 export type ThreadHeadPing = z.infer<typeof ThreadHeadPing>;
+
+/**
+ * Payload of the JOURNALED copy of a `run.created` event. The per-run
+ * `events.jsonl` keeps the prompt text; the owning global/project journal
+ * partition stores the prompt's digest and byte length instead, so the durable
+ * stream never carries a prompt body (the accepted command already holds it).
+ */
+export const JournaledRunCreatedPayload = z
+  .object({
+    mode: ModeKind,
+    prompt_sha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .describe("sha256 hex digest of the redacted prompt text."),
+    prompt_bytes: z
+      .number()
+      .int()
+      .nonnegative()
+      .describe("UTF-8 byte length of the redacted prompt text."),
+  })
+  .passthrough()
+  .describe(
+    "Journaled `run.created` payload: the prompt text is replaced by its sha256 digest and byte " +
+      "length in the global/project journal partition; the per-run event log keeps the prompt.",
+  );
+export type JournaledRunCreatedPayload = z.infer<typeof JournaledRunCreatedPayload>;
 
 export const RunEventType = z
   .enum([
@@ -113,6 +139,21 @@ export const RunEventType = z
     "interaction.answered",
     "interaction.timeout",
     "interaction.answer_discarded",
+    /** Live message into a running attempt (`POST /v2/runs/:id/messages`).
+     * `message.accepted` = daemon ADMISSION, journaled through a
+     * failure-propagating append BEFORE any native dispatch (nothing is sent
+     * when it cannot land). `message.delivered` = a correlated native
+     * consumption event was observed. `message.refused` = a typed non-delivery
+     * (`outcome` rejected | not_active | unsupported | delivery_unknown plus
+     * `reason`). A native `accepted` verdict adds no row: it is the receipt the
+     * route returns and replays under the same Idempotency-Key. Payload:
+     * {message_id, attempt_id?, harness_id?, outcome?, reason?, live_input?,
+     *  native_turn_id?, text_sha256, text_bytes, text, title}; the journaled
+     * copy drops `text` (daemon journaled-run-events.ts), the per-run
+     * events.jsonl keeps it, and the timeline shows it as the row detail. */
+    "message.accepted",
+    "message.delivered",
+    "message.refused",
     "plan.progress",
     "plan.questions",
     "plan.brief.materialized",

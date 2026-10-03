@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { flagStr, type ParsedArgs } from "./args.js";
 import type {
   ControlReviewerPanelEntry,
   EffortHint,
@@ -143,4 +145,27 @@ export function parseReviewFlags(
   const review = values.length ? (reviewValues.length ? enabled : !enabled) : undefined;
   if (bestOf && review === false) throw new Error("Best-of includes review; remove --no-review");
   return review ?? (bestOf ? true : undefined);
+}
+
+/**
+ * Per-run system instructions from `--instructions "<text>"` or
+ * `--instructions-file <path>` (mutually exclusive; the file form avoids
+ * ARG_MAX and keeps long instructions out of the process argv / `ps`).
+ */
+export function resolveInstructions(args: ParsedArgs): string | undefined {
+  const inline = flagStr(args, "instructions");
+  const file = flagStr(args, "instructions-file");
+  if (inline !== undefined && file !== undefined) {
+    throw new Error("pass either --instructions or --instructions-file, not both");
+  }
+  if (file !== undefined) {
+    try {
+      return readFileSync(file, "utf8");
+    } catch (err) {
+      throw new Error(
+        `could not read --instructions-file ${file}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+  return inline;
 }

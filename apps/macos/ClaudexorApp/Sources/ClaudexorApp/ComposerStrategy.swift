@@ -61,7 +61,7 @@ struct ComposerStrategyResolution: Equatable {
     var delegate: Bool
     /// Plan council (D31); only ever true on `.plan`.
     var council: Bool
-    /// Council membership width (2..4) when `council`; nil otherwise (Best-of
+    /// Council membership width (2..effective cap) when `council`; nil otherwise (Best-of
     /// width stays pool-derived in `sendTurn`, never carried here).
     var councilN: Int?
     /// Agent "until clean" repair strategy.
@@ -70,13 +70,14 @@ struct ComposerStrategyResolution: Equatable {
 
 /// Resolve (intent, knobs) → the request-relevant strategy facts. Meaningless
 /// combinations are made unrepresentable: Delegate is dropped off non-agent
-/// intents, Council off non-plan, member count clamped to the wire's 2..4.
+/// intents, Council off non-plan, member count clamped to the daemon's effective cap.
 func resolveComposerStrategy(
     intent: RunMode,
     agentStrategy: AgentStrategy,
     delegate: Bool,
     councilEnabled: Bool,
-    councilMembers: Int
+    councilMembers: Int,
+    maxCouncilMembers: Int
 ) -> ComposerStrategyResolution {
     switch intent {
     case .plan:
@@ -84,7 +85,7 @@ func resolveComposerStrategy(
             return .init(mode: .plan, delegate: false, council: false, councilN: nil, untilClean: false)
         }
         return .init(mode: .plan, delegate: false, council: true,
-                     councilN: min(max(councilMembers, 2), 4), untilClean: false)
+                     councilN: min(max(councilMembers, 2), maxCouncilMembers), untilClean: false)
     case .agent:
         switch agentStrategy {
         case .single:
@@ -100,6 +101,12 @@ func resolveComposerStrategy(
         // Ask (and any other read-only intent) carries no strategy.
         return .init(mode: intent, delegate: false, council: false, councilN: nil, untilClean: false)
     }
+}
+
+/// Pending config does not change the running daemon's admission. Only engines
+/// that omit this projection keep the historical four-member composer limit.
+func composerCouncilMemberLimit(_ settings: SettingsSnapshot?) -> Int {
+    settings?.runtime?.concurrency?.effective.maxCouncilMembers ?? 4
 }
 
 /// The repair fields that actually survive serialization for one resolved

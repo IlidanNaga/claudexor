@@ -1,0 +1,13 @@
+{
+  "$ref": "#/definitions/WorkspaceKind",
+  "definitions": {
+    "WorkspaceKind": {
+      "type": "string",
+      "enum": [
+        "git",
+        "directory"
+      ]
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

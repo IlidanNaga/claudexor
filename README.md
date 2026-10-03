@@ -15,9 +15,9 @@ pay for. It runs Codex CLI, Claude Code, Cursor CLI, OpenCode, Antigravity
 CLI, and raw API
 adapters behind one typed interface: a chat of turns where read-only questions
 resume the vendor's own native session, write turns land as inspectable
-patches, races pit harnesses against each other with cross-family review, and
-every claim — cost, quota, web evidence, auth route — is a typed fact you can
-audit, never a vibe.
+patches or complete file manifests, races pit harnesses against each other with
+cross-family review, and every claim — cost, quota, web evidence, auth route —
+is a typed fact you can audit, never a vibe.
 
 Compared to driving a bare Codex or Claude Code session, Claudexor adds the
 layer the vendors do not ship: best-of-N races with independent reviewers and
@@ -31,7 +31,7 @@ with a vendor usage source (Antigravity, Claude, and Codex); Cursor has none
 yet. Everything runs on your machine, files are the source of truth, and there
 is no telemetry.
 
-Current status: **v3.10.2**. See "Stability at 2.0" below for what is a stable
+Current status: **v3.18.0**. See "Stability at 2.0" below for what is a stable
 contract and what remains experimental; retired verbs and mode ids hard-error
 with the new spelling instead of silently aliasing.
 
@@ -72,7 +72,7 @@ composer](docs/assets/app-agent-run.jpg)
 - [Remote SSH](#remote-ssh)
 - [Quickstart](#quickstart)
 - [Modes](#modes)
-- [Credential Profiles And Quota](#credential-profiles-and-quota)
+- [Accounts And Quota](#accounts-and-quota)
 - [Web, Budgets, And Gates](#web-budgets-and-gates)
 - [Routing, Auth, And Secrets](#routing-auth-and-secrets)
 - [Daemon And Control API](#daemon-and-control-api)
@@ -89,10 +89,11 @@ composer](docs/assets/app-agent-run.jpg)
 
 - Node.js >= 20.19 (the daemon, CLI, and every surface run on Node)
 - pnpm (via corepack: `corepack enable pnpm`)
-- Git for isolated workspaces, candidate envelopes, and delivery. Supported
-  in-place non-Git paths remain available; Doctor reports Git availability, and
-  the app's Workspace Git check explains whether the selected shape is admitted.
-- At least one logged-in vendor CLI — `codex`, `claude`, `cursor-agent`,
+- Git for Git-backed worktrees, candidate envelopes, and source-control delivery.
+  Explicit directory execution supports direct work and selected-input copies
+  without Git; Doctor reports Git availability, and
+  the app's Workspace Git check explains whether a Git-backed shape is admitted.
+- At least one logged-in vendor CLI — `codex`, `claude`, `cursor-agent` (or Cursor’s `agent`),
   `opencode`, or `agy` (Antigravity, for a Gemini subscription) — OR a
   provider API key (adapters accept `OPENAI_API_KEY`,
   `ANTHROPIC_API_KEY`, ... as fallbacks; the raw-API route needs only a key).
@@ -138,7 +139,10 @@ Exact npm pins install under `~/.claudexor/node`; Cursor remains unpinned, so
 the JSON receipt records the downloaded installer's SHA-256 and byte length.
 Every successful executed receipt also records the absolute installed launcher
 and its verified version; a zero-exit installer without that postcondition is a
-typed failure.
+typed failure. On Windows that launcher is the vendor's own `codex.exe` inside
+the pinned npm platform package (never npm's `.cmd` shim), and the same
+managed-root path is what doctor, login and runs resolve; Codex is the one
+vendor with that verified image in this release, the others refuse typed.
 Omitting `--target` preserves the disclosed remote-host flow, its prefix and
 its exit-code contract; the install lease and the post-install proof are part
 of the unattended local contract and do not apply there.
@@ -223,10 +227,12 @@ client verifiers themselves stay fail-closed for the waived versions too).
   `CLAUDEXOR_DAEMON_SOCK`, or the lifecycle command may address another daemon.
   A Windows consumer still owns a native
   extract/`--probe`/handshake/`--stop` smoke before claiming Windows support.
-  The local harness installer is intentionally typed-unsupported on Windows in
-  this release. On POSIX, npm-backed local installation additionally requires
-  `<node-root>/lib/node_modules/npm/bin/npm-cli.js`; Claudexor never falls back
-  to a `npm` found on ambient `PATH`.
+  npm-backed local installation additionally requires the toolchain's own
+  npm entrypoint — `<node-root>/lib/node_modules/npm/bin/npm-cli.js` beside
+  `bin/node` on POSIX, `node_modules\npm\bin\npm-cli.js` beside `node.exe`
+  on Windows; Claudexor never falls back to a `npm` found on ambient `PATH`.
+  On Windows only Codex installs locally (its package-native image); the
+  other vendors are a typed `unsupported_platform` refusal.
 - **npm** — CLI/daemon installs update the ordinary way:
   `npm install -g claudexor@latest`. `claudexor release check` reports whether a
   newer engine runtime is published, verifying the same signed manifest
@@ -255,19 +261,45 @@ claudexor secrets list
 claudexor daemon start
 ```
 
-`apply --dry-run` checks `final/patch.diff` with `git apply --check` and does
-not mutate the repo. Unknown flags and invalid `--access`/`--web`/`--effort`
-values fail loudly with exit code 2 — a typo never silently runs with defaults.
+`apply --dry-run` checks the retained result without mutating the target: Git
+patches use `git apply --check`; directory results verify the manifest, complete
+content and selected target preimages. Unknown flags and invalid
+`--access`/`--web`/`--effort` values fail loudly with exit code 2 — a typo never
+silently runs with defaults.
 When deterministic gates protect existing test/package surfaces and the task is
 explicitly test-authoring work, use `--allow-protected-path <glob[,glob...]>` to
 record typed per-run approval for those protected gate/test path changes. This
 does not bypass built-in critical/security human gates.
 
+### Processing and ordinary folders
+
+`--processing standard|fast|economy` requests service for the selected model; it
+does not change the reasoning effort or routing goal. Native capabilities and
+observed service remain visible, and Fast stays within existing money limits.
+See the [Processing rule](docs/DEVELOPMENT.md#processing-preference).
+
+Inside an ordinary folder, select directory execution explicitly:
+
+```bash
+# Copy the complete selected folder, work there, then inspect/apply the result:
+claudexor agent "Update the report and its figures" --workspace-kind directory --scope-path . --processing economy
+
+# Work directly in the original folder, recording the selected file footprint:
+claudexor agent "Update report.md" --workspace-kind directory --in-place --scope-path report.md
+```
+
+Repeat `--scope-path` for a narrower copied footprint; omission selects no
+existing input files. Directory execution never initializes Git. Copied results
+retain complete file bytes for later application; direct changes are already in
+place and carry no promise of full rollback. Preview limits do not truncate
+delivery files. See [directory execution](docs/ARCHITECTURE.md#directory-execution)
+and the [feature ledger](docs/FEATURES.md) for current acceptance caveats.
+
 ### Reviewers and approvals
 
 Ordinary Agent runs skip internal model review by default, whether the executor
 is pinned or selected automatically. Completed changes remain normally applicable
-and show **Not reviewed**; required checks and patch-integrity checks still apply.
+and show **Not reviewed**; required checks and result-integrity checks still apply.
 Ask and Plan reject these Agent-only controls; Council is Plan's critique path:
 
 - **Review** — `--review` enables automatic panel selection. Best-of and
@@ -315,7 +347,7 @@ Canonical mode ids (engine strategies are FLAGS, not modes):
   fallback intent (Agent is the default on a project thread).
 - `plan` - read-only planning; the plan lifecycle surfaces typed open questions
   and Implement freezes the plan as a content-hashed contract. Solo is the
-  default; `--council` (optionally `--n 2..4`) drafts plans across N harnesses in
+  default; `--council` (optionally `--n N`) drafts plans across N harnesses in
   parallel, then the primary merges them into ONE unified plan whose open
   questions reach you as a single set (see below).
 - `agent` - default `claudexor agent` route. Strategy flags: `--n N` (best-of-N
@@ -362,7 +394,7 @@ points at the draft and attempt evidence files by absolute path (never embedding
 synthesizes ONE unified plan. The tagged `## Open Questions` parser runs on the
 MERGE output only, so you always answer a single question set — the downstream
 readiness/freeze/Implement flow is byte-for-byte identical to a solo plan.
-`--n 2..4` sets the member count (default: distinct available harnesses, up to 3,
+`--n N` sets the member count (default: distinct available harnesses, up to 3,
 primary first); `--n` on a plan is legal ONLY with `--council`. Degradation is
 honest: a failed member is disclosed (event + `council/membership.yaml`) and the
 merge proceeds with the usable inputs (one input still merges). A useful draft
@@ -470,7 +502,9 @@ claudexor profiles                         # every account per harness + the inf
 claudexor accounts --json                  # read-only snapshot doorway for agents, with freshness/quota state
 claudexor auth login claude                # bootstrap sugar: sign into the claude-default row
 claudexor profiles add claude work         # register another account
-claudexor profiles login claude work       # the vendor's own login, scoped to the row's dir
+claudexor profiles login claude work       # direct vendor login in this terminal, scoped to the row's dir
+claudexor profiles add cursor work        # a separate Cursor account row
+claudexor profiles login cursor work       # daemon-managed login in this terminal; setup cancel/reconcile can recover it
 claudexor profiles disable claude work     # Enabled toggle: a disabled account is never routable
 claudexor profiles enable claude work
 claudexor profiles remove claude work      # remove the binding + any Claudexor-owned state/managed secret
@@ -572,7 +606,7 @@ localhost-callback flow. See
 claudexor auth status
 claudexor auth login codex    # codex login (device-auth by default)
 claudexor auth login claude   # claude auth login (claude.ai subscription route)
-claudexor auth login cursor   # cursor-agent login 
+claudexor auth login cursor   # cursor-agent login (or Cursor's own `agent`)
 claudexor profiles add agy work    # register a named Antigravity binding
 claudexor profiles login agy work  # login with its scoped HOME and platform credential policy
 claudexor secrets set openai --from-env OPENAI_API_KEY
@@ -621,7 +655,9 @@ reviews/a01.yaml
 arbitration/decision.yaml
 final/run_facts.yaml
 final/telemetry.yaml
-final/patch.diff
+final/patch.diff?
+final/files/manifest.json?
+final/files/content/<digest>?
 final/work_product.yaml
 final/summary.md
 final/failure.yaml?
@@ -644,14 +680,16 @@ of disappearing into logs.
 Standalone Agent runs use isolated envelopes by default, and Best-of candidates
 always use isolated envelopes. They live under the same external project
 namespace at `~/.claudexor/v3/projects/<project-sha256>/workspaces/.../tree`;
-an isolated run's harness `cwd` is that envelope worktree. Chat thread turns
-follow the workspace mode described above: `in_place` uses the live project,
-while `isolated` uses its persistent thread worktree.
+an isolated run's harness `cwd` is its Git worktree or selected-input directory
+copy. Git-backed chat thread turns follow the workspace mode described above:
+`in_place` uses the live project, while `isolated` uses its persistent thread
+worktree.
 
-Proven work product means a git diff in the envelope, a declared run artifact,
-or an explicitly verified host side-effect. Absolute `/tmp/...` writes are host
-side effects and do not count as project success. A project prompt asking for a
-tmp file should resolve to project-local `tmp/...` or a run artifact unless a
+Proven work product means a Git diff, a complete directory file manifest, a
+declared run artifact, or an explicitly verified host side-effect. Absolute
+`/tmp/...` writes are host side effects and do not count as project success.
+A project prompt asking for a tmp file should resolve to project-local `tmp/...`
+or a run artifact unless a
 future verified host-side-effect mode is explicitly selected.
 
 ## Integrations
@@ -659,7 +697,10 @@ future verified host-side-effect mode is explicitly selected.
 Claudexor can be driven by other tools through CLI JSON on supported commands, the
 local daemon/control API, MCP, and ACP. These surfaces are capability-gated;
 integrations should not assume every subcommand has JSON output or every
-harness supports live steering (see "Stability at 2.0").
+harness supports live steering: read a harness's `liveInput` channel from
+`GET /v2/agent-capabilities` and send a live message through
+`POST /v2/runs/:id/messages`, which answers a typed outcome instead of guessing
+(see "Stability at 2.0").
 
 The CLI accepts repeatable/comma-separated `--attach <path>` or `--image <path>`
 and immediately streams each regular, non-symlink file through `/v2/uploads`.
@@ -766,7 +807,8 @@ Important boundaries:
 
 - `packages/schema` owns contracts and generated JSON Schema.
 - `packages/harness-*` adapters translate native tool I/O into typed events.
-- `packages/workspace` owns worktree envelopes and scoped harness homes.
+- `packages/workspace` owns Git/directory envelopes, complete file capture and
+  scoped harness homes.
 - `packages/orchestrator` owns the canonical mode pipelines (ask, plan, agent)
   and their separate schema-owned strategy controls; the canonical Modes
   section above defines them.

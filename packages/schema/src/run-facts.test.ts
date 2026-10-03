@@ -867,7 +867,7 @@ describe("RunFacts invariant validator (GH #29)", () => {
     ).toThrow(/required actions remain/);
   });
 
-  it("allows positive apply eligibility only for an agent patch deliverable", () => {
+  it("allows positive apply eligibility only for agent patch or files deliverables", () => {
     const eligibility = {
       eligible: true as const,
       state: "ok" as const,
@@ -893,7 +893,14 @@ describe("RunFacts invariant validator (GH #29)", () => {
         },
         apply: { eligibility, operator_decision_present: false },
       }),
-    ).toThrow(/only for a patch deliverable/);
+    ).toThrow(/only for a patch or files deliverable/);
+    const files = validAgentPatch();
+    expect(() =>
+      validateRunFactsInvariants({
+        ...files,
+        deliverable: { ...files.deliverable, kind: "files", path: "final/files/manifest.json" },
+      }),
+    ).not.toThrow();
   });
 
   it("accepts hash-bound risk eligibility only on a needs-decision outcome", () => {

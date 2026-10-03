@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ControlModelOperationDetail, ModelUsage } from "@claudexor/schema";
 import { DaemonControlApiServer, type DaemonControlApiOptions } from "./daemon-server.js";
+import { parseCodexModelCatalog } from "../../harness-codex/src/model.js";
 import { OPERATION_CATALOG } from "./operation-catalog.js";
 
 const servers: DaemonControlApiServer[] = [];
@@ -52,6 +53,178 @@ async function fixture(services: DaemonControlApiOptions["services"], recovery =
 }
 
 describe("raw model operation HTTP surface", () => {
+  it("negotiates exact failure capture without changing the body or unrelated query compatibility", async () => {
+    const createModelOperation = vi.fn(async () => detail());
+    const f = await fixture({ createModelOperation });
+    const headers = { "Idempotency-Key": "capture" };
+    for (const suffix of ["", "?captureFailureEvidence=false", "?unrelated=ignored"]) {
+      expect(
+        (await f.request(`/model-operations${suffix}`, { request: ref }, headers)).status,
+      ).toBe(202);
+      expect(createModelOperation).toHaveBeenLastCalledWith(ref, "capture");
+    }
+    expect(
+      (
+        await f.request(
+          "/model-operations?captureFailureEvidence=true&unrelated=ignored",
+          { request: ref },
+          headers,
+        )
+      ).status,
+    ).toBe(202);
+    expect(createModelOperation).toHaveBeenLastCalledWith(ref, "capture", true);
+    for (const value of ["", "1", "TRUE", "true&captureFailureEvidence=false"]) {
+      expect(
+        (
+          await f.request(
+            `/model-operations?captureFailureEvidence=${value}`,
+            { request: ref },
+            headers,
+          )
+        ).status,
+      ).toBe(400);
+    }
+    expect(createModelOperation).toHaveBeenCalledTimes(4);
+    expect(
+      OPERATION_CATALOG.operations.find(
+        (op) => op.method === "POST" && op.path === "/v2/model-operations",
+      )?.parameters,
+    ).toContainEqual(
+      expect.objectContaining({
+        name: "captureFailureEvidence",
+        location: "query",
+        enum: ["true", "false"],
+      }),
+    );
+  });
+  it("negotiates effort capture independently while preserving omitted/false calls", async () => {
+    const createModelOperation = vi.fn(async () => detail());
+    const f = await fixture({ createModelOperation });
+    const headers = { "Idempotency-Key": "effort" };
+    for (const query of ["", "?captureEffortEvidence=false"]) {
+      expect((await f.request(`/model-operations${query}`, { request: ref }, headers)).status).toBe(
+        202,
+      );
+      expect(createModelOperation).toHaveBeenLastCalledWith(ref, "effort");
+    }
+    expect(
+      (
+        await f.request(
+          "/model-operations?captureEffortEvidence=true&unrelated=ignored",
+          { request: ref },
+          headers,
+        )
+      ).status,
+    ).toBe(202);
+    expect(createModelOperation).toHaveBeenLastCalledWith(ref, "effort", undefined, true);
+    expect(
+      (
+        await f.request(
+          "/model-operations?captureEffortEvidence=true&captureFailureEvidence=true",
+          { request: ref },
+          headers,
+        )
+      ).status,
+    ).toBe(202);
+    expect(createModelOperation).toHaveBeenLastCalledWith(ref, "effort", true, true);
+    for (const value of ["", "1", "TRUE", "true&captureEffortEvidence=false"]) {
+      expect(
+        (
+          await f.request(
+            `/model-operations?captureEffortEvidence=${value}`,
+            { request: ref },
+            headers,
+          )
+        ).status,
+      ).toBe(400);
+    }
+    expect(createModelOperation).toHaveBeenCalledTimes(4);
+    expect(
+      OPERATION_CATALOG.operations.find(
+        (op) => op.method === "POST" && op.path === "/v2/model-operations",
+      )?.parameters,
+    ).toContainEqual(
+      expect.objectContaining({
+        name: "captureEffortEvidence",
+        location: "query",
+        enum: ["true", "false"],
+      }),
+    );
+  });
+
+  it.each([{ levels: [] }, { levels: ["high", "ultra"] }])(
+    "projects the real Codex catalog $levels to both frozen HTTP shapes",
+    async ({ levels }) => {
+      const models = parseCodexModelCatalog({
+        models: [
+          { slug: "test-model", supported_reasoning_levels: levels.map((effort) => ({ effort })) },
+        ],
+      });
+      expect(models[0]?.reasoningEffortsVerified).toBe(true);
+      const catalog = {
+        source: "codex",
+        credentialProfileId: "fixture",
+        accountFingerprint: null,
+        observedAt: "2026-09-12T00:00:00.000Z",
+        provenance: "provider_http",
+        models,
+        clientVersion: "0.156.1",
+        clientVersionSource: "verified_transport",
+      };
+      const accountView = {
+        source: "codex",
+        accounts: [
+          { credentialProfileId: "fixture", availability: "available", problem: null, catalog },
+        ],
+        partial: false,
+      };
+      const f = await fixture({
+        modelCatalog: async () => catalog,
+        modelAccountCatalog: async () => accountView,
+      });
+      const legacy = await f.request("/model-sources/codex/models");
+      expect(legacy.status).toBe(200);
+      expect(await legacy.json()).toEqual({
+        source: "codex",
+        credentialProfileId: "fixture",
+        accountFingerprint: null,
+        observedAt: "2026-09-12T00:00:00.000Z",
+        provenance: "provider_http",
+        models: [
+          {
+            id: "test-model",
+            label: null,
+            isDefault: false,
+            contextWindow: null,
+            maxContextWindow: null,
+            maxOutputTokens: null,
+            inputModalities: [],
+            reasoningEfforts: levels.filter((level) => level !== "ultra"),
+            defaultReasoningEffort: null,
+            supportedOptions: [
+              "toolChoice",
+              "cacheKey",
+              "serviceTier",
+              "processingPreference",
+              ...(levels.length ? ["reasoningEffort"] : []),
+            ],
+          },
+        ],
+      });
+      const modern = await f.request("/model-sources/codex/models?view=accounts");
+      expect(modern.status).toBe(200);
+      const publicModels = models.map(
+        ({ reasoningEffortPreferenceOrder: _order, ...model }) => model,
+      );
+      expect(await modern.json()).toEqual({
+        ...accountView,
+        accounts: [{ ...accountView.accounts[0], catalog: { ...catalog, models: publicModels } }],
+      });
+      expect(models[0]?.reasoningEffortsVerified).toBe(true);
+      if (levels.length) expect(models[0]?.reasoningEffortPreferenceOrder).toEqual(levels);
+    },
+  );
+
   it("requires idempotency before accepting refs and never enqueues an Agent Run", async () => {
     const createModelOperation = vi.fn(async () => detail());
     const f = await fixture({ createModelOperation });
@@ -124,6 +297,7 @@ describe("raw model operation HTTP surface", () => {
   });
 
   it("keeps raw catalogs account-scoped and leaves omitted profile selection to the engine", async () => {
+    let provenance = "fixture";
     const modelSources = vi.fn(async () => ({
       sources: [{ id: "codex", label: "Codex", credentialHarness: "codex" }],
     }));
@@ -132,16 +306,34 @@ describe("raw model operation HTTP surface", () => {
       credentialProfileId: profile ?? "chosen",
       accountFingerprint: null,
       observedAt: "2026-09-06T00:00:00.000Z",
-      provenance: "fixture",
+      provenance,
+      clientVersion: "0.156.1",
+      clientVersionSource: "verified_transport",
       models: [],
     }));
     const f = await fixture({ modelSources, modelCatalog });
     expect((await f.request("/model-sources")).status).toBe(200);
-    expect((await f.request("/model-sources/codex/models")).status).toBe(200);
+    const historical = await f.request("/model-sources/codex/models");
+    expect(historical.status).toBe(200);
+    expect(await historical.json()).toMatchObject({
+      provenance: "fixture",
+      observedAt: "2026-09-06T00:00:00.000Z",
+    });
     expect(modelCatalog).toHaveBeenLastCalledWith("codex", undefined, undefined);
-    expect((await f.request("/model-sources/codex/models?credentialProfileId=chosen")).status).toBe(
-      200,
-    );
+    provenance = "provider_http";
+    const observed = await f.request("/model-sources/codex/models?credentialProfileId=chosen");
+    expect(observed.status).toBe(200);
+    // The legacy query keeps its pre-negotiation shape: the declared client
+    // version the transport recorded is NOT projected here (the account view
+    // below carries it), exactly like `processing` per row.
+    expect(await observed.json()).toEqual({
+      source: "codex",
+      credentialProfileId: "chosen",
+      accountFingerprint: null,
+      observedAt: "2026-09-06T00:00:00.000Z",
+      provenance: "provider_http",
+      models: [],
+    });
     expect(modelCatalog).toHaveBeenLastCalledWith("codex", "chosen", undefined);
     expect(
       (await f.request("/model-sources/codex/models?requestedModel=exact%2Fmodel%2B1")).status,
@@ -166,6 +358,99 @@ describe("raw model operation HTTP surface", () => {
       expect((await f.request(`/model-sources/codex/models?${query}`)).status).toBe(400);
     }
     expect(modelCatalog).toHaveBeenCalledTimes(4);
+  });
+
+  it("negotiates account catalogs while keeping the strict legacy model shape unchanged", async () => {
+    const processing = {
+      modes: ["standard", "fast"],
+      nativeModes: [{ mode: "fast", id: "priority" }],
+      defaultNativeMode: "auto",
+      eligible: true,
+      source: "provider",
+      observedAt: "2026-09-12T00:00:00.000Z",
+    };
+    const model = {
+      id: "test-model",
+      label: null,
+      isDefault: true,
+      contextWindow: 1000000,
+      maxContextWindow: 1000000,
+      maxOutputTokens: null,
+      inputModalities: ["text"],
+      reasoningEfforts: [],
+      defaultReasoningEffort: null,
+      supportedOptions: [],
+      processing,
+    };
+    const catalog = {
+      source: "codex",
+      credentialProfileId: "a",
+      accountFingerprint: null,
+      observedAt: "2026-09-12T00:00:00.000Z",
+      provenance: "provider_http",
+      clientVersion: "0.156.1",
+      clientVersionSource: "installed_cli",
+      models: [model],
+    };
+    const accountView = {
+      source: "codex",
+      accounts: [{ credentialProfileId: "a", availability: "available", problem: null, catalog }],
+      partial: false,
+    };
+    const modelCatalog = vi.fn(async () => catalog);
+    const modelAccountCatalog = vi.fn(async () => accountView);
+    const source = { id: "codex", label: "Codex", credentialHarness: "codex" };
+    const modelSources = vi.fn(async (view?: "accounts") => ({
+      sources: [
+        view
+          ? {
+              ...source,
+              processingPreferences: ["standard", "fast", "economy"],
+              accountCatalog: true,
+            }
+          : source,
+      ],
+    }));
+    const f = await fixture({ modelCatalog, modelAccountCatalog, modelSources });
+    expect(await (await f.request("/model-sources")).json()).toEqual({ sources: [source] });
+    expect(await (await f.request("/model-sources?view=accounts")).json()).toMatchObject({
+      sources: [{ accountCatalog: true, processingPreferences: ["standard", "fast", "economy"] }],
+    });
+    const legacy = (await (await f.request("/model-sources/codex/models")).json()) as {
+      models: Array<Record<string, unknown>>;
+    };
+    expect(legacy.models[0]).not.toHaveProperty("processing");
+    const modern = await f.request(
+      "/model-sources/codex/models?view=accounts&credentialProfileId=a",
+    );
+    expect(modern.status).toBe(200);
+    // The negotiated view carries the declared client version per catalog.
+    const modernBody = (await modern.json()) as { accounts: Array<{ catalog: unknown }> };
+    expect(modernBody).toEqual(accountView);
+    expect(modernBody.accounts[0]?.catalog).toMatchObject({
+      clientVersion: "0.156.1",
+      clientVersionSource: "installed_cli",
+    });
+    expect(modelAccountCatalog).toHaveBeenCalledExactlyOnceWith("codex", "a");
+    expect(modelCatalog).toHaveBeenCalledTimes(1);
+    for (const query of [
+      "view=unknown",
+      "view=",
+      "view=accounts&view=accounts",
+      "view=accounts&requestedModel=test",
+    ]) {
+      expect((await f.request(`/model-sources/codex/models?${query}`)).status).toBe(400);
+    }
+    for (const query of ["view=unknown", "view=accounts&view=accounts", "extra=true"]) {
+      expect((await f.request(`/model-sources?${query}`)).status).toBe(400);
+    }
+    const descriptor = OPERATION_CATALOG.operations.find(
+      (op) => op.path === "/v2/model-sources/:id/models",
+    );
+    expect(descriptor?.parameters).toContainEqual(
+      expect.objectContaining({ name: "view", enum: ["accounts"] }),
+    );
+    expect(descriptor?.responseSchema).toBe("ControlModelCatalogQueryResponse");
   });
 
   it("refuses malformed service output and protects all model routes in recovery mode", async () => {

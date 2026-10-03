@@ -141,6 +141,8 @@ export function outcomeBanner(
       return "Applied · review blocked";
     case "reverted":
       return "Reverted — changes rolled back";
+    case "discarded":
+      return "Discarded — not applied";
     case "not_applied":
       break;
   }
@@ -354,7 +356,7 @@ export function makeOutcomeFacts(
 ): RunOutcomeFacts {
   return {
     lifecycle,
-    noChanges: partial.noChanges ?? false,
+    noChanges: partial.noChanges === undefined ? false : partial.noChanges,
     checks: partial.checks ?? "not_configured",
     review: partial.review ?? "not_run",
     ...(partial.review_requested !== undefined

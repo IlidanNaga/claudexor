@@ -19,7 +19,7 @@
             },
             "instructions": {
               "type": "string",
-              "description": "System-level instructions layered onto every task-producing lane; delivered natively (append-system-prompt / developer_instructions) or as a delimited prompt prefix."
+              "description": "System-level instructions layered onto every task-producing lane; delivered natively (append-system-prompt-file / developer_instructions) or as a delimited prompt prefix."
             },
             "attachments": {
               "type": "array",
@@ -124,6 +124,22 @@
                 "workspaceRoot": {
                   "type": "string",
                   "description": "Absolute existing execution workspace for a project-scoped delegated agent live run. The stable project identity remains scope.root."
+                },
+                "workspaceKind": {
+                  "type": "string",
+                  "enum": [
+                    "git",
+                    "directory"
+                  ],
+                  "description": "Explicit directory execution needs no Git initialization; omission preserves existing clients."
+                },
+                "scopePaths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "description": "Agent-selected input footprint. Directory copies materialize this entire selection; direct runs need no whole-tree baseline."
                 }
               },
               "additionalProperties": false,
@@ -176,6 +192,15 @@
               "maxLength": 32,
               "pattern": "^[a-z0-9]+(?:[_-][a-z0-9]+)*$",
               "description": "Requested reasoning effort."
+            },
+            "processingPreference": {
+              "type": "string",
+              "enum": [
+                "standard",
+                "fast",
+                "economy"
+              ],
+              "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
             },
             "efforts": {
               "type": "object",
@@ -232,6 +257,8 @@
             },
             "n": {
               "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991,
               "exclusiveMinimum": 0,
               "description": "Race width: number of best-of-N candidates."
             },
@@ -469,6 +496,10 @@
                   "credentialProfileId": {
                     "$ref": "#/definitions/ControlRunAgainDraft/properties/request/properties/harnesses/items",
                     "description": "Per-reviewer credential profile id; explicit pins are strict and never fall back."
+                  },
+                  "processingPreference": {
+                    "$ref": "#/definitions/ControlRunAgainDraft/properties/request/properties/processingPreference",
+                    "description": "Advisory service preference. Fast or Economy may use ordinary Standard service; fallback never introduces Fast. Omission preserves native defaults. Explicit native serviceTier takes precedence."
                   }
                 },
                 "required": [

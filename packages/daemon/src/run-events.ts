@@ -1,5 +1,6 @@
 import type { DurableJournal } from "@claudexor/journal";
 import { RunEvent, type RunEvent as RunEventValue } from "@claudexor/schema";
+import { durableTerminalRunEvents } from "./run-event-terminal-index.js";
 
 const RECORDED = "run.event";
 
@@ -18,10 +19,10 @@ export class RunEventStore {
     return event;
   }
 
+  /** One shared validated pass with durable terminal recovery: every journaled
+   * run event parses once per journal generation. */
   validateProjection(): void {
-    for (const entry of this.journal.records(0, [RECORDED])) {
-      if (entry.type === RECORDED) RunEvent.parse(entry.payload);
-    }
+    durableTerminalRunEvents(this.journal);
   }
 }
 

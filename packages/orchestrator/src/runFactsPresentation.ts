@@ -76,6 +76,7 @@ function standardPrimaryCandidates(mode: AnnouncedRunContext["mode"]): RunPresen
   return [
     { kind: "structured_output", path: "final/output.json" },
     { kind: "answer", path: "final/answer.md" },
+    { kind: "files", path: "final/files/result.md" },
     { kind: "patch", path: "final/patch.diff" },
   ];
 }

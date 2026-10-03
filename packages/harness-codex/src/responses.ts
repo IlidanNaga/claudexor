@@ -7,6 +7,8 @@ import type {
   ModelRoute,
   ModelUsage,
 } from "@claudexor/schema";
+import { ModelMessage as ModelMessageSchema } from "@claudexor/schema";
+import { ResponseFailureCapture } from "./failure-evidence.js";
 
 export const CODEX_CONTINUATION_FORMAT = "codex.responses.v1";
 
@@ -111,6 +113,11 @@ function content(value: ModelMessage["content"], role: string): unknown[] {
 function replay(message: ModelMessage, route: ModelRoute): unknown[] | null {
   const native = message.nativeContinuation;
   if (!native) return null;
+  // The same account may answer with another model, or disclose none. That
+  // continuation stays bound to the model that produced it and is never
+  // replayed here; the message uses its canonical projection instead. A message
+  // with nothing but its continuation has no projection and still refuses.
+  const otherModel = native.route.model !== route.model;
   if (
     message.role !== "assistant" ||
     native.format !== CODEX_CONTINUATION_FORMAT ||
@@ -118,16 +125,16 @@ function replay(message: ModelMessage, route: ModelRoute): unknown[] | null {
     native.route.accountFingerprint !== route.accountFingerprint ||
     native.route.source !== route.source ||
     native.route.credentialProfileId !== route.credentialProfileId ||
-    native.route.model !== route.model ||
     !Array.isArray(native.payload) ||
-    !native.payload.every((item) => typeof record(item)?.type === "string")
+    !native.payload.every((item) => typeof record(item)?.type === "string") ||
+    (otherModel && !message.content?.length && !message.tool_calls?.length)
   ) {
     throw new CodexModelError(
       "invalid_continuation",
-      "Native continuation must match the exact account, profile, model, and format.",
+      "Native continuation must match the exact account, profile and format, and a turn another model answered must carry its own content or tool calls.",
     );
   }
-  return native.payload;
+  return otherModel ? null : native.payload;
 }
 
 export function validateCodexModelOptions(options: ModelCallOptions): void {
@@ -276,9 +283,9 @@ function appliedOptions(response: Record<string, unknown>): ModelCallOptions {
   const tier = text(response.service_tier);
   const cacheKey = text(response.prompt_cache_key);
   return {
-    ...(effort ? { reasoningEffort: effort } : {}),
-    ...(tier ? { serviceTier: tier } : {}),
-    ...(cacheKey ? { cacheKey } : {}),
+    ...(effort?.trim() ? { reasoningEffort: effort } : {}),
+    ...(tier?.trim() ? { serviceTier: tier } : {}),
+    ...(cacheKey?.trim() ? { cacheKey } : {}),
     ...(typeof response.parallel_tool_calls === "boolean"
       ? { parallelToolCalls: response.parallel_tool_calls }
       : {}),
@@ -299,7 +306,7 @@ function responseMessage(items: Record<string, unknown>[], route: ModelRoute): M
     if (item.type === "function_call") {
       if (!text(item.call_id) || !text(item.name) || typeof item.arguments !== "string") {
         throw new CodexModelError(
-          "transport_unknown",
+          "response_rejected",
           "Codex returned a malformed completed tool call.",
         );
       }
@@ -310,27 +317,31 @@ function responseMessage(items: Record<string, unknown>[], route: ModelRoute): M
       });
     }
   }
-  return {
+  return ModelMessageSchema.parse({
     role: "assistant",
     content: texts.length ? texts.join("") : null,
     ...(calls.length ? { tool_calls: calls } : {}),
     nativeContinuation: { route, format: CODEX_CONTINUATION_FORMAT, payload: items },
-  };
+  });
 }
 
 /** SSE frames use a streaming UTF-8 decoder. Only a provider terminal makes a response final. */
 export async function readResponsesStream(
   response: Response,
   selected: ModelRoute,
+  captureFailureEvidence = false,
 ): Promise<ModelCallResult> {
   const result = emptyModelResult({ ...selected, model: null });
+  const capture = new ResponseFailureCapture(captureFailureEvidence);
+  capture.response(response);
+  capture.stage = "read";
   result.outcome = "unknown";
   if (!response.body) {
     result.problem = new CodexModelError(
       "transport_unknown",
       "Codex returned no response stream.",
     ).problem;
-    return result;
+    return capture.finish(result);
   }
   const reader = response.body.getReader();
   const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -346,8 +357,11 @@ export async function readResponsesStream(
     const raw = data.join("\n");
     data = [];
     if (raw === "[DONE]") return;
+    capture.stage = "json";
     const event = record(JSON.parse(raw));
+    capture.stage = "event";
     if (!event) throw new Error("invalid SSE object");
+    capture.event(event.type);
     if (event.type === "response.output_item.done") {
       const item = record(event.item),
         index = counter(event.output_index);
@@ -357,6 +371,7 @@ export async function readResponsesStream(
     if (event.type === "error") {
       result.problem = providerProblem(null, event);
       result.outcome = "failed";
+      capture.terminalStatus = "failed";
       terminal = true;
       return;
     }
@@ -364,6 +379,7 @@ export async function readResponsesStream(
       !["response.completed", "response.incomplete", "response.failed"].includes(String(event.type))
     )
       return;
+    capture.stage = "terminal";
     const final = record(event.response);
     if (!final) throw new Error("missing terminal response");
     const expectedStatus = String(event.type).slice("response.".length);
@@ -372,6 +388,21 @@ export async function readResponsesStream(
     result.route = { ...selected, model: text(final.model) };
     result.usage = responseUsage(final.usage);
     result.appliedOptions = appliedOptions(final);
+    result.outcome =
+      event.type === "response.completed"
+        ? "completed"
+        : event.type === "response.incomplete"
+          ? "incomplete"
+          : "failed";
+    // Provider finality precedes host message conversion. A local rejection
+    // cannot undo this fact or turn its reported usage into unknown work.
+    terminal = true;
+    capture.terminalStatus = result.outcome;
+    if (result.outcome === "failed") {
+      result.problem = providerProblem(null, final);
+      return;
+    }
+    capture.stage = "message";
     if (Array.isArray(final.output))
       final.output.forEach((item, index) => {
         const object = record(item);
@@ -380,26 +411,16 @@ export async function readResponsesStream(
       });
     else if (event.type === "response.completed" && done.size === 0)
       throw new Error("missing completed output");
-    result.outcome =
-      event.type === "response.completed"
-        ? "completed"
-        : event.type === "response.incomplete"
-          ? "incomplete"
-          : "failed";
-    if (result.outcome !== "failed") {
-      result.message = responseMessage(
-        [...done].sort(([a], [b]) => a - b).map(([, item]) => item),
-        result.route,
-      );
-    }
-    if (result.outcome === "failed") result.problem = providerProblem(null, final);
+    result.message = responseMessage(
+      [...done].sort(([a], [b]) => a - b).map(([, item]) => item),
+      result.route,
+    );
     if (result.outcome === "incomplete")
       result.problem = new CodexModelError(
         "provider_incomplete",
         "Codex returned an incomplete response.",
         { reason: text(record(final.incomplete_details)?.reason) },
       ).problem;
-    terminal = true;
   };
   const lines = (flush = false) => {
     for (;;) {
@@ -416,30 +437,39 @@ export async function readResponsesStream(
   };
   try {
     while (!terminal) {
+      capture.stage = "read";
       const chunk = await reader.read();
       if (chunk.done) {
+        capture.bodyComplete = true;
+        capture.stage = "decode";
         buffer += decoder.decode();
         lines(true);
         break;
       }
+      capture.receive(chunk.value);
+      capture.stage = "decode";
       buffer += decoder.decode(chunk.value, { stream: true });
       lines();
     }
-    if (!terminal)
+    if (!terminal) {
+      capture.stage = "read";
       result.problem = new CodexModelError(
         "transport_unknown",
         "Codex stream ended without a terminal response.",
       ).problem;
-  } catch {
-    result.outcome = "unknown";
+    }
+  } catch (error) {
+    capture.caught(error);
     result.message = null;
     result.problem = new CodexModelError(
-      "transport_unknown",
-      "Codex response stream was interrupted or malformed.",
+      terminal ? "response_rejected" : "transport_unknown",
+      terminal
+        ? "Codex returned a terminal response whose message could not be used."
+        : "Codex response stream was interrupted or malformed.",
     ).problem;
   } finally {
     await reader.cancel().catch(() => {});
     reader.releaseLock();
   }
-  return result;
+  return capture.finish(result);
 }

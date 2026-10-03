@@ -1,5 +1,15 @@
-import type { AdapterRegistry } from "@claudexor/core";
-import type { ControlHarnessModelsResponse } from "@claudexor/schema";
+import {
+  hasModelInventoryForRoute,
+  validateModel,
+  type ModelCheck,
+  type AdapterRegistry,
+  type HarnessAdapter,
+} from "@claudexor/core";
+import {
+  ControlHarnessAccountModelsResponse,
+  type ControlHarnessModelsResponse,
+  type ModelInventoryAbsence,
+} from "@claudexor/schema";
 import { HarnessGateway } from "@claudexor/gateway";
 import { createAgyAdapter } from "@claudexor/harness-agy";
 import { createClaudeAdapter } from "@claudexor/harness-claude";
@@ -8,6 +18,11 @@ import { createCursorAdapter } from "@claudexor/harness-cursor";
 import { FAKE_KINDS, createFakeHarness } from "@claudexor/harness-fake";
 import { createOpenCodeAdapter } from "@claudexor/harness-opencode";
 import { createRawApiAdapter } from "@claudexor/harness-raw-api";
+import {
+  catalogProfiles,
+  enumerateAccountCatalogs,
+  type AccountCatalogContext,
+} from "./account-catalog.js";
 
 export interface RegistryOptions {
   /** Register the fake-harness suite (so `--harness fake-*` works). Default true. */
@@ -50,6 +65,14 @@ export function buildGateway(opts: RegistryOptions = {}): HarnessGateway {
   return new HarnessGateway(buildRegistry(opts));
 }
 
+/** A harness's model truth for the unscoped listing: the list itself plus the
+ * harness's own declaration of what an absence from it proves (INV-104). The
+ * two travel together so no consumer can hold one and silently lose the other. */
+export type HarnessModelTruth = {
+  response: ControlHarnessModelsResponse;
+  absence: ModelInventoryAbsence;
+};
+
 /**
  * Resolve enumerable models for one harness (ADP4). The SSOT shared by the
  * control-api `harnessModels` service and the CLI `models` command, so both
@@ -59,44 +82,201 @@ export function buildGateway(opts: RegistryOptions = {}): HarnessGateway {
  * only when the harness has no truth source at all. Fails soft — adapter
  * models() already swallows network/auth errors and returns [].
  */
+export async function harnessModelTruth(
+  harnessId: string,
+  cwd: string,
+  includeFakes = false,
+  route?: "local_session" | "api_key",
+): Promise<HarnessModelTruth> {
+  const none: ControlHarnessModelsResponse = {
+    harnessId,
+    models: [],
+    source: "none",
+    verifiedAgainst: null,
+  };
+  const adapter = buildRegistry({ includeFakes }).get(harnessId);
+  if (!adapter) return { response: none, absence: "authoritative" };
+  const manifest = await adapter.discover();
+  const absence = manifest.capabilities.model_inventory_absence ?? "authoritative";
+  if (
+    hasModelInventoryForRoute(adapter, manifest.capabilities.model_inventory_routes, route ?? null)
+  ) {
+    // A live enumeration already reflects the credentials it ran under; the
+    // route filter applies to manifest annotations only.
+    const models = await adapter.models({
+      cwd,
+      ...(route
+        ? { authPreference: route === "api_key" ? ("api_key" as const) : ("subscription" as const) }
+        : {}),
+    });
+    const rows = models.map(({ processing: _processing, ...model }) => ({
+      ...model,
+      routes: model.routes ?? null,
+    }));
+    const hintsOnly = answeredOnlyHints(rows);
+    return {
+      response: {
+        harnessId,
+        models: rows,
+        source: hintsOnly ? "manifest" : "api",
+        verifiedAgainst: hintsOnly ? manifest.capabilities.known_models_verified_against : null,
+      },
+      absence,
+    };
+  }
+  const known = manifest.capabilities.known_models.filter((entry) =>
+    // Route filter (one matcher shape with the governance gate): a bare string
+    // is every-route; an annotated entry must include the requested route.
+    typeof entry === "string" ? true : route === undefined || entry.routes.includes(route),
+  );
+  if (known.length === 0) return { response: none, absence };
+  return {
+    response: {
+      harnessId,
+      models: known.map((entry) =>
+        typeof entry === "string"
+          ? { id: entry, label: null, context_window: null, routes: null }
+          : { id: entry.id, label: null, context_window: null, routes: entry.routes },
+      ),
+      source: "manifest",
+      verifiedAgainst: manifest.capabilities.known_models_verified_against,
+    },
+    absence,
+  };
+}
+
+/** A producer that labels its rows (`origin`) and answered ONLY hint rows could
+ * not read the vendor: that is manifest truth with its frozen freshness stamp,
+ * never a live `api` claim (INV-104) — on the unscoped listing and on every
+ * account row alike. Producers that emit no `origin` are live by definition. */
+function answeredOnlyHints(rows: readonly { origin?: string | undefined }[]): boolean {
+  return rows.length > 0 && rows.every((row) => row.origin === "hint");
+}
+
+/** The unscoped model list alone (the wire shape of `/harnesses/:id/models`). */
 export async function harnessModels(
   harnessId: string,
   cwd: string,
   includeFakes = false,
   route?: "local_session" | "api_key",
 ): Promise<ControlHarnessModelsResponse> {
-  const adapter = buildRegistry({ includeFakes }).get(harnessId);
-  if (!adapter) {
-    return { harnessId, models: [], source: "none", verifiedAgainst: null };
-  }
-  if (typeof adapter.models === "function") {
-    // A live enumeration already reflects the credentials it ran under; the
-    // route filter applies to manifest annotations only.
-    const models = await adapter.models({ cwd });
-    return {
-      harnessId,
-      models: models.map((m) => ({ ...m, routes: m.routes ?? null })),
-      source: "api",
-      verifiedAgainst: null,
-    };
-  }
-  const manifest = await adapter.discover();
-  const known = manifest.capabilities.known_models.filter((entry) =>
-    // Route filter (one matcher shape with the governance gate): a bare string
-    // is every-route; an annotated entry must include the requested route.
-    typeof entry === "string" ? true : route === undefined || entry.routes.includes(route),
+  return (await harnessModelTruth(harnessId, cwd, includeFakes, route)).response;
+}
+
+/**
+ * Judge one explicit model against a harness's truth: ONE owner for the
+ * (list, source, declaration) triple that the settings write, the doctor's
+ * configured-model readiness and the capability catalog used to assemble by
+ * hand — and were silently strict for every harness (INV-104). An
+ * authoritative harness refuses a miss; an advisory one admits it with the
+ * `unverified` note the caller surfaces.
+ */
+export function checkHarnessModelTruth(truth: HarnessModelTruth, model: string): ModelCheck {
+  return validateModel(
+    model,
+    truth.response.models.map((entry) => entry.id),
+    truth.response.source === "api" ? "api" : "manifest",
+    truth.absence,
   );
-  if (known.length === 0) {
-    return { harnessId, models: [], source: "none", verifiedAgainst: null };
+}
+
+/** `harnessModelTruth` + `checkHarnessModelTruth` for callers holding one model. */
+export async function checkHarnessModel(
+  harnessId: string,
+  model: string,
+  cwd: string,
+  includeFakes = false,
+): Promise<{ truth: ControlHarnessModelsResponse; check: ModelCheck }> {
+  const truth = await harnessModelTruth(harnessId, cwd, includeFakes);
+  return { truth: truth.response, check: checkHarnessModelTruth(truth, model) };
+}
+
+/** Opt-in account inventory. The legacy unscoped CLI/model list above keeps its exact contract. */
+export async function harnessAccountModels(
+  input: AccountCatalogContext & {
+    harnessId: string;
+    cwd: string;
+    credentialProfileId?: string;
+    route?: "local_session" | "api_key";
+    registry?: AdapterRegistry;
+  },
+): Promise<ControlHarnessAccountModelsResponse> {
+  const adapter = (input.registry ?? buildRegistry({ includeFakes: false })).get(input.harnessId);
+  const profiles = catalogProfiles(input, input.harnessId, input.credentialProfileId);
+  // The account view is explicitly route-scoped. Keep the durable account
+  // rows separate, but do not enumerate a credential from the other route.
+  // A conflicting explicit pin is a typed unavailable account rather than a
+  // silent cross-route fallback.
+  const routeProfiles = input.route
+    ? profiles.filter(
+        (profile) =>
+          (profile.credential_kind === "api_key" ? "api_key" : "local_session") === input.route,
+      )
+    : profiles;
+  if (input.route && routeProfiles.length === 0 && input.credentialProfileId) {
+    throw Object.assign(
+      new Error("The pinned catalog account does not support the requested route"),
+      {
+        code: "model_account_unavailable",
+        status: 409,
+        retryable: false,
+      },
+    );
   }
-  return {
-    harnessId,
-    models: known.map((entry) =>
-      typeof entry === "string"
-        ? { id: entry, label: null, context_window: null, routes: null }
-        : { id: entry.id, label: null, context_window: null, routes: entry.routes },
-    ),
-    source: "manifest",
-    verifiedAgainst: manifest.capabilities.known_models_verified_against,
-  };
+  // Discovery is host-level capability data, shared by this request's rows.
+  let manifestPromise: ReturnType<HarnessAdapter["discover"]> | undefined;
+  const accounts = await enumerateAccountCatalogs({
+    context: input,
+    adapter,
+    profiles: routeProfiles,
+    read: async (profile, canReadCatalog) => {
+      if (!adapter) return null;
+      const manifest = await (manifestPromise ??= adapter.discover());
+      const route = profile.credential_kind === "api_key" ? "api_key" : "local_session";
+      if (
+        canReadCatalog &&
+        hasModelInventoryForRoute(adapter, manifest.capabilities.model_inventory_routes, route)
+      ) {
+        const models = await adapter.models({ cwd: input.cwd, credentialProfile: profile });
+        // The legacy array API also returns [] on transport failures; it is
+        // not a receipt proving this account has an empty vendor inventory.
+        if (models.length === 0) return null;
+        // A profile probe that could not read the vendor answers hint rows
+        // only; that account row is manifest truth, not a live enumeration.
+        const hintsOnly = answeredOnlyHints(models);
+        return {
+          harnessId: input.harnessId,
+          credentialProfileId: profile.profile_id,
+          models: models.map((model) => ({ ...model, routes: model.routes ?? null })),
+          source: hintsOnly ? ("manifest" as const) : ("api" as const),
+          verifiedAgainst: hintsOnly ? manifest.capabilities.known_models_verified_against : null,
+          // models() may reuse a provider-owned cache and carries no observation receipt.
+          observedAt: null,
+          provenance: hintsOnly ? "manifest" : "adapter_models",
+        };
+      }
+      const known = manifest.capabilities.known_models.filter(
+        (entry) => typeof entry === "string" || entry.routes.includes(route),
+      );
+      if (known.length === 0) return null;
+      return {
+        harnessId: input.harnessId,
+        credentialProfileId: profile.profile_id,
+        models: known.map((entry) =>
+          typeof entry === "string"
+            ? { id: entry, label: null, context_window: null, routes: null }
+            : { id: entry.id, label: null, context_window: null, routes: entry.routes },
+        ),
+        source: "manifest" as const,
+        verifiedAgainst: manifest.capabilities.known_models_verified_against,
+        observedAt: null,
+        provenance: "manifest",
+      };
+    },
+  });
+  return ControlHarnessAccountModelsResponse.parse({
+    harnessId: input.harnessId,
+    accounts,
+    partial: accounts.some((entry) => entry.catalog === null),
+  });
 }

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { ChildStdin, InteractionChannel } from "@claudexor/core";
 import { readVerifiedAttachmentBytes } from "@claudexor/core";
 import type {
@@ -28,6 +29,14 @@ type Json = any;
  * The control channel only activates with `--permission-prompt-tool stdio`;
  * without it the headless CLI auto-denies interactive tools itself.
  */
+
+/**
+ * Request id of the ONE initialize handshake this adapter sends. Interactive
+ * runs write it as the first stdin frame; the prompt-free model probe sends the
+ * same frame alone and selects the CLI's answer by this id (hook frames may
+ * precede it), so both must share one literal.
+ */
+export const CLAUDE_INIT_REQUEST_ID = "req_claudexor_init";
 
 export function isControlRequestFrame(obj: Json): boolean {
   return obj?.type === "control_request";
@@ -72,18 +81,37 @@ export function claudeAttachmentBlocks(
   });
 }
 
-/** Initial user message frame for `--input-format stream-json` sessions. */
-export function initialUserMessageFrame(
-  prompt: string,
+/**
+ * One stream-json user message frame (`--input-format stream-json`). The
+ * `uuid` is the CLI's identity for the message: with `--replay-user-messages`
+ * the CLI echoes the frame back as `{type:"user", isReplay:true, uuid}` and
+ * lists every consumed uuid in `result.user_message_uuids` — the receipts the
+ * live-input owner (live-input.ts) correlates. Shape recorded on 2.1.283.
+ */
+export function userMessageFrame(
+  text: string,
+  uuid: string,
   attachments: ClaudeAttachmentBlock[] = [],
 ): string {
-  const content = [{ type: "text", text: prompt }, ...attachments];
+  const content = [{ type: "text", text }, ...attachments];
   return (
     JSON.stringify({
       type: "user",
       message: { role: "user", content },
+      parent_tool_use_id: null,
+      uuid,
     }) + "\n"
   );
+}
+
+/** Initial user message frame; its own uuid keeps its replay echo identifiable
+ * (and ignored) beside the live messages' echoes. */
+export function initialUserMessageFrame(
+  prompt: string,
+  attachments: ClaudeAttachmentBlock[] = [],
+  uuid: string = randomUUID(),
+): string {
+  return userMessageFrame(prompt, uuid, attachments);
 }
 
 /**
@@ -99,7 +127,7 @@ export function initialSessionFrames(
 ): string {
   const initialize = JSON.stringify({
     type: "control_request",
-    request_id: "req_claudexor_init",
+    request_id: CLAUDE_INIT_REQUEST_ID,
     request: { subtype: "initialize" },
   });
   return initialize + "\n" + initialUserMessageFrame(prompt, attachments);

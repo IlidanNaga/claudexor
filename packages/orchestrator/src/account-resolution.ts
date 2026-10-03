@@ -3,6 +3,8 @@ import type {
   CredentialProfile,
   CredentialProfileStatus,
   CredentialUnusableObservation,
+  ModelSubstitutionObservation,
+  PreProgressRefusalObservation,
   QuotaSnapshot,
 } from "@claudexor/schema";
 import { accountPoolRows, selectFromAccountPool } from "./account-pool.js";
@@ -85,6 +87,14 @@ export interface AccountResolutionContext {
    * refused at the readiness composition point, never re-discovered by
    * spending an attempt. */
   unusable: readonly CredentialUnusableObservation[];
+  /** Live model-substitution observations, passed by model operations only.
+   * They order the unbound pool choice below; a pin and a usable bound
+   * account are resolved before them and never consult them. */
+  substitutions?: readonly ModelSubstitutionObservation[];
+  /** Live pre-progress refusal observations (#363): they order the unbound
+   * pool choice exactly like substitutions and never reach a pin or a usable
+   * bound account. */
+  refusals?: readonly PreProgressRefusalObservation[];
   probe: ((profile: CredentialProfile) => Promise<CredentialProfileStatus>) | undefined;
   /** The explicit pin, already resolved/validated by the caller (null = unpinned). */
   pinnedProfile: CredentialProfile | null;
@@ -428,9 +438,11 @@ export async function resolveAccountForRun(
         harnessId,
         probe: ctx.probe,
         quota,
-        // A durable binding is already selected, like an explicit pin. Pool
-        // rotation below remains fresh-only.
+        // A durable binding is already selected, like an explicit pin, yet it
+        // is unpinned: it may also consume a last positive after a timeout.
+        // Pool rotation below admits only that stale basis (INV-135 #363).
         allowStale: true,
+        unpinned: true,
       });
       const breach = profileHeadroomBreach(
         snapshots,
@@ -466,6 +478,8 @@ export async function resolveAccountForRun(
     excludedProfileIds: ctx.excludedProfileIds,
     headroomThreshold: policy.headroom_threshold,
     model,
+    substitutions: ctx.substitutions,
+    refusals: ctx.refusals,
   });
   if (selection.outcome === "selected") {
     const chosen = selection.candidate.profile;

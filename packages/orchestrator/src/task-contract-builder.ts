@@ -6,6 +6,7 @@ import type {
   ExternalContextPolicy,
   ModeKind,
   PaidBudget,
+  ProcessingPreference,
   ProtectedPathApproval,
   RoutingGoal,
   TestCommandInvocation,
@@ -27,6 +28,11 @@ interface TaskContractBuildInput {
   instructions?: string;
   baseRef?: string;
   delegate?: boolean;
+  /** Wire `execution.delegated`: an EXTERNAL orchestrator owns this workspace
+   *  and carries its own authority. Unrelated to the `delegate` belt flag above
+   *  and to `delegatedFromRunId` (belt-child provenance). Already carried on
+   *  RunInput (orchestrator.ts) — declared here so the trust gate can read it. */
+  delegated?: boolean;
   parentRunId?: string | null;
   delegatedFromRunId?: string | null;
   tests?: TestCommandInvocation[];
@@ -43,6 +49,7 @@ interface TaskContractBuildInput {
   maxTurns?: number | null;
   models?: Record<string, string>;
   efforts?: Record<string, EffortHint>;
+  processingPreference?: ProcessingPreference;
 }
 
 export interface TaskContractDefaults {
@@ -66,12 +73,34 @@ export function buildTaskContract(
   const requestedAccess = access.requested;
   // Effective access is COMPUTED by the engine, never echoed from a client.
   const effectiveAccess: AccessProfile = access.effective;
-  // TrustConfig is USER-LEVEL only (versioned repo config must never
-  // self-grant sensitive powers): unsandboxed full access requires an
-  // explicit allow in ~/.claudexor trust settings — loud error, no downgrade.
-  // The gate applies to the EFFECTIVE profile: a read-only run clamped to
-  // readonly never runs unsandboxed and needs no trust allow.
-  if (effectiveAccess === "full" && !resolvedCfg.trust.allow_full_access) {
+  // The full-access allow is a CONSENT CEREMONY for the operator sitting at a
+  // surface (the app's one-time grant, `claudexor trust --allow-full-access`):
+  // a loud error, never a silent downgrade. Versioned repo config still cannot
+  // self-grant it (ProjectConfig structurally excludes the sensitive trust
+  // settings). Through the narrow control/CLI surface the ACCESS DEFAULT can
+  // only be readonly|workspace_write and the full-access grant is a separate
+  // explicit field; a hand-edited user-level trust file may itself carry
+  // `access_default: full`, which still faces this gate on a non-delegated run.
+  //
+  // A run marked `execution.delegated` skips it: an external orchestrator owns
+  // the workspace and carries its own authority. What that buys differs by
+  // caller, so state both honestly. A control-API client holds the daemon token
+  // and can already POST /v2/trust to grant itself the allow, so the second
+  // ceremony bought nothing there. An MCP tool caller is the HOST'S MODEL: it
+  // holds no token and has no trust-writing tool, so for it this marker is a
+  // real widening — one call with `delegated: true` and `access: "full"` runs
+  // unsandboxed native full on any `repoPath` with no grant, and the only
+  // remaining control is the host's own MCP tool-approval policy. Kept anyway
+  // per INV-122: prefer the broad capability plus an accurate residual over a
+  // weaker second boundary. The residual is disclosed in SECURITY.md.
+  //
+  // The gate applies to the EFFECTIVE profile either way, so a run clamped to
+  // readonly never runs unsandboxed and needs no allow.
+  if (
+    effectiveAccess === "full" &&
+    input.delegated !== true &&
+    !resolvedCfg.trust.allow_full_access
+  ) {
     // Typed refusal: the `code` rides the daemon job record onto the thread
     // turn (TurnEnqueueError.code), so surfaces key remedies on the CODE —
     // never on substring-matching this human message.
@@ -182,5 +211,6 @@ export function buildTaskContract(
     // verbatim so TaskContract construction cannot re-read a later Settings
     // state or leave pure Auto routing as a drift seam.
     routing_efforts: input.efforts ?? {},
+    processing_preference: input.processingPreference,
   });
 }

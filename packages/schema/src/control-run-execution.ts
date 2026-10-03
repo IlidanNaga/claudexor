@@ -1,4 +1,5 @@
 import { z } from "zod/v3";
+import { WorkspaceKind, WorkspaceScopePath } from "./files-manifest.js";
 
 export const RunExecution = z
   .object({
@@ -19,6 +20,15 @@ export const RunExecution = z
       .optional()
       .describe(
         "Absolute existing execution workspace for a project-scoped delegated agent live run. The stable project identity remains scope.root.",
+      ),
+    workspaceKind: WorkspaceKind.optional().describe(
+      "Explicit directory execution needs no Git initialization; omission preserves existing clients.",
+    ),
+    scopePaths: z
+      .array(WorkspaceScopePath)
+      .optional()
+      .describe(
+        "Agent-selected input footprint. Directory copies materialize this entire selection; direct runs need no whole-tree baseline.",
       ),
   })
   .strict()

@@ -64,7 +64,7 @@ public struct RunOutcomeFacts: Codable, Sendable, Equatable, Hashable {
     /// succeeded | failed | cancelled | interrupted
     public let lifecycle: String
     /// True when the run finished without changing any files (the ex `no_op`).
-    public let noChanges: Bool
+    public let noChanges: Bool?
     /// ChecksState: not_configured | passed | failed | ...
     public let checks: String
     /// ReviewState: not_run | approved | blocked | ...
@@ -79,7 +79,7 @@ public struct RunOutcomeFacts: Codable, Sendable, Equatable, Hashable {
         case reviewRequested = "review_requested"
     }
 
-    public init(lifecycle: String, noChanges: Bool, checks: String, review: String, reason: String?, reviewRequested: Bool? = nil) {
+    public init(lifecycle: String, noChanges: Bool?, checks: String, review: String, reason: String?, reviewRequested: Bool? = nil) {
         self.lifecycle = lifecycle
         self.noChanges = noChanges
         self.checks = checks

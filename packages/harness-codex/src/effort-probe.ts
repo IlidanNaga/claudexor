@@ -20,8 +20,10 @@
 import { spawn } from "node:child_process";
 import type { HarnessEvent, HarnessRunSpec, ModelEffortCapability } from "@claudexor/schema";
 import { EffortHint, effortLevelsForModel, mergeEffortLadders } from "@claudexor/schema";
-import { resolveEffort } from "@claudexor/core";
+import { effortRankLadder, resolveEffort } from "@claudexor/core";
 import { nowIso } from "@claudexor/util";
+import { readCodexProcessingModels } from "./processing.js";
+import type { ProcessingCapability, HarnessModel } from "@claudexor/schema";
 import { BIN, probeEnv } from "./missing-cli.js";
 import { CODEX_VENDOR_CLI_VERSION } from "./vendor-cli-version.js";
 
@@ -36,18 +38,20 @@ export type CodexEffortCapability = Record<string, ModelEffortCapability>;
  */
 export interface CodexEffortCatalog {
   models: CodexEffortCapability;
-  /** `model/list` entry flagged `isDefault: true`; null when the vendor marked none. */
+  /** Vendor default; null when none is advertised. */
   defaultModel: string | null;
+  /** Listed models whose effort metadata was absent, distinct from an empty array. */
+  unverifiedModels?: string[];
+  processing?: Record<string, ProcessingCapability>;
+  nativeModels?: HarnessModel[];
 }
-
 /**
- * Recorded fallback coverage: the pinned CLI's visible `model/list` capture,
- * plus unchanged ladders retained from historical account captures. Presence
- * is a union, not a claim that every account advertises every model: the
- * freshness gate checks live entries while permitting snapshot-only entries.
- * Used ONLY when the live probe cannot answer; it is vendor evidence, never an
- * allow-list this repo maintains by hand. `defaultModel` comes from the pinned
- * CLI capture; historical defaults do not override its `isDefault: true`.
+ * Recorded fallback: the pinned CLI's visible `model/list` capture plus ladders
+ * retained from historical account captures — a union, not a claim that every
+ * account advertises every model (the freshness gate checks live entries and
+ * permits snapshot-only ones). Used ONLY when the live probe cannot answer;
+ * vendor evidence, never a hand-kept allow-list. `defaultModel` is the pinned
+ * capture's `isDefault: true`; historical defaults never override it.
  */
 export const CODEX_EFFORT_SNAPSHOT: CodexEffortCatalog = {
   models: {
@@ -55,6 +59,8 @@ export const CODEX_EFFORT_SNAPSHOT: CodexEffortCatalog = {
       levels: ["low", "medium", "high", "xhigh", "max", "ultra"],
       default: "medium",
     },
+    "gpt-6-sol": { levels: ["low", "medium", "high", "xhigh", "max", "ultra"], default: "medium" },
+    "gpt-6-luna": { levels: ["low", "medium", "high", "xhigh", "max"], default: "medium" },
     "gpt-5.6-sol": {
       levels: ["low", "medium", "high", "xhigh", "max", "ultra"],
       default: "low",
@@ -74,9 +80,8 @@ export const CODEX_EFFORT_SNAPSHOT: CodexEffortCatalog = {
 };
 
 /** Vendor CLI version `CODEX_EFFORT_SNAPSHOT` was captured from. Aliases the
- * per-package vendor-version SSOT (vendor-cli-version.ts), the same constant
- * the remote installer pins — the freshness gate and the installed bytes can
- * never disagree about which version this release vouches for. */
+ * vendor-version SSOT (vendor-cli-version.ts) the remote installer pins, so the
+ * freshness gate and the installed bytes vouch for one version. */
 export const CODEX_EFFORT_SNAPSHOT_VERIFIED_AGAINST: string = CODEX_VENDOR_CLI_VERSION;
 
 /**
@@ -118,11 +123,8 @@ const MALFORMED = Symbol("malformed-effort-entry");
 /**
  * Shape-check one `model/list` entry; never throws.
  *
- * ABSENCE is skipped (`null`): no id, no `supportedReasoningEfforts` array, an
- * array member without the field, an empty list — a model with no effort surface
- * is ordinary vendor output. A PRESENT value that is not an `EffortHint` is
- * MALFORMED, because `EffortHint` is the wire contract every consumer downstream
- * enforces, right up to `HarnessManifest.parse`.
+ * Missing metadata is unverified; an explicit empty array is known empty.
+ * A malformed member poisons the probe instead of publishing a partial ladder.
  */
 function readEntry(raw: ModelListEntry): [string, ModelEffortCapability] | null | typeof MALFORMED {
   if (typeof raw.id !== "string" || raw.id.trim() === "") return null;
@@ -130,12 +132,11 @@ function readEntry(raw: ModelListEntry): [string, ModelEffortCapability] | null 
   const levels: EffortHint[] = [];
   for (const item of raw.supportedReasoningEfforts) {
     const level = (item as { reasoningEffort?: unknown })?.reasoningEffort;
-    if (level === undefined) continue;
+    if (level === undefined) return MALFORMED;
     const parsed = EffortHint.safeParse(level);
     if (!parsed.success) return MALFORMED;
     if (!levels.includes(parsed.data)) levels.push(parsed.data);
   }
-  if (levels.length === 0) return null;
   // An absent default is normal (the vendor omits it, or sends an empty string);
   // a present one must be a real level, since it is published as the manifest's
   // per-model `default` and read back through the same schema.
@@ -169,24 +170,30 @@ function readEntry(raw: ModelListEntry): [string, ModelEffortCapability] | null 
 export function readModelListEfforts(data: unknown): CodexEffortCatalog | null {
   if (!Array.isArray(data)) return null;
   const capability: CodexEffortCapability = {};
+  const unverifiedModels: string[] = [];
   let defaultModel: string | null = null;
   for (const raw of data) {
     const listed = raw as ModelListEntry;
     const entry = readEntry(listed);
     if (entry === MALFORMED) return null;
-    // TWO separate facts per entry. `isDefault` is model IDENTITY and is read
-    // even when the entry contributes no ladder: a default model that
-    // advertises no effort surface is still the model a hint-less run executes
-    // on, and dropping its identity with its (nonexistent) ladder silently
-    // re-validated hint-less runs against the harness-wide union — the exact
-    // bug the default-model narrowing exists to prevent.
+    // Default identity survives missing effort metadata.
     if (listed.isDefault === true && typeof listed.id === "string" && listed.id.trim() !== "") {
       defaultModel ??= listed.id;
     }
-    if (!entry) continue;
+    if (!entry) {
+      if (typeof listed.id === "string" && listed.id.trim()) unverifiedModels.push(listed.id);
+      continue;
+    }
     capability[entry[0]] = entry[1];
   }
-  return Object.keys(capability).length > 0 ? { models: capability, defaultModel } : null;
+  return Object.keys(capability).length > 0 || unverifiedModels.length > 0
+    ? {
+        models: capability,
+        defaultModel,
+        ...(unverifiedModels.length ? { unverifiedModels } : {}),
+        ...readCodexProcessingModels(data),
+      }
+    : null;
 }
 
 /**
@@ -428,12 +435,7 @@ export async function codexEffortsForEnv(
 }
 
 /**
- * The full outcome of resolving one (model, requested) pair against a catalog:
- * what to send, whether the merged vendor order MOVED it there, and which
- * model's ladder decided. `codexEffortFor` keeps only the level for the arg
- * builder; the disclosure seams need the other two facts, because a CLAMP is a
- * changed setting the user asked for differently (INV-105) even though a flag
- * is still sent.
+ * Internal projection for arg builders; the run emits the shared typed receipt.
  */
 export interface CodexEffortResolution {
   /** The level to send, or null when no flag should be sent at all. */
@@ -450,48 +452,46 @@ export interface CodexEffortResolution {
  * vendor order (`ultra` on gpt-5.4 → `xhigh` because the merged codex ladder
  * places it), anything else sends no flag at all.
  *
- * If a future catalog ever contains two models whose advertised orders
- * genuinely contradict each other, there is no honest merged rank — so
- * cross-model clamping is treated as IMPOSSIBLE (the ladder collapses to the
- * model's own list) and an unadvertised level is refused rather than clamped
- * along an order this repo would have had to invent.
+ * Inconsistent/incomparable vendor lists cannot authorize a substitution.
  */
 export function codexEffortResolution(
   catalog: CodexEffortCatalog,
   model: string | null | undefined,
   requested: EffortHint | null | undefined,
 ): CodexEffortResolution {
+  const { effectiveModel, advertised, ladder, unverifiable } = codexEffortInputs(catalog, model);
+  const check = resolveEffort(requested, unverifiable ? [] : advertised, ladder);
+  if (check.status !== "ok") return { effort: null, clamped: false, effectiveModel };
+  return { effort: check.effort, clamped: check.clamped, effectiveModel };
+}
+
+/** Shared capability inputs for arg builders and the typed run receipt. */
+export function codexEffortInputs(catalog: CodexEffortCatalog, model: string | null | undefined) {
   const merged = mergeEffortLadders(Object.values(catalog.models).map((entry) => entry.levels));
-  // No model hint does NOT mean "any model": codex runs the catalog's DEFAULT
-  // model (`model/list` isDefault), so the requested level is held to THAT
-  // model's ladder. Validating a hint-less run against the harness-wide union
-  // let a sibling-only level (`ultra`) ride into a default model that rejects
-  // it. A catalog with no recorded default keeps the union fallback — the
-  // broadest honest set when the effective model is genuinely unknown.
-  //
-  // A default model the catalog recorded WITHOUT a ladder is different from an
-  // unknown model: the vendor listed it and advertised no effort surface, so
-  // its ladder is KNOWN-EMPTY, not unknown. `effortLevelsForModel`'s union
-  // fallback would clamp against sibling ladders the run never executes on;
-  // an empty advertised set instead sends no flag, and the caller's INV-105
-  // seam (`codexEffortIgnoredEvent`) discloses the dropped setting.
+  // Final model identity narrows accepted values, including known empty arrays.
+  // Missing metadata on a listed model cannot borrow a sibling's capability;
+  // a genuinely unlisted advisory model retains the existing union fallback.
   const effectiveModel = model ?? catalog.defaultModel;
-  const defaultKnownEffortless =
+  const unverifiable =
     effectiveModel != null &&
-    effectiveModel === catalog.defaultModel &&
-    !(effectiveModel in catalog.models);
-  const advertised = defaultKnownEffortless
+    (catalog.unverifiedModels?.includes(effectiveModel) === true ||
+      (effectiveModel === catalog.defaultModel && !(effectiveModel in catalog.models)));
+  const advertised = unverifiable
     ? []
-    : effortLevelsForModel(
+    : ((effectiveModel != null ? catalog.models[effectiveModel]?.levels : undefined) ??
+      effortLevelsForModel(
         {
           effort_levels: [...merged.order, ...merged.unconstrained],
           model_effort_levels: catalog.models,
         },
         effectiveModel,
-      );
-  const check = resolveEffort(requested, advertised, merged.consistent ? merged.order : advertised);
-  if (check.status !== "ok") return { effort: null, clamped: false, effectiveModel };
-  return { effort: check.effort, clamped: check.clamped, effectiveModel };
+      ));
+  return {
+    effectiveModel,
+    advertised,
+    unverifiable,
+    ladder: effortRankLadder(Object.values(catalog.models).map((entry) => entry.levels)),
+  };
 }
 
 /**
@@ -532,13 +532,13 @@ export function codexEffortIgnoredEvent(
   const detail =
     Object.keys(catalog.models).length > 0
       ? `effort=${spec.effort_hint} (not accepted by the codex catalog resolved for this run's ` +
-        `environment${target ? ` on model ${target}` : ""}; the run used the vendor default)`
+        `environment${target ? ` on model ${target}` : ""}; no effort flag is prepared; the vendor default is left unspecified)`
       : `effort=${spec.effort_hint} (could not be verified against the installed codex CLI: ` +
         "the live model/list probe could not answer, and the recorded snapshot was captured " +
         `from CLI ${CODEX_EFFORT_SNAPSHOT_VERIFIED_AGAINST}, a different version, ` +
-        "so no effort flag was sent; the run used the vendor default)";
+        "so no effort flag is prepared; the vendor default is left unspecified)";
   return {
-    type: "message",
+    type: "status",
     session_id: spec.session_id,
     ts: nowIso(),
     text: `[effort] ignored: ${detail}`,
@@ -579,9 +579,9 @@ export function codexEffortClampedEvent(
   const detail =
     `effort=${spec.effort_hint} (clamped to ${resolved.effort}: the requested level is not ` +
     `advertised by${resolved.effectiveModel ? ` model ${resolved.effectiveModel}` : " the resolved model"}, ` +
-    `so the run sent ${resolved.effort}, the nearest level that model advertises)`;
+    `so preparation selected ${resolved.effort}, the resolved supported level)`;
   return {
-    type: "message",
+    type: "status",
     session_id: spec.session_id,
     ts: nowIso(),
     text: `[effort] clamped: ${detail}`,

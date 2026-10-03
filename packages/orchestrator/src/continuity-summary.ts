@@ -20,8 +20,9 @@ import {
   type CredentialProfile,
   type HarnessEvent as HarnessEventType,
 } from "@claudexor/schema";
-import { AnswerAssembly, type HarnessAdapter } from "@claudexor/core";
+import { AnswerAssembly, type HarnessAdapter, type ProcessingAdmission } from "@claudexor/core";
 import type { ContinuityTurn } from "./continuity.js";
+import { admitCurrentProfileDispatch, type ModelGovernedRoute } from "./modelGovernance.js";
 
 /** Default wall-clock ceiling for one inline summary pass. */
 export const SUMMARY_TIMEOUT_MS = 60_000;
@@ -45,6 +46,16 @@ export interface SummaryRunParams {
   /** Upper bound on the pass; the caller's run signal aborts it too. */
   timeoutMs?: number;
   signal?: AbortSignal;
+  /** Captured route processing facts for this logical summary pass. */
+  processing?: Pick<
+    HarnessRunSpec,
+    "processing_preference" | "processing" | "processing_cost_basis" | "processing_allow_paid"
+  >;
+  /** The same lease-bound admission callback as the enclosing candidate. */
+  processingAdmission?: ProcessingAdmission;
+  physicalDispatchStarted?: () => void;
+  billingVerificationForProfile?: ModelGovernedRoute["billingVerificationForProfile"];
+  paidFallback?: ModelGovernedRoute["paidFallback"];
 }
 
 function boundBytes(text: string, maxBytes: number): string {
@@ -111,8 +122,25 @@ export async function summarizeThreadPrefix(params: SummaryRunParams): Promise<s
       attachments: [],
       browser: null,
       stream_deltas: false,
-      extra: { abortSignal: abort.signal },
+      ...(params.processing?.processing_preference !== undefined
+        ? { processing_preference: params.processing.processing_preference }
+        : {}),
+      ...(params.processing?.processing !== undefined
+        ? { processing: params.processing.processing }
+        : {}),
+      ...(params.processing?.processing_cost_basis !== undefined
+        ? { processing_cost_basis: params.processing.processing_cost_basis }
+        : {}),
+      ...(params.processing?.processing_allow_paid !== undefined
+        ? { processing_allow_paid: params.processing.processing_allow_paid }
+        : {}),
+      extra: {
+        abortSignal: abort.signal,
+        ...(params.processingAdmission ? { processingAdmission: params.processingAdmission } : {}),
+        markPhysicalDispatchStarted: params.physicalDispatchStarted,
+      },
     });
+    await admitCurrentProfileDispatch(params, spec);
     for await (const raw of params.adapter.run(spec)) {
       if (abort.signal.aborted) return null;
       const event = raw as HarnessEventType;

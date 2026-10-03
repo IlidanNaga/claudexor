@@ -1,3 +1,4 @@
+import { credentialMutationWindowOpen } from "@claudexor/core";
 import type { CredentialUnusableObservation, HarnessEvent } from "@claudexor/schema";
 import { CredentialUnusableObservation as CredentialUnusableObservationSchema } from "@claudexor/schema";
 
@@ -30,16 +31,23 @@ const MAX_ROWS = 64;
  *    `clearDefaultSubjects`, wired beside the daemon's status-cache busting).
  *    Clearing is always fail-open — a lost observation costs at
  *    most one attempt rediscovering a refusal, while a stale one poisons
- *    rotation.
+ *    rotation;
+ * 4. no verdict is recorded while a login may be rewriting that harness's
+ *    credential store (the daemon's setup-lifecycle window, #363): it would be
+ *    about a credential in flux, and the window's close clears the ledger.
  */
 export class CredentialUnusableLedger {
   private rows = new Map<string, CredentialUnusableObservation>();
 
-  constructor(private readonly now: () => Date = () => new Date()) {}
+  constructor(
+    private readonly now: () => Date = () => new Date(),
+    private readonly mutating: (harnessId: string) => boolean = credentialMutationWindowOpen,
+  ) {}
 
   /** Validate, clamp to the TTL bound, newest-wins per (subject, model). */
   record(value: CredentialUnusableObservation): void {
     const obs = CredentialUnusableObservationSchema.parse(value);
+    if (this.mutating(obs.harness_id)) return;
     const observed = Date.parse(obs.observed_at);
     const cap = (Number.isFinite(observed) ? observed : this.now().getTime()) + MAX_TTL_MS;
     const expires = Math.min(Date.parse(obs.expires_at), cap);

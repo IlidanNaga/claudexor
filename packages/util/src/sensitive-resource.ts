@@ -35,6 +35,11 @@ export interface SensitiveContentDecision {
   readonly text: string;
 }
 
+export interface SensitiveContentScanner {
+  write(text: string): void;
+  finish(): boolean;
+}
+
 export type SymlinkTargetKind = "directory" | "file" | "other" | "unknown";
 
 export type SensitiveSymlinkDenyReason =
@@ -251,6 +256,51 @@ export class SensitiveResourcePolicy {
 
   containsSensitiveContent(text: string): boolean {
     return this.inspectContent(text, "reject").containsSensitiveContent;
+  }
+
+  /** Streaming artifact scan over the same signatures. The rolling lexical
+   * carry handles chunk-split credentials; a private-key block retains its
+   * opening delimiter independently of its arbitrarily large body. This is a
+   * scanner buffer, never an artifact size limit or a truncated scan. */
+  createContentScanner(): SensitiveContentScanner {
+    const privateRule = CONTENT_RULES.find((rule) => rule.id === "private_key_block")!;
+    const [start, end] = privateRule.pattern.source.split("[\\s\\S]*?");
+    const opening = new RegExp(start!, "g"),
+      closing = new RegExp(end!, "g");
+    let carry = "",
+      keyOpening = "",
+      found = false;
+    return {
+      write: (text) => {
+        if (found) return;
+        const combined = carry + text;
+        if (
+          CONTENT_RULES.some((rule) => {
+            rule.pattern.lastIndex = 0;
+            return rule.pattern.test(rule.id === "aws_access_key" ? combined + "A" : combined);
+          })
+        ) {
+          found = true;
+          return;
+        }
+        const previousOpening = keyOpening;
+        opening.lastIndex = 0;
+        const begin = opening.exec(combined);
+        if (!keyOpening && begin) keyOpening = begin[0];
+        closing.lastIndex = 0;
+        const finish = closing.exec(
+          previousOpening
+            ? combined
+            : combined.slice(begin ? begin.index + begin[0].length : combined.length),
+        );
+        if (keyOpening && finish && this.containsSensitiveContent(keyOpening + finish[0])) {
+          found = true;
+          return;
+        }
+        carry = combined.slice(-4096);
+      },
+      finish: () => found || this.containsSensitiveContent(carry),
+    };
   }
 
   assessSymlink(input: SensitiveSymlinkInput): SensitiveSymlinkDecision {

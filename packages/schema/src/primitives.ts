@@ -38,7 +38,7 @@ export type RiskLevel = z.infer<typeof RiskLevel>;
 export const AccessProfile = z
   .enum(["readonly", "workspace_write", "full", "inherit_native"])
   .describe(
-    "Active filesystem/command access profile for a run: readonly (no writes), workspace_write (use the harness's native workspace-write policy), full (unrestricted; requires the per-repo trust allow), inherit_native (defer to the harness's own native settings).",
+    "Active filesystem/command access profile for a run: readonly (no writes), workspace_write (use the harness's native workspace-write policy), full (unrestricted; requires the per-repo trust allow for a run an operator starts at a surface, not for an execution.delegated run), inherit_native (defer to the harness's own native settings).",
   );
 export type AccessProfile = z.infer<typeof AccessProfile>;
 

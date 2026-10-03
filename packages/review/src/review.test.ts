@@ -13,7 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { HarnessAdapter } from "@claudexor/core";
+import { credentialProfileUnpinned, type HarnessAdapter } from "@claudexor/core";
 import type { CredentialProfile, ProviderFamily } from "@claudexor/schema";
 import {
   ConformanceReport,
@@ -172,6 +172,212 @@ describe("reviewer progress event schema contract", () => {
 });
 
 describe("sealed release native reviewer contract", () => {
+  it("reviews explicit ordinary-folder postimages with an empty diff and no Git inventory", async () => {
+    const workspace = makeReviewWorkspace();
+    mkdirSync(join(workspace.cwd, "assets"));
+    writeFileSync(join(workspace.cwd, "assets", "result.bin"), Buffer.from([0, 255, 1]));
+    writeFileSync(join(workspace.cwd, "outside.txt"), "not selected");
+    let checked = false;
+    const reviewer = makeWorkspaceProbeReviewer("file-reviewer", (cwd) => {
+      expect([...readFileSync(join(cwd, "assets", "result.bin"))]).toEqual([0, 255, 1]);
+      expect(existsSync(join(cwd, "outside.txt"))).toBe(false);
+      checked = true;
+    });
+    await reviewCandidate({
+      candidateLabel: "Folder result",
+      diff: "",
+      candidatePaths: ["assets/result.bin"],
+      ...workspace,
+      reviewers: [reviewer],
+    });
+    expect(checked).toBe(true);
+    expect(existsSync(join(workspace.cwd, ".git"))).toBe(false);
+  });
+  it("enforces the existing panel cap on streamed unknown premium amount and retains partial money", async () => {
+    const reviewer = makeReviewer("premium-budget", "anthropic", []);
+    let continued = false;
+    reviewer.adapter.run = async function* (spec) {
+      const common = {
+        session_id: spec.session_id,
+        ts: new Date().toISOString(),
+        credential_route: "vendor_native" as const,
+        processing_cost_basis: {
+          kind: "paid_credits" as const,
+          nativeMode: "fast",
+          source: "fixture",
+        },
+      };
+      yield { ...common, type: "started" as const };
+      yield {
+        ...common,
+        type: "usage" as const,
+        usage: { cost_usd: 2, cost_basis: { kind: "unknown" as const, source: "fixture" } },
+      };
+      continued = true;
+      yield { ...common, type: "message" as const, text: "```json\n[]\n```" };
+    };
+    const amounts: number[] = [];
+    const result = await reviewCandidate({
+      candidateLabel: "Candidate",
+      diff: "diff --git a/a b/a\n",
+      ...makeReviewWorkspace(),
+      reviewers: [reviewer],
+      onUsageCost: (usd) => {
+        amounts.push(usd);
+        return usd >= 1;
+      },
+    });
+    expect(amounts).toEqual([2]);
+    expect(continued).toBe(false);
+    expect(result).toMatchObject({
+      reviewSpendUsd: 2,
+      reviewCashUsd: 0,
+      reviewCashKnowledge: "unknown",
+      reviewUnknownUsd: 2,
+    });
+  });
+
+  it("reports cumulative panel spend across simultaneous reviewer indexes", async () => {
+    const reviewers = ["a", "b"].map((id) => {
+      const reviewer = makeReviewer(id, "anthropic", []);
+      reviewer.adapter.run = async function* (spec) {
+        const common = {
+          session_id: spec.session_id,
+          ts: new Date().toISOString(),
+          credential_route: "managed_api_key" as const,
+        };
+        yield { ...common, type: "started" as const };
+        yield { ...common, type: "usage" as const, usage: { cost_usd: 0.6 } };
+        yield { ...common, type: "message" as const, text: "```json\n[]\n```" };
+      };
+      return reviewer;
+    });
+    const amounts: number[] = [];
+    const result = await reviewCandidate({
+      candidateLabel: "Candidate",
+      diff: "diff --git a/a b/a\n",
+      ...makeReviewWorkspace(),
+      reviewers,
+      onUsageCost: (usd) => {
+        amounts.push(usd);
+        return usd >= 1;
+      },
+    });
+    expect(amounts).toEqual([0.6, 1.2]);
+    expect(result.reviewCashUsd).toBe(1.2);
+  });
+  it.each([
+    {
+      mode: "standard",
+      kind: "included",
+      amount: "unknown",
+      cash: "exact",
+      valuation: 0,
+      unknown: 2,
+    },
+    {
+      mode: "fast",
+      kind: "paid_credits",
+      amount: "unknown",
+      cash: "unknown",
+      valuation: 0,
+      unknown: 2,
+    },
+    {
+      mode: "fast",
+      kind: "paid_credits",
+      amount: "valuation",
+      cash: "unknown",
+      valuation: 2,
+      unknown: 0,
+    },
+  ] as const)(
+    "separates reviewer processing $mode / $amount amount from tariff billing",
+    async ({ mode, kind, amount, cash, valuation, unknown }) => {
+      const reviewer = makeReviewer("processing-reviewer", "anthropic", []);
+      reviewer.adapter.run = async function* (spec) {
+        const common = {
+          session_id: spec.session_id,
+          ts: new Date().toISOString(),
+          credential_route: "vendor_native" as const,
+          processing: {
+            requested: mode,
+            submitted: mode,
+            submittedNative: mode,
+            observed: "unknown" as const,
+            observedNative: [],
+            reason: null,
+            source: "fixture",
+          },
+          processing_cost_basis: { kind, nativeMode: mode, source: "fixture" },
+        };
+        yield { ...common, type: "started" as const };
+        yield {
+          ...common,
+          type: "usage" as const,
+          usage: { cost_usd: 2, cost_basis: { kind: amount, source: "fixture" } },
+        };
+        yield { ...common, type: "message" as const, text: "```json\n[]\n```" };
+        yield { ...common, type: "completed" as const };
+      };
+      const result = await reviewCandidate({
+        candidateLabel: "Candidate",
+        diff: "diff --git a/a b/a\n",
+        ...makeReviewWorkspace(),
+        reviewers: [reviewer],
+      });
+      expect(result).toMatchObject({
+        reviewCashUsd: 0,
+        reviewCashKnowledge: cash,
+        reviewValuationUsd: valuation,
+        reviewUnknownUsd: unknown,
+      });
+    },
+  );
+  it.each([false, true])(
+    "admits the exact prepared reviewer before native dispatch (refused=%s)",
+    async (refused) => {
+      const reviewer = makeReviewer("processing-admission-reviewer", "anthropic", []);
+      reviewer.processingPreference = "fast";
+      reviewer.adapter.prepareProcessing = async () => ({
+        model: null,
+        receipt: {
+          requested: "fast",
+          submitted: "fast",
+          submittedNative: "priority",
+          observed: "unknown",
+          observedNative: [],
+          reason: null,
+          source: "fixture",
+        },
+        costBasis: { kind: "paid_credits", nativeMode: "priority", source: "fixture" },
+      });
+      const order: string[] = [];
+      reviewer.adapter.run = async function* (spec) {
+        order.push("native");
+        yield {
+          type: "message",
+          session_id: spec.session_id,
+          ts: new Date().toISOString(),
+          text: "```json\n[]\n```",
+        };
+      };
+      await reviewCandidate({
+        candidateLabel: "Candidate",
+        diff: "diff --git a/a b/a\n",
+        ...makeReviewWorkspace(),
+        reviewers: [reviewer],
+        onBeforeDispatch: (index, actual) => {
+          expect(index).toBe(0);
+          expect(actual.processing_cost_basis?.kind).toBe("paid_credits");
+          expect(actual.processing?.submittedNative).toBe("priority");
+          order.push("admission");
+          if (refused) throw new Error("fixture budget admission refused");
+        },
+      });
+      expect(order).toEqual(refused ? ["admission"] : ["admission", "native"]);
+    },
+  );
   it("keeps the release transport schema provider-strict and semantic-free", () => {
     expect(strictifyForStructuredOutput(SEALED_REVIEW_OUTPUT_SCHEMA)).toEqual(
       SEALED_REVIEW_OUTPUT_SCHEMA,
@@ -3573,6 +3779,7 @@ describe("reviewEngine", () => {
     );
     const artifactsDir = reapMk(join(tmpdir(), "claudexor-review-artifacts-"));
     const homes = new Map<string, string>();
+    const unpinned = new Map<string, boolean>();
     const profile = (id: string, harness: string): CredentialProfile => ({
       profile_id: id,
       harness_id: harness,
@@ -3587,6 +3794,7 @@ describe("reviewEngine", () => {
       id: string,
       family: ProviderFamily,
       pinned: CredentialProfile,
+      selection: Pick<ReviewerSpec, "profilePinned"> = {},
     ): ReviewerSpec => {
       const adapter: HarnessAdapter = {
         id,
@@ -3608,6 +3816,7 @@ describe("reviewEngine", () => {
         },
         async *run(spec) {
           homes.set(id, spec.env?.HOME ?? "");
+          unpinned.set(id, credentialProfileUnpinned(spec));
           expect(spec.credential_profile?.profile_id).toBe(pinned.profile_id);
           const ts = new Date().toISOString();
           yield {
@@ -3621,7 +3830,7 @@ describe("reviewEngine", () => {
           yield { type: "completed", session_id: spec.session_id, ts };
         },
       };
-      return { adapter, providerFamily: family, credentialProfile: pinned };
+      return { adapter, providerFamily: family, credentialProfile: pinned, ...selection };
     };
 
     const res = await reviewCandidate({
@@ -3632,11 +3841,17 @@ describe("reviewEngine", () => {
       cwd: candidateRoot,
       reviewers: [
         reviewer("profile-review-a", "openai", profile("a", "profile-review-a")),
-        reviewer("profile-review-b", "anthropic", profile("b", "profile-review-b")),
+        reviewer("profile-review-b", "anthropic", profile("b", "profile-review-b"), {
+          profilePinned: false,
+        }),
       ],
     });
 
     expect(res.findings).toEqual([]);
+    // #363: only a pool-chosen seat reaches its adapter as unpinned; a seat
+    // with no pin fact keeps the strict pin contract.
+    expect(unpinned.get("profile-review-a")).toBe(false);
+    expect(unpinned.get("profile-review-b")).toBe(true);
     expect(homes.get("profile-review-a")).toBeTruthy();
     expect(homes.get("profile-review-b")).toBeTruthy();
     expect(homes.get("profile-review-a")).not.toBe(homes.get("profile-review-b"));

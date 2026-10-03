@@ -1,10 +1,11 @@
 import { flagBool, flagStr, type ParsedArgs } from "./args.js";
 
-/** The five typed RunDecisionAction values, mapped from their CLI action flags. */
+/** Typed RunDecisionAction values, mapped from their CLI action flags. */
 const ACTION_FLAGS: { flag: string; action: string }[] = [
   { flag: "accept-risk", action: "accept_risk" },
   { flag: "override", action: "override_needs_human" },
   { flag: "revert", action: "revert_run" },
+  { flag: "discard", action: "discard" },
   { flag: "accept-clean-patch", action: "accept_clean_patch" },
   { flag: "rerun", action: "rerun_with_feedback" },
 ];
@@ -27,7 +28,7 @@ export function resolveDecisionBody(args: ParsedArgs): DecisionResolution {
     return {
       ok: false,
       message:
-        "one action is required (--accept-risk | --override | --revert | --accept-clean-patch | --rerun)",
+        "one action is required (--accept-risk | --override | --revert | --discard | --accept-clean-patch | --rerun)",
     };
   }
   if (chosen.length > 1) {
