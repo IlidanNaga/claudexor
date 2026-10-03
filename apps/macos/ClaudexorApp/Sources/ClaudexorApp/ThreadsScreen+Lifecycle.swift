@@ -67,6 +67,14 @@ enum ThreadLifecycleCopy {
 
     static let deleteBusyReason =
         "A turn is running in this thread. Stop it or let it finish before deleting the thread."
+
+    /// The row menu's "Delete" title. While a turn runs the item is disabled,
+    /// and its title carries the reason itself: a disabled menu item's tooltip
+    /// is no reliable place for it on macOS.
+    static func deleteMenuTitle(busy: Bool) -> String {
+        busy ? "Delete (a turn is running)" : "Delete"
+    }
+
     static let deleteNowBusyReason =
         "A turn is still running in this thread. Delete Now becomes available when it finishes."
 
@@ -93,9 +101,17 @@ enum ThreadLifecycleCopy {
         let day = deadline.formatted(
             Date.FormatStyle(date: .abbreviated, time: .omitted)
                 .locale(Locale(identifier: "en_US_POSIX")))
-        return deadline > now
-            ? "\(place) · restorable until \(day)"
-            : "\(place) · restore period ended \(day)"
+        return restorePeriodEnded(purgeAfter: purgeAfter, now: now)
+            ? "\(place) · restore period ended \(day)"
+            : "\(place) · restorable until \(day)"
+    }
+
+    /// Whether Restore is over: the caption says so, the engine would answer
+    /// 410 `thread_trash_expired`, and the button is off. A missing or
+    /// unreadable deadline claims nothing (the engine decides).
+    static func restorePeriodEnded(purgeAfter: String?, now: Date = .now) -> Bool {
+        guard let purgeAfter, let deadline = instant(purgeAfter) else { return false }
+        return deadline <= now
     }
 
     private static func instant(_ raw: String) -> Date? {
@@ -160,7 +176,7 @@ extension ThreadsScreen {
     @ViewBuilder func threadDeleteMenuItem(_ located: LocatedThread) -> some View {
         let busy = model.isThreadBusy(located.thread.id, at: located.locationID)
         Divider()
-        Button("Delete", role: .destructive) {
+        Button(ThreadLifecycleCopy.deleteMenuTitle(busy: busy), role: .destructive) {
             Task { await model.trashThread(locationID: located.locationID, id: located.thread.id) }
         }
         .disabled(busy)
@@ -171,16 +187,22 @@ extension ThreadsScreen {
 
     /// A Trash row: what it is, how long Restore works, and the two actions.
     /// While a turn of the thread runs, "Delete Now…" is disabled and the row
-    /// says why (the engine answers 409 to every client in that state).
+    /// says why (the engine answers 409 to every client in that state). Once
+    /// the restore period has ended, Restore is disabled and the caption
+    /// already says so (the engine would answer 410).
     func trashRow(_ located: LocatedThread) -> some View {
         let thread = located.thread
         let busy = model.isThreadBusy(thread.id, at: located.locationID)
+        let now = Date.now
+        let restoreEnded = ThreadLifecycleCopy.restorePeriodEnded(
+            purgeAfter: thread.purgeAfter, now: now)
         let project = thread.repoRoot.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "No project"
         let place = model.remoteConnection(for: located.locationID)
             .map { "\($0.displayName) · \(project)" } ?? project
         return VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
             Text(thread.title ?? "Untitled thread").font(.body).lineLimit(1)
-            Text(ThreadLifecycleCopy.trashCaption(place: place, purgeAfter: thread.purgeAfter))
+            Text(ThreadLifecycleCopy.trashCaption(
+                place: place, purgeAfter: thread.purgeAfter, now: now))
                 .font(.caption).foregroundStyle(.secondary).lineLimit(1)
             HStack(spacing: Theme.Spacing.sm) {
                 Button("Restore") {
@@ -189,7 +211,10 @@ extension ThreadsScreen {
                             locationID: located.locationID, id: thread.id)
                     }
                 }
-                .help("Return this thread to the thread list")
+                .disabled(restoreEnded)
+                .help(restoreEnded
+                    ? "The restore period of this thread has ended"
+                    : "Return this thread to the thread list")
                 Button("Delete Now…", role: .destructive) { deleteNowTarget = located }
                     .disabled(busy)
                     .help(busy

@@ -512,22 +512,25 @@ frequency and volume are. The contracts:
     dialog that moves the thread to Trash (`POST /threads/:id/trash`; deleting
     the open thread returns the conversation pane to a draft). A Trash row is
     not selectable; it names the thread, where it lived and until when it can
-    be restored, and offers **Restore** (`POST /threads/:id/restore`) and
-    **Delete Now…**: a confirmation that states, for the thread's workspace
-    mode, what purge deletes and what it keeps as listed once in ARCHITECTURE
-    (thread lifecycle routes), then `POST /threads/:id/purge`. The copy has one
-    owner (`ThreadLifecycleCopy`) and never promises to erase the conversation.
-    While a turn of the thread runs, Delete and Delete Now… are disabled with
-    the reason as hover help, and a Trash row also says it in place (the
-    engine refuses that purge for every client). A refused purge (`409`)
-    leaves the thread in Trash with Restore. The engine journals a purge
-    before it deletes the thread's directories, so after any other failure or
-    a lost answer the app re-reads the list and says only what it shows: still
-    in Trash (Restore works), deleted after all (no Restore), or, when the list
-    cannot be read either, that the outcome is unconfirmed (check Trash once
-    the engine responds). A later list without the thread retires that message,
-    and a successful Restore or Delete Now clears it. No local-only thread
-    state. The sidebar's BOTTOM-LEFT
+    be restored, and offers **Restore** (`POST /threads/:id/restore`;
+    disabled once the restore period has ended, which the caption already
+    says, since the engine would answer `410`) and **Delete Now…**: a
+    confirmation that states, for the thread's workspace mode, what purge
+    deletes and what it keeps as listed once in ARCHITECTURE (thread lifecycle
+    routes), then `POST /threads/:id/purge`. The copy has one owner
+    (`ThreadLifecycleCopy`) and never promises to erase the conversation.
+    While a turn of the thread runs, Delete and Delete Now… are disabled and
+    say why in visible text, not only in hover help: the Delete menu item's
+    title names the running turn, and a Trash row states the reason under its
+    buttons (the engine refuses that purge for every client). A refused purge
+    (`409`) leaves the thread in Trash with Restore. The engine journals a
+    purge before it deletes the thread's directories, so after any other
+    failure or a lost answer the app re-reads the list and says only what it
+    shows: still in Trash (Restore works), deleted after all (no Restore), or,
+    when the list cannot be read either, that the outcome is unconfirmed
+    (check Trash once the engine responds). A later list without the thread
+    retires that message, and a successful Restore or Delete Now clears it. No
+    local-only thread state. The sidebar's BOTTOM-LEFT
     carries ONE compact accounts control (Claude-Code style, INV-135): a quiet
     single-line trigger — worst-readiness dot + the account name (or "N
     accounts") + worst quota % + chevron — that opens a popover to manage

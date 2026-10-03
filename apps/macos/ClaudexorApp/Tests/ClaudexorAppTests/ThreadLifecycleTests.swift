@@ -74,6 +74,12 @@ struct ThreadLifecycleTests {
             .hasPrefix("repo · restore period ended "))
         #expect(ThreadLifecycleCopy.trashCaption(place: "repo", purgeAfter: nil, now: now)
             == "repo · in Trash")
+        // Restore is offered exactly while the caption says it works; with no
+        // readable deadline the app claims nothing and the engine decides.
+        #expect(!ThreadLifecycleCopy.restorePeriodEnded(
+            purgeAfter: "2030-01-15T12:00:00.000Z", now: now))
+        #expect(ThreadLifecycleCopy.restorePeriodEnded(purgeAfter: "2020-01-15T12:00:00Z", now: now))
+        #expect(!ThreadLifecycleCopy.restorePeriodEnded(purgeAfter: nil, now: now))
     }
 
     // MARK: Commands
@@ -112,6 +118,9 @@ struct ThreadLifecycleTests {
 
         await model.trashThread(locationID: .local, id: "th-1")
         #expect(model.threadStatus == ThreadLifecycleCopy.deleteBusyReason)
+        // The disabled menu item names the reason in its title, not only in a tooltip.
+        #expect(ThreadLifecycleCopy.deleteMenuTitle(busy: true) == "Delete (a turn is running)")
+        #expect(ThreadLifecycleCopy.deleteMenuTitle(busy: false) == "Delete")
         await model.deleteThreadNow(locationID: .local, id: "th-2")
         #expect(model.threadStatus == ThreadLifecycleCopy.deleteNowBusyReason)
         #expect(server.recorded.isEmpty)
