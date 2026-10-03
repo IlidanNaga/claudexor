@@ -435,6 +435,31 @@ struct ThreadLifecycleTests {
         #expect(await model.refreshThreads())
         #expect(model.threadStatus == banner)
     }
+
+    @MainActor
+    @Test func aBannerThatALaterOperationClearedDoesNotComeBackAfterAFailedReread() async throws {
+        defer { LifecycleStubURLProtocol.handler = nil }
+        let server = LifecycleServer(states: ["th-1": "trashed", "th-2": "active"], purge: .refuse)
+        let model = lifecycleModel(server)
+        model.threads = [
+            try lifecycleThread(id: "th-1", state: "trashed"),
+            try lifecycleThread(id: "th-2", state: "active"),
+        ]
+        await model.deleteThreadNow(locationID: .local, id: "th-1")
+        #expect(model.threadStatus?.contains("stays in Trash") == true)
+
+        // The owner's next operation succeeds and clears the status line...
+        await model.setThreadFolder(locationID: .local, id: "th-2", folder: "Work")
+        #expect(model.threadStatus == nil)
+        // ...so a failed re-read followed by a good one shows no stale banner,
+        // although the thread is still in Trash.
+        server.listUnreachable = true
+        #expect(await model.refreshThreads() == false)
+        #expect(model.threadStatus?.hasPrefix("Could not refresh threads: ") == true)
+        server.listUnreachable = false
+        #expect(await model.refreshThreads())
+        #expect(model.threadStatus == nil)
+    }
 }
 
 // MARK: - Fixtures
@@ -580,6 +605,11 @@ private final class LifecycleServer: @unchecked Sendable {
                 return reply(request, 200, #"{"threads":[\#(rows.joined(separator: ","))],"problems":\#(problems)}"#)
             }
             let parts = path.split(separator: "/").map(String.init)
+            if method == "PATCH", parts.count == 3, parts[1] == "threads" {
+                // A folder move: the engine answers with the re-filed thread.
+                return reply(request, 200, lifecycleJSON(
+                    id: parts[2], state: states[parts[2]] ?? "active", folder: "Work"))
+            }
             guard method == "POST", parts.count == 4, parts[1] == "threads" else {
                 return reply(request, 404, #"{"error":"not found"}"#)
             }

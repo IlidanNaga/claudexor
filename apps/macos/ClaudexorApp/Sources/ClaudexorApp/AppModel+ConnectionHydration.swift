@@ -77,7 +77,13 @@ extension AppModel {
         } catch {
             guard requestIsCurrent() else { return false }
             // A transport/decode failure is not an empty thread list: retain
-            // last-known rows and surface the failure.
+            // last-known rows and surface the failure. It takes the one status
+            // line: a Delete Now banner it replaces comes back with the next
+            // list, one that had already left the line is over.
+            if threadStatus != deleteNowBanner?.text,
+               threadStatus?.hasPrefix(Self.threadRefreshFailurePrefix) != true {
+                deleteNowBanner = nil
+            }
             threadStatus = Self.threadRefreshFailurePrefix + userMessage(for: error)
             return false
         }
