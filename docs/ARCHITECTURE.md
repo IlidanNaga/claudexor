@@ -1947,8 +1947,8 @@ Endpoint semantics beyond the inventory:
   finishes a partial cleanup. Purge does not erase the conversation: the thread
   and turn records stay in the journal, run trees follow the run retention
   below, native sessions of Agent turns stay where the vendor CLI keeps them,
-  and project files are untouched. A purged thread leaves every listing, and
-  ACP `session/list` also omits trashed threads.
+  and project files are untouched. A purged thread leaves every listing (ACP's
+  view of trashed threads is in INTEGRATIONS).
 - Refused turns are honest end-to-end: when a turn's run dies BEFORE it starts
   (the trust gate refusing `access: full`, preflight validation, an enqueue
   throw, or an Implement whose plan still has open questions and no explicit
