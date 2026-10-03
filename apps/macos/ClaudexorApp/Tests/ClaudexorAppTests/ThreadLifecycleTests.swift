@@ -31,6 +31,31 @@ struct ThreadLifecycleTests {
         #expect(sections.archived.isEmpty && sections.trash.isEmpty)
     }
 
+    @Test func foldersGroupOnlyActiveThreadsAndEveryThreadIsListedOnce() throws {
+        // The sidebar composes the folder view (ThreadsScreen+Folders) over the
+        // active partition; an archived or trashed thread keeps its folder
+        // label but is listed only in its own section.
+        let specs: [(id: String, state: String, folder: String?)] = [
+            ("live", "active", "A"), ("loose", "active", nil), ("shelved", "closed", "A"),
+            ("binned", "trashed", "A"), ("parked", "closed", "B"),
+        ]
+        let rows = try specs.map { spec in
+            LocatedThread(locationID: .local, thread: try lifecycleThread(
+                id: spec.id, state: spec.state, folder: spec.folder))
+        }
+        let sections = ThreadSidebarSections(rows)
+        let folders = ThreadFolderSection.sections(for: sections.active)
+        #expect(folders.map(\.folder) == ["A", nil])
+        #expect(folders.map { $0.threads.map(\.thread.id) } == [["live"], ["loose"]])
+        let listed = folders.flatMap(\.threads) + sections.archived + sections.trash
+        #expect(listed.map(\.thread.id).sorted() == rows.map(\.thread.id).sorted())
+        #expect(sections.archived.map(\.thread.folder) == ["A", "B"])
+        #expect(sections.trash.map(\.thread.folder) == ["A"])
+        // A folder carried only by archived or trashed threads makes no
+        // section: the active part stays the plain list.
+        #expect(ThreadFolderSection.sections(for: ThreadSidebarSections([rows[1], rows[4]]).active).isEmpty)
+    }
+
     // MARK: Honest "Delete Now…" text
 
     @Test func deleteNowTextBranchesOnWorkspaceModeAndNeverPromisesErasure() {
@@ -221,21 +246,24 @@ private func lifecycleJSON(
     id: String,
     state: String,
     workspaceMode: String = "in_place",
-    headRunId: String? = nil
+    headRunId: String? = nil,
+    folder: String? = nil
 ) -> String {
     let head = headRunId.map { "\"\($0)\"" } ?? "null"
+    let folderJSON = folder.map { "\"\($0)\"" } ?? "null"
     let purgeAfter = state == "trashed" ? "\"2030-01-01T00:00:00.000Z\"" : "null"
-    return #"{"id":"\#(id)","title":"Thread \#(id)","repoRoot":"/tmp/project","mode":"agent","workspaceMode":"\#(workspaceMode)","authPreference":"auto","primaryHarness":null,"eligibleHarnesses":[],"state":"\#(state)","trashedAt":null,"purgeAfter":\#(purgeAfter),"runIds":[],"headRunId":\#(head),"needsHuman":false,"createdAt":"2026-10-01T00:00:00Z","updatedAt":"2026-10-01T00:00:00Z"}"#
+    return #"{"id":"\#(id)","title":"Thread \#(id)","folder":\#(folderJSON),"repoRoot":"/tmp/project","mode":"agent","workspaceMode":"\#(workspaceMode)","authPreference":"auto","primaryHarness":null,"eligibleHarnesses":[],"state":"\#(state)","trashedAt":null,"purgeAfter":\#(purgeAfter),"runIds":[],"headRunId":\#(head),"needsHuman":false,"createdAt":"2026-10-01T00:00:00Z","updatedAt":"2026-10-01T00:00:00Z"}"#
 }
 
 private func lifecycleThread(
     id: String,
     state: String,
-    headRunId: String? = nil
+    headRunId: String? = nil,
+    folder: String? = nil
 ) throws -> ThreadSummary {
     try JSONDecoder().decode(
         ThreadSummary.self,
-        from: Data(lifecycleJSON(id: id, state: state, headRunId: headRunId).utf8))
+        from: Data(lifecycleJSON(id: id, state: state, headRunId: headRunId, folder: folder).utf8))
 }
 
 private func runningTask(_ id: String) -> TaskRun {

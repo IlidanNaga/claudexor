@@ -4,10 +4,11 @@ import ClaudexorKit
 // MARK: - Thread lifecycle in the sidebar: Archive → Trash → Delete Now
 //
 // Kept beside ThreadsScreen.swift (INV-124 readability ratchet). The sidebar
-// stays ONE list on ONE screen (DESIGN_SYSTEM §4): active threads, then the
-// collapsed "Archived" section (state `closed`), then the collapsed "Trash"
-// section (state `trashed`). Membership is derived from the server's lifecycle
-// state only — there is no local-only thread state.
+// stays ONE list on ONE screen (DESIGN_SYSTEM §4): active threads (grouped by
+// folder, ThreadsScreen+Folders), then the collapsed "Archived" section (state
+// `closed`), then the collapsed "Trash" section (state `trashed`). Membership
+// is derived from the server's lifecycle state only — there is no local-only
+// thread state.
 
 /// Which collapsed lifecycle sections are open. Both start collapsed.
 struct ThreadSidebarDisclosure: Equatable {
@@ -121,16 +122,19 @@ enum ThreadLifecycleCopy {
 }
 
 extension ThreadsScreen {
-    /// The thread list: active rows, then the collapsed Archived and Trash
-    /// sections. Active and archived rows open the conversation; Trash rows
-    /// are not selectable (a trashed thread takes no turns until restored).
+    /// The thread list: the active threads in their folder sections
+    /// (ThreadsScreen+Folders), then the collapsed Archived and Trash sections.
+    /// Archived and trashed threads keep their folder label but are listed
+    /// only in their own section. Active and archived rows open the
+    /// conversation; Trash rows are not selectable (a trashed thread takes no
+    /// turns until restored).
     var threadSections: some View {
         let sections = ThreadSidebarSections(model.locatedThreads)
         return List(selection: Binding(
             get: { model.selectedLocatedThreadID },
             set: { locatedID in
                 guard let locatedID,
-                      let located = (sections.active + sections.archived).first(where: {
+                      let located = model.locatedThreads.first(where: {
                           $0.id == locatedID
                       })
                 else { return }
@@ -141,7 +145,7 @@ extension ThreadsScreen {
                 }
             }
         )) {
-            activeThreadRows(sections.active)
+            threadListRows(sections.active)
             if !sections.archived.isEmpty {
                 Section(isExpanded: $sidebarDisclosure.archivedExpanded) {
                     ForEach(sections.archived) { located in
@@ -161,14 +165,6 @@ extension ThreadsScreen {
         }
         .listStyle(.sidebar)
         .scrollContentBackground(.hidden)   // let the Liquid Glass panel show through
-    }
-
-    /// Rows of the active partition (neither archived nor trashed). Any
-    /// grouping of the active list composes here, never over Archived/Trash.
-    @ViewBuilder func activeThreadRows(_ active: [LocatedThread]) -> some View {
-        ForEach(active) { located in
-            threadRow(located).tag(located.id)
-        }
     }
 
     /// The row menu's "Delete": one click, no dialog. The thread moves to the

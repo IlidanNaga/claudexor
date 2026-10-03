@@ -283,12 +283,13 @@ struct ThreadsScreen: View {
                 )
                 .frame(maxHeight: .infinity)
             } else {
-                threadSections   // active, then collapsed Archived and Trash (ThreadsScreen+Lifecycle)
+                threadSections   // folders of active threads, then Archived and Trash (+Lifecycle)
             }
 
             SidebarFooter()
         }
         .padding(.top, Theme.Spacing.xs)
+        .modifier(ThreadFolderDialogs(editor: $folderEditor))
         .sheet(isPresented: Binding(
             get: { renameTargetId != nil },
             set: {
@@ -301,6 +302,7 @@ struct ThreadsScreen: View {
         .threadDeleteNowConfirmation(target: $deleteNowTarget) { confirmDeleteNow($0) }
     }
 
+    @State var folderEditor = ThreadFolderEditor()
     @State var renameDraft = ""
     @State var renameTargetId: String?
     @State var renameTargetLocation: ExecutionLocationID?

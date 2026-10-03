@@ -503,34 +503,49 @@ frequency and volume are. The contracts:
 - Single window, **three regions**:
   - **Thread list (glass sidebar):** the conversations, with a needs-you marker;
     "New" enters the draft state (the first message materializes the thread).
-    ONE list in three parts derived from the server's thread state: active
-    threads, then a collapsed **Archived** section (`closed` — Archive hides a
-    thread there, Reopen brings it back) and a collapsed **Trash** section
-    (`trashed`). Each active or archived row carries a context menu — Rename…
-    (title sheet), Archive/Reopen, and **Delete** — where rename/archive ride
-    `PATCH /threads/:id` (`title`/`state`) and Delete is one click with no
-    dialog that moves the thread to Trash (`POST /threads/:id/trash`; deleting
-    the open thread returns the conversation pane to a draft). A Trash row is
-    not selectable; it names the thread, where it lived and until when it can
-    be restored, and offers **Restore** (`POST /threads/:id/restore`;
-    disabled once the restore period has ended, which the caption already
-    says, since the engine would answer `410`) and **Delete Now…**: a
-    confirmation that states, for the thread's workspace mode, what purge
-    deletes and what it keeps as listed once in ARCHITECTURE (thread lifecycle
-    routes), then `POST /threads/:id/purge`. The copy has one owner
-    (`ThreadLifecycleCopy`) and never promises to erase the conversation.
-    While a turn of the thread runs, Delete and Delete Now… are disabled and
-    say why in visible text, not only in hover help: the Delete menu item's
-    title names the running turn, and a Trash row states the reason under its
-    buttons (the engine refuses that purge for every client). A refused purge
-    (`409`) leaves the thread in Trash with Restore. The engine journals a
-    purge before it deletes the thread's directories, so after any other
-    failure or a lost answer the app re-reads the list and says only what it
-    shows: still in Trash (Restore works), deleted after all (no Restore), or,
-    when the list cannot be read either, that the outcome is unconfirmed
-    (check Trash once the engine responds). A later list without the thread
-    retires that message, and a successful Restore or Delete Now clears it. No
-    local-only thread state. The sidebar's BOTTOM-LEFT
+    ONE list in three parts derived from the server's thread state: the
+    active threads, then a collapsed **Archived** section (`closed` — Archive
+    hides a thread there, Reopen brings it back) and a collapsed **Trash**
+    section (`trashed`). Folders group the active part only. Folder names are
+    derived from their member threads, so empty folders do not persist and one
+    name used on several engines is ONE section. With no folder among the
+    active threads that part is the plain list, with no section header; once
+    an active thread has a folder, it shows one section per folder (sorted;
+    header menu Rename… / Remove Folder…), then "Ungrouped" for active threads
+    without one. An archived or trashed thread keeps its folder but is listed
+    only in its own section. Each active or archived row carries a context
+    menu — Rename… (title sheet), Move to Folder (Ungrouped, the existing
+    folders, New Folder…), Archive/Reopen, and **Delete** — where rename,
+    filing and archive ride the server-owned `PATCH /threads/:id`
+    (`title`/`folder`/`state`) and Delete is one click with no dialog that
+    moves the thread to Trash (`POST /threads/:id/trash`; deleting the open
+    thread returns the conversation pane to a draft). Filing a thread does not
+    reorder the list (a folder-only PATCH keeps `updatedAt`). Folder
+    Rename/Remove re-file each member — a thread in the trash keeps its folder
+    — and report a partial result as "Updated N of M threads; K failed."; the
+    folder sheet disables Create for a name outside 1–120 characters and says
+    why on a reserved line; an engine older than folders is reported as "The
+    engine is too old for folders. Update Claudexor." A Trash row is not
+    selectable; it names the thread, where it lived and until when it can be
+    restored, and offers **Restore** (`POST /threads/:id/restore`; disabled
+    once the restore period has ended, which the caption already says, since
+    the engine would answer `410`) and **Delete Now…**: a confirmation that
+    states, for the thread's workspace mode, what purge deletes and what it
+    keeps as listed once in ARCHITECTURE (thread lifecycle routes), then
+    `POST /threads/:id/purge`. The copy has one owner (`ThreadLifecycleCopy`)
+    and never promises to erase the conversation. While a turn of the thread
+    runs, Delete and Delete Now… are disabled and say why in visible text, not
+    only in hover help: the Delete menu item's title names the running turn,
+    and a Trash row states the reason under its buttons (the engine refuses
+    that purge for every client). A refused purge (`409`) leaves the thread in
+    Trash with Restore. The engine journals a purge before it deletes the
+    thread's directories, so after any other failure or a lost answer the app
+    re-reads the list and says only what it shows: still in Trash (Restore
+    works), deleted after all (no Restore), or, when the list cannot be read
+    either, that the outcome is unconfirmed (check Trash once the engine
+    responds). A later list without the thread retires that message, and a
+    successful Restore or Delete Now clears it. No local-only thread state.
+    The sidebar's BOTTOM-LEFT
     carries ONE compact accounts control (Claude-Code style, INV-135): a quiet
     single-line trigger — worst-readiness dot + the account name (or "N
     accounts") + worst quota % + chevron — that opens a popover to manage
