@@ -9,7 +9,11 @@ import type { DaemonControlApiOptions, DaemonRunRecord } from "./daemon-server.j
 import { projectThread } from "./thread-projection.js";
 import type { ThreadTurnRouteCtx } from "./thread-turn-routes.js";
 import type { verifyAndDeliver } from "@claudexor/delivery";
-import { chainThreadMutation, findActiveMutatingThreadRun } from "./thread-mutation.js";
+import {
+  chainThreadMutation,
+  findActiveMutatingThreadRun,
+  findActiveThreadRun,
+} from "./thread-mutation.js";
 
 export interface ThreadLifecycleRouteCtx {
   turnCtx: ThreadTurnRouteCtx;
@@ -32,6 +36,12 @@ export interface ThreadLifecycleRouteCtx {
   gateSpecs(record: DaemonRunRecord): NonNullable<Parameters<typeof verifyAndDeliver>[3]>;
 }
 
+/**
+ * `requiresIdle` refuses with 409 `thread_busy` while ANY turn of the thread is
+ * queued or running. Only purge sets it: purge deletes the lane homes a live
+ * ask/plan turn runs in. Trash and restore delete nothing (a trashed thread
+ * already refuses edits and new turns), so they gain no busy refusal.
+ */
 async function lifecycle(
   ctx: ThreadLifecycleRouteCtx,
   threadId: string,
@@ -45,12 +55,12 @@ async function lifecycle(
   }
   await chainThreadMutation(ctx.turnCtx.threadTurnChains, threadId, async () => {
     try {
-      const active = requiresIdle
-        ? findActiveMutatingThreadRun(await ctx.listRuns(), threadId)
-        : undefined;
+      const active = requiresIdle ? findActiveThreadRun(await ctx.listRuns(), threadId) : undefined;
       if (active) {
         throw Object.assign(
-          new Error(`thread ${threadId} has an active mutating turn (${active.state})`),
+          new Error(
+            `thread ${threadId} has an active turn (${active.state}); purge it once no turn is queued or running`,
+          ),
           { status: 409, code: "thread_busy" },
         );
       }
@@ -75,7 +85,7 @@ export async function handleThreadLifecycleRoutes(
       ctx,
       decodeURIComponent(threadTrashMatch[1] as string),
       ctx.services?.trashThread,
-      true,
+      false,
       res,
     );
     return true;

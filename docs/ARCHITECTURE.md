@@ -1450,7 +1450,9 @@ adoption. An isolated thread's accumulated worktree diff is delivered to the
 project on demand via `POST /v2/threads/:id/apply`. The isolated workspace is
 pinned by a persistent `claudexor/thread-*` branch (not a dangling commit);
 successful delivery advances that branch. Trash retains the thread and its
-branch for 30 days and exposes explicit restore/purge routes.
+branch for 30 days and exposes explicit restore/purge routes; once
+`purge_after` passes, restore is refused and the next disk-retention pass
+purges the thread (see the thread lifecycle routes and disk retention below).
 
 ### Agent --n (race) / --create
 
@@ -1931,6 +1933,22 @@ Endpoint semantics beyond the inventory:
   agent runs against the frozen plan rather than a bare prompt. `POST /v2/threads/:id/apply` delivers an isolated thread's accumulated
   worktree diff to the project; in-place threads write the project directly and
   never need it.
+- `POST /v2/threads/:id/trash` moves a thread into recoverable trash for 30 days
+  (`trashedAt`, `purgeAfter`); a trashed thread refuses edits and new turns, and
+  a turn already running finishes normally. `restore` returns it to its
+  pre-trash state until `purgeAfter` (afterwards `410 thread_trash_expired`).
+  `purge` requires trash (`409 thread_not_trashed`) and answers `409
+  thread_busy` while ANY turn of the thread is queued or running, because an
+  Ask/Plan turn runs inside the lane home purge deletes; trash and restore
+  delete nothing and never refuse a busy thread. Purge journals the `purged`
+  state first, then deletes the isolated worktree with its `claudexor/thread-*`
+  branch and every lane home of the thread (the saved native sessions of its
+  Ask/Plan turns and its cached continuation summaries); a repeated purge
+  finishes a partial cleanup. Purge does not erase the conversation: the thread
+  and turn records stay in the journal, run trees follow the run retention
+  below, native sessions of Agent turns stay where the vendor CLI keeps them,
+  and project files are untouched. A purged thread leaves every listing, and
+  ACP `session/list` also omits trashed threads.
 - Refused turns are honest end-to-end: when a turn's run dies BEFORE it starts
   (the trust gate refusing `access: full`, preflight validation, an enqueue
   throw, or an Implement whose plan still has open questions and no explicit
@@ -2532,7 +2550,17 @@ reclaimed run leaves a tombstone projection behind, so its artifacts answer
 with a typed 410 `run_expired_by_retention` — never a mysterious 404. The
 receipt also carries an advisory `data_root_unrecognized` listing — names of
 top-level data-root entries the engine does not own and never touches
-(absent, with an `errors[]` entry, when that scan fails).
+(absent, with an `errors[]` entry, when that scan fails). The same pass purges
+EXPIRED TRASH: a trashed thread whose `purge_after` has passed goes through the
+one thread purge owner (the service behind `POST /v2/threads/:id/purge`) before
+run candidates are judged, so the runs only it referenced become ordinary
+unreferenced candidates. A thread with a queued or running turn is kept for a
+later pass and disclosed in `errors[]`, as is a failed purge; a dry run purges
+nothing and previews those threads' runs as unreferenced. The receipt's
+`purged_threads` names the purged (or would-be-purged) threads; like
+`data_root_unrecognized` it is opt-in (`trash_purge_report`, sent only by a
+lockstep CLI), the startup pass requests it for its log line, and
+`claudexor gc` prints it.
 While running it snapshots its live harness child process groups to
 `daemon/pids.json`; the NEXT startup reaps recorded orphans that survived a
 crash (pid liveness + command-name recycling guard) and sweeps workspace

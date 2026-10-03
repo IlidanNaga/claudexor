@@ -1,10 +1,10 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ProjectPartitions, ProjectStore } from "@claudexor/daemon";
 import { ArtifactStore } from "@claudexor/artifact-store";
-import { createRetentionRunner } from "./retention-service.js";
+import { createRetentionRunner, scheduleStartupRetention } from "./retention-service.js";
 
 const roots: string[] = [];
 let previousConfigDir: string | undefined;
@@ -42,24 +42,45 @@ function projectWithAgedRun(runId: string): string {
   return root;
 }
 
+type FakeThread = {
+  id: string;
+  run_ids: string[];
+  state?: string;
+  purge_after?: string | null;
+  head_run_id?: string | null;
+  repo?: { root: string } | null;
+};
+
 function deps(input: {
   projectRoots: string[];
   healthyRoots: string[];
   threadRunIds?: string[];
-  records: Array<{ runId: string; state: string; finishedAt: string }>;
+  threads?: FakeThread[];
+  records: Array<{ runId?: string; state: string; finishedAt?: string; params?: unknown }>;
+  purged?: string[];
+  failPurge?: string;
 }) {
   const projects = {
     list: () => input.projectRoots.map((root, i) => ({ id: `p${i}`, root })),
   } as unknown as ProjectStore;
+  let rows: FakeThread[] =
+    input.threads ?? (input.threadRunIds ? [{ id: "t1", run_ids: input.threadRunIds }] : []);
   const threads = {
     healthyProjectRoots: () => input.healthyRoots,
-    listThreads: () => (input.threadRunIds ? [{ id: "t1", run_ids: input.threadRunIds }] : []),
+    // Like the store, a purged thread drops out of every listing.
+    listThreads: () => rows.filter((thread) => thread.state !== "purged"),
     turnsFor: () => [],
   } as unknown as ProjectPartitions;
   return {
     projects: () => projects,
     threads,
     daemonJobs: async () => input.records,
+    purgeThread: async (id: string) => {
+      if (id === input.failPurge) throw new Error("worktree removal failed");
+      input.purged?.push(id);
+      rows = rows.map((thread) => (thread.id === id ? { ...thread, state: "purged" } : thread));
+      return { id, state: "purged" };
+    },
   };
 }
 
@@ -159,5 +180,116 @@ describe("retention service composition", () => {
     // The startup pass and an operator `gc` firing together.
     await Promise.all([runner({ dry_run: true }), runner({ dry_run: true })]);
     expect(peak).toBe(1);
+  });
+});
+
+describe("expired trash purge in the retention pass (owner decision E2)", () => {
+  const past = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+  const future = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
+  const trashThreads: FakeThread[] = [
+    { id: "t-expired", run_ids: ["run-trash-only"], state: "trashed", purge_after: past },
+    { id: "t-fresh", run_ids: ["run-fresh"], state: "trashed", purge_after: future },
+    { id: "t-active", run_ids: [], state: "active", purge_after: null },
+  ];
+
+  it("purges ONLY expired trash through the one purge owner and discloses it on opt-in", async () => {
+    const purged: string[] = [];
+    const runner = createRetentionRunner(
+      deps({ projectRoots: [], healthyRoots: [], threads: trashThreads, records: [], purged }),
+    );
+    const receipt = await runner({ dry_run: false, trash_purge_report: true });
+    expect(purged).toEqual(["t-expired"]);
+    expect(receipt.purged_threads).toEqual(["t-expired"]);
+    expect(receipt.errors).toEqual([]);
+  });
+
+  it("still purges without the opt-in but keeps the receipt key absent (version skew)", async () => {
+    const purged: string[] = [];
+    const receipt = await createRetentionRunner(
+      deps({ projectRoots: [], healthyRoots: [], threads: trashThreads, records: [], purged }),
+    )({ dry_run: false });
+    expect(purged).toEqual(["t-expired"]);
+    expect(receipt).not.toHaveProperty("purged_threads");
+  });
+
+  it("dry run lists expired trash, deletes nothing, and previews its runs as unreferenced", async () => {
+    const root = projectWithAgedRun("run-trash-only");
+    const freshRun = join(new ArtifactStore(root).runsDir(), "run-fresh");
+    mkdirSync(join(freshRun, "final"), { recursive: true });
+    writeFileSync(join(freshRun, "final", "summary.md"), "# done\n");
+    const purged: string[] = [];
+    const receipt = await createRetentionRunner(
+      deps({
+        projectRoots: [root],
+        healthyRoots: [root],
+        threads: trashThreads,
+        records: [
+          { runId: "run-trash-only", state: "succeeded", finishedAt: ancient },
+          { runId: "run-fresh", state: "succeeded", finishedAt: ancient },
+        ],
+        purged,
+      }),
+    )({ dry_run: true, trash_purge_report: true });
+    expect(purged).toEqual([]);
+    expect(receipt.purged_threads).toEqual(["t-expired"]);
+    // The would-be-purged thread no longer protects its run in the preview;
+    // the still-restorable trashed thread keeps protecting its own.
+    expect(receipt.deleted_runs.map((d) => d.run_id)).toEqual(["run-trash-only"]);
+    expect(receipt.kept.referenced).toBe(1);
+  });
+
+  it("keeps an expired thread with a live turn for a later pass and says why", async () => {
+    const purged: string[] = [];
+    const receipt = await createRetentionRunner(
+      deps({
+        projectRoots: [],
+        healthyRoots: [],
+        threads: trashThreads,
+        records: [{ state: "running", params: { threadId: "t-expired", mode: "ask" } }],
+        purged,
+      }),
+    )({ dry_run: false, trash_purge_report: true });
+    expect(purged).toEqual([]);
+    expect(receipt.purged_threads).toEqual([]);
+    expect(receipt.errors).toEqual([
+      "expired trash thread t-expired kept: a turn is still running",
+    ]);
+  });
+
+  it("discloses a failed purge in errors instead of listing it as purged", async () => {
+    const receipt = await createRetentionRunner(
+      deps({
+        projectRoots: [],
+        healthyRoots: [],
+        threads: trashThreads,
+        records: [],
+        failPurge: "t-expired",
+      }),
+    )({ dry_run: false, trash_purge_report: true });
+    expect(receipt.purged_threads).toEqual([]);
+    expect(receipt.errors).toEqual(["expired trash thread t-expired: worktree removal failed"]);
+  });
+
+  it("the startup pass requests the trash disclosure and logs the purge count", async () => {
+    const logDir = mkdtempSync(join(tmpdir(), "claudexor-retention-log-"));
+    roots.push(logDir);
+    const logPath = join(logDir, "daemon.log");
+    const requests: unknown[] = [];
+    const runner = createRetentionRunner(
+      deps({ projectRoots: [], healthyRoots: [], threads: trashThreads, records: [] }),
+    );
+    scheduleStartupRetention(
+      async (request) => {
+        requests.push(request);
+        return runner(request);
+      },
+      { logPath, shuttingDown: () => false, delayMs: 0 },
+    );
+    const readLog = () => (existsSync(logPath) ? readFileSync(logPath, "utf8") : "");
+    for (let i = 0; i < 500 && !readLog().includes("retention:"); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(requests).toEqual([{ dry_run: false, trash_purge_report: true }]);
+    expect(readLog()).toContain("1 expired trash threads");
   });
 });

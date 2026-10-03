@@ -160,6 +160,24 @@ export function controlServices(
     { requiresGit: runStartRequiresGit },
     { git: "durable_job" },
   );
+  // The ONE owner of thread byte deletion: the purge route and the retention
+  // pass's expired-trash purge both call it.
+  const purgeThread = async (id: string) => {
+    const thread = threads.getThread(id);
+    if (!thread) throw Object.assign(new Error(`no such thread: ${id}`), { status: 404 });
+    // Journal the explicit purge authority before deleting bytes. If owned
+    // cleanup fails, a repeated purge can safely finish it; validation can
+    // never fail after user state has already been removed.
+    const purged = threads.purgeThread(id);
+    if (thread.repo && thread.workspace.mode === "isolated") {
+      await purgeThreadWorktree(thread.repo.root, id);
+    }
+    // Durable per-lane read-only homes exist regardless of workspace mode
+    // (in_place threads have them too), so sweep them for EVERY purged thread
+    // (INV-034 lifecycle owner (a)).
+    purgeThreadLanes(thread.repo?.root ?? NO_PROJECT_ROOT, id);
+    return purged;
+  };
   return {
     preflightRunRequirements,
     preflightThreadRunRequirements,
@@ -177,7 +195,7 @@ export function controlServices(
     validateResources: async (refs: ResourceAttachmentRef[]) => {
       resources().resolve(refs);
     },
-    runRetention: createRetentionRunner({ projects, threads, daemonJobs }),
+    runRetention: createRetentionRunner({ projects, threads, daemonJobs, purgeThread }),
     // F3 nested-project disclosure: each project carries its recomputed
     // nesting relations — surfaces disclose "nested inside <root>", never refuse.
     listProjects: async () => {
@@ -279,22 +297,7 @@ export function controlServices(
     },
     trashThread: async (id: string) => threads.trashThread(id),
     restoreThread: async (id: string) => threads.restoreThread(id),
-    purgeThread: async (id: string) => {
-      const thread = threads.getThread(id);
-      if (!thread) throw Object.assign(new Error(`no such thread: ${id}`), { status: 404 });
-      // Journal the explicit purge authority before deleting bytes. If owned
-      // cleanup fails, a repeated purge can safely finish it; validation can
-      // never fail after user state has already been removed.
-      const purged = threads.purgeThread(id);
-      if (thread.repo && thread.workspace.mode === "isolated") {
-        await purgeThreadWorktree(thread.repo.root, id);
-      }
-      // Durable per-lane read-only homes exist regardless of workspace mode
-      // (in_place threads have them too), so sweep them for EVERY purged thread
-      // (INV-034 lifecycle owner (a)).
-      purgeThreadLanes(thread.repo?.root ?? NO_PROJECT_ROOT, id);
-      return purged;
-    },
+    purgeThread,
     applyThread: async (id: string, opts: ThreadApplyOptions) => applyThreadDiff(threads, id, opts),
     listTrust: listTrustService,
     updateTrust: updateTrustService,
