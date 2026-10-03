@@ -29,8 +29,11 @@ Start read-only unless the user explicitly asked to change or create files.
    fallback requires doctor status `ok` and the requested intent. Aggregate
    status neither proves nor vetoes a pooled or explicitly named profile.
 2. Call `claudexor_accounts` before choosing an account or reviewer identity.
-   It is a read-only atomic snapshot of registered profiles, readiness, quota
-   freshness, and the daemon's `next_up` routing projection. `available/passed`
+   It is the read-only Accounts view of registered profiles, readiness, quota
+   freshness, and the daemon's `next_up` routing projection; the default call
+   returns the server's cached listing (at most about 15 s stale), and
+   `fresh: true` requests the atomic snapshot, an expensive explicit refresh
+   to use only when acting on staleness matters. `available/passed`
    on the exact selected row is the usable route evidence; `unknown`,
    `not_run`, or stale quota means uncertain, not absent. Never substitute
    aggregate doctor status, another profile's probe, or a host/default login.
