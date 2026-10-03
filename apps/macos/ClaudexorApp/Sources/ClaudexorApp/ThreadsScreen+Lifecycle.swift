@@ -41,12 +41,14 @@ enum ThreadLifecycleCopy {
 
     /// What a purge removes and what it keeps (owner decision E1). It never
     /// promises to erase the conversation: the engine journal keeps the
-    /// messages, and run outputs follow the regular cleanup of old runs.
+    /// messages, run outputs follow the regular cleanup of old runs, and an
+    /// agent that keeps sessions in its account's own directory (a Codex
+    /// config-dir login, Antigravity) keeps them there.
     static func deleteNowMessage(workspaceMode: String?) -> String {
-        var text = "Project files are not touched. The saved agent sessions of this thread's"
-            + " Ask and Plan turns are deleted, and the thread disappears from every client."
-            + " Its messages stay in the local engine journal, and its run outputs are left"
-            + " to the regular cleanup of old runs."
+        var text = "Project files are not touched. The thread disappears from every client,"
+            + " and its own local directories and caches are deleted. Saved sessions may"
+            + " remain in the agents' own storage. Its messages stay in the local engine"
+            + " journal, and its run outputs are left to the regular cleanup of old runs."
         if workspaceMode == "isolated" {
             text += " The thread's separate working copy is deleted, including changes that"
                 + " were never applied to the project."

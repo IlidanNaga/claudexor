@@ -38,6 +38,10 @@ struct ThreadLifecycleTests {
         let isolated = ThreadLifecycleCopy.deleteNowMessage(workspaceMode: "isolated")
         for text in [direct, isolated] {
             #expect(text.hasPrefix("Project files are not touched."))
+            // Codex config-dir logins and Antigravity keep sessions in the
+            // account's own directory, which purge never deletes.
+            #expect(text.contains("Saved sessions may remain in the agents' own storage."))
+            #expect(!text.contains("sessions of this thread's Ask and Plan turns are deleted"))
             #expect(text.contains("Its messages stay in the local engine journal"))
             #expect(text.hasSuffix("This cannot be undone."))
             #expect(!text.contains("removes the conversation"))

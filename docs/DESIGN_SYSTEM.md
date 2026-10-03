@@ -514,17 +514,18 @@ frequency and volume are. The contracts:
     not selectable; it names the thread, where it lived and until when it can
     be restored, and offers **Restore** (`POST /threads/:id/restore`) and
     **Delete Now…**: a confirmation that states exactly what goes for the
-    thread's workspace mode (project files untouched; the saved agent sessions
-    of its Ask/Plan turns deleted; the thread gone from every client; its
-    messages kept in the local engine journal and its run outputs left to the
-    regular cleanup; an isolated thread also loses its separate working copy
-    with changes never applied to the project), then
-    `POST /threads/:id/purge`. The copy has one owner (`ThreadLifecycleCopy`)
-    and never promises to erase the conversation. While a turn of the thread
-    runs, Delete and Delete Now… are disabled with the reason as hover help,
-    and a Trash row also says it in place (the engine refuses that purge for
-    every client). A refused or failed purge leaves the thread in Trash with
-    Restore. No local-only thread state. The sidebar's BOTTOM-LEFT
+    thread's workspace mode (project files untouched; the thread gone from
+    every client and its own local directories and caches deleted, while saved
+    sessions may remain in the agents' own storage; its messages kept in the
+    local engine journal and its run outputs left to the regular cleanup; an
+    isolated thread also loses its separate working copy with changes never
+    applied to the project), then `POST /threads/:id/purge`. The copy has one
+    owner (`ThreadLifecycleCopy`) and never promises to erase the conversation.
+    While a turn of the thread runs, Delete and Delete Now… are disabled with
+    the reason as hover help, and a Trash row also says it in place (the
+    engine refuses that purge for every client). A refused or failed purge
+    leaves the thread in Trash with Restore. No local-only thread state. The
+    sidebar's BOTTOM-LEFT
     carries ONE compact accounts control (Claude-Code style, INV-135): a quiet
     single-line trigger — worst-readiness dot + the account name (or "N
     accounts") + worst quota % + chevron — that opens a popover to manage

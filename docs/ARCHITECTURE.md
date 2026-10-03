@@ -1939,14 +1939,16 @@ Endpoint semantics beyond the inventory:
   pre-trash state until `purgeAfter` (afterwards `410 thread_trash_expired`).
   `purge` requires trash (`409 thread_not_trashed`) and answers `409
   thread_busy` while ANY turn of the thread is queued or running, because an
-  Ask/Plan turn runs inside the lane home purge deletes; trash and restore
+  Ask/Plan turn can run inside the lane home purge deletes; trash and restore
   delete nothing and never refuse a busy thread. Purge journals the `purged`
-  state first, then deletes the isolated worktree with its `claudexor/thread-*`
-  branch and every lane home of the thread (the saved native sessions of its
-  Ask/Plan turns and its cached continuation summaries); a repeated purge
-  finishes a partial cleanup. Purge does not erase the conversation: the thread
-  and turn records stay in the journal, run trees follow the run retention
-  below, native sessions of Agent turns stay where the vendor CLI keeps them,
+  state first, then deletes the thread's own directories: the isolated worktree
+  with its `claudexor/thread-*` branch and every lane home (the per-thread HOME
+  of its Ask/Plan turns and its cached continuation summaries); a repeated
+  purge finishes a partial cleanup. Purge does not erase the conversation: the
+  thread and turn records stay in the journal, run trees follow the run
+  retention below, native sessions that a route keeps outside the lane home
+  stay in the agent's own storage (Agent turns, and Codex config-dir login
+  profiles and Antigravity, which keep sessions in the account's directory),
   and project files are untouched. A purged thread leaves every listing (ACP's
   view of trashed threads is in INTEGRATIONS).
 - Refused turns are honest end-to-end: when a turn's run dies BEFORE it starts
