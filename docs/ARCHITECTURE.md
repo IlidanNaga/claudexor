@@ -1954,9 +1954,11 @@ Endpoint semantics beyond the inventory:
   Ask/Plan turns and its cached continuation summaries). A directory error
   after that commit (ENOTEMPTY, EBUSY, a Windows lock) fails the request
   although the thread is already purged and no longer restorable, so a client
-  re-reads the list instead of promising Trash; a repeated purge or the next
-  disk-retention pass (below) finishes the cleanup, and nothing makes a
-  partially deleted thread restorable again. Purge does not erase the
+  re-reads the list instead of promising Trash, and reads the thread's absence
+  as a purge only from a list whose `problems` name no skipped project and
+  whose rows it could all decode; a repeated purge or the next disk-retention
+  pass (below) finishes the cleanup, and nothing makes a partially deleted
+  thread restorable again. Purge does not erase the
   conversation: the thread and turn records stay in the journal, run trees
   follow the run retention below, native sessions that a route keeps outside
   the lane home stay in the agent's own storage (Agent turns, and Codex

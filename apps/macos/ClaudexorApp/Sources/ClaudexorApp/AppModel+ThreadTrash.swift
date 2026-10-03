@@ -1,11 +1,12 @@
 import Foundation
 import ClaudexorKit
 
-/// The banner a failed "Delete Now" left and the thread it speaks about, so a
-/// later thread list without that thread can retire it.
+/// The banner a failed "Delete Now" left, the thread it speaks about and what
+/// it said, so a later thread list that makes it wrong can retire it.
 struct DeleteNowBanner: Equatable {
     let locationID: ExecutionLocationID
     let threadID: String
+    let outcome: DeleteNowFailure
     let text: String
 }
 
@@ -100,7 +101,8 @@ extension AppModel {
     /// (docs/ARCHITECTURE.md, thread lifecycle routes), so a failed request or
     /// a lost answer does not mean the thread is still there. Re-read the list
     /// and say only what it shows; Trash and Restore are promised only while
-    /// the engine still lists the thread in Trash.
+    /// the engine still lists the thread in Trash, and only a list without
+    /// gaps confirms the purge by leaving the thread out.
     private func reportDeleteNowFailure(
         reason: String,
         requestClient: GatewayClient,
@@ -110,30 +112,33 @@ extension AppModel {
         let listed = isCurrentGateway(requestClient, at: locationID)
             ? await refreshThreadList(at: locationID)
             : false
+        // A list that came back recorded its gaps (reconcileThreadStatus);
+        // without that record nothing is confirmed.
         let outcome: DeleteNowFailure
-        if !listed {
-            outcome = .unconfirmed
-        } else if let thread = threadSummary(id, at: locationID), thread.state != "purged" {
-            outcome = thread.state == "trashed" ? .inTrash : .elsewhere
+        if listed, let gaps = threadListGaps[locationID] {
+            outcome = DeleteNowFailure(listed: threadSummary(id, at: locationID), gaps: gaps)
         } else {
-            outcome = .gone
+            outcome = .unconfirmed(nil)
         }
         let text = ThreadLifecycleCopy.deleteNowFailure(outcome, reason: reason)
         threadStatus = text
-        // "Deleted" is final; the other banners hold only while a later list
-        // still has the thread.
+        // "Deleted" is final; the other banners hold until a later list shows
+        // they no longer do.
         deleteNowBanner = outcome == .gone
             ? nil
-            : DeleteNowBanner(locationID: locationID, threadID: id, text: text)
+            : DeleteNowBanner(locationID: locationID, threadID: id, outcome: outcome, text: text)
     }
 
-    /// Called after every list that reflects the engine: once the thread a
-    /// Delete Now banner speaks about is gone, neither "it stays in Trash" nor
-    /// "could not confirm" holds, so the banner goes too.
-    func retireDeleteNowBanner(at locationID: ExecutionLocationID) {
-        guard let banner = deleteNowBanner, banner.locationID == locationID,
-              threadSummary(banner.threadID, at: locationID) == nil
-        else { return }
+    /// Called after every thread list the engine answered for `locationID`,
+    /// with what that list could not show. A Delete Now banner about a thread
+    /// of that engine leaves once the list makes it wrong; a thread missing
+    /// from a list with gaps confirms nothing, so the banner stays.
+    func reconcileThreadStatus(at locationID: ExecutionLocationID, listGaps: ThreadListGaps) {
+        threadListGaps[locationID] = listGaps
+        guard let banner = deleteNowBanner, banner.locationID == locationID else { return }
+        let now = DeleteNowFailure(
+            listed: threadSummary(banner.threadID, at: locationID), gaps: listGaps)
+        guard !banner.outcome.stillHolds(once: now) else { return }
         if threadStatus == banner.text { threadStatus = nil }
         deleteNowBanner = nil
     }

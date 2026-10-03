@@ -34,13 +34,51 @@ struct ThreadSidebarSections: Equatable {
     }
 }
 
-/// Where a thread stands after a "Delete Now" request failed, as the engine's
-/// list read right after the failure shows it.
+/// What a thread list the engine answered could not show: projects the engine
+/// skipped (its `problems`, such as a project whose folder is missing) and rows
+/// this app version could not decode. A thread missing from a list with a gap
+/// may still exist, so its absence confirms nothing.
+struct ThreadListGaps: Equatable {
+    var skippedProjects = 0
+    var unreadableThreads = 0
+
+    var isEmpty: Bool { skippedProjects == 0 && unreadableThreads == 0 }
+}
+
+extension ThreadListGaps {
+    init(_ list: ThreadListResponse) {
+        self.init(skippedProjects: list.problems.count, unreadableThreads: list.droppedThreads)
+    }
+}
+
+/// Where a thread stands after a "Delete Now" request failed, as a thread list
+/// the engine answered shows it.
 enum DeleteNowFailure: Equatable {
     case inTrash      // still listed in Trash (a refusal): Restore works
-    case gone         // no longer listed: the engine purged it after all
+    case gone         // missing from a complete list: the engine purged it after all
     case elsewhere    // listed outside Trash (restored meanwhile)
-    case unconfirmed  // the list could not be read: no promise either way
+    /// No promise either way: the list could not be read (nil), or it has a
+    /// gap and does not show the thread.
+    case unconfirmed(ThreadListGaps?)
+
+    /// The thread's place by a list the engine answered: `listed` is its row
+    /// there (nil when the list does not show it), `gaps` what the list could
+    /// not show. Only a list without gaps confirms a purge by leaving it out.
+    init(listed: ThreadSummary?, gaps: ThreadListGaps) {
+        if let listed, listed.state != "purged" {
+            self = listed.state == "trashed" ? .inTrash : .elsewhere
+        } else if listed != nil || gaps.isEmpty {
+            self = .gone
+        } else {
+            self = .unconfirmed(gaps)
+        }
+    }
+
+    /// Whether a banner that said this still holds once a later list shows
+    /// `now`: a thread confirmed purged retires every banner about it.
+    func stillHolds(once now: DeleteNowFailure) -> Bool {
+        now != .gone
+    }
 }
 
 /// Product copy of the trash lifecycle, one owner (INV-134): the honest
@@ -80,16 +118,36 @@ enum ThreadLifecycleCopy {
         "A turn is still running in this thread. Delete Now becomes available when it finishes."
 
     /// A failed "Delete Now", said by what the re-read list shows. Only a
-    /// thread still listed in Trash is promised to stay there.
+    /// thread still listed in Trash is promised to stay there, and only a
+    /// complete list confirms that it was deleted.
     static func deleteNowFailure(_ outcome: DeleteNowFailure, reason: String) -> String {
         switch outcome {
         case .inTrash: return "Could not delete the thread now; it stays in Trash: \(reason)"
         case .gone: return "The thread was deleted, though the request reported an error: \(reason)"
         case .elsewhere: return "Could not delete the thread now: \(reason)"
-        case .unconfirmed:
+        case .unconfirmed(nil):
             return "Could not confirm whether the thread was deleted; check Trash once the engine"
                 + " responds: \(reason)"
+        case .unconfirmed(let gaps?):
+            return "Could not confirm whether the thread was deleted: the thread list was"
+                + " incomplete (\(listGaps(gaps))); check Trash once it is complete: \(reason)"
         }
+    }
+
+    /// The gaps of a thread list, as the unconfirmed banner names them.
+    static func listGaps(_ gaps: ThreadListGaps) -> String {
+        var parts: [String] = []
+        if gaps.skippedProjects > 0 {
+            parts.append("the engine skipped \(counted(gaps.skippedProjects, "project"))")
+        }
+        if gaps.unreadableThreads > 0 {
+            parts.append("this app could not read \(counted(gaps.unreadableThreads, "thread"))")
+        }
+        return parts.joined(separator: " and ")
+    }
+
+    private static func counted(_ count: Int, _ noun: String) -> String {
+        "\(count) \(noun)\(count == 1 ? "" : "s")"
     }
 
     /// Trash row caption: where the thread lives and how long Restore works.

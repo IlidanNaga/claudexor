@@ -80,12 +80,34 @@ struct ThreadLifecycleTests {
 
     @Test func aFailedDeleteNowPromisesTrashOnlyWhileTheListStillHasItThere() {
         let reason = "Cannot reach the engine — is the daemon running?"
-        let texts = [DeleteNowFailure.inTrash, .gone, .elsewhere, .unconfirmed].map {
-            ($0, ThreadLifecycleCopy.deleteNowFailure($0, reason: reason))
-        }
-        for (outcome, text) in texts {
+        let gaps = ThreadListGaps(skippedProjects: 1, unreadableThreads: 2)
+        let outcomes: [DeleteNowFailure] = [.inTrash, .gone, .elsewhere, .unconfirmed(nil), .unconfirmed(gaps)]
+        for outcome in outcomes {
+            let text = ThreadLifecycleCopy.deleteNowFailure(outcome, reason: reason)
             #expect(text.hasSuffix(reason))
             #expect(text.contains("stays in Trash") == (outcome == .inTrash))
+            // Only a complete list without the thread says it was deleted.
+            #expect(text.hasPrefix("The thread was deleted") == (outcome == .gone))
+        }
+        #expect(ThreadLifecycleCopy.deleteNowFailure(.unconfirmed(gaps), reason: reason).contains(
+            "(the engine skipped 1 project and this app could not read 2 threads)"))
+    }
+
+    @Test func onlyAListWithoutGapsConfirmsAPurgeByLeavingTheThreadOut() throws {
+        let trashed = try lifecycleThread(id: "th-1", state: "trashed")
+        let active = try lifecycleThread(id: "th-1", state: "active")
+        let skipped = ThreadListGaps(skippedProjects: 1)
+        let unreadable = ThreadListGaps(unreadableThreads: 1)
+        #expect(DeleteNowFailure(listed: nil, gaps: ThreadListGaps()) == .gone)
+        #expect(DeleteNowFailure(listed: nil, gaps: skipped) == .unconfirmed(skipped))
+        #expect(DeleteNowFailure(listed: nil, gaps: unreadable) == .unconfirmed(unreadable))
+        // A listed thread is where the list shows it, gaps or not.
+        #expect(DeleteNowFailure(listed: trashed, gaps: skipped) == .inTrash)
+        #expect(DeleteNowFailure(listed: active, gaps: ThreadListGaps()) == .elsewhere)
+        // Absence from a list with gaps retires no banner; absence from a complete one does.
+        for banner in [DeleteNowFailure.inTrash, .elsewhere, .unconfirmed(nil), .unconfirmed(skipped)] {
+            #expect(banner.stillHolds(once: .unconfirmed(skipped)))
+            #expect(!banner.stillHolds(once: .gone))
         }
     }
 
@@ -238,9 +260,94 @@ struct ThreadLifecycleTests {
         #expect(await model.refreshThreads())
         #expect(model.threadStatus == nil)
     }
+
+    // MARK: A list that is incomplete confirms no deletion
+
+    @MainActor
+    @Test func aThreadMissingFromAListThatSkippedItsProjectIsNotCalledDeleted() async throws {
+        defer { LifecycleStubURLProtocol.handler = nil }
+        // The purge never reaches the engine; the re-read succeeds but skips the
+        // thread's project (its folder is missing), so the row is not in it.
+        let server = LifecycleServer(states: ["th-1": "trashed"], purge: .dropBeforeApply)
+        server.skippedRoot = lifecycleRoot
+        let model = lifecycleModel(server)
+        model.threads = [try lifecycleThread(id: "th-1", state: "trashed")]
+
+        await model.deleteThreadNow(locationID: .local, id: "th-1")
+
+        let unconfirmed = try #require(model.threadStatus)
+        #expect(unconfirmed.hasPrefix("Could not confirm whether the thread was deleted"))
+        #expect(unconfirmed.contains("the engine skipped 1 project"))
+        // The project comes back with the thread still in Trash: the banner holds...
+        server.skippedRoot = nil
+        #expect(await model.refreshThreads())
+        #expect(ThreadSidebarSections(model.locatedThreads).trash.map(\.thread.id) == ["th-1"])
+        #expect(model.threadStatus == unconfirmed)
+        // ...until a complete list no longer has the thread.
+        server.setState("th-1", "purged")
+        #expect(await model.refreshThreads())
+        #expect(model.threadStatus == nil)
+    }
+
+    @MainActor
+    @Test func aRefusedDeleteNowWhoseRowThisAppCannotReadIsNotCalledDeleted() async throws {
+        defer { LifecycleStubURLProtocol.handler = nil }
+        // The engine refuses (409), and the re-read carries the thread's row in a
+        // shape this app version cannot decode, so the row is dropped.
+        let server = LifecycleServer(states: ["th-1": "trashed"], purge: .refuse)
+        server.unreadable = ["th-1"]
+        let model = lifecycleModel(server)
+        model.threads = [try lifecycleThread(id: "th-1", state: "trashed")]
+
+        await model.deleteThreadNow(locationID: .local, id: "th-1")
+
+        let unconfirmed = try #require(model.threadStatus)
+        #expect(unconfirmed.hasPrefix("Could not confirm whether the thread was deleted"))
+        #expect(unconfirmed.contains("this app could not read 1 thread"))
+        #expect(unconfirmed.contains("thread_busy"))
+        // While the row stays unreadable, nothing is confirmed either way.
+        #expect(await model.refreshThreads())
+        #expect(!(model.threadStatus ?? "").hasPrefix("The thread was deleted"))
+    }
+
+    @MainActor
+    @Test func aRemoteListThatSkippedAProjectOrARowConfirmsNoDeletionButACompleteOneDoes() async throws {
+        defer { LifecycleStubURLProtocol.handler = nil }
+        for gap in ["project", "row", "none"] {
+            let server = LifecycleServer(
+                states: ["th-1": "trashed"],
+                purge: gap == "none" ? .applyThenDropAnswer : .dropBeforeApply)
+            if gap == "project" { server.skippedRoot = lifecycleRoot }
+            if gap == "row" { server.unreadable = ["th-1"] }
+            let (model, remote) = remoteLifecycleModel(
+                server, threads: [try lifecycleThread(id: "th-1", state: "trashed")])
+
+            await model.deleteThreadNow(locationID: remote, id: "th-1")
+
+            #expect(server.posts == ["POST /v2/threads/th-1/purge"])
+            let status = try #require(model.threadStatus)
+            switch gap {
+            case "project": #expect(status.contains("the engine skipped 1 project"))
+            case "row": #expect(status.contains("this app could not read 1 thread"))
+            default: #expect(status.hasPrefix("The thread was deleted"))
+            }
+            if gap != "none" {
+                #expect(status.hasPrefix("Could not confirm whether the thread was deleted"))
+                // A complete remote list without the thread retires the banner.
+                server.skippedRoot = nil
+                server.unreadable = []
+                server.setState("th-1", "purged")
+                #expect(await model.refreshRemoteThreads(remote))
+                #expect(model.threadStatus == nil)
+            }
+        }
+    }
 }
 
 // MARK: - Fixtures
+
+/// The project every fixture thread belongs to.
+private let lifecycleRoot = "/tmp/project"
 
 private func lifecycleJSON(
     id: String,
@@ -252,7 +359,7 @@ private func lifecycleJSON(
     let head = headRunId.map { "\"\($0)\"" } ?? "null"
     let folderJSON = folder.map { "\"\($0)\"" } ?? "null"
     let purgeAfter = state == "trashed" ? "\"2030-01-01T00:00:00.000Z\"" : "null"
-    return #"{"id":"\#(id)","title":"Thread \#(id)","folder":\#(folderJSON),"repoRoot":"/tmp/project","mode":"agent","workspaceMode":"\#(workspaceMode)","authPreference":"auto","primaryHarness":null,"eligibleHarnesses":[],"state":"\#(state)","trashedAt":null,"purgeAfter":\#(purgeAfter),"runIds":[],"headRunId":\#(head),"needsHuman":false,"createdAt":"2026-10-01T00:00:00Z","updatedAt":"2026-10-01T00:00:00Z"}"#
+    return #"{"id":"\#(id)","title":"Thread \#(id)","folder":\#(folderJSON),"repoRoot":"\#(lifecycleRoot)","mode":"agent","workspaceMode":"\#(workspaceMode)","authPreference":"auto","primaryHarness":null,"eligibleHarnesses":[],"state":"\#(state)","trashedAt":null,"purgeAfter":\#(purgeAfter),"runIds":[],"headRunId":\#(head),"needsHuman":false,"createdAt":"2026-10-01T00:00:00Z","updatedAt":"2026-10-01T00:00:00Z"}"#
 }
 
 private func lifecycleThread(
@@ -293,6 +400,26 @@ private func lifecycleModel(_ server: LifecycleServer) -> AppModel {
     return model
 }
 
+/// A model whose remote engine is the stub: `threads` are its cached rows.
+@MainActor
+private func remoteLifecycleModel(
+    _ server: LifecycleServer,
+    threads: [ThreadSummary]
+) -> (AppModel, ExecutionLocationID) {
+    let model = lifecycleModel(server)
+    let connection = RemoteConnection(id: UUID(), sshAlias: "lifecycle-host")
+    let config = URLSessionConfiguration.ephemeral
+    config.protocolClasses = [LifecycleStubURLProtocol.self]
+    model.remoteConnections = [connection]
+    model.remoteClients[connection.locationID] = GatewayClient(
+        baseURL: URL(string: "http://127.0.0.1:1235")!, token: "remote",
+        session: URLSession(configuration: config))
+    model.remoteThreadCache = threads.map {
+        RemoteThreadCacheEntry(locationID: connection.locationID, thread: $0, syncedAt: .now)
+    }
+    return (model, connection.locationID)
+}
+
 /// How the tiny engine answers a purge request.
 private enum PurgeBehavior {
     case apply                // 200 with the purged thread
@@ -309,6 +436,8 @@ private final class LifecycleServer: @unchecked Sendable {
     private var calls: [String] = []
     private let purge: PurgeBehavior
     private var listDown = false
+    private var skipped: String?
+    private var garbled: Set<String> = []
 
     init(states: [String: String], purge: PurgeBehavior = .apply) {
         self.states = states
@@ -323,6 +452,18 @@ private final class LifecycleServer: @unchecked Sendable {
         set { lock.withLock { listDown = newValue } }
     }
 
+    /// While set, the list skips this project root and reports it in
+    /// `problems`, as the engine does for a project whose folder is missing.
+    var skippedRoot: String? {
+        get { lock.withLock { skipped } }
+        set { lock.withLock { skipped = newValue } }
+    }
+    /// Threads whose list rows come in a shape the app cannot decode.
+    var unreadable: Set<String> {
+        get { lock.withLock { garbled } }
+        set { lock.withLock { garbled = newValue } }
+    }
+
     /// Another client (or the engine itself) changes a thread's state.
     func setState(_ id: String, _ state: String) { lock.withLock { states[id] = state } }
 
@@ -333,10 +474,17 @@ private final class LifecycleServer: @unchecked Sendable {
             calls.append("\(method) \(path)")
             if method == "GET", path == "/v2/threads" {
                 if listDown { return nil }
-                let rows = states.keys.sorted()
+                // Every fixture thread lives in `lifecycleRoot`.
+                let listed = skipped == lifecycleRoot ? [] : states.keys.sorted()
+                let rows = listed
                     .filter { states[$0] != "purged" }
-                    .map { lifecycleJSON(id: $0, state: states[$0] ?? "active") }
-                return reply(request, 200, #"{"threads":[\#(rows.joined(separator: ","))],"problems":[]}"#)
+                    .map { garbled.contains($0)
+                        ? #"{"id":"\#($0)","state":7}"#
+                        : lifecycleJSON(id: $0, state: states[$0] ?? "active") }
+                let problems = skipped.map {
+                    #"[{"projectId":"p-1","root":"\#($0)","code":"project_root_missing","message":"project root no longer exists: \#($0)"}]"#
+                } ?? "[]"
+                return reply(request, 200, #"{"threads":[\#(rows.joined(separator: ","))],"problems":\#(problems)}"#)
             }
             let parts = path.split(separator: "/").map(String.init)
             guard method == "POST", parts.count == 4, parts[1] == "threads" else {

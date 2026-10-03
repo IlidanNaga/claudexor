@@ -55,7 +55,7 @@ extension AppModel {
             guard requestIsCurrent() else { return false }
             threads = list.threads
             projectListingProblems = list.problems
-            retireDeleteNowBanner(at: .local)
+            reconcileThreadStatus(at: .local, listGaps: ThreadListGaps(list))
             if list.droppedThreads > 0 {
                 // Per-row salvage disclosed: the store carried rows this
                 // app build cannot decode, so disclose it instead of hiding it.
@@ -68,6 +68,7 @@ extension AppModel {
             guard requestIsCurrent() else { return false }
             threads = []
             projectListingProblems = []
+            threadListGaps[.local] = nil   // an engine without threads confirms no purge
             return true
         } catch {
             guard requestIsCurrent() else { return false }

@@ -541,10 +541,14 @@ frequency and volume are. The contracts:
     Trash with Restore. The engine journals a purge before it deletes the
     thread's directories, so after any other failure or a lost answer the app
     re-reads the list and says only what it shows: still in Trash (Restore
-    works), deleted after all (no Restore), or, when the list cannot be read
-    either, that the outcome is unconfirmed (check Trash once the engine
-    responds). A later list without the thread retires that message, and a
-    successful Restore or Delete Now clears it. No local-only thread state.
+    works); deleted after all (no Restore), which only a complete list can
+    confirm by leaving the thread out; or that the outcome is unconfirmed,
+    when the list cannot be read (check Trash once the engine responds) or has
+    a gap and does not show the thread — the engine skipped a project (its
+    `problems`) or this app could not read a row — which the message names
+    (check Trash once the list is complete). A later complete list without the
+    thread retires that message, and a successful Restore or Delete Now clears
+    it. No local-only thread state.
     The sidebar's BOTTOM-LEFT
     carries ONE compact accounts control (Claude-Code style, INV-135): a quiet
     single-line trigger — worst-readiness dot + the account name (or "N

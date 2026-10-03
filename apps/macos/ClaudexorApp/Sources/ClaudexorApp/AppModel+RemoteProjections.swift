@@ -58,7 +58,7 @@ extension AppModel {
                 RemoteThreadCacheEntry(locationID: locationID, thread: $0, syncedAt: now)
             })
             persistRemoteThreadCache()
-            retireDeleteNowBanner(at: locationID)
+            reconcileThreadStatus(at: locationID, listGaps: ThreadListGaps(list))
             await refreshRemoteRuns(locationID, using: client)
             guard isCurrentGateway(client, at: locationID) else { return true }
             for thread in list.threads {
