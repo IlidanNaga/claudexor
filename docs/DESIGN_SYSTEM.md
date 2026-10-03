@@ -513,13 +513,9 @@ frequency and volume are. The contracts:
     the open thread returns the conversation pane to a draft). A Trash row is
     not selectable; it names the thread, where it lived and until when it can
     be restored, and offers **Restore** (`POST /threads/:id/restore`) and
-    **Delete Now…**: a confirmation that states exactly what goes for the
-    thread's workspace mode (project files untouched; the thread gone from
-    every client and its own local directories and caches deleted, while saved
-    sessions may remain in the agents' own storage; its messages kept in the
-    local engine journal and its run outputs left to the regular cleanup; an
-    isolated thread also loses its separate working copy with changes never
-    applied to the project), then `POST /threads/:id/purge`. The copy has one
+    **Delete Now…**: a confirmation that states, for the thread's workspace
+    mode, what purge deletes and what it keeps as listed once in ARCHITECTURE
+    (thread lifecycle routes), then `POST /threads/:id/purge`. The copy has one
     owner (`ThreadLifecycleCopy`) and never promises to erase the conversation.
     While a turn of the thread runs, Delete and Delete Now… are disabled with
     the reason as hover help, and a Trash row also says it in place (the

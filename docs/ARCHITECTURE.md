@@ -1940,11 +1940,14 @@ Endpoint semantics beyond the inventory:
   `purge` requires trash (`409 thread_not_trashed`) and answers `409
   thread_busy` while ANY turn of the thread is queued or running, because an
   Ask/Plan turn can run inside the lane home purge deletes; trash and restore
-  delete nothing and never refuse a busy thread. Purge journals the `purged`
-  state first, then deletes the thread's own directories: the isolated worktree
-  with its `claudexor/thread-*` branch and every lane home (the per-thread HOME
-  of its Ask/Plan turns and its cached continuation summaries). A directory
-  error after that commit (ENOTEMPTY, EBUSY, a Windows lock) fails the request
+  delete nothing and never refuse a busy thread. What purge deletes and keeps
+  is listed here once; DESIGN_SYSTEM (the Delete Now dialog) and the FEATURES
+  row refer to it. Purge journals the `purged` state first, which takes the
+  thread out of every listing, then deletes the thread's own directories: the
+  isolated worktree, with any changes never applied to the project, and its
+  `claudexor/thread-*` branch, and every lane home (the per-thread HOME of its
+  Ask/Plan turns and its cached continuation summaries). A directory error
+  after that commit (ENOTEMPTY, EBUSY, a Windows lock) fails the request
   although the thread is already purged and no longer restorable, so a client
   re-reads the list instead of promising Trash; a repeated purge or the next
   disk-retention pass (below) finishes the cleanup, and nothing makes a
@@ -1953,8 +1956,8 @@ Endpoint semantics beyond the inventory:
   follow the run retention below, native sessions that a route keeps outside
   the lane home stay in the agent's own storage (Agent turns, and Codex
   config-dir login profiles and Antigravity, which keep sessions in the
-  account's directory), and project files are untouched. A purged thread
-  leaves every listing (ACP's view of trashed threads is in INTEGRATIONS).
+  account's directory), and project files are untouched. (ACP's view of
+  trashed threads is in INTEGRATIONS.)
 - Refused turns are honest end-to-end: when a turn's run dies BEFORE it starts
   (the trust gate refusing `access: full`, preflight validation, an enqueue
   throw, or an Implement whose plan still has open questions and no explicit
