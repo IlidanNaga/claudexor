@@ -109,6 +109,13 @@ struct ThreadLifecycleTests {
             #expect(banner.stillHolds(once: .unconfirmed(skipped)))
             #expect(!banner.stillHolds(once: .gone))
         }
+        // A thread back outside Trash retires what points to Trash, and only that.
+        #expect(!DeleteNowFailure.inTrash.stillHolds(once: .elsewhere))
+        #expect(!DeleteNowFailure.unconfirmed(nil).stillHolds(once: .elsewhere))
+        #expect(!DeleteNowFailure.unconfirmed(skipped).stillHolds(once: .elsewhere))
+        #expect(DeleteNowFailure.elsewhere.stillHolds(once: .elsewhere))
+        #expect(DeleteNowFailure.inTrash.stillHolds(once: .inTrash))
+        #expect(DeleteNowFailure.unconfirmed(nil).stillHolds(once: .inTrash))
     }
 
     @Test func trashCaptionStatesHowLongRestoreWorks() {
@@ -341,6 +348,29 @@ struct ThreadLifecycleTests {
                 #expect(model.threadStatus == nil)
             }
         }
+    }
+
+    // MARK: The banner follows the thread's confirmed state
+
+    @MainActor
+    @Test func aStaysInTrashBannerHoldsWhileTrashedAndLeavesWhenAnotherClientRestores() async throws {
+        defer { LifecycleStubURLProtocol.handler = nil }
+        let server = LifecycleServer(states: ["th-1": "trashed"], purge: .refuse)
+        let model = lifecycleModel(server)
+        model.threads = [try lifecycleThread(id: "th-1", state: "trashed")]
+
+        await model.deleteThreadNow(locationID: .local, id: "th-1")
+
+        let banner = try #require(model.threadStatus)
+        #expect(banner.contains("stays in Trash"))
+        // Still listed in Trash: the banner holds.
+        #expect(await model.refreshThreads())
+        #expect(model.threadStatus == banner)
+        // Another client restores it: the next list retires the Trash promise.
+        server.setState("th-1", "active")
+        #expect(await model.refreshThreads())
+        #expect(ThreadSidebarSections(model.locatedThreads).active.map(\.thread.id) == ["th-1"])
+        #expect(model.threadStatus == nil)
     }
 }
 

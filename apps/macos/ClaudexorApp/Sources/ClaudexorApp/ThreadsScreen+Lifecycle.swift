@@ -75,9 +75,15 @@ enum DeleteNowFailure: Equatable {
     }
 
     /// Whether a banner that said this still holds once a later list shows
-    /// `now`: a thread confirmed purged retires every banner about it.
+    /// `now`: a thread confirmed purged retires every banner about it, and a
+    /// thread listed outside Trash (restored, also by another client) retires
+    /// the banners that point to Trash.
     func stillHolds(once now: DeleteNowFailure) -> Bool {
-        now != .gone
+        switch (self, now) {
+        case (_, .gone): return false
+        case (.inTrash, .elsewhere), (.unconfirmed, .elsewhere): return false
+        default: return true
+        }
     }
 }
 

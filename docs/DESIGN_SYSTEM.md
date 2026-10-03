@@ -546,9 +546,11 @@ frequency and volume are. The contracts:
     when the list cannot be read (check Trash once the engine responds) or has
     a gap and does not show the thread — the engine skipped a project (its
     `problems`) or this app could not read a row — which the message names
-    (check Trash once the list is complete). A later complete list without the
-    thread retires that message, and a successful Restore or Delete Now clears
-    it. No local-only thread state.
+    (check Trash once the list is complete). A later list that makes the
+    message wrong retires it: a complete list without the thread, or, for a
+    message that points to Trash, a list that shows the thread outside Trash
+    (restored, also by another client). A successful Restore or Delete Now
+    clears it. No local-only thread state.
     The sidebar's BOTTOM-LEFT
     carries ONE compact accounts control (Claude-Code style, INV-135): a quiet
     single-line trigger — worst-readiness dot + the account name (or "N
