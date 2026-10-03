@@ -19,7 +19,7 @@
         },
         "trash_purge_report": {
           "type": "boolean",
-          "description": "Opt in to the expired-trash disclosure: when true, the receipt carries purged_threads. The purge itself always runs; the same lockstep capability negotiation as data_root_report keeps older strict receipt readers compatible."
+          "description": "Opt in to the thread-purge disclosure: when true, the receipt carries purged_threads and purge_leftovers. The purges themselves always run; the same lockstep capability negotiation as data_root_report keeps older strict receipt readers compatible."
         }
       },
       "additionalProperties": false,

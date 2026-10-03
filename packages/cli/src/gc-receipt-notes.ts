@@ -28,5 +28,13 @@ export function gcReceiptNotes(receipt: ControlGcReceipt, ownedRoot: string): st
     const verb = receipt.dry_run ? "would purge" : "purged";
     notes.push(`${verb} ${purged.length} expired trash thread(s): ${purged.join(", ")}`);
   }
+  // Purges whose directory cleanup failed earlier, finished by this pass.
+  const leftovers = receipt.purge_leftovers;
+  if (leftovers && leftovers.length > 0) {
+    const verb = receipt.dry_run ? "would finish" : "finished";
+    notes.push(
+      `${verb} ${leftovers.length} purge(s) whose cleanup failed earlier: ${leftovers.join(", ")}`,
+    );
+  }
   return notes;
 }

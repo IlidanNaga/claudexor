@@ -5,7 +5,9 @@
  * and schedules the bounded startup maintenance pass. `claudexor gc` and the
  * control route are thin callers of the runner built here. The same pass
  * purges expired trash (a trashed thread past `purge_after`) through the one
- * thread purge owner, so trash cannot outlive its restore window forever.
+ * thread purge owner, so trash cannot outlive its restore window forever, and
+ * through the same owner finishes every purge whose directory cleanup failed
+ * after the purge was journaled.
  */
 import { join } from "node:path";
 import type { ProjectPartitions, ProjectStore } from "@claudexor/daemon";
@@ -27,9 +29,11 @@ export interface RetentionRunnerDeps {
   daemonJobs: () => Promise<
     Array<{ runId?: string; state: string; finishedAt?: string; params?: unknown }>
   >;
-  /** The ONE thread purge owner (control-services): journals the purge, then
+  /** The ONE thread purge owner (thread-purge.ts): journals the purge, then
    * deletes the isolated worktree/branch and every lane home of the thread. */
   purgeThread: (id: string) => Promise<unknown>;
+  /** Whether a directory that owner deletes is still on disk for the thread. */
+  hasPurgeLeftovers: (thread: Thread) => boolean;
 }
 
 export type RetentionRunner = (request: ControlGcRequest) => Promise<ControlGcReceipt>;
@@ -45,9 +49,39 @@ function expiredTrashThreads(threads: readonly Thread[], now: number): Thread[] 
 }
 
 /**
+ * Finish purges whose directory cleanup failed after the journal commit: a
+ * purged thread is hidden from every listing, so without this pass its
+ * isolated worktree (and any lane home) would stay on disk forever. The owner
+ * journals nothing new for an already purged thread and deletes what is left;
+ * a cleanup that fails again is disclosed and retried by the next pass. The
+ * thread is never made restorable again. Dry-run only lists them.
+ */
+async function finishPurgeLeftovers(
+  deps: RetentionRunnerDeps,
+  dryRun: boolean,
+): Promise<{ finished: string[]; errors: string[] }> {
+  const finished: string[] = [];
+  const errors: string[] = [];
+  for (const thread of deps.threads.listPurgedThreads()) {
+    if (!deps.hasPurgeLeftovers(thread)) continue;
+    try {
+      if (!dryRun) await deps.purgeThread(thread.id);
+      finished.push(thread.id);
+    } catch (error) {
+      errors.push(
+        `purged thread ${thread.id} cleanup: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  return { finished, errors };
+}
+
+/**
  * Purge expired trash through the one purge owner. A thread with a queued or
  * running turn is kept for a later pass (the purge route answers 409
  * `thread_busy` for the same reason); dry-run only lists what it would purge.
+ * A purge that fails after its journal commit is finished by the NEXT pass's
+ * `finishPurgeLeftovers` (this pass only discloses the error).
  */
 async function purgeExpiredTrash(
   deps: RetentionRunnerDeps,
@@ -86,9 +120,11 @@ export function createRetentionRunner(deps: RetentionRunnerDeps): RetentionRunne
     // reference set spans EVERY non-purged thread's full run lineage.
     const retention = loadConfig(noProjectRoot).global.retention;
     const jobs = await deps.daemonJobs();
-    // Expired trash goes FIRST, so the runs only it referenced become ordinary
+    // Purges left unfinished by an earlier failure, then expired trash, both
+    // FIRST, so the runs only expired trash referenced become ordinary
     // unreferenced candidates of this same pass. A dry run purges nothing, so
     // its reference set skips the would-be-purged threads to preview the same.
+    const leftovers = await finishPurgeLeftovers(deps, request.dry_run);
     const trash = await purgeExpiredTrash(deps, jobs, request.dry_run);
     const previewPurged = new Set(request.dry_run ? trash.purged : []);
     const records = jobs
@@ -186,8 +222,11 @@ export function createRetentionRunner(deps: RetentionRunnerDeps): RetentionRunne
         dataRootMode: claudexorOwnedRoot() === userConfigDir() ? "override" : "default",
       },
     );
-    receipt.errors.unshift(...trash.errors);
-    if (request.trash_purge_report) receipt.purged_threads = trash.purged;
+    receipt.errors.unshift(...leftovers.errors, ...trash.errors);
+    if (request.trash_purge_report) {
+      receipt.purged_threads = trash.purged;
+      receipt.purge_leftovers = leftovers.finished;
+    }
     return receipt;
   };
   return (request) => {
@@ -219,7 +258,8 @@ export function scheduleStartupRetention(
           opts.logPath,
           `retention: freed ${receipt.freed_bytes} bytes (${receipt.deleted_runs.length} runs, ` +
             `${receipt.deleted_reviews.length} reviews, ` +
-            `${receipt.purged_threads?.length ?? 0} expired trash threads, ${receipt.errors.length} errors)`,
+            `${receipt.purged_threads?.length ?? 0} expired trash threads, ` +
+            `${receipt.purge_leftovers?.length ?? 0} finished purges, ${receipt.errors.length} errors)`,
         ),
       (error: unknown) =>
         logLine(

@@ -1943,14 +1943,17 @@ Endpoint semantics beyond the inventory:
   delete nothing and never refuse a busy thread. Purge journals the `purged`
   state first, then deletes the thread's own directories: the isolated worktree
   with its `claudexor/thread-*` branch and every lane home (the per-thread HOME
-  of its Ask/Plan turns and its cached continuation summaries); a repeated
-  purge finishes a partial cleanup. Purge does not erase the conversation: the
-  thread and turn records stay in the journal, run trees follow the run
-  retention below, native sessions that a route keeps outside the lane home
-  stay in the agent's own storage (Agent turns, and Codex config-dir login
-  profiles and Antigravity, which keep sessions in the account's directory),
-  and project files are untouched. A purged thread leaves every listing (ACP's
-  view of trashed threads is in INTEGRATIONS).
+  of its Ask/Plan turns and its cached continuation summaries). A directory
+  error after that commit (ENOTEMPTY, EBUSY, a Windows lock) fails the request
+  although the thread is already purged and no longer restorable; a repeated
+  purge or the next disk-retention pass (below) finishes the cleanup, and
+  nothing makes a partially deleted thread restorable again. Purge does not
+  erase the conversation: the thread and turn records stay in the journal, run
+  trees follow the run retention below, native sessions that a route keeps
+  outside the lane home stay in the agent's own storage (Agent turns, and Codex
+  config-dir login profiles and Antigravity, which keep sessions in the
+  account's directory), and project files are untouched. A purged thread
+  leaves every listing (ACP's view of trashed threads is in INTEGRATIONS).
 - Refused turns are honest end-to-end: when a turn's run dies BEFORE it starts
   (the trust gate refusing `access: full`, preflight validation, an enqueue
   throw, or an Implement whose plan still has open questions and no explicit
@@ -2558,11 +2561,16 @@ one thread purge owner (the service behind `POST /v2/threads/:id/purge`) before
 run candidates are judged, so the runs only it referenced become ordinary
 unreferenced candidates. A thread with a queued or running turn is kept for a
 later pass and disclosed in `errors[]`, as is a failed purge; a dry run purges
-nothing and previews those threads' runs as unreferenced. The receipt's
-`purged_threads` names the purged (or would-be-purged) threads; like
-`data_root_unrecognized` it is opt-in (`trash_purge_report`, sent only by a
-lockstep CLI), the startup pass requests it for its log line, and
-`claudexor gc` prints it.
+nothing and previews those threads' runs as unreferenced. Before that, the
+pass FINISHES PURGES whose directory cleanup failed after the journal commit:
+every purged thread whose isolated worktree or lane home is still on disk goes
+through the same owner again (it journals nothing new and deletes what is
+left); a cleanup that fails again is disclosed in `errors[]` and retried by the
+next pass, and a dry run only lists them. The receipt's `purged_threads` names
+the purged (or would-be-purged) expired trash and `purge_leftovers` the
+finished (or would-be-finished) purges; like `data_root_unrecognized` both are
+opt-in (`trash_purge_report`, sent only by a lockstep CLI), the startup pass
+requests them for its log line, and `claudexor gc` prints them.
 While running it snapshots its live harness child process groups to
 `daemon/pids.json`; the NEXT startup reaps recorded orphans that survived a
 crash (pid liveness + command-name recycling guard) and sweeps workspace

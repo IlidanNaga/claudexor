@@ -506,7 +506,7 @@ export async function gcCommand(args: ParsedArgs, json: boolean): Promise<number
   const dryRun = flagBool(args, "dry-run") === true;
   const { addr, engine } = await ensureDaemon();
   // Capability negotiation over the handshake's validated engine identity:
-  // request the opt-in receipt reports (data-root scan, expired-trash purges)
+  // request the opt-in receipt reports (data-root scan, thread purges)
   // ONLY from a lockstep daemon (same engine version as this CLI). Any skew —
   // older daemon, newer daemon, or a malformed identity — omits the flags, so
   // both sides exchange the exact pre-feature request/receipt shapes and a

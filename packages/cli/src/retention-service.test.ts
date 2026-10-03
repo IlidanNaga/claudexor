@@ -4,7 +4,9 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ProjectPartitions, ProjectStore } from "@claudexor/daemon";
 import { ArtifactStore } from "@claudexor/artifact-store";
+import { noProjectRepoRoot, projectRuntimeDir } from "@claudexor/util";
 import { createRetentionRunner, scheduleStartupRetention } from "./retention-service.js";
+import { threadPurgeOwner } from "./thread-purge.js";
 
 const roots: string[] = [];
 let previousConfigDir: string | undefined;
@@ -49,7 +51,23 @@ type FakeThread = {
   purge_after?: string | null;
   head_run_id?: string | null;
   repo?: { root: string } | null;
+  workspace?: { mode: string };
 };
+
+/** A project root whose runtime dir still holds a thread's isolated worktree
+ * dir and a lane home (what the purge owner deletes). */
+function projectWithThreadDirs(threadId: string): string {
+  const root = mkdtempSync(join(tmpdir(), "claudexor-retention-purge-"));
+  roots.push(root);
+  const runtime = projectRuntimeDir(root);
+  mkdirSync(join(runtime, "threads", threadId, "tree"), { recursive: true });
+  writeFileSync(join(runtime, "threads", threadId, "tree", "unapplied.txt"), "work\n");
+  mkdirSync(join(runtime, "lanes", threadId, "claude-default", "home"), { recursive: true });
+  return root;
+}
+
+const worktreeDir = (root: string, threadId: string) =>
+  join(projectRuntimeDir(root), "threads", threadId);
 
 function deps(input: {
   projectRoots: string[];
@@ -58,7 +76,9 @@ function deps(input: {
   threads?: FakeThread[];
   records: Array<{ runId?: string; state: string; finishedAt?: string; params?: unknown }>;
   purged?: string[];
-  failPurge?: string;
+  /** Directory errors the purge owner throws AFTER journaling `purged`, per
+   * thread and in attempt order (the real owner journals first, then deletes). */
+  cleanupErrors?: Record<string, Error[]>;
 }) {
   const projects = {
     list: () => input.projectRoots.map((root, i) => ({ id: `p${i}`, root })),
@@ -67,8 +87,10 @@ function deps(input: {
     input.threads ?? (input.threadRunIds ? [{ id: "t1", run_ids: input.threadRunIds }] : []);
   const threads = {
     healthyProjectRoots: () => input.healthyRoots,
-    // Like the store, a purged thread drops out of every listing.
+    // Like the store, a purged thread drops out of every listing; only the
+    // retention pass lists it, to finish a cleanup that failed.
     listThreads: () => rows.filter((thread) => thread.state !== "purged"),
+    listPurgedThreads: () => rows.filter((thread) => thread.state === "purged"),
     turnsFor: () => [],
   } as unknown as ProjectPartitions;
   return {
@@ -76,11 +98,23 @@ function deps(input: {
     threads,
     daemonJobs: async () => input.records,
     purgeThread: async (id: string) => {
-      if (id === input.failPurge) throw new Error("worktree removal failed");
-      input.purged?.push(id);
       rows = rows.map((thread) => (thread.id === id ? { ...thread, state: "purged" } : thread));
+      const error = input.cleanupErrors?.[id]?.shift();
+      if (error) throw error;
+      const thread = rows.find((row) => row.id === id);
+      if (thread?.repo) {
+        for (const dir of ["threads", "lanes"]) {
+          rmSync(join(projectRuntimeDir(thread.repo.root), dir, id), {
+            recursive: true,
+            force: true,
+          });
+        }
+      }
+      input.purged?.push(id);
       return { id, state: "purged" };
     },
+    // The REAL leftover check of the purge owner, over the directories above.
+    hasPurgeLeftovers: threadPurgeOwner(threads, noProjectRepoRoot()).hasPurgeLeftovers,
   };
 }
 
@@ -210,6 +244,7 @@ describe("expired trash purge in the retention pass (owner decision E2)", () => 
     )({ dry_run: false });
     expect(purged).toEqual(["t-expired"]);
     expect(receipt).not.toHaveProperty("purged_threads");
+    expect(receipt).not.toHaveProperty("purge_leftovers");
   });
 
   it("dry run lists expired trash, deletes nothing, and previews its runs as unreferenced", async () => {
@@ -256,18 +291,104 @@ describe("expired trash purge in the retention pass (owner decision E2)", () => 
     ]);
   });
 
-  it("discloses a failed purge in errors instead of listing it as purged", async () => {
+  it("discloses a cleanup error after the purge commit, and the next pass finishes that purge", async () => {
+    const root = projectWithThreadDirs("t-expired");
+    const purged: string[] = [];
+    const runner = createRetentionRunner(
+      deps({
+        projectRoots: [root],
+        healthyRoots: [root],
+        threads: [
+          {
+            id: "t-expired",
+            run_ids: [],
+            state: "trashed",
+            purge_after: past,
+            repo: { root },
+            workspace: { mode: "isolated" },
+          },
+        ],
+        records: [],
+        purged,
+        cleanupErrors: { "t-expired": [new Error("worktree removal failed")] },
+      }),
+    );
+    const first = await runner({ dry_run: false, trash_purge_report: true });
+    expect(first.purged_threads).toEqual([]);
+    expect(first.purge_leftovers).toEqual([]);
+    expect(first.errors).toEqual(["expired trash thread t-expired: worktree removal failed"]);
+    // Journaled `purged` (hidden, no Restore) while its worktree stays on disk.
+    expect(existsSync(worktreeDir(root, "t-expired"))).toBe(true);
+
+    const second = await runner({ dry_run: false, trash_purge_report: true });
+    expect(second.purge_leftovers).toEqual(["t-expired"]);
+    expect(second.errors).toEqual([]);
+    expect(existsSync(worktreeDir(root, "t-expired"))).toBe(false);
+    expect(purged).toEqual(["t-expired"]);
+
+    // Nothing is left on disk, so the next pass has nothing to finish.
+    const third = await runner({ dry_run: false, trash_purge_report: true });
+    expect(third.purge_leftovers).toEqual([]);
+    expect(purged).toEqual(["t-expired"]);
+  });
+
+  it("retries a purge whose cleanup hit ENOTEMPTY (a Windows lock) until the directory goes", async () => {
+    // The purge route already journaled `purged`; its cleanup failed and left both directories.
+    const root = projectWithThreadDirs("t-locked");
+    const enotempty = Object.assign(
+      new Error(`ENOTEMPTY: directory not empty, rmdir '${worktreeDir(root, "t-locked")}'`),
+      { code: "ENOTEMPTY" },
+    );
+    const purged: string[] = [];
+    const runner = createRetentionRunner(
+      deps({
+        projectRoots: [root],
+        healthyRoots: [root],
+        threads: [
+          {
+            id: "t-locked",
+            run_ids: [],
+            state: "purged",
+            repo: { root },
+            workspace: { mode: "isolated" },
+          },
+        ],
+        records: [],
+        purged,
+        cleanupErrors: { "t-locked": [enotempty] },
+      }),
+    );
+    const first = await runner({ dry_run: false, trash_purge_report: true });
+    expect(first.purge_leftovers).toEqual([]);
+    expect(first.errors).toEqual([`purged thread t-locked cleanup: ${enotempty.message}`]);
+    expect(existsSync(worktreeDir(root, "t-locked"))).toBe(true);
+
+    const second = await runner({ dry_run: false, trash_purge_report: true });
+    expect(second.purge_leftovers).toEqual(["t-locked"]);
+    expect(second.errors).toEqual([]);
+    expect(existsSync(worktreeDir(root, "t-locked"))).toBe(false);
+    expect(purged).toEqual(["t-locked"]);
+  });
+
+  it("dry run lists an unfinished purge without deleting; a finished purge is left alone", async () => {
+    const root = projectWithThreadDirs("t-leftover");
+    const purged: string[] = [];
+    const isolated = { repo: { root }, workspace: { mode: "isolated" } };
     const receipt = await createRetentionRunner(
       deps({
-        projectRoots: [],
-        healthyRoots: [],
-        threads: trashThreads,
+        projectRoots: [root],
+        healthyRoots: [root],
+        threads: [
+          { id: "t-leftover", run_ids: [], state: "purged", ...isolated },
+          { id: "t-done", run_ids: [], state: "purged", ...isolated },
+        ],
         records: [],
-        failPurge: "t-expired",
+        purged,
       }),
-    )({ dry_run: false, trash_purge_report: true });
-    expect(receipt.purged_threads).toEqual([]);
-    expect(receipt.errors).toEqual(["expired trash thread t-expired: worktree removal failed"]);
+    )({ dry_run: true, trash_purge_report: true });
+    expect(receipt.purge_leftovers).toEqual(["t-leftover"]);
+    expect(purged).toEqual([]);
+    expect(existsSync(worktreeDir(root, "t-leftover"))).toBe(true);
   });
 
   it("the startup pass requests the trash disclosure and logs the purge count", async () => {
