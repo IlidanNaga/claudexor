@@ -766,7 +766,7 @@ The portable plugin supports macOS and Linux and requires the `claudexor`
 command on `PATH`; Windows is not currently supported. It bundles one Agent
 Skill plus MCP wiring and never collects credentials or bypasses Claudexor's
 typed apply and human-decision gates. See
-[`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md#portable-agent-skill-and-copilot-plugin)
+[`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md#portable-agent-skill-and-host-packages)
 for lifecycle and precedence details.
 
 The explicit Claude install also enables the official subscription-quota
