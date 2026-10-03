@@ -52,6 +52,7 @@ extension AppModel {
             return
         }
         do {
+            threadStatus = nil
             let updated = try await requestClient.setThreadFolder(id: id, folder: folder)
             guard isCurrentGateway(requestClient, at: locationID) else { return }
             applyThreadUpdate(updated, at: locationID)
@@ -77,6 +78,9 @@ extension AppModel {
     }
 
     private func updateThreads(inFolder oldName: String, to newName: String?) async {
+        // A new folder operation supersedes an earlier folder banner; its own
+        // PATCH failures and the refresh set the status that belongs to it.
+        threadStatus = nil
         let members = Self.threadsToRefile(threads(in: oldName))
         let locations = Set(members.map(\.locationID))
         var failures = 0

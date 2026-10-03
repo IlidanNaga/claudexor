@@ -50,6 +50,28 @@ import Testing
     }
 
     @MainActor
+    @Test func aSuccessfulRetryClearsTheEarlierPartialFailureBanner() async throws {
+        defer { FolderAppStubURLProtocol.handler = nil }
+        FolderAppStubURLProtocol.handler = { request in
+            let path = request.url?.path ?? ""
+            if request.httpMethod == "PATCH", path.hasPrefix("/v2/threads/") {
+                let id = String(path.dropFirst("/v2/threads/".count))
+                let body = try JSONEncoder().encode(try Self.thread(id, folder: "B"))
+                return (FolderAppStubURLProtocol.response(request, status: 200), body)
+            }
+            let list = #"{"threads":[],"problems":[]}"#
+            return (FolderAppStubURLProtocol.response(request, status: 200), Data(list.utf8))
+        }
+        let model = AppModel(client: FolderAppStubURLProtocol.client(), requestNotificationAuthorization: false)
+        model.threads = [try Self.thread("a1", folder: "A"), try Self.thread("a2", folder: "A")]
+        model.threadStatus = "Updated 1 of 2 threads; 1 failed."
+
+        await model.renameThreadFolder("A", to: "B")
+
+        #expect(model.threadStatus == nil)
+    }
+
+    @MainActor
     @Test func renamingAFolderRefilesOnlyLiveMembersWithoutAFailureReport() async throws {
         defer { FolderAppStubURLProtocol.handler = nil }
         nonisolated(unsafe) var patched: [String] = []
