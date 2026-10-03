@@ -109,13 +109,6 @@ extension ThreadsScreen {
         Task { await model.renameThread(locationID: locationID, id: id, title: title) }
     }
 
-    func confirmPermanentDelete() {
-        guard let id = deleteTargetId, let locationID = deleteTargetLocation else { return }
-        deleteTargetId = nil
-        deleteTargetLocation = nil
-        Task { await model.permanentlyDeleteThread(locationID: locationID, id: id) }
-    }
-
     func threadRow(_ located: LocatedThread) -> some View {
         let thread = located.thread
         return VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
@@ -169,12 +162,7 @@ extension ThreadsScreen {
                     }
                 }
             }
-            Divider()
-            Button("Delete Permanently…", role: .destructive) {
-                deleteTargetId = thread.id
-                deleteTargetLocation = located.locationID
-            }
-            .disabled(model.isThreadBusy(thread.id, at: located.locationID))
+            threadDeleteMenuItem(located)
         }
         .padding(.vertical, Theme.Spacing.xxs)
     }

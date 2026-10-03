@@ -503,10 +503,28 @@ frequency and volume are. The contracts:
 - Single window, **three regions**:
   - **Thread list (glass sidebar):** the conversations, with a needs-you marker;
     "New" enters the draft state (the first message materializes the thread).
-    Each row carries a context menu — Rename… (title sheet), Archive/Reopen,
-    and confirmed permanent deletion. Deletion is disabled while the head run
-    is active and uses server-owned trash then purge; rename/archive ride
-    `PATCH /threads/:id` (`title`/`state`). No local-only thread state. The sidebar's BOTTOM-LEFT
+    ONE list in three parts derived from the server's thread state: active
+    threads, then a collapsed **Archived** section (`closed` — Archive hides a
+    thread there, Reopen brings it back) and a collapsed **Trash** section
+    (`trashed`). Each active or archived row carries a context menu — Rename…
+    (title sheet), Archive/Reopen, and **Delete** — where rename/archive ride
+    `PATCH /threads/:id` (`title`/`state`) and Delete is one click with no
+    dialog that moves the thread to Trash (`POST /threads/:id/trash`; deleting
+    the open thread returns the conversation pane to a draft). A Trash row is
+    not selectable; it names the thread, where it lived and until when it can
+    be restored, and offers **Restore** (`POST /threads/:id/restore`) and
+    **Delete Now…**: a confirmation that states exactly what goes for the
+    thread's workspace mode (project files untouched; the saved agent sessions
+    of its Ask/Plan turns deleted; the thread gone from every client; its
+    messages kept in the local engine journal and its run outputs left to the
+    regular cleanup; an isolated thread also loses its separate working copy
+    with changes never applied to the project), then
+    `POST /threads/:id/purge`. The copy has one owner (`ThreadLifecycleCopy`)
+    and never promises to erase the conversation. While a turn of the thread
+    runs, Delete and Delete Now… are disabled with the reason as hover help,
+    and a Trash row also says it in place (the engine refuses that purge for
+    every client). A refused or failed purge leaves the thread in Trash with
+    Restore. No local-only thread state. The sidebar's BOTTOM-LEFT
     carries ONE compact accounts control (Claude-Code style, INV-135): a quiet
     single-line trigger — worst-readiness dot + the account name (or "N
     accounts") + worst quota % + chevron — that opens a popover to manage

@@ -1,0 +1,5 @@
+---
+"claudexor": minor
+---
+
+Thread deletion in the macOS app is now a trash lifecycle. "Delete" moves a thread to a collapsed Trash section with one click, "Restore" brings it back for 30 days, and "Delete Now…" purges it after a confirmation that states exactly what is removed and what stays for the thread's workspace mode; it never promises to erase the conversation, whose messages stay in the local engine journal. Archived threads now move into their own collapsed section. The purge route answers 409 `thread_busy` while any turn of the thread is queued or running, ask and plan turns included, because purge deletes the session home such a turn runs in; trash and restore stay unrestricted. The daemon's retention pass (at startup and on `claudexor gc`) now purges trash whose 30-day window has ended, names those threads in the receipt (`purged_threads`, requested with `trash_purge_report`) and in `claudexor gc --dry-run`, and ACP `session/list` no longer lists trashed threads.

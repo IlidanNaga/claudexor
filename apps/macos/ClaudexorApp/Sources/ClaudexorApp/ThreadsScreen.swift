@@ -283,25 +283,7 @@ struct ThreadsScreen: View {
                 )
                 .frame(maxHeight: .infinity)
             } else {
-                List(model.locatedThreads, selection: Binding(
-                    get: { model.selectedLocatedThreadID },
-                    set: { locatedID in
-                        guard let locatedID,
-                              let located = model.locatedThreads.first(where: {
-                                  $0.id == locatedID
-                              })
-                        else { return }
-                        Task {
-                            await model.openThread(
-                                locationID: located.locationID,
-                                id: located.thread.id)
-                        }
-                    }
-                )) { located in
-                    threadRow(located).tag(located.id)
-                }
-                .listStyle(.sidebar)
-                .scrollContentBackground(.hidden)   // let the Liquid Glass panel show through
+                threadSections   // active, then collapsed Archived and Trash (ThreadsScreen+Lifecycle)
             }
 
             SidebarFooter()
@@ -316,34 +298,14 @@ struct ThreadsScreen: View {
                 }
             }
         )) { renameSheet }
-        .confirmationDialog(
-            "Delete thread permanently?",
-            isPresented: Binding(
-                get: { deleteTargetId != nil },
-                set: {
-                    if !$0 {
-                        deleteTargetId = nil
-                        deleteTargetLocation = nil
-                    }
-                }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button("Delete Permanently", role: .destructive) { confirmPermanentDelete() }
-            Button("Cancel", role: .cancel) {
-                deleteTargetId = nil
-                deleteTargetLocation = nil
-            }
-        } message: {
-            Text("This removes the conversation and its thread workspace. This action cannot be undone.")
-        }
+        .threadDeleteNowConfirmation(target: $deleteNowTarget) { confirmDeleteNow($0) }
     }
 
     @State var renameDraft = ""
     @State var renameTargetId: String?
     @State var renameTargetLocation: ExecutionLocationID?
-    @State var deleteTargetId: String?
-    @State var deleteTargetLocation: ExecutionLocationID?
+    @State var deleteNowTarget: LocatedThread?
+    @State var sidebarDisclosure = ThreadSidebarDisclosure()
     // MARK: Conversation pane
 
     private var conversation: some View {
