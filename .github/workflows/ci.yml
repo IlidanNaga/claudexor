@@ -42,7 +42,7 @@ jobs:
       # (the Node-20-compatible pinned pnpm version). Specifying both causes
       # ERR_PNPM_BAD_PM_VERSION.
       - name: Install pnpm
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
 
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -226,7 +226,7 @@ jobs:
           persist-credentials: false
 
       - name: Install pnpm
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
 
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -280,13 +280,15 @@ jobs:
       # termination, and the journal walker whose separator bug reproduces
       # ONLY here. Suites built on POSIX mode bits, symlinks or `#!/bin/sh`
       # fixtures stay on the Linux/macOS legs; their win32 branches are
-      # proven by injected-platform unit tests instead.
-      - name: Test (platform auth, agy print, ConPTY, setup transport, journal)
+      # proven by injected-platform unit tests instead. The CLI exit tail runs
+      # here because only Windows libuv aborts a forced exit after fetch().
+      - name: Test (platform auth, agy print, ConPTY, setup transport, journal, CLI exit)
         run: >
           pnpm vitest run packages/schema/src/schema.test.ts
           packages/schema/src/platform-auth-policy.test.ts
           packages/core/src/process-identity.test.ts
           packages/core/src/process-tree.test.ts
+          packages/core/src/proc-windows-hide.test.ts
           packages/core/src/capabilities.test.ts
           packages/core/src/win32-conpty-helper.test.ts
           packages/harness-agy/src/conformance.test.ts
@@ -294,6 +296,16 @@ jobs:
           packages/cli/src/setup-login-capability.test.ts
           packages/cli/src/setup-login-pty.test.ts
           packages/cli/src/setup-login-runner-transport.test.ts
+          packages/cli/src/profile-login-win32.integration.test.ts
+          packages/cli/src/setup-login-recovery.test.ts
+          packages/cli/src/setup-recovery-command.test.ts
+          packages/cli/src/live-auth-status.test.ts
+          packages/core/src/credential-mutation-window.test.ts
+          packages/core/src/proc-exit.test.ts
+          packages/harness-cursor/src/auth-timeout.test.ts
+          packages/harness-cursor/src/status-cache.test.ts
+          packages/harness-cursor/src/status-cache-clock.test.ts
+          packages/cli/src/cli-io.test.ts
           packages/journal/src/index.test.ts
           packages/journal/src/background-compaction.test.ts
           packages/journal/src/background-capacity.test.ts
@@ -309,6 +321,44 @@ jobs:
           packages/daemon/src/command-retention.test.ts
           packages/control-api/src/model-routes.test.ts
 
+      # The local Codex installer on Windows, proven against the REAL pinned
+      # package: the exact embedded Node toolchain (the official zip's
+      # `node.exe` beside its own `node_modules/npm/bin/npm-cli.js`, SHA-256
+      # pinned below for the `.node-version` release), no node/npm on PATH,
+      # an isolated profile/config root, and the package-native `codex.exe`
+      # the shared harness PATH resolves for doctor/login/run. Auth is a
+      # separate lane; this proves install, receipt, version and doctor
+      # readiness only. `scripts/windows-local-install-smoke.mjs` is the proof.
+      - name: Stage the exact embedded Node toolchain (node.exe + its own npm-cli.js)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = (Get-Content .node-version -Raw).Trim()
+          $expected = "edaca9bd58ec8e92037dac4e877d52f6b8f430b81c18b57e264b4e2fb111cd56"
+          $archive = "node-v$version-win-x64.zip"
+          $stage = Join-Path $env:RUNNER_TEMP "claudexor-embedded-node"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          $zip = Join-Path $stage $archive
+          Invoke-WebRequest -Uri "https://nodejs.org/dist/v$version/$archive" -OutFile $zip
+          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) {
+            throw "$archive SHA-256 $actual does not match the pinned $expected (nodejs.org SHASUMS256.txt for v$version)"
+          }
+          Expand-Archive -LiteralPath $zip -DestinationPath $stage -Force
+          $node = Join-Path $stage "node-v$version-win-x64\node.exe"
+          $npm = Join-Path (Split-Path -Parent $node) "node_modules\npm\bin\npm-cli.js"
+          if (-not (Test-Path -LiteralPath $node -PathType Leaf)) { throw "embedded node.exe missing at $node" }
+          if (-not (Test-Path -LiteralPath $npm -PathType Leaf)) { throw "embedded npm-cli.js missing at $npm" }
+          & $node --version
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "CLAUDEXOR_EMBEDDED_NODE=$node" -Encoding utf8
+
+      - name: Local Codex install proof (exact npm pin, embedded npm, no ambient node/npm, isolated profile)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & $env:CLAUDEXOR_EMBEDDED_NODE scripts/windows-local-install-smoke.mjs
+          if ($LASTEXITCODE -ne 0) { throw "windows-local-install-smoke exited $LASTEXITCODE" }
+
   swift:
     runs-on: macos-26
     steps:
@@ -316,7 +366,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .node-version

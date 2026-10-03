@@ -2,13 +2,14 @@
 /**
  * Version-parity bar for the release workflow: the ROOT manifest (the version
  * SSOT), every workspace manifest, and the generated runtime version must
- * carry one identical version. The portable Copilot manifest and MCP Registry
+ * carry one identical version. The portable plugin manifests and MCP Registry
  * server/package descriptors carry that version too,
  * and that version must equal the expected one (the release tag).
  *
  * Usage: node scripts/verify-version-parity.mjs <expected-version>
  */
 import { readFileSync, readdirSync, existsSync } from "node:fs";
+import { PORTABLE_MANIFESTS, syncPortableAssets } from "./lib/portable-plugins.mjs";
 
 const expected = process.argv[2];
 if (!expected) {
@@ -40,7 +41,8 @@ record("server.json", server.version);
 for (const [index, pkg] of (server.packages ?? []).entries()) {
   record(`server.json packages[${index}]`, pkg.version);
 }
-record("plugins/copilot/plugin.json", read("plugins/copilot/plugin.json").version);
+for (const path of PORTABLE_MANIFESTS) record(path, read(path).version);
+syncPortableAssets(process.cwd(), true);
 
 if (versions.size !== 1) {
   console.error("version drift across root + workspaces + generated distribution surfaces:");

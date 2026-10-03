@@ -39,10 +39,7 @@ export function exitCodeForTerminalPayload(payload: Record<string, unknown>): nu
   return processExitCodeForRunStatus(payload["lifecycle"]);
 }
 
-/**
- * One concise line per run event for live terminal progress. Returns null for
- * noise (heartbeats, raw harness deltas we do not surface in a TTY).
- */
+/** One concise human progress line; null for heartbeats and raw deltas. */
 export function formatRunEventLine(ev: Record<string, unknown>): string | null {
   const type = String(ev["type"] ?? "");
   const p = (ev["payload"] ?? {}) as Record<string, unknown>;
@@ -73,6 +70,12 @@ export function formatRunEventLine(ev: Record<string, unknown>): string | null {
     }
     case "harness.event": {
       const sub = String(p["type"] ?? "");
+      if (
+        sub === "status" &&
+        (p["payload"] as Record<string, unknown> | undefined)?.["auth_status_stale"] === true &&
+        typeof p["title"] === "string"
+      )
+        return `[${who}] WARNING: ${truncate(p["title"], 300)}`;
       if (sub === "message" && typeof p["title"] === "string")
         return `[${who}] ${truncate(String(p["title"]), 160)}`;
       if (sub === "tool_call" && p["tool"] && typeof p["tool"] === "object") {

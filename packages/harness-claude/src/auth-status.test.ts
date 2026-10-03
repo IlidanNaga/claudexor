@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { SpawnOptions } from "@claudexor/core";
+import { bindCredentialMutationWindow, type SpawnOptions } from "@claudexor/core";
 import {
   CLAUDE_AUTH_STATUS_CACHE_TTL_MS,
   CLAUDE_AUTH_STATUS_TOTAL_TIMEOUT_MS,
@@ -278,5 +278,42 @@ describe("Claude auth-status resilience", () => {
     const invalidated = await pending;
     expect(invalidated.stale).toBeUndefined();
     expect(invalidated.probeError).toBeTruthy();
+  });
+
+  it("neither seeds nor serves the LKG while a Claude login window is open (#363)", async () => {
+    let open = false;
+    bindCredentialMutationWindow((harness) => open && harness === "claude");
+    try {
+      let calls = 0;
+      const answers = [
+        result('{"loggedIn":true,"authMethod":"claude.ai"}'), // before the window
+        result("", { code: null, signal: "SIGKILL" }),
+        result("", { code: null, signal: "SIGKILL" }),
+        result('{"loggedIn":true,"authMethod":"claude.ai"}'), // inside the window
+        result("", { code: null, signal: "SIGKILL" }),
+        result("", { code: null, signal: "SIGKILL" }),
+      ];
+      const runCapture = async () => answers[calls++]!;
+      await probeClaudeAuthStatus("/bin/claude", options(runCapture));
+      open = true;
+      // A pre-window positive is not leaned on inside the window, even before
+      // the lifecycle's entry invalidation reached this cache...
+      const inside = await probeClaudeAuthStatus("/bin/claude", options(runCapture));
+      expect(inside.stale).toBeUndefined();
+      expect(inside.probeError).toBeTruthy();
+      clearClaudeAuthStatusCache(); // the entry invalidation
+      // ...and a positive read inside the window is returned live, not kept:
+      // once the window closes (no further invalidation) nothing stands in.
+      expect(await probeClaudeAuthStatus("/bin/claude", options(runCapture))).toMatchObject({
+        authed: true,
+      });
+      open = false;
+      const after = await probeClaudeAuthStatus("/bin/claude", options(runCapture));
+      expect(after.stale).toBeUndefined();
+      expect(after.probeError).toBeTruthy();
+      expect(calls).toBe(6);
+    } finally {
+      bindCredentialMutationWindow(null);
+    }
   });
 });

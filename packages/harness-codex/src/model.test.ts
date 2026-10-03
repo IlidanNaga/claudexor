@@ -2,7 +2,12 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { CredentialProfile, ModelCallRequest, ModelCallResult } from "@claudexor/schema";
 import { createCodexModelAdapter, parseCodexModelCatalog } from "./model.js";
+import {
+  CODEX_HTTP_CLIENT_VERSION,
+  type CodexCatalogClientVersion,
+} from "./http-client-version.js";
 import { CODEX_MODEL_INVENTORY } from "./processing-session.js";
+import { CODEX_VENDOR_CLI_VERSION } from "./vendor-cli-version.js";
 
 const catalog = {
   models: [
@@ -48,9 +53,15 @@ function withHeader(response: Response, turnState: string): Response {
   response.headers.set("x-codex-turn-state", turnState);
   return response;
 }
+const VERIFIED_CLIENT: CodexCatalogClientVersion = {
+  version: CODEX_HTTP_CLIENT_VERSION,
+  source: "verified_transport",
+};
+
 function setup(
   respond: (init: RequestInit | undefined) => Response | Promise<Response> = () => terminal(),
   now: () => number = () => 1900000000000,
+  clientVersion: CodexCatalogClientVersion = VERIFIED_CLIENT,
 ) {
   const profile = CredentialProfile.parse({
     profile_id: "work",
@@ -85,7 +96,16 @@ function setup(
     readAuthFile,
     fetcher,
     token,
-    adapter: createCodexModelAdapter({ fetch: fetcher, readAuthFile, now }),
+    adapter: createCodexModelAdapter({
+      fetch: async (url, init) =>
+        fetcher(
+          url,
+          init?.method === "POST" ? { ...init, body: await new Response(init.body).text() } : init,
+        ),
+      readAuthFile,
+      now,
+      clientVersion: async () => clientVersion,
+    }),
     context: { profile, onDispatch, signal: new AbortController().signal },
     request: ModelCallRequest.parse({
       source: "codex",
@@ -344,14 +364,21 @@ describe("exact-profile Codex model catalog", () => {
           contextWindow: 272000,
           maxContextWindow: 872000,
           maxOutputTokens: null,
-          reasoningEfforts: ["medium", "ultra"],
+          reasoningEfforts: ["medium"],
+          reasoningEffortPreferenceOrder: ["medium", "ultra"],
           defaultReasoningEffort: "medium",
           inputModalities: ["text", "image"],
         },
       ],
     });
     expect(result.provenance).toBe("provider_http");
-    expect(fixture.fetcher.mock.calls[0]?.[0]).toContain("/models?client_version=0.153.3");
+    // The declared client version is the transport's own level, never the
+    // installer pin: the two constants must be able to differ (issue #339).
+    expect(fixture.fetcher.mock.calls[0]?.[0]).toContain(
+      `/models?client_version=${CODEX_HTTP_CLIENT_VERSION}`,
+    );
+    expect(result.clientVersion).toBe(CODEX_HTTP_CLIENT_VERSION);
+    expect(result.clientVersionSource).toBe("verified_transport");
     expect(result.accountFingerprint).toMatch(/^[a-f0-9]{64}$/);
     expect(JSON.stringify(result)).not.toContain(fixture.token);
     expect(fixture.onDispatch).not.toHaveBeenCalled();
@@ -879,6 +906,27 @@ describe("single-generation Codex adapter", () => {
     expect(result.problem?.code).toBe("model_unavailable");
     expect(result.outcome).toBe("failed");
     expect(fixture.onDispatch).not.toHaveBeenCalled();
+    // The refusal names the declared client version and its source (issue
+    // #339): the version filter, not the account, decided the list.
+    expect(result.problem?.message).toContain(
+      `client_version ${CODEX_HTTP_CLIENT_VERSION} (the version this Claudexor release verified its Codex HTTP transport against)`,
+    );
+    expect(result.problem?.context).toMatchObject({
+      clientVersion: CODEX_HTTP_CLIENT_VERSION,
+      clientVersionSource: "verified_transport",
+    });
+  });
+  it("declares a NEWER installed CLI's version on the wire and in the catalog, never the installer pin", async () => {
+    const fixture = setup(undefined, undefined, { version: "9.9.9", source: "installed_cli" });
+    const result = await fixture.adapter.catalog(fixture.context);
+    expect(fixture.fetcher.mock.calls[0]?.[0]).toContain("/models?client_version=9.9.9");
+    expect(String(fixture.fetcher.mock.calls[0]?.[0])).not.toContain(CODEX_VENDOR_CLI_VERSION);
+    expect(result).toMatchObject({ clientVersion: "9.9.9", clientVersionSource: "installed_cli" });
+    const refused = await fixture.adapter.invoke(
+      { ...fixture.request, model: "gpt-6-astra" },
+      fixture.context,
+    );
+    expect(refused.problem?.message).toContain("client_version 9.9.9 (the installed Codex CLI)");
   });
   it("refuses unadvertised effort and does not clamp or silently retry", async () => {
     const fixture = setup();
@@ -920,12 +968,22 @@ describe("single-generation Codex adapter", () => {
   });
   it("does not replace requested options with inferred actual values", async () => {
     const fixture = setup();
+    fixture.fetcher.mockResolvedValueOnce(
+      Response.json({
+        models: [
+          {
+            ...catalog.models[0],
+            supported_reasoning_levels: [{ effort: "medium" }, { effort: "high" }],
+          },
+        ],
+      }),
+    );
     const result = await fixture.adapter.invoke(
-      { ...fixture.request, options: { reasoningEffort: "ultra", serviceTier: "priority" } },
+      { ...fixture.request, options: { reasoningEffort: "high", serviceTier: "priority" } },
       fixture.context,
     );
     expect(JSON.parse(fixture.fetcher.mock.calls[1][1]!.body as string)).toMatchObject({
-      reasoning: { effort: "ultra" },
+      reasoning: { effort: "high" },
       service_tier: "priority",
     });
     expect(result.appliedOptions).toEqual({ reasoningEffort: "medium", serviceTier: "standard" });

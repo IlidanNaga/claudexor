@@ -1,6 +1,6 @@
 {
   "name": "@claudexor/core",
-  "version": "3.13.0",
+  "version": "3.19.0",
   "license": "MIT",
   "description": "HarnessAdapter contract, process helpers, typed errors, and low-level execution utilities.",
   "type": "module",
@@ -27,7 +27,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@playwright/mcp": "0.0.78",
+    "@playwright/mcp": "0.0.83",
     "@claudexor/schema": "workspace:*",
     "@claudexor/util": "workspace:*"
   },

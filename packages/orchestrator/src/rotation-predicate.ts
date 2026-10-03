@@ -25,6 +25,7 @@ import type { AttemptOutputMarkers } from "./attemptOutputMarkers.js";
 
 /** Typed evidence one native try presents to the rotation predicate. */
 export interface RotationEvidence {
+  requestRefused?: boolean;
   /** A TYPED vendor rate-limit signal was observed this try (W5.4). */
   sawTypedLimit: boolean;
   /** No POLICY-ACCEPTED answer material (`acceptedTryOutput`: an errored try's
@@ -49,12 +50,14 @@ export interface RotationEvidence {
  * eligibility), so the frozen truth-table pins keep their meaning.
  */
 export function rotationRetryEligible(input: {
+  requestRefused?: boolean;
   sawTypedLimit: boolean;
   deliverableEmpty: boolean;
   mutationObserved?: boolean;
   terminalNonTransientDeath?: boolean;
   sawAgentProgress?: boolean;
 }): boolean {
+  if (input.requestRefused) return false;
   if (!input.deliverableEmpty || input.mutationObserved === true) return false;
   if (input.sawTypedLimit) return true;
   return input.terminalNonTransientDeath === true && input.sawAgentProgress !== true;
@@ -68,6 +71,7 @@ export function rotationRetryEligible(input: {
  * markers alone).
  */
 export function reactiveRotationEvidence(args: {
+  requestRefused?: boolean;
   markers: AttemptOutputMarkers;
   sawTypedLimit: boolean;
   sawRetryable: boolean;
@@ -76,6 +80,7 @@ export function reactiveRotationEvidence(args: {
   workspaceDiffNonEmpty?: boolean;
 }): RotationEvidence {
   return {
+    requestRefused: args.requestRefused,
     sawTypedLimit: args.sawTypedLimit,
     deliverableEmpty: args.deliverableEmpty,
     mutationObserved: (args.workspaceDiffNonEmpty ?? false) || args.markers.fileChanges > 0,

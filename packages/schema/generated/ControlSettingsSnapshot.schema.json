@@ -403,6 +403,14 @@
           },
           "default": {},
           "description": "Per-harness settings keyed by harness id."
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Admission notes of this write (INV-104)."
         }
       },
       "additionalProperties": false,

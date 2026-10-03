@@ -205,6 +205,7 @@ export async function failedCandidatesResult(
     eventRefs: existingEventRefs,
     runDir: paths.root,
     resetsAt: unanimous?.resetsAt ?? null,
+    requestRefusal: unanimous?.requestRefusal,
     // The first candidate speaks (like harnessId/attemptId); a budget terminal speaks for itself.
     vendorFailure: budget ? null : attemptVendorFailure([first], first.attemptId),
     nextActions: first.secretDiffRefusal

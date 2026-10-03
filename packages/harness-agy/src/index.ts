@@ -82,7 +82,16 @@ async function detectVersion(): Promise<string | null> {
  * the unauthenticated plain listing fails — an empty live list would refuse
  * every explicit model (PLAN §2.6).
  */
+// gemini-3.8-flash-{high,medium,low}: confirmed live on 2026-10-03 with
+// `agy models` under a Claudexor profile HOME. The host binary answered
+// 1.1.13 right before the listing and self-updated to 1.2.16 while it ran,
+// so this is evidence of the ids on the vendor backend for that account and
+// moment, not a re-verification of the 1.1.13 fixtures; the ids follow the
+// same `-effort` suffix shape as the 3.7 entries.
 const AGY_KNOWN_MODELS = [
+  "gemini-3.8-flash-high",
+  "gemini-3.8-flash-medium",
+  "gemini-3.8-flash-low",
   "gemini-3.7-flash-high",
   "gemini-3.7-flash-medium",
   "gemini-3.7-flash-low",
@@ -392,6 +401,17 @@ async function* runAgy(
   spec: HarnessRunSpec,
   prepareProfileKeychain: (home: string, platform?: NodeJS.Platform) => void,
 ): AsyncIterable<HarnessEvent> {
+  const input = promptWithInstructions(spec);
+  if (!input) {
+    yield {
+      type: "error",
+      session_id: spec.session_id,
+      ts: nowIso(),
+      error: "agy requires nonempty input for headless execution",
+    };
+    yield { type: "completed", session_id: spec.session_id, ts: nowIso() };
+    return;
+  }
   const profile = spec.credential_profile;
   // Л-4: no engine-default credential — an unpinned agy run has nothing to
   // route. Typed stream refusal (error then completed), the one refusal
@@ -433,7 +453,8 @@ async function* runAgy(
     // The vendor probe/run remains the final transport authority.
   }
 
-  const args = ["-p", promptWithInstructions(spec), "--output-format", "stream-json"];
+  // AGY 1.1.13 selects print mode from piped stdin only without a print/prompt flag.
+  const args = ["--output-format", "stream-json"];
   // Л-18: without --add-dir agy resolves relative paths against its own app
   // data dir instead of the workspace (live-proven §1.2d).
   args.push("--add-dir", spec.cwd);
@@ -445,6 +466,7 @@ async function* runAgy(
   yield* runCliHarness({
     bin: AGY_BIN(),
     args,
+    input,
     spec,
     env: route.env,
     label: "agy",

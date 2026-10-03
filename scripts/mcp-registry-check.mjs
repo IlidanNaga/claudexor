@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { appendFileSync, readFileSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
+import { PORTABLE_MANIFESTS, syncPortableAssets } from "./lib/portable-plugins.mjs";
 
 const args = new Set(process.argv.slice(2));
 const registryMode = valueAfter("--registry");
@@ -11,7 +12,7 @@ if (registryMode && registryMode !== "before" && registryMode !== "after") {
 const root = JSON.parse(readFileSync("package.json", "utf8"));
 const npmPackage = JSON.parse(readFileSync("packages/claudexor/package.json", "utf8"));
 const server = JSON.parse(readFileSync("server.json", "utf8"));
-const plugin = JSON.parse(readFileSync("plugins/copilot/plugin.json", "utf8"));
+const plugins = PORTABLE_MANIFESTS.map((path) => JSON.parse(readFileSync(path, "utf8")));
 const pluginMcp = JSON.parse(readFileSync("plugins/copilot/.mcp.json", "utf8"));
 const expectedName = "io.github.razzant/claudexor";
 
@@ -24,7 +25,7 @@ if (
 ) {
   fail("server.json must use the pinned 2025-12-11 registry schema");
 }
-if (server.version !== root.version || plugin.version !== root.version) {
+if (server.version !== root.version || plugins.some((plugin) => plugin.version !== root.version)) {
   fail("portable distribution versions must match the root package version");
 }
 if (!Array.isArray(server.packages) || server.packages.length !== 1) {
@@ -57,6 +58,7 @@ if (
 ) {
   fail("portable Copilot MCP config must invoke the preinstalled claudexor command without env");
 }
+syncPortableAssets(process.cwd(), true);
 
 if (args.has("--npm")) {
   const url = `https://registry.npmjs.org/claudexor/${encodeURIComponent(root.version)}`;

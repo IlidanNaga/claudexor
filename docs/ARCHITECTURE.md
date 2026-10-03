@@ -270,7 +270,7 @@ at every wire boundary.
   follows the retained set, not the file.
 - `packages/cli`: thin command surface plus local host-integration lifecycle
   (`claudexor plugin`) for generated Claude Code/Codex/Cursor/OpenCode
-  skill/MCP artifacts and command artifacts where hosts support them. Plugin
+  skill/MCP artifacts and commands; portable distributions live under `plugins/`. Plugin
   lifecycle state is user-level local setup state, not a schema/control-api
   contract.
 - `packages/claudexor`: the bare-name npm bin wrapper — `claudexor` and
@@ -283,7 +283,9 @@ at every wire boundary.
   all three run modes enqueue through the daemon `/v2` control API. Until MCP
   Tasks stabilize, MCP returns a durable run handle and exposes explicit
   status/result/cancel/interaction tools; it does not hold a tool call open or
-  advertise Tasks. ACP uses the official TypeScript SDK at stable protocol v1;
+  advertise Tasks. MCP persistent-thread create/turn pass an optional caller key
+  to the daemon's existing idempotent journal; read projects its thread detail
+  without starting a run or a daemon. ACP uses the official TypeScript SDK at stable protocol v1;
   its session IDs are daemon thread IDs and list/load/resume/close/prompt/cancel
   all project the same `/v2` thread authority. ACP images and embedded resources
   are finalized through the daemon attachment pipeline before a turn enqueues.
@@ -440,8 +442,10 @@ consumer is a staged field). Capabilities are data-driven and declared by the
 adapter: `effort_levels` + `model_effort_levels` (+ the
 `effort_levels_verified_against` freshness note) and `known_models` (+ the
 `known_models_verified_against` freshness note) as the manifest model truth
-source under the STRICT semantics described in the model-governance section
-above — there is no warn-and-pass-through tier.
+source, judged under the harness's own `model_inventory_absence` declaration
+described in the model-governance section above: strict where the harness
+declares its lists complete, forward-and-disclose where it declares them
+advisory — there is no silent pass-through tier either way.
 
 Reasoning effort is an OPEN vocabulary, mirroring the vendors: codex types its
 own `ReasoningEffort` as any non-empty value the model advertises, and Claude
@@ -456,8 +460,8 @@ positional merge of its models' lists (`mergeEffortLadders`; the Swift
 `EffortLadder` merges the manifest's already-ordered arrays the same way), and
 a level's rank is its position in that merged order — which is what lets a
 brand-new vendor level sort correctly with no code change. Should two models
-ever advertise genuinely contradictory orders, the merge flags it and
-cross-model clamping is refused rather than an order invented. Adapters
+advertise contradictory or incomparable orders, the resolver refuses
+cross-model substitutions rather than treating display order as rank. Adapters
 discover what is really advertised at discovery time and fall back to a
 recorded snapshot (stamped vendor data, kept in its captured order) when a
 probe cannot answer, so a probe failure costs freshness, never the run; both
@@ -468,26 +472,73 @@ live model must match its recorded ladder/default, while a recorded-only model
 does not make another account stale. Effort ceilings are per MODEL, not per
 harness (gpt-6-astra and gpt-5.6-sol take `ultra`, gpt-5.4 stops at `xhigh`), so
 `effortLevelsForModel` narrows the harness-wide merged ladder for the routed
-model. The shared normalizer then passes an ADVERTISED level through verbatim,
-clamps an unadvertised one onto the nearest advertised level INSIDE the merged
-vendor order, and refuses a level that order has never seen, disclosed via
-`ignored_settings` rather than silently downgraded. WHICH LAYER clamps is part
+model on the native session surface. The shared normalizer passes an accepted level through verbatim,
+resolves a known unadvertised preference to the strongest supported level not
+above the request. Only when every supported level exceeds the request may the
+known minimum be used. Display tie-breaking between incomparable vendor chains
+is not rank evidence; unknown order never authorizes a guessed substitution. WHICH LAYER clamps is part
 of the contract: `discover()` probes the DEFAULT native harness home, so the
 manifest carries the default account's ladders, while codex advertises per
 ACCOUNT and every credential profile and API-key route runs under its own
-`CODEX_HOME`. Run preflight (`governRouteEffort`) therefore only DISCLOSES a
-level the harness's merged ladder does not know and forwards everything else
-verbatim; the adapter, which has resolved the profile env the child will
-actually run in, is the single layer that clamps. Reviewer efforts have no
-adapter-side disclosure channel, so the panel resolvers refuse a level the
-SELECTED reviewer does not advertise — against the named model's own ladder
-when the entry resolves one, else the harness-wide merged ladder — instead of
-forwarding it to be dropped. The CLI help, the MCP tool
+`CODEX_HOME`. Run preflight (`governRouteEffort`) therefore forwards the original
+preference even when default-account discovery lacks it. Native effort adapters
+resolve only after the account, model and harness are bound. Settings writes and
+reviewer admission preserve these preferences too; a separate effort on an
+adapter without that carrier retains its typed validation rule. Compound
+Cursor/Antigravity model ids are route identities and are never rewritten by
+effort resolution. Claude uses the installed binary's accepted list and its
+recorded same-provider vendor order for known gaps; historical ordering cannot
+authorize submitting a value absent from the current accepted list. Snapshot
+fallback authorizes values only on its recorded CLI version. An unverifiable
+knob uses the current vendor default with an explicit omission receipt; known
+absence and unknown capability remain distinct. An unrankable request against
+an available nonempty ladder refuses before generation. The CLI help, the MCP tool
 schema and the macOS picker's ordering all derive from that single source. `doctor` validates each
 harness's CONFIGURED default model against the truth source, so a broken
 default (e.g. a model the CLI cannot run) is reported honestly instead of
 masked by a smoke that used a different model, and the same verdict rides
 the harness status DTO (`configuredModelCheck`) into the Settings UI.
+The reusable `EffortResolution` schema records `requested` (the original
+preference), `submitted` (native option or explicit null omission), `resolution`
+(`exact`, `downward`, `floor`, `omitted`, `unverifiable`, `rejected`), `source`
+(the resolution authority), and `parameter` (the native carrier, null if absent).
+`observed` and `observedSource` stay null unless a provider field reports effort;
+submission never becomes observation. Existing dispatch/lifecycle evidence still
+determines whether the prepared option was physically sent. The receipt is
+optional on historical records. Model operations retain `effortResolution` in the
+existing `ModelCallResult` resource only when creation opted into
+`captureEffortEvidence=true` (see [model operations](#caller-owned-model-operations)).
+
+Runs record it as `attempts[].effort_resolution` in
+`final/telemetry.yaml`, carried through `HarnessEvent.effort_resolution`. The
+attempt retains the final native execution's receipt after account rotation.
+Codex model results obtain observation only from Responses' `reasoning.effort`;
+`appliedOptions` keeps its existing provider-echo meaning. Session adapters do
+not claim an observed value. Adaptation disclosures are status/log events and
+never injected assistant messages. These fields add no operation, generation,
+retry, account-selection or budget authority. A rejected final-route preference
+ends that attempt without account rotation, model/harness fallback or repair retry;
+ordinary availability failover retains its existing policy.
+
+Codex raw model calls expose ordinary inference efforts, while the native CLI's
+`ultra` selector also owns automatic task delegation. The raw adapter excludes
+that agent-mode selector from `reasoningEfforts` and retains the vendor's original
+`reasoningEffortPreferenceOrder` internally through operation-local catalog parsing.
+The existing preference resolver chooses the strongest accepted generation effort
+not above the original request in that vendor order (currently `ultra` → `max`
+for Astra), with a downward receipt and no claim of native delegation. It does
+not copy the CLI's underlying per-agent effort or invent a replacement ladder.
+Both public catalog views project the internal order out, preserving their object
+shapes. Native session Ultra remains unchanged and is implemented by the CLI.
+
+Managed catalogs also carry optional `reasoningEffortsVerified` on `ModelCatalogEntry`:
+true records a fully parsed vendor array (including known empty), while false or
+historical absence prevents an incomplete catalog from claiming known absence or
+authorizing a substitution. Native Codex likewise retains explicit empty arrays
+separately from missing metadata on a listed model. The unnegotiated model-catalog
+HTTP view omits this new field; the account view retains it. An unlisted advisory model
+still follows its existing sibling-ladder fallback.
+
 Manifest `auth_modes` and `capability_profile.auth.preferred_source` describe
 possible source availability only. They are not readiness. UI, routing, and
 reviewer selection use doctor status, enabled intents, and smoke/conformance
@@ -549,9 +600,9 @@ reads; per-attempt overrides
 (budget downgrade to `fallback_model`, fallback retry) sit on top. Every
 explicit model — per-run, settings default, fallback, reviewer — must pass
 the harness's model truth source wherever that source can prove absence (live
-`models()` inventory, else manifest `known_models`; a harness with neither
-refuses explicit models; an advisory live inventory forwards, see below): enforced at
-settings write (400), run preflight (typed failure with artifacts before any
+`models()` inventory, else manifest `known_models`; an authoritative harness
+with neither refuses explicit models; an advisory harness forwards, see below):
+enforced at settings write (400), run preflight (typed failure with artifacts before any
 CLI spawns), immediately before each routed spawn against that attempt's exact
 profile, state, cwd, and auth preference, and both reviewer-panel paths. A pinned
 profile answers its OWN inventory through the same route resolver the run path
@@ -560,26 +611,36 @@ route is enumerated with the same `auto` the adapter will resolve and the spec
 reaches the adapter unrewritten: the gate reads the run's identity, it never
 decides it, and an undecidable route is the vendor's refusal to make, not the
 gate's.
-The same rule decides what a list may refuse with. A live inventory always
-proves PRESENCE; it proves ABSENCE only when its producer declares that it can.
-`model_inventory_absence: "advisory"` (codex, because `model/list` carries no
-provenance and the CLI substitutes a bundled default list when its remote fetch
-times out) makes an unlisted EXPLICIT model undecidable here, so the gate
-forwards it byte-identical, the vendor decides, and the per-spawn gate discloses
-once — as a status event — that the model was not listed. Preflight stays
-silent, so one spawn speaks once. Manifest truth is never advisory and is never
-substituted to admit a model; the unscoped `/harnesses/:id/models` query, the
-settings-write gate, the doctor's configured-model check and the automatic
-reviewer panel are unaffected, since they read manifest truth or keep their own
-skip-at-zero-cost contract. The residual is disclosed rather than guessed at: a
-vendor CLI refusing a forwarded model surfaces as an untyped error carrying the
-vendor's text, and a mistyped model on such a harness costs one spawn.
+The same rule decides what a list may refuse with. A list always proves
+PRESENCE; whether an absence from it is proof too is the HARNESS's declaration
+(`model_inventory_absence`), and it governs the live inventory and the manifest
+hint list alike — the hints are one day's memory of the same vendor menu, so
+they can refuse no more than the producer can. `advisory` (claude: the picker
+is an alias menu of one binary version plus the account's bootstrap rows;
+codex: `model/list` carries no provenance and the CLI substitutes a bundled
+default list when its remote fetch times out; cursor: `--list-models` is a
+fail-soft menu blind to routing variants) makes an unlisted EXPLICIT model
+undecidable, so every gate forwards it byte-identical and the vendor decides.
+Each admitting consumer says so once: the settings write persists the model
+and its read-back carries the admission in `notes` (the CLI prints it), the
+doctor's configured-model row passes with the note in its detail, and the
+per-spawn gate discloses a status event; preflight stays silent, so one spawn
+speaks once. `validateModel` takes the list, its source and the declaration
+with no defaults, and `checkHarnessModel` in the CLI registry is the one owner
+of that triple for the settings, doctor and catalog gates. No list is ever
+substituted to admit a model, and the automatic reviewer panel keeps its own
+skip-at-zero-cost contract whatever the harness declares. The residual is
+disclosed rather than guessed at: a vendor CLI refusing a forwarded model
+surfaces as an untyped error carrying the vendor's text, and a mistyped model
+on an advisory harness costs one spawn.
 Thread ask/plan readiness and inventory use the same durable lane HOME as the
 eventual spawn, while non-thread read-only runs retain disposable state.
 `/harnesses/:id/models` reports
-the truth source honestly (`source: api|manifest|none`, with the manifest's
-`verifiedAgainst` CLI-version freshness note), and the model-hints-freshness
-gate warns when the installed vendor CLI drifts from the verified version.
+the truth source honestly (`source: api|manifest|none` — a producer that
+answered only hint rows reports `manifest`; rows may carry `origin` and
+`resolved_model` — with the manifest's `verifiedAgainst` CLI-version freshness
+note), and the model-hints-freshness gate warns when the installed vendor CLI
+drifts from the verified version.
 Candidate diffs additionally pass a typed policy gate: protected-path changes
 and critical-risk diffs escalate as `NEEDS_HUMAN` findings. An accepted
 escalation blocks the run only when it belongs to the WINNING candidate
@@ -597,10 +658,21 @@ the argv prompt only instructs the harness to read it, and the file is removed
 before every diff/gate/review (including native retries). This prevents
 `spawn E2BIG` without truncating evidence or polluting the candidate patch.
 
-One-shot Codex and Cursor prompts use the vendors' stdin contracts through the
-shared CLI run loop; prompt bytes never ride their process argv. One-shot stdin
-and a bidirectional session are exclusive owners of the same pipe. Adapters
-without a verified prompt-stdin contract retain their vendor-specific transport.
+Cursor and AGY prompts use the shared CLI loop's one-shot stdin. AGY omits
+print flags so its native stdin reader selects print mode. Claude one-shot uses
+text stdin; interactive/image runs retain their sole stream-json stdin owner.
+Claude instructions append through an adapter-owned UTF-8 file, removed when
+the child ends, never through argv or user-role text (`instructions-file.ts`).
+Codex owns one native
+`app-server --stdio` JSON-RPC child per Claudexor run. The adapter keeps the run
+active while a native turn, active goal continuation, or run-owned background
+terminal exists. Native thread/turn ids are control handles, not durable engine
+truth; the daemon journal remains authoritative. Stop pauses an active goal,
+interrupts the exact stored turn id, terminates only background terminals whose
+item ids were observed in that run, verifies quiescence, then reaps app-server.
+Native in-turn retry notices use the existing nonterminal `api_retry` status;
+their wire mapping is documented in INTEGRATIONS' Harness Stream Reference.
+Adapters without a verified prompt transport retain their vendor-specific path.
 
 Git-backed candidate envelopes also preserve bounded raster previews before
 cleanup (PNG/JPEG/WebP/GIF, 16 MiB each / 32 MiB total) under the attempt's
@@ -667,9 +739,50 @@ an in-flight probe); an external vendor login/logout may remain visible for the
 bounded grace window. Stale evidence is never reported as a fresh passed login
 and does not alter profile selection or paid-route policy: an already explicit
 pin or durable thread binding may keep its exact config-dir route alive for
-this bounded grace, while unpinned pool/rotation selection remains fresh-only.
+this bounded grace, while unpinned pool/rotation selection never consumes it.
 This absorbs a probe failure only; it does not claim to serialize the vendor's
 OAuth refresh or to repair a revoked credential.
+Cursor's row status probe (`cursor-agent status` in a row's file-store HOME)
+is coordinated the same way: concurrent reads of one row store — keyed by the
+auth-selecting `HOME`/`USERPROFILE`/`XDG_CONFIG_HOME`/`APPDATA`, so admission
+and a spawn with a lane state HOME share it — share one child, and a POSITIVE
+answer is reused as fresh for at most one minute, keeping the instant the
+vendor gave it as `last_verified_at`. Age uses a suspend-inclusive monotonic
+clock; Linux uptime's possible one-second quantization is conservatively
+bounded, so an observation can expire less than two seconds early. Wall time
+only stamps the observation; clock steps neither extend nor expire it.
+A probe with no recognized answer whose ten-second budget expires before
+observed native exit or caller cancellation reports
+`did not answer within 10s (…); login state unknown`, which is
+`unknown + not_run`, never a logout and never a pass — a caller's
+cancellation or a kill from outside is a plain unknown, not a timeout. Its stale path serves the other side of routing (the INV-135
+#363 amendment): only such a timeout, while the store's last positive answer is
+under five minutes old, projects that answer as `stale: true` with
+`stale_basis: last_positive_after_timeout`, its `stale_age_ms`, a detail naming
+the answer's instant, and no `last_verified_at` or identity. That basis admits
+UNPINNED choices only — a bound row, the pool, rotation and `next_up` — never
+an explicit pin (a pin whose probe timed out is still refused), while the
+generic grace above still serves only a selected route. A logged-out answer
+from the store drops its positive, as do Claudexor-handled credential
+mutations (including an in-flight probe), and while a Claudexor-managed
+Cursor login's credential-mutation window is open (see the profile-login
+note under [Design constraints](#design-constraints)) the coordinator
+answers live and neither reuses, retains nor leans on any positive; any
+other unknown answer never consults it, and no file in the row HOME is read
+as a substitute. The
+adapter's spawn-time route check applies the same split. The engine stamps
+each spec whose row was an unpinned choice (a bound row, the pool, rotation, an
+unpinned or automatic reviewer seat) with that row's id in `spec.extra`; the
+adapter never infers it from profile fields. Only a stamped row starts on a
+stale positive, after yielding an `[auth] … using the last positive status
+answer …` status event (`auth_status_stale`; never answer text). An explicit
+pin, or any unstamped spec, whose spawn-time probe times out refuses as
+`login state is unknown`, naming the last positive as unpinned-only, and every
+other unconfirmed row refuses the same way rather than with login advice. A
+model-inventory read, which launches nothing, may still read on it. The
+Accounts catalog projection remains stricter for a named account: it reports
+unknown status and does not offer catalog reading on stale evidence. This
+conservative projection does not change standalone inventory or run admission.
 Adapters declare the physical credential transport they support (`config_file`,
 `env_var`, `oauth_token_env`, `os_keychain`, `http_header`, or `none`) plus the
 containment strategy that keeps it honest. A transport may be platform-scoped;
@@ -733,6 +846,12 @@ Codex's direct `model/list` and quota app-server probes use that same producer,
 so a GUI-launched daemon can discover models and quota from the CLI it found
 during login. Host toolchain PATH is composed before a scoped HOME patch;
 credential homes and provider-variable scrubbing remain specific to each probe.
+The shared `spawnProcess`/`runCaptureRaw` helpers also request `windowsHide`:
+every child they start is a fully piped background process. On Windows this
+requests a hidden console for the direct child at spawn; it does not control
+grandchildren or windows the child opens later. Interactive sign-in
+(`profiles login`, the Terminal/ConPTY setup runner) and `setup attach` do not
+use those helpers and keep their own visible-terminal policy.
 
 ### Credential profiles (INV-135, unified account model)
 
@@ -809,6 +928,11 @@ share chat/session state. No token is ever
 copied between stores, no env ever receives a host-Keychain bridge, and
 `CURSOR_API_KEY` is scrubbed from profiled native
 runs — the named identity is exactly its file store or a typed refusal.
+The Cursor status receipt distinguishes a successful server `getMe` response
+with typed `userInfo` from the vendor CLI's token-only fallback after a server
+error. Only the former supplies vendor verification; bare authentication booleans,
+legacy text, and stale observations do not become current server proof. Unrecognized
+vendor output keeps its existing readiness classification and unknown billing.
 The Accounts-only Cursor probe receipt also carries an optional email parsed
 from the CLI's narrow typed status grammar. Projections reuse
 the status invocation they already need; no credential file is read, no raw
@@ -827,14 +951,39 @@ checkpoint, per harness) and hands it to the run as `threadAccountBindings`;
 a binding whose row became disabled/deleted/revoked/exhausted moves to a pool
 sibling with a typed `route.account.lane_switch` disclosure, never silently.
 (3) Otherwise the quota-aware POOL of enabled+ready subscription rows selects
-the account (`route.account.pool_selected`): fresh model-applicable headroom
+the account (`route.account.pool_selected`); "ready" is fresh readiness except
+a Cursor row's bounded last positive status answer after a timed-out probe
+(see [Auth And Secrets](#5-auth-and-secrets)): fresh model-applicable headroom
 descending, unknown/stale quota after known-positive headroom but before
 exhausted (stale quota never authorizes routing), deterministic profile-id
 tie-break; a row under an observed live block (a reactive vendor-limit
 cooldown or spent window — the A4 reader) ranks exhausted with its release
-instant. Model operations pass one more ordering key, a live model-substitution
+instant. Two live observations add one ordering key among the selectable rows:
+a marked row ranks after every other selectable row for that requested model,
+a row's newest mark counts, oldest mark first, and a mark never excludes a row
+or makes the pool exhausted. Model operations pass a model-substitution
 observation (see [Caller-owned model operations](#caller-owned-model-operations));
-Agent Runs pass none. An empty or exhausted pool is a TYPED TERMINAL
+Agent Runs, reviewer seats and the `next_up` projection pass a pre-progress
+refusal observation. That observation is recorded when an unpinned try on a
+subscription row reported a typed `started` session and then ended in the
+structural rotation branch's own evidence (a terminal non-transient death with
+no agent progress, no deliverable and no mutation) without a typed vendor limit,
+which is already a cooldown; an adapter's own pre-spawn refusal and an explicit
+pin never record one, and the vendor's wording is never read. It is keyed by
+harness, row and requested model (the harness default model is its own key),
+lives in daemon memory for one hour, and clears when a later try on that row and
+model makes agent progress or ends cleanly, or on a credential-generation
+change. A try binds its row's credential generation before it spawns, so an
+outcome arriving after such a change neither records nor clears a mark; while
+a login of that harness holds its credential-mutation window the generation is
+no number at all, so a try bound before or inside the window never records or
+clears one (#363). When
+the default route is not ready and no registered row admits a
+lane, the lane refusal names every row with its own observed readiness
+(`<harness> has no ready account (<row>: <detail>; …)`) instead of the default
+route's doctor advice, so login advice appears only where a row's probe
+positively reported logged-out; `next_up` names unready rows the same way. An
+empty or exhausted pool is a TYPED TERMINAL
 (`route.account.pool_exhausted`, then `credential_pool_exhausted` with the
 pool's earliest known reset — owner Q3=A): an unpinned run under `auto` or
 explicit `subscription` waits for a window instead of silently taking the
@@ -866,8 +1015,11 @@ fresh vendor session with the thread's continuation packet instead of
 resuming a sibling's. `claudexor profiles login
 <harness> <id>` runs the vendor login with the named binding's exact scoped
 environment: codex rides the SAME durable device-code setup job as the default
-login (D-17); the other harnesses run the vendor command interactively in this
-terminal. Credential custody remains an effective platform fact, so a scoped
+login (D-17); Cursor runs the vendor command in this terminal through a
+`client_pty` setup job and the existing `setup attach` owner. Claude/AGY keep
+their direct scoped terminal flow (see the profile-login note under
+[Design constraints](#design-constraints)).
+Credential custody remains an effective platform fact, so a scoped
 HOME may select Claudexor-owned vendor state without representing a separate
 OS-user credential.
 
@@ -1000,14 +1152,10 @@ UI surfaces the exhaustion instead of implying a switch. Exhaustion is also a
 TYPED terminal: a reactive rotation-eligible failure with nowhere to go
 terminalizes the attempt on `credential_pool_exhausted` (category
 `harness_unavailable` — nothing malfunctioned) only when the triggering
-subject or a POOL-MEMBER row carries limit/unusable evidence — rows for
-identities rotation could never select (wrong kind, outside policy, not
-ready) never count, and an evidence-free structural death keeps its TRUE
-failure — through NORMAL attempt
-finalization, BEFORE the transient gate could burn same-profile retries on the
-already-refused subject, and the run terminal lifts `code` + `resetsAt` onto
-`final/failure.yaml` in every lane (race unanimity, convergence last-result,
-read-only chain). `resetsAt` folds the EARLIEST known reset WITHIN the pool —
+subject carries limit/unusable evidence. Earlier or untried accounts cannot
+replace its structural failure with a quota claim. Normal finalization lifts
+`code` and `resetsAt` onto `final/failure.yaml` in every lane before transient
+retry (race unanimity, convergence last-result, read-only chain). `resetsAt` folds the EARLIEST known reset WITHIN the pool —
 the triggering subject's own observed limit included; a limit-evidenced member
 with an unknown reset makes it null — deliberately the within-pool opposite of
 the across-candidates LATEST rule. At preflight under `rotate`, the selected
@@ -1033,7 +1181,10 @@ clearing contract is threefold: bounded self-expiry (24h hard cap;
 entitlement/probe verdicts expire within the hour), a served model response
 for the same subject (wired where usage events already feed the quota
 registry), and any credential-generation change (login/logout/profile
-mutation). Consumption is one composition point: `readyProfilesForRotation`
+mutation). Nothing is recorded while a login of that harness holds its
+credential-mutation window, and a subscription row's verdict is recorded only
+while the credential its try bound is still current (#363). Consumption is one
+composition point: `readyProfilesForRotation`
 refuses a candidate a live observation condemns (model-scoped observations
 refuse only their own model), exhaustion rows name it typed
 (`rejected: credential_unusable`, never hidden behind `not_ready`), and the
@@ -1271,9 +1422,10 @@ run. A read-only turn of a THREAD instead gets a DURABLE per-lane home under
 `projects/<project-sha256>/lanes/<threadId>/<harness>-<profileOrDefault>/home`
 (a lane = thread + harness + credential profile), a sibling of `workspaces/`
 and outside every worktree (INV-063). The lane home persists across turns so
-the harness's recorded native session is reachable for `codex exec resume` /
-`claude --resume` on the next lane turn (INV-034); it is removed only by thread
-purge, credential-profile deletion, or the orphan-lane retention sweep.
+the harness's recorded native session is reachable for Codex app-server
+`thread/resume` / `claude --resume` on the next lane turn (INV-034); it is
+removed only by thread purge, credential-profile deletion, or the orphan-lane
+retention sweep.
 
 Convergence modes also default to isolated envelopes. The CLI-only `--in-place`
 is reserved for explicit stateful external adapters, such as Terminal-Bench
@@ -1387,10 +1539,41 @@ manifest truth applies. Codex account enumeration is native-session-specific,
 so API-key and unscoped legacy queries retain their manifest source instead of
 borrowing a subscription catalog. A failed supported live inventory remains
 unverifiable; it never falls back to a convenient manifest to admit a model.
-Where its producer declared absences advisory, an unverifiable answer instead
-sends the explicit model to the vendor unchanged (above). The authenticated
+Where the harness declared absences advisory, an unverifiable answer — and a
+manifest miss — instead sends the explicit model to the vendor unchanged
+(above). The authenticated
 account catalog read below is a different source and stays strict: a model it
 does not carry is a typed `model_unavailable` refusal.
+
+Claude's producer is the prompt-free `initialize` handshake of the installed
+`claude` binary (`harness-claude/src/model-probe.ts`): one stdin frame, the
+picker rows of the `control_response` (`value`, `displayName`, `resolvedModel`),
+exit on EOF, never `--model` (the CLI echoes it as a row), `--setting-sources
+""` and `--strict-mcp-config` (no hooks, no settings echo), model-override env
+scrubbed. Scopes (owner decision 2026-09-24): a `config_dir_login` profile is
+probed under its own config dir and keychain bridge, an `api_key` /
+`oauth_token` profile with its own credential in the env var its runs use
+under a scratch HOME (cache keyed by profile id, never by a secret), so the
+account view carries the account's own rows; the unscoped listing runs
+credential-free under a scratch HOME with non-essential traffic off and
+describes the binary alone. The probe resolves the binary exactly as the spawn
+layer does (a caller's PATH patch replaces the normalized PATH). Rows carry `origin` (`live`: the
+picker selectors and their resolutions as pinnable exact ids; `hint`: the frozen
+`CLAUDE_KNOWN_MODELS` ids appended so presence never shrinks below the manifest)
+and `resolved_model` (diagnostic; the row id is what travels). The answer is
+total: any failure yields the hint rows alone, and the registry then reports
+the list as `source: manifest` with its frozen `verifiedAgainst` stamp rather
+than a live `api` claim. One cached single-flight capture per (scope, binary
+identity — realpath, inode, size, mtime; `harnessBinaryIdentity` in core) lives
+an hour, a failure a minute, so an in-place CLI update is re-read without a
+daemon restart. The `--help` effort memo is keyed by the same identity and
+follows a run's PATH patch the same way, as do the readonly-flag probe and the
+`--version` read behind the snapshot-trust gate, so every question about "the
+binary this run executes" is asked of that binary. Two stated bounds: the memo
+is one slot (a patched run alternating with host-keyed callers re-reads
+`--help`, one bounded spawn per alternation), and a relative entry in a patch
+PATH is resolved as the daemon sees it, so a binary reachable only through a
+project-relative entry falls back to the snapshot ladder.
 
 The engine also accepts one raw model generation independently of Agent Runs.
 `ModelAdapter` in core and the model-operation schemas define caller-owned
@@ -1401,13 +1584,30 @@ review loop, model fallback or internal compaction is created for this capabilit
 
 The Codex transport lives in `harness-codex`. It uses a selected managed ChatGPT
 profile, the official CLI for an expired-token refresh, and the raw account's
-model catalog. In-process refresh work is serialized by canonical managed home;
+model catalog. The backend filters that catalog by the client version the
+caller declares (a model is listed only for clients at or above its own
+minimum), so the transport declares ITS OWN verified level,
+`CODEX_HTTP_CLIENT_VERSION` (`http-client-version.ts`), raised to the installed
+Codex CLI's version when that is newer and never below the constant — not the
+managed-installer pin, which is a different fact (a release that only moves
+the installer must never decide which models an account can see). The account
+view carries the declared `clientVersion` and its source per catalog (the
+legacy query keeps its shape), every membership refusal names it, and the constant moves together with a recorded catalog
+fixture pair (`fixtures/models-http-*.json`) whose shared rows must stay
+identical. In-process refresh work is serialized by canonical managed home;
 cancelled callers cannot release another caller past a still-live refresh. Each
 caller rereads current authorization. Selection hands its exact-profile catalog
 to this operation's invocation, which rechecks the current account fingerprint;
 no catalog or credentials are cached across operations. Unknown fingerprints
 retain fresh discovery and cannot authorize native continuation reuse.
-Its single inference POST follows a durable dispatch receipt.
+Its single inference POST follows a durable dispatch receipt. Exact JSON bytes
+stream with Content-Length. `request-delivery.ts` observes public callbacks on
+the existing dispatcher; its lazy `dispatcher-accessor.cts` preserves native
+cold initialization, proxy, TLS and pool ownership. Positive connector or
+incomplete-upload proof yields `transport_not_delivered`; full handoff or
+unobserved transport stays unknown. `ModelOperations` refines the terminal to
+`not_started` only after publishing proof, retaining the attempted-send timestamp
+and route. Crash/publication failure stays unknown. No adapter retry is added.
 The caller's canonical instruction messages retain their roles and ordered text
 parts in Ouroboros history. Codex's provider-specific wire projection maps each
 canonical `system` message to the high-priority `developer` role because this
@@ -1472,8 +1672,18 @@ death are separate facts. A crash after response bytes are published but before
 the command's terminal journal commit retains an unknown outcome; uncommitted
 bytes cannot certify a completed response and are reclaimed as crash residue.
 
-Callers may request `captureFailureEvidence=true` on the existing model-operation
-POST, discovered through that operation's query descriptor. Omission and false
+Callers may request `captureEffortEvidence=true` on the existing model-operation
+POST, discovered through its query descriptor, to retain the adapter's typed
+`effortResolution` receipt. Omission and false strip only that field before
+immutable result publication, preserving strict legacy result bytes. The literal
+true choice is captured in command parameters and idempotency identity: rejoining
+the same operation retains it, and changing it under the same key conflicts.
+GET still returns the stored bytes and their original digest for ACK; it performs
+no projection. This choice never changes the inference request, real provider
+`appliedOptions`, dispatch or generation count. Historical results remain unchanged.
+
+Callers may independently request `captureFailureEvidence=true` on the same POST,
+discovered through that operation's query descriptor. Omission and false
 retain the legacy command identity and strict result shape; true is bound to the
 same idempotency key and cannot change during a create rejoin. This is transport
 evidence intent, not a provider generation option.
@@ -1541,8 +1751,9 @@ is the caller's decision. The same composition point records a
 `ModelSubstitutionObservation` in the daemon's in-memory
 `ModelSubstitutionLedger`: bounded, newest-wins per account and requested model,
 kept for 30 minutes (observation retention, not a vendor reset time), never
-cleared by a later success, and voided with the credential generation at the
-unusable ledger's call sites. While one is live, Auto selection for that
+cleared by a later success, voided with the credential generation at the
+unusable ledger's call sites, and never recorded while a login of that harness
+holds its credential-mutation window (#363). While one is live, Auto selection for that
 requested model ranks the account after every other selectable account, oldest
 observation first, so a fully marked pool takes turns. The observation never
 excludes an account or exhausts a pool, and a pin or a usable preferred account
@@ -1648,6 +1859,7 @@ validator dump, and validates the per-run SSE cursor as a nonnegative integer
 - `POST /v2/runs/:id/decision`
 - `GET /v2/runs/:id/events`
 - `POST /v2/runs/:id/interactions/:id/answer`
+- `POST /v2/runs/:id/messages`
 - `GET /v2/runs/:id/produced`
 - `GET /v2/runs/:id/produced/<path>`
 - `POST /v2/runs/:id/retry`
@@ -1759,7 +1971,12 @@ Endpoint semantics beyond the inventory:
   `claudexor retry` and `claudexor run-again`. Durable idempotent replay is
   resolved before mutable resource, Git, or harness preflight: once a request
   was accepted, a later environment change returns the original command/run
-  handle rather than replacing history with a new refusal. If no command was
+  handle rather than replacing history with a new refusal. A project root that
+  was never registered is a caller fix, not an unreadable replay index:
+  `POST /v2/runs` and Exact Retry answer typed `404 project_not_registered`
+  (`retryable: false`, required action: register the root with
+  `POST /v2/projects` or declare `scope.ephemeral`) instead of the retryable
+  `503 idempotency_status_unavailable`. If no command was
   accepted, a replay may reuse its one journaled runless turn only while that
   turn is still the conversation tail; the recovery boundary refuses a
   historical orphan before enqueue. Already accepted commands remain valid and
@@ -2419,7 +2636,8 @@ runs. The request `loginFlow` selects the secondary app-server
 `browser_callback` (`account/login/start {chatgptDeviceCode}` → `chatgpt`
 authUrl) or the legacy Terminal `browser_redirect` (localhost callback). Claude
 (`claude auth login`, the claude.ai subscription route with no version-varying
-flag) and Cursor (`cursor-agent login`) use daemon-hosted URL disclosure; Claude
+flag) and Cursor (`cursor-agent login`, or `agent login` through a verified
+Cursor `agent`) use daemon-hosted URL disclosure; Claude
 accepts its one-shot completion input over the transient sidecar, while Cursor
 self-completes by vendor polling. Antigravity uses the same disclosure/input
 shape but declares terminal stdin because the vendor rejects a plain pipe.
@@ -2482,6 +2700,10 @@ runner's hash-bound result is journaled before verification. For a
 DEFAULT-store login, exit zero enters a fresh, source-targeted native probe
 followed by an isolated same-harness capability smoke over the normal adapter
 stream; only the exact `vendor_native` / `native_session` route may pass.
+One silent effort-omission status may precede `started` for the smoke's explicit
+null effort preference. It remains preparation evidence in the stream digest;
+the native `started` event alone supplies credential route/source proof. Repeated
+pre-start preparation, other pre-start activity, and events after completion still fail.
 Another provider, an API key, tool use, external context, or workspace mutation
 invalidates the receipt. No plan-tier, entitlement, quota, or zero-cost
 inference is part of this proof. A PROFILE-targeted login (INV-135:
@@ -2531,8 +2753,11 @@ and passive registry retain normal cancellation and unconfirmed-child custody.
 An ordinary daemon
 stop/restart no longer terminates an awaiting-user login runner (that regression
 killed the operator's own pending login in the 2026-07-21 incident); explicit
-`setup jobs cancel` and the login deadline's timeout escalation are the only
-signalling paths. Restart consumes an existing
+`setup cancel` and the login deadline's timeout escalation are the only signalling
+paths. Group probes keep polling within the existing grace through transient
+uncertainty (including macOS exit-time permission errors); only proven emptiness
+closes the credential-mutation window. Persistent uncertainty stays unconfirmed.
+Restart consumes an existing
 terminal result first, then adopts a live runner only on positive evidence — a
 matching durable handle, the same leader identity, and a nonempty process
 group; a proven-dead group with no receipt is the unrecoverable
@@ -2542,8 +2767,10 @@ becomes `interrupted_unknown` and is never auto-replayed. Terminal outcomes dist
 `completed`, `not_supported`, `launch_failed`, `command_failed`,
 `auth_not_ready`, `capability_verification_failed`,
 `credential_route_mismatch`, `timed_out`, `cancelled_by_user`,
-`cancelled_on_restart`, `interrupted_unknown`, and
-`termination_unconfirmed`.
+`cancelled_on_restart`, `interrupted`, `interrupted_unknown`, and
+`termination_unconfirmed`. `interrupted` records a live monitor proving the
+recorded group empty without a result; `cancelled_on_restart` describes that
+evidence during restart reconciliation.
 
 The checksummed, fsync-before-ACK global journal is the only setup lifecycle and
 event authority. Per-job `0700` directories under the daemon data root contain
@@ -2561,9 +2788,10 @@ of local fake apply state.
 daemon abort closes the active harness stream and the process helper sends a
 cooperative interrupt with hard-kill fallback. (The former `interrupt` control
 kind was deleted as a fake knob — it mapped to the same daemon cancel.) Live
-input forwarding into a running harness is not a supported control surface; the
-former `/runs/:id/input` endpoint and `RunInput` DTO were removed as dead code
-rather than left as an always-`unsupported` stub.
+input into a running attempt is its own typed surface,
+`POST /v2/runs/:id/messages`, described under "Live messages into a running run"
+below; the former `/runs/:id/input` endpoint and `RunInput` DTO stay deleted (a
+stub that always answered `unsupported` was dead code, not a channel).
 
 A run blocked by the winning candidate's `NEEDS_HUMAN` findings (reviewer
 escalation, protected-path change, critical-risk diff) retains lifecycle
@@ -2657,6 +2885,143 @@ the run carries a typed `protected_path_approvals` entry for the matching glob
 built-in critical/security path gates such as `.github/workflows`. They are
 accepted only from the run request surface — plans and repo config never carry
 approvals.
+
+### Live messages into a running run
+
+`POST /v2/runs/:id/messages` places a message into a run's ACTIVE agent
+attempt while it runs (the nanny's correction that used to wait for the
+terminal or cost a cancel+restart). The body is `{text, expectedAttemptId?}`
+(1..65,536 UTF-16 code units, secret-like values refused like every prompt
+ingress), the `Idempotency-Key` is REQUIRED and IS the message id, and the
+route is served through the durable delivery ledger (`run.message`): a replay
+under the same key returns the recorded receipt, a different body under the
+same key is `409 idempotency_conflict`, and a command left non-terminal by a
+daemon restart answers `409 delivery_interrupted`. HTTP carries only transport
+facts (404 unknown run, 501 no service, 400 malformed/secret/too-long/missing
+key, 409 idempotency, 500 receipt-save failure); EVERY typed outcome is HTTP
+200 — deliberately unlike the answer and control routes — so a client reads
+`outcome`, never the status code. The protocol major stays 3; clients discover
+the route by its row in `GET /v2/operations`.
+
+Three boundaries are reported separately and never conflated:
+
+- **Daemon admission** — the run's `events.jsonl` gets a `message.accepted`
+  row through a failure-PROPAGATING append BEFORE any native dispatch. When
+  that append throws, nothing is sent and the receipt is `rejected` with
+  reason `admission_persist_failed` (a new key is needed to try again).
+- **Native acceptance** — outcome `accepted`: the harness's documented
+  acceptance boundary was observed (Codex: `turn/steer` returned `{turnId}`,
+  carried as `nativeTurnId`; Claude Code: the `command_lifecycle queued`
+  frame for the message's uuid); consumption is unproved. No second row is
+  written: the receipt is the answer and replays under the same key.
+- **Native consumption** — outcome `delivered`: a correlated native
+  consumption event was observed (Codex: the `userMessage` echo whose
+  `clientId` equals the message id; Claude Code: the `--replay-user-messages`
+  echo `{type:"user", isReplay:true, uuid}` or the `command_lifecycle started`
+  frame for that uuid) and a `message.delivered` row closes the
+  message. Obedience is still unproved — the model may ignore the text. The
+  receipt reads `delivered` only when the echo reaches the adapter before it
+  answers; for Codex `turn/steer` replies first (the echo followed 2.9 s
+  later in the 0.156.1 recording), so the usual receipt is `accepted` and the
+  echo then surfaces as the adapter's status event with code live_input_delivered — a
+  `harness.event` timeline row carrying `message_id` and `native_turn_id` —
+  which a client reconciles against its message id. No `message.delivered`
+  row is written retroactively for an already-answered receipt.
+
+Every non-delivery closes with a `message.refused` row carrying `outcome` and
+`reason`: `rejected` (an explicit refusal of THIS submission: a vendor RPC
+refusal on a still-active turn `rpc_refused`, a caller error `multi_attempt`,
+or `admission_persist_failed`), `not_active` (no eligible target before
+dispatch: `run_terminal`, `no_live_session`, `attempt_mismatch`,
+`no_active_turn`, `interaction_pending`), `unsupported` (no live-input channel
+for this harness/transport/run scope: `no_live_session` for an adapter that
+declares `none` or lacks `message`, `thread_bound` for a thread turn), and
+`delivery_unknown` (the message MAY have landed: `transport_lost`,
+`response_timeout`; a receipt-save failure is the ledger's 500).
+`accepted:false` on `delivery_unknown` never means "safe to resend under a new
+key" — reuse the key to read the recorded verdict. Reasons come from adapter
+and registry state only, never from vendor prose (INV-049). The payload of
+every `message.*` row is `{message_id, attempt_id?, harness_id?, outcome?,
+reason?, live_input?, native_turn_id?, text_sha256, text_bytes, text, title}`;
+the journaled copy in the owning partition drops `text` (like the
+`run.created` prompt digest), the per-run `events.jsonl` keeps it, and the
+timeline shows it as the row detail.
+
+The daemon's in-process `LiveInputRegistry` (`packages/daemon/src/live-input.ts`)
+is the one live-handle owner, fed by the orchestrator at the agent attempt
+scope through `RunInput.onLiveAttempt` (a LIVE session-id getter, because a
+native transient retry mints a new session id per try) and released in that
+attempt's `finally`; `dropForRun` runs beside the interaction registry's on run
+terminal. Its decision order: an unknown-and-terminal run → `not_active`
+(`run_terminal`); a thread turn → `unsupported` (`thread_bound`: the
+continuity packet would lose the message, INV-137); no live attempt →
+`not_active` (`no_live_session`); several live attempts (race `n>1`) without
+`expectedAttemptId` → `rejected` (`multi_attempt`); a mismatching
+`expectedAttemptId` → `not_active` (`attempt_mismatch`); a pending interaction
+→ `not_active` (`interaction_pending`) with NO vendor write, since a steer
+beside an open `AskUserQuestion` would neither answer it nor be a work tool
+(INV-048); an adapter without `message` or a profile of `none` →
+`unsupported`; no native session yet → `not_active`; otherwise the adapter's
+verdict passes through 1:1. Candidate attempts (including the synthesis
+attempt) and the read-only ask/plan/report attempts register; reviewer lanes do
+not and therefore answer `not_active`.
+
+Steering lifetime is attempt-local: a native transient retry keeps the
+registration (the getter follows the new session), while a convergence
+attempt, an Exact Retry or a `rerun_with_feedback` run is a new attempt that
+never re-injects earlier messages — the message was addressed to a session,
+not to the task. Three disclosed residuals: a receipt that lands after the run's
+terminal commit (the adapter answered late) is file-tail-stamped into
+`events.jsonl` (`message.*` rows are in the post-terminal audit allowlist next
+to `control.*`, so terminal-authority validation accepts them) — durable and
+visible on the next timeline read, but the live SSE push for that row is
+missed; a closing row that arrives WHILE the terminal is being committed
+answers `500 message_receipt_unavailable` (the replay stays 500; the message
+may have landed); and a consumed steer is not inactivity-watchdog progress until the
+model's next output, so a message into a stalled session does not prevent its
+timeout.
+
+The channel is a per-adapter declaration, not a doctor probe:
+`HarnessCapabilityProfile.live_input` (`mid_turn` | `next_tool_boundary` |
+`none`, default `none`) is projected as `liveInput` on the `CatalogHarness` row
+of `GET /v2/agent-capabilities`, and an adapter that declares a channel implements
+`message(sessionId, {messageId, text})` beside `cancel`. Codex declares
+`mid_turn` (app-server `turn/steer` against the snapshotted active turn; a
+turn gap answers `not_active`/`no_active_turn`, an app-server without
+`turn/steer` answers `rejected`/`rpc_refused`). Claude Code declares
+`next_tool_boundary` through the native queue fold of its stream-json stdin
+(`packages/harness-claude/src/live-input.ts`, recorded on Claude Code 2.1.283
+through the real adapter path: `fixtures/stream-json/recorded-live-fold-2.1.283.jsonl`
+and `recorded-live-final-text-2.1.283.jsonl`, replayed 1:1 by the conformance
+tests): the message is written to the live stdin as a user frame whose `uuid`
+is the message id, Claude Code queues it at once (`command_lifecycle queued`
+within ~10 ms = `accepted`) and picks it up inside the same turn right after
+the current tool batch (the replay echo, `command_lifecycle started` or
+`completed`, or the result's `user_message_uuids` = `delivered`, surfaced once
+as the `live_input_delivered` status event keyed by `message_id`). The managed
+vendor pin (2.1.281) carries the same frames and flag; the pickup itself is
+recorded on 2.1.283. A
+message that arrives while the model composes its final text stays queued
+and runs as the NEXT native turn inside the same run: the run loop's
+`session.onIo` seam hands the adapter the live handle, `closeStdinOn` returns
+false while a message is written-but-unreceipted, `queued` or `started`, or a
+run-owned background task is open (`system/task_started` with
+`is_backgrounded: true` … `system/task_notification`, so a background
+continuation is kept too), the second `system/init` folds into the one
+`started` (a `native_turn_started` status marks the turn), each result's
+`usage.cost_usd` is the delta of the cumulative `total_cost_usd`, and the last
+result's final text is the run's answer. No `queued` frame within 2 s answers
+`delivery_unknown`/`response_timeout` (the stdin handle swallows write errors,
+so a dead pipe surfaces this way), a session closed with the message still
+unreceipted `delivery_unknown`/`transport_lost`, and a `cancelled|discarded|
+refused` lifecycle state before consumption is typed `live_input_refused`
+without failing the run. A one-shot argv run (no interaction channel; never
+the daemon's shape) has no live session and answers `not_active`/`no_live_session`. Cursor declares `none` (no
+persistent live-input channel: its prompt is piped once, then EOF); agy,
+opencode and raw-api declare `none`. There is no CLI verb or MCP tool for
+messages in this release (`claudexor follow` is the later surface), and the
+ACP server's `session/prompt` on an active session is refused rather than
+bridged into a steer.
 
 ### Live-tree mutation paths
 
@@ -2857,7 +3222,10 @@ sample counts and auth routing survive. A new explicitly unpriced attempt
 clears the cost average; auth-only updates preserve compatible observations.
 Mixed review panels classify
 each observed amount separately from its prospective billing basis;
-their aggregate is never blindly charged as cash. Candidate and reviewer
+their aggregate is never blindly charged as cash. Panel admission keeps
+declared Processing costs and already-observed slot costs;
+an unvisited ordinary slot without a receipt does not invent an unknown-cost
+hold. Later included slots cannot erase an observed paid or unknown hold. Candidate and reviewer
 retries classify EACH usage event by that event/current typed credential
 route and Processing evidence; a native→API-key retry cannot hide later metered spend under the first
 native route, and an undisclosed route remains cost-unverifiable. A typed auth
@@ -3022,7 +3390,23 @@ auth-route evidence: verified included ordinary service proves
 `subscription_entitlement`, so that route survives
 `paid_fallback: never` and ranks with a real economy tuple instead of reading as
 unknown/paid. Surfaces project the rationale verbatim (run detail) and never
-reconstruct the order from prose. A deep-scan swarm reserves n>1 subscription
+reconstruct the order from prose. A named account's ordinary billing evidence
+requires its fresh vendor-backed verification: an authenticated adapter response,
+or the existing exact-profile vendor observation over a passing local probe.
+Local store presence and stale readiness do not prove subscription entitlement.
+Default-store doctor evidence applies only to a profile-less route. The admission
+probe is reused for ranking and the initial reservation. Each physical dispatch
+reads its actual account's current verification again, including when the account
+ID is unchanged, and re-admits it against the existing budget lease and
+paid-fallback policy. This includes inline continuity summaries, rotation and runs
+without Processing controls. A newer vendor observation is not frozen to the
+initial selection; a valid positive reservation estimate remains independent of
+billing verification. A Plan refused before any physical send releases its lease
+and retains the typed policy cause; started work without cost evidence stays unknown. A policy
+refusal is a configuration failure, separate from a monetary-cap or provider
+failure. The ranking rationale remains the
+original selection evidence; the execution receipt names the account that ran.
+A deep-scan swarm reserves n>1 subscription
 scouts under a finite cap against the per-run estimate floor (mirroring the
 candidate loop), so later scouts are not refused for lacking a per-attempt cash
 quote; a scout the gate still refuses before spawn is recorded as a failed attempt
@@ -3098,7 +3482,7 @@ run's final answer must conform to (agent race / ask answers), normalized and
 strictified
 for vendor strict modes (every object: `required` = all keys,
 `additionalProperties: false`; inline root — both live-verified: codex
-`--output-schema <FILE>` written into the scoped CODEX_HOME, claude
+app-server `turn/start.outputSchema`, claude
 `--json-schema <inline JSON>`). The conformance validator selects draft-07
 (the compatibility default when `$schema` is omitted) or draft 2020-12 from
 the caller declaration; the metadata declaration is removed only from the
@@ -3153,13 +3537,18 @@ the typed `context` field of `HarnessEvent`: result `terminal_reason` (`prompt_t
 the rapid-refill breaker `rapid_refill_breaker` → `capacity_exhausted` with a
 typed cause), the `compact_boundary` system frame → a compaction event, and the
 top-level typed `rate_limit_event` → the existing `rate_limit` signal (a routine
-`allowed` heartbeat surfaces nothing and never arms rotation). Codex exec
-0.153.3's recorded oversized-input case surfaces a stderr JSON-RPC error
-(`input_error_code: input_too_large`) before model execution, without a typed
-context stream frame. The Codex adapter has no token-window context mapping;
-this character-limit capture does not establish a token-window limit. A
-terminal `capacity_exhausted` with no completed WorkReport maps to
-`interrupted / context_capacity_exhausted`.
+`allowed` heartbeat surfaces nothing and never arms rotation). Codex exec's
+recorded oversized-input refusal remains separate: the app-server preserves
+RPC data and emits `request_refusal`, which reaches final failure as
+`input_too_large` with Unicode-scalar measurements and no quota reset. It stops
+account rotation, same-harness fallback-model and convergence retries; ordinary
+failover remains unchanged. `capability_profile.input_limits` declares the
+verified native turn-text bound only on the observed CLI version. The catalog's
+`inputLimits` entry's `askPromptBudget` subtracts shared thread-pointer framing for ordinary
+ASK initial attempts (`prompt-framing.ts`), including thread turns. Other shapes
+remain unbudgeted; no predictive native refusal or guessed model window is added.
+The native input cap excludes separate instructions and is not token capacity. A terminal `capacity_exhausted` with no completed
+WorkReport maps to `interrupted / context_capacity_exhausted`.
 
 One-shot continuation (D-16d): when an eligible terminal `capacity_exhausted`
 (cause `repeated_refill` only — `prompt_too_long` may be an irreducible packet)
@@ -3552,9 +3941,13 @@ Vendor harness CLIs land on a host only through the disclosed installer
 connected host). The npm-distributed harnesses (claude, codex, opencode)
 install one EXACT pinned version — each pin aliases that harness package's
 vendor-version constant, and npm checks the registry integrity checksum for
-that exact version; `@latest` is never used. For claude and codex that
-constant is the same value the model-hints and effort freshness gates read,
-so the installed CLI is the version this release was verified against; the
+that exact version; `@latest` is never used. For codex that constant is the
+same value the model-hints and effort freshness gates read; for claude it is
+the effort-snapshot stamp, while the Claude known-model hint list keeps the
+literal version it was last actually re-verified against (a pin bump never
+restamps unrechecked ids). So the installed CLI is the version this release's
+effort ladders were verified against (a recording that needs a paid live run
+keeps the version it was captured from, as its fixture manifest states); the
 opencode pin is a deterministic install target, not a verification claim —
 no recorded fixture covers it yet, as its `vendor-cli-version.ts` discloses.
 Cursor ships no npm artifact and cannot be pinned:
@@ -3577,7 +3970,8 @@ credential variables.
 
 The installer recipe producer also accepts the explicit `local` target used by
 host integrations. Npm harnesses then install under the existing managed Node
-root (`~/.claudexor/node/bin`), which is already shared by local resolution and
+root (`~/.claudexor/node`, launchers in its `bin` on POSIX), which is already
+shared by local resolution and
 native harness PATH resolution; Cursor keeps its vendor-selected destination,
 and normalized harness discovery covers both `~/.local/bin` and
 `~/.cursor/bin`. An explicit `--target local --yes` is suitable for an
@@ -3600,8 +3994,24 @@ pathname because a new owner could have replaced it between observation and
 mutation. An unexpected filesystem or child-process exception is normalized by
 the canonical CLI projector as `harness_install_failed`; JSON mode still emits
 one object containing the full pre-execution disclosure.
-Local Windows installation is a typed `unsupported_platform` refusal before
-filesystem or child-process side effects. The omitted target remains `remote`,
+On Windows an npm global prefix holds only `.cmd`/sh/ps1 shims and no
+executable image, and Claudexor never spawns a harness through a shell (issue
+#191), so the local target is supported exactly where the pinned package
+yields a verified package-native image: `@openai/codex` resolves its optional
+`@openai/codex-win32-<arch>` platform package and executes
+`vendor/<triple>/bin/codex.exe` from it. Core's `runtime-env.ts` is the one
+owner of that layout (`npmGlobalPackagesDir`, `embeddedNpmCli`,
+`windowsNativeImageDir`): the installer runs the embedded
+`node_modules/npm/bin/npm-cli.js` beside `node.exe`, proves the image inside
+the prefix, and the normalized harness PATH carries that image dir on win32
+(`managedWindowsNativeImageDirs`) so doctor, login, runs and quota resolve the
+same `codex.exe` by bare name. The prefix is anchored on the same `HOME` the
+PATH producer reads (the user profile when unset). Every other vendor — an npm
+pin without a verified image (claude, opencode), an unsupported architecture,
+or a script vendor — is a typed `unsupported_platform` refusal before
+filesystem or child-process side effects, and the Windows CI lane installs the
+real pinned package with no ambient node/npm as the proof
+(`scripts/windows-local-install-smoke.mjs`). The omitted target remains `remote`,
 so the SSH installer's
 visible disclosure, confirmation, command, destination, and precedence
 contract are unchanged. After any successful local install, the embedding host
@@ -3675,7 +4085,8 @@ A host owns the install directory, config root, process, rollback, and exact
 reviewed pin. Its full Node toolchain is the exact version proven by that pin's
 closure smoke; POSIX consumers using local harness install must provide both
 `<node-root>/bin/node` and
-`<node-root>/lib/node_modules/npm/bin/npm-cli.js`, with no ambient-PATH npm
+`<node-root>/lib/node_modules/npm/bin/npm-cli.js` (Windows: `node.exe` and its
+adjacent `node_modules\npm\bin\npm-cli.js`), with no ambient-PATH npm
 fallback. The root package's
 `engines.node >=20.19.0` promise covers the npm distribution and does not by
 itself prove a release-built `--target=node22` closure on Node 20. The pin also
@@ -4016,16 +4427,51 @@ code touching one of these areas must honor it or change it explicitly here.
   first-wins auth-route receipt would misvalue metered usage as subscription
   entitlement against a finite cash cap. `nextEligibleProfile` skips
   cross-kind candidates; rotate between accounts of the SAME transport only.
-- `claudexor profiles login` for non-codex harnesses deliberately spawns the
-  vendor's own login command IN the operator's terminal (no daemon setup
-  job): vendor OAuth needs the user's TTY/browser interactively, and the
-  binding's Claudexor-owned HOME/config root scopes vendor state. Credential
-  custody remains platform-defined and may be OS-user-owned; Claudexor neither
-  reads nor copies it. There is no daemon setup receipt to journal, and the
-  post-exit vendor doctor probe under the exact binding environment is the
-  verification truth (exit code non-zero unless the probe passes). Codex
-  profile login is the D-17
-  exception: it rides the SAME durable app-server device-code setup job as
-  the default codex login (restart-surviving runner, transient sidecar,
-  in-app/inline code disclosure), because the app-server flow needs no TTY. The daemon-owned setup jobs remain the path for
-  non-interactive/GUI-driven logins.
+- `claudexor profiles login cursor <id>` runs the vendor's own login in the
+  operator's terminal through the daemon's existing `client_pty` setup job.
+  The CLI reads the registered binding, creates its job and uses the sealed
+  manifest, one-use attachment and built runner. Vendor state remains in the
+  binding's scoped store; Claudexor neither reads nor copies credentials.
+  Claude/AGY profile login keeps its direct vendor terminal path, including
+  its known delayed-observation limitation (BACKLOG W-f). Non-Codex
+  `profiles login --json` refuses before preparing or starting a login.
+  Codex retains its durable device-code flow; GUI/non-interactive login uses
+  the existing setup API.
+- The setup journal owns the credential-mutation window from durable permit
+  through terminal verification. A hash-bound runner result or a positively
+  empty recorded process group establishes the command's end. Fresh profile
+  verification runs while the window remains open; terminalization closes it.
+  The existing monitor also settles a proven-empty group with no receipt as
+  interrupted, after checking once more for a result published during that
+  proof. A missing sidecar never releases a permitted job. An unattached
+  reservation without permission remains replaceable. A bound pre-command
+  failure is a launch failure; actual unknown termination retains custody.
+  Physical executable bytes are checked before permission; an already
+  permitted vendor's self-update does not invalidate its original sealed
+  command and recorded process identity.
+- Opening and closing each invalidate the process-wide caches, ledger marks
+  and credential generations plus that harness's auth readiness. While its
+  window is open, the Cursor status coordinator and Claude LKG neither reuse
+  nor retain observations; fresh probes still answer and may admit work.
+  Refusal marks and subscription-row unusable callbacks are generation-bound.
+  The aggregate doctor/status projections are invalidated at the transitions;
+  they can show an intermediate observation until close. Pre-existing late
+  model-substitution callbacks and default/API-key unusable callbacks do not
+  gain a new cross-generation guarantee. Descendants outliving a valid runner
+  receipt remain outside the command-completion proof. An unreadable bound
+  journal reads open; restart alone proves no closure. The hold is per harness,
+  not a blanket admission ban. A genuinely unconfirmed group still needs the
+  existing proof-based reconciliation.
+- The Cursor CLI requests cancellation on Ctrl-C, SIGHUP and SIGTERM. A lost
+  attachment without a runner receipt also requests cancellation; failed
+  delivery is visible and custody stays with the daemon. An already-attached
+  or fenced job names its id and the full CLI's `setup cancel <jobId>` and
+  `setup reconcile <jobId>` commands, which call the existing API. Cancellation
+  is asynchronous and reconcile requires positive termination evidence; these
+  commands do not claim that request acceptance means a finished login.
+  The packaged daemon's alternate `setup attach` role stays attach-only.
+  A hard-killed client cannot cancel; a live vendor retains its job until its
+  own result, explicit cancellation or the existing deadline. A permitted
+  historical unconfirmed row without provable group evidence remains a
+  disclosed recovery limitation. The interactive CLI exits zero only for a
+  succeeded verified job, or 130 after its handled interruption.

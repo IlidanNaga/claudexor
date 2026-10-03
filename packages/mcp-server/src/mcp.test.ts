@@ -98,7 +98,7 @@ async function wireToolCall(tools: McpTool[], name: string, args: Record<string,
 }
 
 describe("Claudexor MCP server (SDK v2)", () => {
-  it("negotiates the client's 2025-06-18 era, lists 18 tools, and answers PING during a slow call", async () => {
+  it("negotiates the client's 2025-06-18 era, lists 21 tools, and answers PING during a slow call", async () => {
     const tools = defaultClaudexorTools(async (p) => {
       if (p.mode === "agent") {
         await sleep(500);
@@ -135,7 +135,7 @@ describe("Claudexor MCP server (SDK v2)", () => {
     const init = w.responses.find((r) => r.id === "init");
     expect(init?.result?.protocolVersion).toBe("2025-06-18");
     expect(init?.result?.serverInfo?.name).toBe("claudexor");
-    expect(w.responses.find((r) => r.id === 2)?.result?.tools).toHaveLength(18);
+    expect(w.responses.find((r) => r.id === 2)?.result?.tools).toHaveLength(21);
     const call = w.responses.find((r) => r.id === 3);
     expect(call?.result?.content?.[0]?.text).toContain("slow done");
   });
@@ -322,6 +322,10 @@ describe("Claudexor MCP server (SDK v2)", () => {
     expect(planSchema?.properties).not.toHaveProperty("tests");
     expect(planSchema?.properties).not.toHaveProperty("deepScan");
     expect(runSchema?.properties?.tests?.type).toBe("array");
+    expect(runSchema?.properties?.credentialProfileId).toMatchObject({
+      type: "string",
+      pattern: "\\S",
+    });
     expect(runSchema?.properties).not.toHaveProperty("deepScan");
     expect(runSchema?.properties).not.toHaveProperty("council");
 
@@ -428,6 +432,188 @@ describe("Claudexor MCP server (SDK v2)", () => {
     expect(textOf(23)).toContain("inline_secret_rejected");
     expect(textOf(24)).toContain("durable run artifacts");
     expect(textOf(24)).toContain("inline_secret_rejected");
+  });
+
+  it("exposes persistent thread tools with strict route controls and durable handles", async () => {
+    const calls: Record<string, unknown>[] = [];
+    const tools = defaultClaudexorTools(async (params) => {
+      calls.push(params);
+      return params.mode === "__thread_create"
+        ? {
+            summary: "created thread th-1; in_place writes to /tmp/canonical-project",
+            threadId: "th-1",
+            title: "Audit",
+            workspaceMode: "in_place",
+            repoRoot: "/tmp/canonical-project",
+          }
+        : {
+            summary: "queued",
+            jobId: "job-1",
+            threadId: "th-1",
+            turnId: "turn-1",
+            runId: "run-1",
+            runDir: "/tmp/run-1",
+          };
+    });
+    const create = tools.find((tool) => tool.name === "claudexor_thread_create")!;
+    const turn = tools.find((tool) => tool.name === "claudexor_thread_turn")!;
+    expect(create.description).toContain("Creation starts no model");
+    expect(create.description).toContain("project directory directly (in_place)");
+    expect(create.description).toContain("workspace=isolated");
+    expect(create.inputSchema.properties).toMatchObject({
+      workspace: {
+        enum: ["in_place", "isolated"],
+        description: expect.stringContaining("the default"),
+      },
+    });
+
+    expect(create.inputSchema).toMatchObject({
+      additionalProperties: false,
+      required: ["repoPath"],
+      properties: { credentialProfileId: { type: "string", pattern: "\\S" } },
+    });
+    expect(turn.inputSchema).toMatchObject({
+      additionalProperties: false,
+      required: ["threadId", "prompt"],
+      properties: {
+        model: { type: "string", pattern: "\\S" },
+        credentialProfileId: { type: "string", pattern: "\\S" },
+        idempotencyKey: { type: "string", maxLength: 256 },
+      },
+    });
+    expect(
+      (create.inputSchema.properties as Record<string, unknown>)?.idempotencyKey,
+    ).toMatchObject({ maxLength: 256 });
+
+    const created = await wireToolCall(tools, create.name, {
+      repoPath: "/tmp/project",
+      credentialProfileId: "work-secondary",
+    });
+    const queued = await wireToolCall(tools, turn.name, {
+      threadId: "th-1",
+      prompt: "continue",
+      model: "gpt-6-sol",
+      credentialProfileId: "work-secondary",
+      idempotencyKey: "turn-once",
+    });
+    const refused = await wireToolCall(tools, create.name, { repoPath: "relative" });
+
+    expect(created?.structuredContent).toMatchObject({
+      threadId: "th-1",
+      workspaceMode: "in_place",
+      repoRoot: "/tmp/canonical-project",
+    });
+    expect(created?.content?.[0]?.text).toBe(created?.structuredContent?.summary);
+    expect(queued?.structuredContent).toMatchObject({
+      threadId: "th-1",
+      turnId: "turn-1",
+      runId: "run-1",
+    });
+    expect(refused?.isError).toBe(true);
+    expect(calls).toEqual([
+      {
+        mode: "__thread_create",
+        repoPath: "/tmp/project",
+        credentialProfileId: "work-secondary",
+      },
+      {
+        mode: "__thread_turn",
+        threadId: "th-1",
+        prompt: "continue",
+        model: "gpt-6-sol",
+        credentialProfileId: "work-secondary",
+        idempotencyKey: "turn-once",
+      },
+    ]);
+    const read = tools.find((tool) => tool.name === "claudexor_thread_read")!;
+    expect(read.annotations?.readOnlyHint).toBe(true);
+    expect(read.inputSchema).toMatchObject({ required: ["threadId"], additionalProperties: false });
+  });
+
+  it("declares the thread-turn handle as an object-root outputSchema the SDK enforces", async () => {
+    const queued = {
+      summary: "queued turn t on thread th",
+      jobId: "job-1",
+      threadId: "th",
+      turnId: "t",
+      state: "queued",
+    };
+    const tools = defaultClaudexorTools(async () => queued);
+    const w = wire(tools);
+    await w.initialize();
+    w.send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+    await sleep(80);
+    await w.close();
+    const listed = (w.responses.find((r) => r.id === 1)?.result?.tools as any[]).find(
+      (tool) => tool.name === "claudexor_thread_turn",
+    );
+    // 2025-era hosts would otherwise receive {result: handle} instead of the handle.
+    expect(listed?.outputSchema?.type).toBe("object");
+    expect(listed?.outputSchema?.properties?.result).toBeUndefined();
+    expect(listed?.outputSchema?.anyOf).toHaveLength(2);
+    const call = await wireToolCall(tools, "claudexor_thread_turn", {
+      threadId: "th",
+      prompt: "go",
+    });
+    expect(call?.isError).not.toBe(true);
+    expect(call?.structuredContent).toEqual(queued);
+    const drifted = await wireToolCall(
+      defaultClaudexorTools(async () => ({ summary: "s", threadId: "th", turnId: "t" })),
+      "claudexor_thread_turn",
+      { threadId: "th", prompt: "go" },
+    );
+    expect(drifted?.isError).toBe(true);
+  });
+
+  it("preserves typed thread failures on the MCP wire", async () => {
+    const error = Object.assign(new Error("thread is busy"), {
+      code: "thread_busy",
+      retryable: true,
+      requiredActions: ["wait for the active turn"],
+      context: { threadId: "th-1" },
+    });
+    const result = await wireToolCall(
+      defaultClaudexorTools(async () => {
+        throw error;
+      }),
+      "claudexor_thread_turn",
+      { threadId: "th-1", prompt: "continue" },
+    );
+
+    expect(result?.isError).toBe(true);
+    expect(result?.structuredContent).toEqual({
+      status: "failed",
+      failure: {
+        message: "thread is busy",
+        code: "thread_busy",
+        retryable: true,
+        requiredActions: ["wait for the active turn"],
+        context: { threadId: "th-1" },
+      },
+    });
+  });
+
+  it("redacts and bounds thread failures before they cross the MCP wire", async () => {
+    const secret = `sk-${"x".repeat(40)}`;
+    const error = Object.assign(new Error(`failed with ${secret}`), {
+      code: "thread_failed",
+      fieldErrors: { prompt: [`contains ${secret}`] },
+      requiredActions: [`remove ${secret}`],
+      details: { nested: { token: secret } },
+      context: { stderr: `${secret}${"x".repeat(3_000)}` },
+    });
+    const result = await wireToolCall(
+      defaultClaudexorTools(async () => {
+        throw error;
+      }),
+      "claudexor_thread_turn",
+      { threadId: "th-1", prompt: "continue" },
+    );
+    const failure = result?.structuredContent?.failure as Record<string, unknown>;
+
+    expect(JSON.stringify(failure)).not.toContain(secret);
+    expect(JSON.stringify(failure)).toContain("[redacted]");
+    expect(JSON.stringify(failure).length).toBeLessThan(12_000);
   });
 
   it("run tools return structuredContent mirroring the text (summary, handles, applyEligibility)", async () => {

@@ -1,5 +1,70 @@
 # claudexor
 
+## 3.19.0
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/cli@3.19.0
+
+## 3.18.0
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies [fb1fdb4]
+  - @claudexor/cli@3.18.0
+
+## 3.17.2
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/cli@3.17.2
+
+## 3.17.1
+
+### Patch Changes
+
+- Updated dependencies [72825b9]
+  - @claudexor/cli@3.17.1
+
+## 3.17.0
+
+### Patch Changes
+
+- @claudexor/cli@3.17.0
+
+## 3.16.0
+
+### Patch Changes
+
+- Updated dependencies [788ddca]
+  - @claudexor/cli@3.16.0
+
+## 3.15.1
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/cli@3.15.1
+
+## 3.15.0
+
+### Patch Changes
+
+- Updated dependencies [3bc8af4]
+  - @claudexor/cli@3.15.0
+
+## 3.14.0
+
+### Patch Changes
+
+- Updated dependencies [2c024ac]
+- Updated dependencies [7e615b6]
+- Updated dependencies [fb42a94]
+  - @claudexor/cli@3.14.0
+
 ## 3.13.0
 
 ### Minor Changes

@@ -21,15 +21,21 @@
  * its own quota/profile preflight; checking it against the primary profile
  * here would reject a valid cross-profile fallback.
  *
- * One truth source cannot refuse: a live inventory whose adapter declared
- * `model_inventory_absence: "advisory"` proves presence but not absence, so an
- * unlisted explicit model is forwarded to the vendor unchanged and disclosed
- * once by the per-spawn gate. Manifest truth stays strict, and no gate ever
- * swaps one list for another to admit a model.
+ * What a list may refuse with is the HARNESS's declaration: where the adapter
+ * declared `model_inventory_absence: "advisory"`, its live inventory and its
+ * manifest hints alike prove presence but not absence, so an unlisted explicit
+ * model is forwarded to the vendor unchanged and disclosed once by the
+ * per-spawn gate. An authoritative harness (the declaration a silent manifest
+ * gets) refuses as before, and no gate ever swaps one list for another to
+ * admit a model.
  */
+import { billingKnowledgeForAuthRoute } from "@claudexor/budget";
+import type { AuthVerification, PaidFallback } from "@claudexor/schema";
 import type { HarnessAdapter } from "@claudexor/core";
 import {
   HarnessUnavailableError,
+  effortResolutionEvent,
+  resolveEffortEvidence,
   validateModel,
   hasModelInventoryForRoute,
   prepareHarnessProcessing,
@@ -64,6 +70,8 @@ export interface ModelGovernedRoute {
   /** Effective account after profile preflight/rotation. Model truth must come
    * from this same identity, never the default credential store. */
   quotaAdmission: { profile: CredentialProfile | null };
+  billingVerificationForProfile?: (profile: CredentialProfile) => Promise<AuthVerification>;
+  paidFallback?: PaidFallback;
   settings: { defaultModel: string | null; fallbackModel: string | null } | null;
 }
 
@@ -72,8 +80,8 @@ type ModelTruth = {
   list: readonly string[];
   source: "api" | "manifest";
   route: "local_session" | "api_key" | null;
-  /** Only a live producer can be advisory; manifest truth always speaks for
-   * itself, so it is never substituted to admit (or to forward) a model. */
+  /** The harness's own declaration (INV-104), honoured for the live list and
+   * the manifest hints alike; no list is ever substituted to admit a model. */
   absence: ModelInventoryAbsence;
 };
 
@@ -113,11 +121,14 @@ async function modelTruthForRoute(
       absence: routed.modelInventory?.model_inventory_absence ?? "authoritative",
     };
   }
+  // The manifest hint list is judged under the SAME declaration as the live
+  // answer: it is one day's memory of the vendor menu that producer reads,
+  // so it can refuse no more than the producer can (owner decision 2026-09-24).
   return {
     list: knownModelIdsForRoute(routed.knownModels, route),
     source: "manifest",
     route,
-    absence: "authoritative",
+    absence: routed.modelInventory?.model_inventory_absence ?? "authoritative",
   };
 }
 
@@ -139,8 +150,10 @@ function assertModelsAllowed(
     }
     // A pinned profile OWNS this inventory: sending the operator to the
     // profile-less `claudexor models` would print a different account's list.
+    // Observations only — which account supplied which list — never a cause
+    // guess ("re-authenticate", "plan", "entitlement") the gate cannot know.
     const remedy = profile
-      ? `the selected credential profile '${profile.profile_id}' supplied this inventory; verify or re-authenticate that profile, then inspect its live vendor model list`
+      ? `the selected credential profile '${profile.profile_id}' supplied this ${truth.source === "api" ? "live inventory" : "manifest list"} (${truth.list.length} models); inspect that profile's own vendor model list`
       : `run \`claudexor models --harness ${routed.adapter.id}\``;
     throw new HarnessUnavailableError(
       `harness '${routed.adapter.id}' refused ${role} '${model}' (truth source: ${truth.source}${truth.source === "manifest" ? `, route: ${truth.route ?? "undecided"}` : ""}): ${check.message}; ` +
@@ -174,6 +187,26 @@ export async function assertRouteModelsAllowed(
     });
     assertModelsAllowed(routed, [{ role: "model", model: resolved }], truth, profile);
   }
+}
+
+/** Refresh account evidence and admit one send without replacing captured Processing. */
+export async function admitCurrentProfileDispatch(
+  routed: Pick<ModelGovernedRoute, "billingVerificationForProfile" | "paidFallback">,
+  spec: HarnessRunSpec,
+): Promise<void> {
+  if (spec.credential_profile && routed.billingVerificationForProfile) {
+    // The dispatched row can differ from admission after rotation/model fallback.
+    // Default-store readiness and the original row's entitlement never follow it.
+    spec.extra["routeBillingKnowledge"] = billingKnowledgeForAuthRoute({
+      route:
+        spec.credential_profile.credential_kind === "api_key" ? "managed_api_key" : "vendor_native",
+      verification: await routed.billingVerificationForProfile(spec.credential_profile),
+    });
+  }
+  spec.extra["paidFallback"] = routed.paidFallback;
+  await admitPreparedProcessing(spec);
+  const markStarted = spec.extra["markPhysicalDispatchStarted"];
+  if (typeof markStarted === "function") (markStarted as () => void)();
 }
 
 /**
@@ -226,9 +259,7 @@ export async function* runModelGovernedRoute(
       );
     }
   }
-  await admitPreparedProcessing(spec);
-  const markStarted = spec.extra["markPhysicalDispatchStarted"];
-  if (typeof markStarted === "function") (markStarted as () => void)();
+  await admitCurrentProfileDispatch(routed, spec);
   if (spec.processing?.reason === "processing_control_unavailable") {
     yield {
       type: "status",
@@ -248,6 +279,12 @@ export async function* runModelGovernedRoute(
       session_id: spec.session_id,
       text: unverified.join("; "),
     };
+  }
+  if (!routed.adapter.effortParameter) {
+    yield effortResolutionEvent(
+      spec.session_id,
+      resolveEffortEvidence(spec.effort_hint, [], [], "adapter", null),
+    );
   }
   yield* routed.adapter.run(spec);
 }

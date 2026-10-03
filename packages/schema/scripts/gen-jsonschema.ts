@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import {
+  EffortResolution,
   ProcessingPreference,
   ProcessingCapability,
   ProcessingReceipt,
@@ -34,6 +35,8 @@ import {
   ControlHarnessModelsResponse,
   ControlInteractionAnswerRequest,
   ControlInteractionAnswerResponse,
+  ControlRunMessageRequest,
+  ControlRunMessageResponse,
   ControlPendingInteraction,
   ControlQuotaRefreshRequest,
   ControlQuotaResponse,
@@ -142,6 +145,7 @@ import {
   ApplyEligibility,
   McpRunToolResult,
   McpRunHandleResult,
+  McpThreadTurnResult,
   ControlTrustState,
   ControlTrustUpdateRequest,
   ControlProblem,
@@ -182,6 +186,7 @@ for (const name of readdirSync(outDir)) {
 }
 
 const schemas = {
+  EffortResolution,
   ProcessingPreference,
   ProcessingCapability,
   ProcessingReceipt,
@@ -289,6 +294,8 @@ const schemas = {
   ControlRunApplicabilityResponse,
   ControlInteractionAnswerRequest,
   ControlInteractionAnswerResponse,
+  ControlRunMessageRequest,
+  ControlRunMessageResponse,
   SecretMetadata,
   ControlGcReceipt,
   ControlGcRequest,
@@ -319,6 +326,7 @@ const schemas = {
   ApplyEligibility,
   McpRunToolResult,
   McpRunHandleResult,
+  McpThreadTurnResult,
   ControlTrustState,
   ControlTrustUpdateRequest,
   ControlProblem,

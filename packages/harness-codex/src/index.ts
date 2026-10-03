@@ -6,7 +6,7 @@ import {
 } from "./processing-session.js";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 export { createCodexModelAdapter } from "./model.js";
-import { codexTranscriptModel, codexTranscriptRateLimits } from "./transcript.js";
+export { describeCodexClientVersion } from "./http-client-version.js";
 import { withCodexVendorFailure } from "./vendor-failure.js";
 import { resolveSecret } from "@claudexor/secrets";
 import { tmpdir } from "node:os";
@@ -34,14 +34,14 @@ import {
   type CodexEffortProbe,
 } from "./effort-probe.js";
 import { codexRunEffortResolution } from "./effort-gate.js";
-export { codexConfigHasNodeRepl } from "./toml.js";
 import { codexConfigHasNodeRepl, tomlBasicString } from "./toml.js";
 import { CODEX_VENDOR_CLI_VERSION } from "./vendor-cli-version.js";
 export { CODEX_EFFORT_SNAPSHOT, clearCodexEffortCache, unionEffortLevels } from "./effort-probe.js";
-export { CODEX_VENDOR_CLI_VERSION };
+export { CODEX_VENDOR_CLI_VERSION, codexConfigHasNodeRepl };
 import type { DoctorSpec, HarnessAdapter } from "@claudexor/core";
 import {
   abortSignalFromSpec,
+  throwIfEffortRejected,
   brokenInstallAdvisory,
   browserMcpCommand,
   providerScrubEnv,
@@ -58,8 +58,13 @@ import { parseCodexEvent, parseCodexStderrFailure, type CodexParseState } from "
 import { CODEX_ACCESS_PROFILES, probeCodexCredentialProfile, resolveCodexProfileRoute } from "./profile.js";
 import { smokeIsolatedApiKey } from "./smoke.js";
 export { canonicalCodexProfileHome, codexAccountIdentity } from "./profile.js";
-import { estimateCodexCostUsd } from "./pricing.js";
 import { codexImageArgs } from "./attachments.js";
+import {
+  CodexAppServerController,
+  runCodexAppServer,
+  type CodexAppServerRunInput,
+} from "./app-server-run.js";
+import { decorateCodexEvent, type CodexEventDecoration } from "./event-decoration.js";
 
 import { BIN, detectVersion, missingCliError, missingCliReport, probeEnv } from "./missing-cli.js";
 export { BIN } from "./missing-cli.js";
@@ -75,7 +80,7 @@ export {
   ensureCodexApiAuth,
   probeLogin,
 } from "./auth.js";
-import { CODEX_CAPABILITY_PROFILE } from "./capability-profile.js";
+import { CODEX_CAPABILITY_PROFILE, CODEX_TURN_INPUT_LIMIT } from "./capability-profile.js";
 export { CODEX_MANAGED_LOGIN } from "./capability-profile.js";
 import {
   CODEX_FILE_AUTH_ARGS,
@@ -354,12 +359,15 @@ type CodexRuntimeDeps = {
   resolveProfileSecret: (ref: string) => string | null;
   smokeIsolatedApiKey: typeof smokeIsolatedApiKey;
   runCliHarness: typeof runCliHarness;
+  /** Production lifecycle transport; undefined only for legacy exec-focused unit tests. */
+  runAppServer?: (input: CodexAppServerRunInput) => AsyncGenerator<HarnessEvent>;
   /** Live per-model effort discovery; null on any failure (caller falls back). */
   probeEfforts: CodexEffortProbe;
   nowMs: () => number;
 };
 
 export function createCodexAdapter(deps: Partial<CodexRuntimeDeps> = {}): HarnessAdapter {
+  const controllers = new Map<string, CodexAppServerController>();
   const runtime: CodexRuntimeDeps = {
     detectVersion,
     brokenInstallAdvisory,
@@ -369,12 +377,14 @@ export function createCodexAdapter(deps: Partial<CodexRuntimeDeps> = {}): Harnes
     resolveProfileSecret: (ref) => resolveSecret(ref),
     smokeIsolatedApiKey,
     runCliHarness,
+    runAppServer: deps.runCliHarness && !deps.runAppServer ? undefined : runCodexAppServer,
     probeEfforts: (bin, env) => probeCodexEfforts(bin, env ? { env } : {}),
     nowMs: () => Date.now(),
     ...deps,
   };
   return {
     id: "codex",
+    effortParameter: "model_reasoning_effort",
     capabilityProfile: CODEX_CAPABILITY_PROFILE,
     ...codexProcessingMethods(runtime, codexNativeEnv),
 
@@ -414,17 +424,12 @@ export function createCodexAdapter(deps: Partial<CodexRuntimeDeps> = {}): Harnes
           read_files: true,
           // mcp_servers.browser.*` overrides (live-verified) — gated on web policy.
           browser_tool: true,
-          // LIVE-VERIFIED (codex 0.137): `codex exec --output-schema <FILE>`.
           json_schema_output: true,
-          // D-16: `--output-schema` constrains the FINAL MESSAGE, so a no-caller
-          // WorkReport envelope must wrap the markdown deliverable as
-          // `output: string` (final_message).
           work_report_transport: "constrained",
           structured_output_channel: "final_message",
           web_policy: "native",
-          // Effort is per MODEL here (`model/list` → supportedReasoningEfforts),
-          // so the harness-wide list is the UNION and `model_effort_levels`
-          // carries the truth a specific model is held to.
+          // Effort is per MODEL (`model/list` → supportedReasoningEfforts): the harness-wide
+          // list is the UNION; `model_effort_levels` holds the truth a model is held to.
           effort_levels: unionEffortLevels(efforts.catalog.models),
           model_effort_levels: efforts.catalog.models,
           effort_levels_verified_against: efforts.live
@@ -433,6 +438,8 @@ export function createCodexAdapter(deps: Partial<CodexRuntimeDeps> = {}): Harnes
           // Manifest truth for routes the live probe does not answer; no hidden models.
           known_models: [
             "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-6-luna",
             "gpt-5.6",
             "gpt-5.6-sol",
             "gpt-5.6-terra",
@@ -447,6 +454,9 @@ export function createCodexAdapter(deps: Partial<CodexRuntimeDeps> = {}): Harnes
         },
         capability_profile: {
           ...CODEX_CAPABILITY_PROFILE,
+          ...(version === CODEX_TURN_INPUT_LIMIT.verified_against
+            ? { input_limits: [CODEX_TURN_INPUT_LIMIT] }
+            : {}),
           auth: {
             ...CODEX_CAPABILITY_PROFILE.auth,
             preferred_source: nativeSessionAvailable
@@ -607,11 +617,24 @@ export function createCodexAdapter(deps: Partial<CodexRuntimeDeps> = {}): Harnes
     },
 
     run(spec: HarnessRunSpec): AsyncIterable<HarnessEvent> {
-      return runCodex(spec, runtime);
+      return controlledRun(spec);
     },
 
     review(spec: HarnessRunSpec): AsyncIterable<HarnessEvent> {
-      return runCodex(spec, runtime);
+      return controlledRun(spec);
+    },
+
+    async cancel(sessionId: string): Promise<void> {
+      await controllers.get(sessionId)?.cancel();
+    },
+
+    // Live input rides the app-server controller of the session (turn/steer);
+    // a session without one (legacy exec path, unknown id) has no channel.
+    async message(sessionId: string, input: { messageId: string; text: string }) {
+      const controller = controllers.get(sessionId);
+      return controller
+        ? controller.steer(input)
+        : { outcome: "unsupported" as const, reason: "no_live_session" as const };
     },
 
     probeCredentialProfile(
@@ -621,11 +644,22 @@ export function createCodexAdapter(deps: Partial<CodexRuntimeDeps> = {}): Harnes
       return probeCodexCredentialProfile(profile, runtime, abortSignal);
     },
   };
+
+  async function* controlledRun(spec: HarnessRunSpec): AsyncGenerator<HarnessEvent> {
+    const controller = new CodexAppServerController();
+    controllers.set(spec.session_id, controller);
+    try {
+      yield* runCodex(spec, runtime, controller);
+    } finally {
+      if (controllers.get(spec.session_id) === controller) controllers.delete(spec.session_id);
+    }
+  }
 }
 
 async function* runCodex(
   spec: HarnessRunSpec,
   runtime: CodexRuntimeDeps,
+  controller?: CodexAppServerController,
 ): AsyncIterable<HarnessEvent> {
   const profile = spec.credential_profile;
   const authPreference = spec.auth_preference ?? "auto";
@@ -634,154 +668,182 @@ async function* runCodex(
   let tempCodexHome: string | null = null;
   let authRoute: "subscription" | "api_key" | null;
 
-  if (profile) {
-    const resolved = await resolveCodexProfileRoute(
-      profile,
-      spec.env,
-      runtime,
-      abortSignalFromSpec(spec),
-    );
-    if (resolved.refusal !== null) {
-      yield { type: "error", session_id: spec.session_id, ts: nowIso(), error: resolved.refusal };
-      yield { type: "completed", session_id: spec.session_id, ts: nowIso() };
-      return;
-    }
-    ({ nativeEnv, tempCodexHome } = resolved);
-    key = resolved.key ?? undefined;
-    authRoute = resolved.route;
-  } else {
-    const nativeLogin: CodexLoginProbe =
-      authPreference === "api_key"
-        ? { authed: false, method: "logged_out", probeError: null }
-        : await runtime.probeLogin(BIN, {
-            env: nativeEnv,
-            abortSignal: abortSignalFromSpec(spec),
-          });
-    const nativeSessionReady = nativeLogin.method === "chatgpt" && nativeLogin.probeError === null;
-    const trySubscription = (): boolean => nativeSessionReady;
-    const tryApiKey = (): boolean => {
-      key ??= runtime.codexApiKey();
-      if (!key) return false;
-      tempCodexHome = mkdtempSync(join(tmpdir(), "claudexor-codex-auth-"));
-      ensureCodexApiAuth({ CODEX_HOME: tempCodexHome });
-      if (codexAuthModeAt(tempCodexHome, spec.env) === "api_key") return true;
-      rmSync(tempCodexHome, { recursive: true, force: true });
-      tempCodexHome = null;
-      return false;
-    };
-    authRoute = selectCodexRunAuthRoute(authPreference, trySubscription, tryApiKey);
-    if (authRoute === null) {
-      const error =
-        authPreference === "subscription"
-          ? "Codex subscription auth was explicitly requested but vendor status did not confirm a native ChatGPT session (run `claudexor auth login codex`)"
-          : authPreference === "api_key"
-            ? "Codex API-key auth was explicitly requested but no usable OpenAI API key route is ready"
-            : "no usable Codex auth: native ChatGPT session is not ready and no OpenAI API key fallback is ready";
-      yield { type: "error", session_id: spec.session_id, ts: nowIso(), error };
-      yield { type: "completed", session_id: spec.session_id, ts: nowIso() };
-      return;
-    }
-  }
-
-  // Auto is subscription-first. Selecting its API-key fallback is a paid-route
-  // switch and must remain typed/visible; explicit routes never fall back.
-  if (!profile && authPreference === "auto" && authRoute === "api_key") {
-    yield {
-      type: "message",
-      session_id: spec.session_id,
-      ts: nowIso(),
-      text: "[auth] native subscription route unavailable; auto selected api_key",
-      payload: {
-        auth_switched: true,
-        from_auth_mode: "local_session",
-        to_auth_mode: "api_key",
-        reason: "readiness_preferred",
-      },
-    };
-  }
-
-  // Native auth uses the vendor-owned CODEX_HOME (which may resolve credentials
-  // through a config file or OS keychain); API auth uses an isolated generated
-  // auth file. Neither route inherits provider env credentials or redirects.
-  const env: Record<string, string | null | undefined> =
-    authRoute === "subscription" ? nativeEnv : { ...spec.env, ...providerScrubEnv() };
-
-  // Non-envelope API-key routes use a private CODEX_HOME because Codex ignores
-  // OPENAI_API_KEY against its normal auth store. `tryApiKey` created and
-  // verified this file before route selection returned api_key.
-  if (authRoute === "api_key" && tempCodexHome) {
-    env["CODEX_HOME"] = tempCodexHome;
-  }
-
-  // Disable Codex.app's headless-incompatible node_repl MCP, but ONLY when the
-  // config codex will actually load (the resolved CODEX_HOME, else ~/.codex)
-  // already defines it — never create a transport-less partial entry on a scoped
-  // home (that broke codex startup, the "invalid transport" regression).
-  // Structured output: codex takes a FILE path. API routes may use their
-  // isolated CODEX_HOME; native routes must never write helper files into the
-  // vendor-owned native home, so they use a private temp directory.
   let outputSchemaPath: string | null = null;
   let tempSchemaDir: string | null = null;
-  if (spec.output_schema !== undefined && spec.output_schema !== null) {
-    try {
-      let dir = authRoute === "subscription" ? undefined : env["CODEX_HOME"];
-      if (!dir) {
-        tempSchemaDir = mkdtempSync(join(tmpdir(), "claudexor-codex-schema-"));
-        dir = tempSchemaDir;
-      }
-      outputSchemaPath = join(dir, `claudexor-output-schema-${spec.session_id}.json`);
-      writeFileSync(outputSchemaPath, JSON.stringify(spec.output_schema));
-    } catch (err) {
-      // FAIL-CLOSED (Quiz-6a): output_schema is a contract — running the
-      // child UNCONSTRAINED because a local schema file failed to write would
-      // silently drop it. Fail loudly; the caller retries or reroutes.
-      throw new Error(
-        `codex output-schema file could not be written (${err instanceof Error ? err.message : String(err)}); refusing to run unconstrained`,
-      );
-    }
-  }
-  // Probed in THIS run's resolved env, so a credential profile or API-key route
-  // gets its OWN account's catalog, not whichever one landed in the cache first.
-  // INV-105 on the RUN: version-gate snapshot-fallback trust (an installed
-  // codex outside the pinned version is never sent the snapshot's levels), and
-  // disclose a DROP/CLAMP on the same catalog the args resolve with — preflight
-  // passed this level against the DEFAULT account's manifest, but THIS env's
-  // catalog may drop it or clamp it onto the routed model's ceiling.
-  const effort = await codexRunEffortResolution(spec, runtime, env, abortSignalFromSpec(spec));
-  if (effort.disclosure) yield effort.disclosure;
-  spec = applyCodexRunProcessing(
-    spec,
-    effort.catalog,
-    env["CODEX_HOME"],
-    authRoute === "subscription",
-  );
-  const processing = spec.processing;
-  const args = codexExecArgs(spec, {
-    suppressNodeRepl: codexConfigHasNodeRepl(env["CODEX_HOME"]),
-    outputSchemaPath,
-    effortCatalog: effort.catalog,
-  });
-  // Route evidence: the auth mode this child ACTUALLY runs under, read from
-  // the same auth.json codex loads (typed `auth_mode` field — chatgpt vs
-  // apikey). Disclosed on the started event; quota attribution consumes it.
-  const credentialRoute =
-    authRoute === "subscription" ? ("vendor_native" as const) : ("managed_api_key" as const);
-  const credentialSource =
-    authRoute === "subscription" ? ("native_session" as const) : ("api_key_env" as const);
-  // Codex reports tokens, not cash; only explicit rates may supply an estimate.
-  const model = spec.model_hint ?? process.env.CLAUDEXOR_CODEX_MODEL ?? null;
-  // capture the native thread id (thread.started) so we can read the model
-  // codex recorded in its own rollout transcript; cache that one read.
-  let codexThreadId: string | undefined;
-  let transcriptModel: string | undefined;
-  const parseState: CodexParseState = {
-    envelopeActive: !!spec.output_schema,
-    requiredMcpServers: (spec.extra_mcp_servers ?? [])
-      .filter((server) => server.required)
-      .map((server) => server.name),
-  }; // finality + #19816 + required MCP startup proof
-
   try {
+    if (profile) {
+      const resolved = await resolveCodexProfileRoute(
+        profile,
+        spec.env,
+        runtime,
+        abortSignalFromSpec(spec),
+      );
+      if (resolved.refusal !== null) {
+        yield { type: "error", session_id: spec.session_id, ts: nowIso(), error: resolved.refusal };
+        yield { type: "completed", session_id: spec.session_id, ts: nowIso() };
+        return;
+      }
+      ({ nativeEnv, tempCodexHome } = resolved);
+      key = resolved.key ?? undefined;
+      authRoute = resolved.route;
+    } else {
+      const nativeLogin: CodexLoginProbe =
+        authPreference === "api_key"
+          ? { authed: false, method: "logged_out", probeError: null }
+          : await runtime.probeLogin(BIN, {
+              env: nativeEnv,
+              abortSignal: abortSignalFromSpec(spec),
+            });
+      const nativeSessionReady =
+        nativeLogin.method === "chatgpt" && nativeLogin.probeError === null;
+      const trySubscription = (): boolean => nativeSessionReady;
+      const tryApiKey = (): boolean => {
+        key ??= runtime.codexApiKey();
+        if (!key) return false;
+        tempCodexHome = mkdtempSync(join(tmpdir(), "claudexor-codex-auth-"));
+        ensureCodexApiAuth({ CODEX_HOME: tempCodexHome }, true, key);
+        if (codexAuthModeAt(tempCodexHome, spec.env) === "api_key") return true;
+        rmSync(tempCodexHome, { recursive: true, force: true });
+        tempCodexHome = null;
+        return false;
+      };
+      authRoute = selectCodexRunAuthRoute(authPreference, trySubscription, tryApiKey);
+      if (authRoute === null) {
+        const error =
+          authPreference === "subscription"
+            ? "Codex subscription auth was explicitly requested but vendor status did not confirm a native ChatGPT session (run `claudexor auth login codex`)"
+            : authPreference === "api_key"
+              ? "Codex API-key auth was explicitly requested but no usable OpenAI API key route is ready"
+              : "no usable Codex auth: native ChatGPT session is not ready and no OpenAI API key fallback is ready";
+        yield { type: "error", session_id: spec.session_id, ts: nowIso(), error };
+        yield { type: "completed", session_id: spec.session_id, ts: nowIso() };
+        return;
+      }
+    }
+
+    // Auto is subscription-first. Selecting its API-key fallback is a paid-route
+    // switch and must remain typed/visible; explicit routes never fall back.
+    if (!profile && authPreference === "auto" && authRoute === "api_key") {
+      yield {
+        type: "message",
+        session_id: spec.session_id,
+        ts: nowIso(),
+        text: "[auth] native subscription route unavailable; auto selected api_key",
+        payload: {
+          auth_switched: true,
+          from_auth_mode: "local_session",
+          to_auth_mode: "api_key",
+          reason: "readiness_preferred",
+        },
+      };
+    }
+
+    // Native auth uses the vendor-owned CODEX_HOME (which may resolve credentials
+    // through a config file or OS keychain); API auth uses an isolated generated
+    // auth file. Neither route inherits provider env credentials or redirects.
+    const env: Record<string, string | null | undefined> =
+      authRoute === "subscription" ? nativeEnv : { ...spec.env, ...providerScrubEnv() };
+
+    // Non-envelope API-key routes use a private CODEX_HOME because Codex ignores
+    // OPENAI_API_KEY against its normal auth store. `tryApiKey` created and
+    // verified this file before route selection returned api_key.
+    if (authRoute === "api_key" && tempCodexHome) {
+      env["CODEX_HOME"] = tempCodexHome;
+    }
+
+    // Disable Codex.app's headless-incompatible node_repl MCP, but ONLY when the
+    // config codex will actually load (the resolved CODEX_HOME, else ~/.codex)
+    // already defines it — never create a transport-less partial entry on a scoped
+    // home (that broke codex startup, the "invalid transport" regression).
+    // Structured output: codex takes a FILE path. API routes may use their
+    // isolated CODEX_HOME; native routes must never write helper files into the
+    // vendor-owned native home, so they use a private temp directory.
+    if (!runtime.runAppServer && spec.output_schema !== undefined && spec.output_schema !== null) {
+      try {
+        let dir = authRoute === "subscription" ? undefined : env["CODEX_HOME"];
+        if (!dir) {
+          tempSchemaDir = mkdtempSync(join(tmpdir(), "claudexor-codex-schema-"));
+          dir = tempSchemaDir;
+        }
+        outputSchemaPath = join(dir, `claudexor-output-schema-${spec.session_id}.json`);
+        writeFileSync(outputSchemaPath, JSON.stringify(spec.output_schema));
+      } catch (err) {
+        // FAIL-CLOSED (Quiz-6a): output_schema is a contract — running the
+        // child UNCONSTRAINED because a local schema file failed to write would
+        // silently drop it. Fail loudly; the caller retries or reroutes.
+        throw new Error(
+          `codex output-schema file could not be written (${err instanceof Error ? err.message : String(err)}); refusing to run unconstrained`,
+        );
+      }
+    }
+    // Probed in THIS run's resolved env, so a credential profile or API-key route
+    // gets its OWN account's catalog, not whichever one landed in the cache first.
+    // INV-105 on the RUN: version-gate snapshot-fallback trust (an installed
+    // codex outside the pinned version is never sent the snapshot's levels), and
+    // disclose a DROP/CLAMP on the same catalog the args resolve with — preflight
+    // passed this level against the DEFAULT account's manifest, but THIS env's
+    // catalog may drop it or clamp it onto the routed model's ceiling.
+    const effort = await codexRunEffortResolution(spec, runtime, env, abortSignalFromSpec(spec));
+    yield effort.event;
+    throwIfEffortRejected(effort.resolution);
+    spec = applyCodexRunProcessing(
+      spec,
+      effort.catalog,
+      env["CODEX_HOME"],
+      authRoute === "subscription",
+    );
+    const suppressNodeRepl = codexConfigHasNodeRepl(env["CODEX_HOME"]);
+    const args = runtime.runAppServer
+      ? [
+          ...CODEX_FILE_AUTH_ARGS,
+          ...CODEX_PROJECT_DOC_FALLBACK_ARGS,
+          ...(suppressNodeRepl ? ["-c", "mcp_servers.node_repl.enabled=false"] : []),
+        ]
+      : codexExecArgs(spec, {
+          suppressNodeRepl,
+          outputSchemaPath,
+          effortCatalog: effort.catalog,
+        });
+    // Route evidence: the auth mode this child ACTUALLY runs under, read from
+    // the same auth.json codex loads (typed `auth_mode` field — chatgpt vs
+    // apikey). Disclosed on the started event; quota attribution consumes it.
+    const credentialRoute =
+      authRoute === "subscription" ? ("vendor_native" as const) : ("managed_api_key" as const);
+    const credentialSource =
+      authRoute === "subscription" ? ("native_session" as const) : ("api_key_env" as const);
+    // Codex reports tokens, not cash; only explicit rates may supply an estimate.
+    const model = spec.model_hint ?? process.env.CLAUDEXOR_CODEX_MODEL ?? null;
+    const parseState: CodexParseState = {
+      envelopeActive: !!spec.output_schema,
+      requiredMcpServers: (spec.extra_mcp_servers ?? [])
+        .filter((server) => server.required)
+        .map((server) => server.name),
+    }; // finality + #19816 + required MCP startup proof
+    const decoration: CodexEventDecoration = {
+      spec,
+      env,
+      credentialRoute,
+      credentialSource,
+      tempCodexHome,
+      model,
+    };
+    const decorate = (event: HarnessEvent): HarnessEvent => decorateCodexEvent(event, decoration);
+
+    if (runtime.runAppServer) {
+      const native = runtime.runAppServer({
+        bin: BIN,
+        args,
+        spec,
+        env,
+        controller,
+        effortCatalog: effort.catalog,
+      });
+      const decorated = (async function* (): AsyncGenerator<HarnessEvent> {
+        for await (const event of native) yield decorate(event);
+      })();
+      yield* withCodexVendorFailure(decorated, spec, env, () => decoration.nativeThreadId);
+      return;
+    }
     const stream = runtime.runCliHarness({
       bin: BIN,
       args,
@@ -794,72 +856,10 @@ async function* runCodex(
         // Bind the rollout transcript to THIS run via the native thread id.
         const raw = obj as { type?: unknown; thread_id?: unknown };
         if (raw?.type === "thread.started" && typeof raw.thread_id === "string")
-          codexThreadId = raw.thread_id;
+          decoration.nativeThreadId = raw.thread_id;
         const out = parseCodexEvent(obj, sessionId, parseState);
         if (out === null) return null;
-        for (const ev of out) {
-          if (processing) {
-            ev.processing = processing;
-            ev.processing_cost_basis = spec.processing_cost_basis;
-          }
-          // Do NOT fabricate observed_model from the request hint: route proof
-          // exists to catch silent fallback, so an unobserved model must stay
-          // unobserved. Record the requested model for diagnostics only.
-          if (ev.type === "started" && spec.model_hint && !ev.observed_model) {
-            ev.payload = {
-              ...(ev.payload ?? {}),
-              requested_model: spec.model_hint,
-              observed_model_source: "unobserved",
-            };
-          }
-          // The route is fixed before spawn; attach it to every event so a
-          // later usage/quota record remains independently attributable.
-          ev.credential_route = credentialRoute;
-          ev.credential_source = credentialSource;
-          if (profile) ev.credential_profile_id = profile.profile_id;
-          // codex's --json stream never carries the model, but the CLI
-          // records it in its own session rollout. Try to recover it as soon as
-          // the rollout's turn_context appears, then attach the transcript-sourced
-          // observation to the next normalized event. This keeps route proof from
-          // depending on reaching the final usage event under slow reviewer runs.
-          if (!ev.observed_model && spec.evidence_policy !== "stream_only") {
-            transcriptModel ??= codexTranscriptModel(env["CODEX_HOME"], codexThreadId) ?? undefined;
-            if (transcriptModel) {
-              ev.observed_model = transcriptModel;
-              ev.payload = { ...(ev.payload ?? {}), observed_model_source: "transcript" };
-            }
-          }
-          // an api_key run uses a TEMPORARY CODEX_HOME that this process
-          // deletes on exit, so the native session it created is gone next turn.
-          // Strip its id from the event so it never poisons the thread resume map
-          // (a later `codex exec resume <ghost>` would deterministically fail).
-          if (
-            ev.type === "started" &&
-            tempCodexHome &&
-            ev.payload &&
-            "native_session_id" in ev.payload
-          ) {
-            const { native_session_id: _dropped, ...rest } = ev.payload as Record<string, unknown>;
-            ev.payload = { ...rest, resume_disabled: "ephemeral_codex_home" };
-          }
-          if (ev.type === "usage" && ev.usage && ev.usage.cost_usd === undefined && !processing) {
-            const est = estimateCodexCostUsd(model, ev.usage);
-            if (est !== undefined) {
-              ev.usage.cost_usd = est;
-              ev.usage.estimated = true;
-            }
-          }
-          // Quota headroom: attach codex's own rate-window record to the usage event
-          // (fresh read per usage — the rollout accretes as the turn ends).
-          if (ev.type === "usage" && !ev.quota && spec.evidence_policy !== "stream_only") {
-            const rl = codexTranscriptRateLimits(env["CODEX_HOME"], codexThreadId);
-            if (rl) ev.quota = rl;
-          }
-          // A profiled run's quota is THE PROFILE's (round-17 #2); unstamped = engine default.
-          if (ev.quota && profile && ev.quota.subject_id == null) {
-            ev.quota = { ...ev.quota, subject_id: profile.profile_id };
-          }
-        }
+        for (const ev of out) decorate(ev);
         return out;
       },
       parseStderrFailure: (message, sessionId) => {
@@ -872,7 +872,7 @@ async function* runCodex(
         return event;
       },
     });
-    yield* withCodexVendorFailure(stream, spec, env, () => codexThreadId);
+    yield* withCodexVendorFailure(stream, spec, env, () => decoration.nativeThreadId);
   } finally {
     if (tempCodexHome) {
       try {

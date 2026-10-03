@@ -1,5 +1,123 @@
 # @claudexor/control-api
 
+## 3.19.0
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.19.0
+  - @claudexor/delivery@3.19.0
+  - @claudexor/workspace@3.19.0
+  - @claudexor/event-log@3.19.0
+  - @claudexor/secrets@3.19.0
+  - @claudexor/util@3.19.0
+
+## 3.18.0
+
+### Patch Changes
+
+- @claudexor/delivery@3.18.0
+- @claudexor/workspace@3.18.0
+- @claudexor/event-log@3.18.0
+- @claudexor/schema@3.18.0
+- @claudexor/secrets@3.18.0
+- @claudexor/util@3.18.0
+
+## 3.17.2
+
+### Patch Changes
+
+- Adapt Codex raw-model Ultra preferences to the strongest supported generation effort in the vendor order, preserve explicit effort evidence, and keep native Ultra delegation unchanged (#368).
+
+- Updated dependencies
+  - @claudexor/schema@3.17.2
+  - @claudexor/delivery@3.17.2
+  - @claudexor/event-log@3.17.2
+  - @claudexor/workspace@3.17.2
+  - @claudexor/secrets@3.17.2
+  - @claudexor/util@3.17.2
+
+## 3.17.1
+
+### Patch Changes
+
+- 72825b9: Resolve effort preferences at the final native route using the strongest supported level at or below a known request, with an explicitly recorded minimum or vendor-default omission when applicable. Preserve advertised future values, original preferences and model identities. Add shared typed effort evidence to model results and final attempt telemetry; keep adaptation disclosures in logs.
+
+  Preserve strict legacy model results unless creation opts into `captureEffortEvidence=true`, binding that choice to idempotency while keeping exact stored bytes and digest acknowledgement. Keep effort verification metadata in negotiated account catalogs only. Refuse unplaceable effort without retrying another route, clean temporary Codex authorization on preparation exit, and describe prepared controls without claiming dispatch.
+
+- Updated dependencies [72825b9]
+  - @claudexor/schema@3.17.1
+  - @claudexor/delivery@3.17.1
+  - @claudexor/event-log@3.17.1
+  - @claudexor/workspace@3.17.1
+  - @claudexor/secrets@3.17.1
+  - @claudexor/util@3.17.1
+
+## 3.17.0
+
+### Patch Changes
+
+- 951489f: `POST /v2/runs` and Exact Retry for a project root that was never registered now answer a typed `404 project_not_registered` (not retryable, with the remedy: register the root with `POST /v2/projects` or declare `scope.ephemeral`) instead of a retryable `503 idempotency_status_unavailable`.
+- Updated dependencies [951489f]
+  - @claudexor/schema@3.17.0
+  - @claudexor/delivery@3.17.0
+  - @claudexor/workspace@3.17.0
+  - @claudexor/event-log@3.17.0
+  - @claudexor/secrets@3.17.0
+  - @claudexor/util@3.17.0
+
+## 3.16.0
+
+### Minor Changes
+
+- 788ddca: Add `POST /v2/runs/:id/messages`: a live message into a running run's active attempt with journal-first admission, typed outcomes (delivered, accepted, rejected, not_active, unsupported, delivery_unknown) plus reasons, and a key-required idempotent receipt. Each harness declares its live-input channel as `capability_profile.live_input`, projected as `liveInput` in the agent-capability catalog.
+
+### Patch Changes
+
+- Updated dependencies [788ddca]
+  - @claudexor/schema@3.16.0
+  - @claudexor/delivery@3.16.0
+  - @claudexor/event-log@3.16.0
+  - @claudexor/workspace@3.16.0
+  - @claudexor/secrets@3.16.0
+  - @claudexor/util@3.16.0
+
+## 3.15.1
+
+### Patch Changes
+
+- @claudexor/delivery@3.15.1
+- @claudexor/event-log@3.15.1
+- @claudexor/schema@3.15.1
+- @claudexor/secrets@3.15.1
+- @claudexor/util@3.15.1
+- @claudexor/workspace@3.15.1
+
+## 3.15.0
+
+### Patch Changes
+
+- @claudexor/delivery@3.15.0
+- @claudexor/workspace@3.15.0
+- @claudexor/event-log@3.15.0
+- @claudexor/schema@3.15.0
+- @claudexor/secrets@3.15.0
+- @claudexor/util@3.15.0
+
+## 3.14.0
+
+### Patch Changes
+
+- Updated dependencies [2c024ac]
+- Updated dependencies [7e615b6]
+- Updated dependencies [fb42a94]
+  - @claudexor/schema@3.14.0
+  - @claudexor/delivery@3.14.0
+  - @claudexor/workspace@3.14.0
+  - @claudexor/event-log@3.14.0
+  - @claudexor/secrets@3.14.0
+  - @claudexor/util@3.14.0
+
 ## 3.13.0
 
 ### Patch Changes

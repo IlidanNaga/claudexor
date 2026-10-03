@@ -1,8 +1,8 @@
 {
   "name": "@claudexor/harness-codex",
-  "version": "3.13.0",
+  "version": "3.19.0",
   "license": "MIT",
-  "description": "Codex CLI adapter (codex exec --json).",
+  "description": "Codex CLI adapter (app-server lifecycle protocol).",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -23,7 +23,8 @@
     "@claudexor/core": "workspace:*",
     "@claudexor/schema": "workspace:*",
     "@claudexor/secrets": "workspace:*",
-    "@claudexor/util": "workspace:*"
+    "@claudexor/util": "workspace:*",
+    "undici": "7.25.0"
   },
   "repository": {
     "type": "git",
@@ -41,6 +42,6 @@
     "access": "public"
   },
   "devDependencies": {
-    "yaml": "^2.6.1"
+    "yaml": "^2.9.1"
   }
 }

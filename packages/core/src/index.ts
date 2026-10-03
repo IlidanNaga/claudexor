@@ -26,3 +26,5 @@ export * from "./process-group.js";
 export * from "./process-tree.js";
 export * from "./isolation-locator.js";
 export * from "./credential-profile-policy.js";
+export * from "./credential-selection.js";
+export * from "./credential-mutation-window.js";

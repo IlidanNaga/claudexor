@@ -147,6 +147,21 @@
                     ],
                     "default": null,
                     "description": "Credential routes the model is scoped to; null = every route."
+                  },
+                  "origin": {
+                    "type": "string",
+                    "enum": [
+                      "live",
+                      "hint"
+                    ],
+                    "description": "Where this row came from: live = the vendor's own enumeration reported it; hint = a frozen known-model id the producer appends when its live answer lacks it or could not be read. Absent = live."
+                  },
+                  "resolved_model": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "For an alias row, the exact model id the vendor reported it resolves to at enumeration time; null or absent when the source reports none. The row id is what is sent; this is never substituted for it."
                   }
                 },
                 "required": [

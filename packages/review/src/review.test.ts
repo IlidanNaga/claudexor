@@ -13,7 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { HarnessAdapter } from "@claudexor/core";
+import { credentialProfileUnpinned, type HarnessAdapter } from "@claudexor/core";
 import type { CredentialProfile, ProviderFamily } from "@claudexor/schema";
 import {
   ConformanceReport,
@@ -3779,6 +3779,7 @@ describe("reviewEngine", () => {
     );
     const artifactsDir = reapMk(join(tmpdir(), "claudexor-review-artifacts-"));
     const homes = new Map<string, string>();
+    const unpinned = new Map<string, boolean>();
     const profile = (id: string, harness: string): CredentialProfile => ({
       profile_id: id,
       harness_id: harness,
@@ -3793,6 +3794,7 @@ describe("reviewEngine", () => {
       id: string,
       family: ProviderFamily,
       pinned: CredentialProfile,
+      selection: Pick<ReviewerSpec, "profilePinned"> = {},
     ): ReviewerSpec => {
       const adapter: HarnessAdapter = {
         id,
@@ -3814,6 +3816,7 @@ describe("reviewEngine", () => {
         },
         async *run(spec) {
           homes.set(id, spec.env?.HOME ?? "");
+          unpinned.set(id, credentialProfileUnpinned(spec));
           expect(spec.credential_profile?.profile_id).toBe(pinned.profile_id);
           const ts = new Date().toISOString();
           yield {
@@ -3827,7 +3830,7 @@ describe("reviewEngine", () => {
           yield { type: "completed", session_id: spec.session_id, ts };
         },
       };
-      return { adapter, providerFamily: family, credentialProfile: pinned };
+      return { adapter, providerFamily: family, credentialProfile: pinned, ...selection };
     };
 
     const res = await reviewCandidate({
@@ -3838,11 +3841,17 @@ describe("reviewEngine", () => {
       cwd: candidateRoot,
       reviewers: [
         reviewer("profile-review-a", "openai", profile("a", "profile-review-a")),
-        reviewer("profile-review-b", "anthropic", profile("b", "profile-review-b")),
+        reviewer("profile-review-b", "anthropic", profile("b", "profile-review-b"), {
+          profilePinned: false,
+        }),
       ],
     });
 
     expect(res.findings).toEqual([]);
+    // #363: only a pool-chosen seat reaches its adapter as unpinned; a seat
+    // with no pin fact keeps the strict pin contract.
+    expect(unpinned.get("profile-review-a")).toBe(false);
+    expect(unpinned.get("profile-review-b")).toBe(true);
     expect(homes.get("profile-review-a")).toBeTruthy();
     expect(homes.get("profile-review-b")).toBeTruthy();
     expect(homes.get("profile-review-a")).not.toBe(homes.get("profile-review-b"));

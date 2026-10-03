@@ -11,7 +11,7 @@
         },
         "instructions": {
           "type": "string",
-          "description": "System-level instructions layered onto every task-producing lane; delivered natively (append-system-prompt / developer_instructions) or as a delimited prompt prefix."
+          "description": "System-level instructions layered onto every task-producing lane; delivered natively (append-system-prompt-file / developer_instructions) or as a delimited prompt prefix."
         },
         "attachments": {
           "type": "array",

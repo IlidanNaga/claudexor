@@ -11,7 +11,7 @@
         },
         "instructions": {
           "type": "string",
-          "description": "System-level instructions layered onto every task-producing lane; delivered natively (append-system-prompt / developer_instructions) or as a delimited prompt prefix."
+          "description": "System-level instructions layered onto every task-producing lane; delivered natively (append-system-prompt-file / developer_instructions) or as a delimited prompt prefix."
         },
         "attachments": {
           "type": "array",
@@ -39,8 +39,7 @@
             "plan",
             "agent"
           ],
-          "description": "Canonical run mode: ask and plan are read-only, agent writes. Strategy controls are separate schema-owned fields, never modes.",
-          "default": "agent"
+          "description": "Turn mode override; omission inherits the thread's default mode."
         },
         "harnesses": {
           "type": "array",

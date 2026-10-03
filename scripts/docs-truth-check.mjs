@@ -29,6 +29,7 @@
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { PORTABLE_MANIFESTS, syncPortableAssets } from "./lib/portable-plugins.mjs";
 import {
   GEN_BEGIN,
   GEN_END,
@@ -292,11 +293,11 @@ if (!constMatch) {
     }
   }
   const server = JSON.parse(readFileSync("server.json", "utf8"));
-  const portable = JSON.parse(readFileSync("plugins/copilot/plugin.json", "utf8"));
+  syncPortableAssets(process.cwd(), true);
   for (const [path, version] of [
     ["server.json", server.version],
     ...(server.packages ?? []).map((pkg, index) => [`server.json packages[${index}]`, pkg.version]),
-    ["plugins/copilot/plugin.json", portable.version],
+    ...PORTABLE_MANIFESTS.map((path) => [path, JSON.parse(readFileSync(path, "utf8")).version]),
   ]) {
     if (version !== constant) {
       failures.push(

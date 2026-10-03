@@ -1,11 +1,14 @@
 import {
   hasModelInventoryForRoute,
+  validateModel,
+  type ModelCheck,
   type AdapterRegistry,
   type HarnessAdapter,
 } from "@claudexor/core";
 import {
   ControlHarnessAccountModelsResponse,
   type ControlHarnessModelsResponse,
+  type ModelInventoryAbsence,
 } from "@claudexor/schema";
 import { HarnessGateway } from "@claudexor/gateway";
 import { createAgyAdapter } from "@claudexor/harness-agy";
@@ -62,6 +65,14 @@ export function buildGateway(opts: RegistryOptions = {}): HarnessGateway {
   return new HarnessGateway(buildRegistry(opts));
 }
 
+/** A harness's model truth for the unscoped listing: the list itself plus the
+ * harness's own declaration of what an absence from it proves (INV-104). The
+ * two travel together so no consumer can hold one and silently lose the other. */
+export type HarnessModelTruth = {
+  response: ControlHarnessModelsResponse;
+  absence: ModelInventoryAbsence;
+};
+
 /**
  * Resolve enumerable models for one harness (ADP4). The SSOT shared by the
  * control-api `harnessModels` service and the CLI `models` command, so both
@@ -71,17 +82,22 @@ export function buildGateway(opts: RegistryOptions = {}): HarnessGateway {
  * only when the harness has no truth source at all. Fails soft — adapter
  * models() already swallows network/auth errors and returns [].
  */
-export async function harnessModels(
+export async function harnessModelTruth(
   harnessId: string,
   cwd: string,
   includeFakes = false,
   route?: "local_session" | "api_key",
-): Promise<ControlHarnessModelsResponse> {
+): Promise<HarnessModelTruth> {
+  const none: ControlHarnessModelsResponse = {
+    harnessId,
+    models: [],
+    source: "none",
+    verifiedAgainst: null,
+  };
   const adapter = buildRegistry({ includeFakes }).get(harnessId);
-  if (!adapter) {
-    return { harnessId, models: [], source: "none", verifiedAgainst: null };
-  }
+  if (!adapter) return { response: none, absence: "authoritative" };
   const manifest = await adapter.discover();
+  const absence = manifest.capabilities.model_inventory_absence ?? "authoritative";
   if (
     hasModelInventoryForRoute(adapter, manifest.capabilities.model_inventory_routes, route ?? null)
   ) {
@@ -93,14 +109,19 @@ export async function harnessModels(
         ? { authPreference: route === "api_key" ? ("api_key" as const) : ("subscription" as const) }
         : {}),
     });
+    const rows = models.map(({ processing: _processing, ...model }) => ({
+      ...model,
+      routes: model.routes ?? null,
+    }));
+    const hintsOnly = answeredOnlyHints(rows);
     return {
-      harnessId,
-      models: models.map(({ processing: _processing, ...model }) => ({
-        ...model,
-        routes: model.routes ?? null,
-      })),
-      source: "api",
-      verifiedAgainst: null,
+      response: {
+        harnessId,
+        models: rows,
+        source: hintsOnly ? "manifest" : "api",
+        verifiedAgainst: hintsOnly ? manifest.capabilities.known_models_verified_against : null,
+      },
+      absence,
     };
   }
   const known = manifest.capabilities.known_models.filter((entry) =>
@@ -108,19 +129,66 @@ export async function harnessModels(
     // is every-route; an annotated entry must include the requested route.
     typeof entry === "string" ? true : route === undefined || entry.routes.includes(route),
   );
-  if (known.length === 0) {
-    return { harnessId, models: [], source: "none", verifiedAgainst: null };
-  }
+  if (known.length === 0) return { response: none, absence };
   return {
-    harnessId,
-    models: known.map((entry) =>
-      typeof entry === "string"
-        ? { id: entry, label: null, context_window: null, routes: null }
-        : { id: entry.id, label: null, context_window: null, routes: entry.routes },
-    ),
-    source: "manifest",
-    verifiedAgainst: manifest.capabilities.known_models_verified_against,
+    response: {
+      harnessId,
+      models: known.map((entry) =>
+        typeof entry === "string"
+          ? { id: entry, label: null, context_window: null, routes: null }
+          : { id: entry.id, label: null, context_window: null, routes: entry.routes },
+      ),
+      source: "manifest",
+      verifiedAgainst: manifest.capabilities.known_models_verified_against,
+    },
+    absence,
   };
+}
+
+/** A producer that labels its rows (`origin`) and answered ONLY hint rows could
+ * not read the vendor: that is manifest truth with its frozen freshness stamp,
+ * never a live `api` claim (INV-104) — on the unscoped listing and on every
+ * account row alike. Producers that emit no `origin` are live by definition. */
+function answeredOnlyHints(rows: readonly { origin?: string | undefined }[]): boolean {
+  return rows.length > 0 && rows.every((row) => row.origin === "hint");
+}
+
+/** The unscoped model list alone (the wire shape of `/harnesses/:id/models`). */
+export async function harnessModels(
+  harnessId: string,
+  cwd: string,
+  includeFakes = false,
+  route?: "local_session" | "api_key",
+): Promise<ControlHarnessModelsResponse> {
+  return (await harnessModelTruth(harnessId, cwd, includeFakes, route)).response;
+}
+
+/**
+ * Judge one explicit model against a harness's truth: ONE owner for the
+ * (list, source, declaration) triple that the settings write, the doctor's
+ * configured-model readiness and the capability catalog used to assemble by
+ * hand — and were silently strict for every harness (INV-104). An
+ * authoritative harness refuses a miss; an advisory one admits it with the
+ * `unverified` note the caller surfaces.
+ */
+export function checkHarnessModelTruth(truth: HarnessModelTruth, model: string): ModelCheck {
+  return validateModel(
+    model,
+    truth.response.models.map((entry) => entry.id),
+    truth.response.source === "api" ? "api" : "manifest",
+    truth.absence,
+  );
+}
+
+/** `harnessModelTruth` + `checkHarnessModelTruth` for callers holding one model. */
+export async function checkHarnessModel(
+  harnessId: string,
+  model: string,
+  cwd: string,
+  includeFakes = false,
+): Promise<{ truth: ControlHarnessModelsResponse; check: ModelCheck }> {
+  const truth = await harnessModelTruth(harnessId, cwd, includeFakes);
+  return { truth: truth.response, check: checkHarnessModelTruth(truth, model) };
 }
 
 /** Opt-in account inventory. The legacy unscoped CLI/model list above keeps its exact contract. */
@@ -173,15 +241,18 @@ export async function harnessAccountModels(
         // The legacy array API also returns [] on transport failures; it is
         // not a receipt proving this account has an empty vendor inventory.
         if (models.length === 0) return null;
+        // A profile probe that could not read the vendor answers hint rows
+        // only; that account row is manifest truth, not a live enumeration.
+        const hintsOnly = answeredOnlyHints(models);
         return {
           harnessId: input.harnessId,
           credentialProfileId: profile.profile_id,
           models: models.map((model) => ({ ...model, routes: model.routes ?? null })),
-          source: "api" as const,
-          verifiedAgainst: null,
+          source: hintsOnly ? ("manifest" as const) : ("api" as const),
+          verifiedAgainst: hintsOnly ? manifest.capabilities.known_models_verified_against : null,
           // models() may reuse a provider-owned cache and carries no observation receipt.
           observedAt: null,
-          provenance: "adapter_models",
+          provenance: hintsOnly ? "manifest" : "adapter_models",
         };
       }
       const known = manifest.capabilities.known_models.filter(

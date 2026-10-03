@@ -615,36 +615,47 @@ invariant or operator decision before proceeding.
   schema (no `routing.default_model`); canaries
   `[INV-103:scalar-model-primary-only]` and `[INV-103:no-global-model]`;
   routing tests. Locked operator decision.
-- **INV-104** Wherever absence from the harness's model truth source (live
-  inventory or manifest known-good list) is proof, a model outside it is
-  refused at settings-write, run preflight (typed failure WITH artifacts before
-  any CLI spawns), and both reviewer-resolution paths — never forwarded to the
-  vendor CLI to die as an opaque native error. Refusals name the harness, the model, and the truth
-  source; model truth is surfaced to UIs (`source: api | manifest`), and
-  known-model hints carry a `verifiedAgainst` freshness note checked by the
-  model-hints-freshness gate. A truth source refuses only what it can prove:
-  the strict rule above holds wherever absence from the list is evidence, which
-  is every manifest list and every live inventory whose producer declares it.
-  A producer that cannot tell its own answer from a vendor-substituted one
-  declares `model_inventory_absence: "advisory"` (codex: a `model/list` reply
-  carries no provenance and the CLI serves a bundled default list when its
-  remote fetch times out), and then presence still admits while absence decides
-  nothing: the EXPLICIT model is forwarded byte-identical, the vendor accepts or
-  refuses it, and the per-spawn gate discloses once that the model was not
-  listed. No list is ever substituted for another to admit a model, and
-  automatic reviewer selection still skips an unlisted family at zero cost.
-  Residuals, disclosed: the explicit reviewer panel forwards without that
+- **INV-104** A model list is evidence of PRESENCE at one runtime identity,
+  account and time. Whether an absence from it is evidence too is the
+  HARNESS's own declaration (`model_inventory_absence`), honoured wherever its
+  lists are read — the live inventory and the manifest known-good list alike,
+  at settings-write, run preflight (typed failure WITH artifacts before any
+  CLI spawns), doctor readiness and the explicit reviewer-resolution path,
+  while `claudexor models` shows each list's source and hint marks and
+  automatic reviewer selection keeps the zero-cost skip stated below.
+  `authoritative` (the declaration a silent manifest gets) keeps the
+  strict rule: a model outside the list is refused with the harness, the model
+  and the truth source named, never forwarded to the vendor CLI to die as an
+  opaque native error, and a harness with no list refuses every explicit model.
+  `advisory` (claude: the picker is an alias menu of one binary version plus the
+  account's bootstrap rows; codex: a `model/list` reply carries no provenance
+  and the CLI serves a bundled default list when its remote fetch times out;
+  cursor: `--list-models` is a fail-soft menu blind to routing variants) means
+  presence still admits while absence decides nothing: the EXPLICIT model is
+  forwarded byte-identical, the vendor accepts or refuses it, and the consumer
+  that admitted it says so once — the settings read-back carries `notes`, the
+  readiness row carries the note in its detail, the per-spawn gate discloses a
+  status event. Hint ids count as present. No list is ever substituted for
+  another to admit a model; model truth is surfaced to UIs (`source: api |
+  manifest`); known-model hints carry a `verifiedAgainst` freshness note
+  checked by the model-hints-freshness gate; automatic reviewer selection still
+  skips an unlisted family at zero cost; HTTP model operations stay strict
+  against the account catalog read at a named client version; raw-api, agy and
+  opencode stay authoritative by declaration, not by proof of completeness.
+  Residuals, disclosed: the explicit reviewer panel forwards without the
   run-event disclosure (its spawn does not pass the per-spawn gate); on the CLI
-  run path a vendor model refusal arrives as an
-  untyped error carrying the vendor's text (only HTTP model operations are
-  typed, and they stay strict), and a mistyped explicit model on such a harness
-  now costs one spawn instead of failing free at the gate. verify: canaries
+  run path a vendor model refusal arrives as an untyped error carrying the
+  vendor's text; a mistyped explicit model on an advisory harness costs one
+  spawn, and bounded account failover may spend one start per account before a
+  typed account-independent stop exists. verify: canaries
   `[INV-104:model-truth-refusal]`, `[INV-104:models-manifest-fallback]`,
-  `[INV-104:settings-write-strict]`; settings-service tests;
-  modelGovernance preflight tests; `packages/core/src/model.test.ts`;
+  `[INV-104:settings-write-strict]`, `[INV-104:settings-write-advisory]`;
+  settings-service tests; modelGovernance preflight tests;
+  `packages/core/src/model.test.ts`; `packages/cli/src/model-truth.test.ts`;
   `packages/orchestrator/src/reviewerPanel.test.ts`;
-  `packages/harness-codex/src/astra.test.ts`. Operator decision 2026-09-21:
-  strict wherever the truth source can prove absence.
+  `packages/harness-codex/src/astra.test.ts`. Operator decisions 2026-09-21
+  (strict wherever a truth source can prove absence) and 2026-09-24 (absence is
+  the harness's declaration; claude, codex and cursor declare advisory).
 - **INV-105** Per-harness knobs a manifest does not support are disclosed as
   `ignored_settings` on `harness.started` — never silently dropped. This
   covers max_turns, tool lists, and effort (an empty declared ladder); an
@@ -922,9 +933,30 @@ invariant or operator decision before proceeding.
   vendor-limit cooldown or spent window, stale-but-live included — ranks a
   row exhausted with its release instant), a row that recently answered this
   model's request with a different model (a live, self-expiring
-  model-substitution observation) ranks after every other selectable row,
-  oldest observation first, and is never excluded by it; deterministic profile-id
-  tie-break. The per-harness `limit_action` stored default is the kind-aware
+  model-substitution observation), or whose session an unpinned run started
+  on it recently ended before any progress for this same requested model (a
+  live, self-expiring pre-progress refusal observation, scoped to that exact
+  account and requested model and never recorded by a pin), ranks after
+  every other selectable row, oldest observation first, and is never
+  excluded by it; deterministic profile-id tie-break.
+  **CONCEPT-CHANGE(INV-135), #363:** an unpinned choice is admitted on FRESH
+  readiness, with one bounded exception for Cursor rows: when a row's
+  `cursor-agent status` probe did not answer within its own budget, that row
+  store's last POSITIVE status answer, if younger than five minutes, may admit
+  the row to an UNPINNED choice (bound row, pool, rotation, `next_up`). The
+  row stays disclosed as stale unknown — never a fresh pass, never an
+  identity — and a spawn on it says so. A logged-out answer from that store
+  or any Claudexor-handled credential mutation revokes it. No positive answer,
+  an expired one, any other probe failure, and an explicit pin keep the
+  strict behavior: a pin is never admitted on it, and every other stale
+  observation still serves only an already selected route. Rationale: an
+  unanswered probe is not vendor evidence of either state, whatever delayed
+  it; the row's own recent positive answer with no observed logout since is
+  the best evidence at hand, and refusing it let unanswered probes alone
+  report "no ready account". The exception widens only unpinned
+  availability, where a wrong guess meets the pool's ordinary failover,
+  and leaves the pin contract
+  unchanged. The per-harness `limit_action` stored default is the kind-aware
   `auto` — it RESOLVES at decision time to `rotate` for subscription
   (`local_session`) subjects and `fail` for metered API-key or unknown
   routes, while explicitly persisted `fail`/`ask`/`rotate` keep their exact
@@ -958,7 +990,9 @@ invariant or operator decision before proceeding.
   rollback command, run BEFORE installing an older engine. verify: schema
   credential-profile.ts + accounts-migration.ts; orchestrator
   preflightProfile/account-pool tests; the accounts-unified-migration
-  battery; threads binding/resume-isolation tests; profile-delete tests.
+  battery; threads binding/resume-isolation tests; profile-delete tests;
+  `packages/harness-cursor/src/status-cache.test.ts` +
+  `packages/orchestrator/src/rowAdmission.test.ts` (#363 stale admission).
 - **INV-136** High-volume UI evidence is PROGRESSIVE, BOUNDED, and honest:
   per-run milestone bursts are exactly one in-flight request plus at most one
   trailing refresh (events during the trailing load cannot chain more GETs);

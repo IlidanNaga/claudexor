@@ -307,6 +307,68 @@
                 {
                   "type": "object",
                   "properties": {
+                    "requestRefusal": {
+                      "type": "object",
+                      "properties": {
+                        "scope": {
+                          "type": "string",
+                          "const": "turn_text",
+                          "description": "All text input items in one native turn; separate instructions are excluded."
+                        },
+                        "unit": {
+                          "type": "string",
+                          "const": "unicode_scalars"
+                        },
+                        "limit": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "exclusiveMinimum": 0,
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "source": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "kind": {
+                          "type": "string",
+                          "const": "input_too_large"
+                        },
+                        "actual": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "native_code": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "scope",
+                        "unit",
+                        "limit",
+                        "source",
+                        "kind",
+                        "actual",
+                        "native_code"
+                      ],
+                      "additionalProperties": false,
+                      "description": "Vendor-typed physical input refusal; the same input cannot be repaired by changing this harness's account or model."
+                    },
                     "phase": {
                       "type": "string",
                       "default": "unknown",
@@ -344,6 +406,7 @@
                             "delegation_child_drain_timeout",
                             "subscription_window_exhausted",
                             "credential_pool_exhausted",
+                            "input_too_large",
                             "delegated_home_unavailable",
                             "delegated_confinement_unavailable",
                             "delegated_evidence_incomplete",
@@ -2198,6 +2261,22 @@
                 ],
                 "default": null,
                 "description": "Attempt involved, when any."
+              },
+              "messageId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null,
+                "description": "Live-message id on message.* receipt rows and on the adapter's live_input_delivered status row, when any."
+              },
+              "outcome": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null,
+                "description": "Typed live-message outcome on message.* rows (delivered | accepted | rejected | not_active | unsupported | delivery_unknown); `delivered` on the adapter's consumption status row; null elsewhere."
               },
               "title": {
                 "type": "string",

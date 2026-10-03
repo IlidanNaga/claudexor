@@ -1,4 +1,5 @@
 import { z } from "zod/v3";
+import { HarnessRequestRefusal } from "./harness-input.js";
 
 /**
  * The typed run-failure contract, split out of `control.ts` for the reason the
@@ -25,6 +26,7 @@ export const RunFailureCode = z
      * the EARLIEST known release inside the pool — the first instant any
      * member reopens — or null when any member's reset is unknown. */
     "credential_pool_exhausted",
+    "input_too_large",
     /* Active scoped-HOME/evidence refusals plus the historical confinement
      * decoder code. Attempt-loop failures must be listed here or
      * `declaredFailure` drops them to `code: null` and the terminal states less
@@ -78,6 +80,7 @@ export type VendorFailureEvidence = z.infer<typeof VendorFailureEvidence>;
 
 export const RunFailure = z
   .object({
+    requestRefusal: HarnessRequestRefusal.optional(),
     phase: z.string().default("unknown").describe("Pipeline phase where the failure happened."),
     category: z
       .enum([

@@ -1,5 +1,90 @@
 # @claudexor/harness-agy
 
+## 3.19.0
+
+### Patch Changes
+
+- 386bbf1: Add the Gemini 3.8 Flash model definitions (gemini-3.8-flash-high, gemini-3.8-flash-medium, gemini-3.8-flash-low) to the Antigravity known-model list. The verified CLI version stays 1.1.13, the version the recorded fixtures were captured against: the three ids were confirmed live with `agy models` under a Claudexor profile HOME on 2026-10-03 (the host agy answered 1.1.13 right before the listing and self-updated to 1.2.16 during it), which is evidence of the ids on the vendor backend, not a fixture re-verification.
+- Updated dependencies
+  - @claudexor/core@3.19.0
+  - @claudexor/schema@3.19.0
+  - @claudexor/util@3.19.0
+
+## 3.18.0
+
+### Patch Changes
+
+- Updated dependencies [b00408e]
+  - @claudexor/core@3.18.0
+  - @claudexor/schema@3.18.0
+  - @claudexor/util@3.18.0
+
+## 3.17.2
+
+### Patch Changes
+
+- Preserve native input-size refusals without account retries or unrelated quota resets, publish measured ASK input budgets, distinguish proven undelivered Codex model requests, and move large Claude and AGY inputs off process arguments.
+- Updated dependencies
+  - @claudexor/schema@3.17.2
+  - @claudexor/core@3.17.2
+  - @claudexor/util@3.17.2
+
+## 3.17.1
+
+### Patch Changes
+
+- Updated dependencies [72825b9]
+  - @claudexor/schema@3.17.1
+  - @claudexor/core@3.17.1
+  - @claudexor/util@3.17.1
+
+## 3.17.0
+
+### Patch Changes
+
+- Updated dependencies [092ec2b]
+- Updated dependencies [951489f]
+  - @claudexor/core@3.17.0
+  - @claudexor/schema@3.17.0
+  - @claudexor/util@3.17.0
+
+## 3.16.0
+
+### Patch Changes
+
+- Updated dependencies [788ddca]
+  - @claudexor/schema@3.16.0
+  - @claudexor/core@3.16.0
+  - @claudexor/util@3.16.0
+
+## 3.15.1
+
+### Patch Changes
+
+- @claudexor/core@3.15.1
+- @claudexor/schema@3.15.1
+- @claudexor/util@3.15.1
+
+## 3.15.0
+
+### Patch Changes
+
+- Updated dependencies [3bc8af4]
+  - @claudexor/core@3.15.0
+  - @claudexor/schema@3.15.0
+  - @claudexor/util@3.15.0
+
+## 3.14.0
+
+### Patch Changes
+
+- Updated dependencies [2c024ac]
+- Updated dependencies [7e615b6]
+- Updated dependencies [fb42a94]
+  - @claudexor/core@3.14.0
+  - @claudexor/schema@3.14.0
+  - @claudexor/util@3.14.0
+
 ## 3.13.0
 
 ### Patch Changes

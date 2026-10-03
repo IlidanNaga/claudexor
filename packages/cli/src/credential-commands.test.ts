@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "@claudexor/config";
+import { DaemonControlApiServer } from "@claudexor/control-api";
 import { noProjectRepoRoot } from "@claudexor/util";
 import { parseArgs } from "./args.js";
 import {
@@ -77,6 +78,112 @@ describe("claudexor profiles add (INV-135)", () => {
   });
 });
 
+type ScriptedJobState = "waiting_for_input" | "running" | "succeeded" | "failed" | "cancelled";
+
+/** A loopback control server whose setup-job services follow a scripted
+ * job (#363): create answers the sealed client_pty job, every status read
+ * advances the script, cancel terminalizes it. Ephemeral port, never a real
+ * daemon, no runner or vendor. */
+async function withScriptedSetupDaemon<T>(
+  script: { afterCreate: ScriptedJobState[]; onCancel?: ScriptedJobState },
+  fn: (
+    ensureDaemon: () => Promise<{ addr: { baseUrl: string; token: string } }>,
+    calls: string[],
+    requests: unknown[],
+  ) => Promise<T>,
+): Promise<T> {
+  const calls: string[] = [];
+  const requests: unknown[] = [];
+  const steps = [...script.afterCreate];
+  let state: ScriptedJobState = "waiting_for_input";
+  const job = () => {
+    const terminal = !["waiting_for_input", "running"].includes(state);
+    return {
+      jobId: "setup-scripted-1",
+      harness: "cursor",
+      action: "login",
+      transport: "client_pty",
+      state,
+      phase: terminal ? "completed" : state === "running" ? "verifying" : "launching",
+      command: "cursor-agent login",
+      guideUrl: "https://docs.cursor.com/en/cli/reference/authentication",
+      message: `scripted ${state}`,
+      createdAt: "2026-09-30T00:00:00.000Z",
+      startedAt: "2026-09-30T00:00:00.000Z",
+      finishedAt: terminal ? "2026-09-30T00:00:01.000Z" : null,
+      profileId: "work",
+      authCapability: {
+        attemptId: "attempt-scripted",
+        challengeDigest: "d".repeat(64),
+        requestDigest: "e".repeat(64),
+        disclosure: {
+          schemaVersion: 1,
+          protocolVersion: 1,
+          harness: "cursor",
+          requested: "subscription",
+          requiredRoute: "vendor_native",
+          requiredSource: "native_session",
+          networkScope: "selected_harness_only",
+          billingKnowledge: "unknown",
+          incrementalCostKnowledge: "unknown",
+          mayConsumeQuota: true,
+          generatedAt: "2026-09-30T00:00:00.000Z",
+        },
+        state: "disclosed",
+      },
+      ...(terminal
+        ? {
+            outcome: {
+              reason:
+                state === "succeeded"
+                  ? "completed"
+                  : state === "cancelled"
+                    ? "cancelled_by_user"
+                    : "command_failed",
+            },
+          }
+        : {}),
+    };
+  };
+  const token = "profile-login-setup-fixture";
+  const server = new DaemonControlApiServer({
+    token,
+    daemon: {
+      enqueue: async () => ({ id: "unused", state: "queued" }),
+      status: async (id: string) => ({ id, state: "failed" }),
+      list: async () => [],
+      cancel: async () => ({ cancelled: true }),
+    } as never,
+    services: {
+      createSetupJob: async (input: { request: unknown }) => {
+        calls.push("create");
+        requests.push(input.request);
+        return job();
+      },
+      setupJobStatus: async () => {
+        calls.push("status");
+        state = steps.shift() ?? state;
+        return job();
+      },
+      cancelSetupJob: async () => {
+        calls.push("cancel");
+        state = script.onCancel ?? "cancelled";
+        return job();
+      },
+    },
+  });
+  const { host, port } = await server.start();
+  try {
+    return await fn(
+      async () => ({ addr: { baseUrl: `http://${host}:${port}`, token } }),
+      calls,
+      requests,
+    );
+  } finally {
+    await server.stop();
+  }
+}
+
 describe("claudexor profiles login machine output", () => {
   afterEach(() => vi.restoreAllMocks());
 
@@ -100,33 +207,41 @@ describe("claudexor profiles login machine output", () => {
     identity: null,
   });
 
-  it("refuses an interactive Claude login as one JSON object before vendor output", async () => {
-    let stdout = "";
-    const write = vi.spyOn(process.stdout, "write").mockImplementation(((chunk: unknown) => {
-      stdout += String(chunk);
-      return true;
-    }) as never);
-
-    const code = await profilesCommandWithDeps(
-      parseArgs(["profiles", "login", "claude", "work", "--json"]),
-      true,
-      {
-        daemonGet: async () => ({
-          profiles: [row("claude", "work")],
-          harnessAccounts: [],
-          accountPools: [],
-        }),
-      },
-    );
-
-    expect(code).toBe(2);
-    expect(write).toHaveBeenCalledOnce();
-    expect(JSON.parse(stdout)).toMatchObject({
-      ok: false,
-      exitCode: 2,
-      code: "invalid_argument",
-    });
-  });
+  it.each(["cursor", "claude", "agy"])(
+    "preserves %s --json refusal without creating or attaching a login job",
+    async (harness) => {
+      let stdout = "";
+      const write = vi.spyOn(process.stdout, "write").mockImplementation(((chunk: unknown) => {
+        stdout += String(chunk);
+        return true;
+      }) as never);
+      const ensureDaemon = vi.fn();
+      const attach = vi.fn();
+      const spawnSync = vi.fn();
+      const code = await profilesCommandWithDeps(
+        parseArgs(["profiles", "login", harness, "work", "--json"]),
+        true,
+        {
+          daemonGet: async () => ({
+            profiles: [row(harness, "work")],
+            harnessAccounts: [],
+            accountPools: [],
+          }),
+          ensureDaemon,
+          attach,
+          spawnSync,
+        },
+      );
+      expect(code).toBe(2);
+      expect(ensureDaemon).not.toHaveBeenCalled();
+      expect(attach).not.toHaveBeenCalled();
+      expect(spawnSync).not.toHaveBeenCalled();
+      expect(write).toHaveBeenCalledOnce();
+      expect(JSON.parse(stdout)).toMatchObject({ ok: false, exitCode: 2 });
+      expect(JSON.parse(stdout).message).toContain("does not support --json");
+      expect(JSON.parse(stdout)).not.toHaveProperty("job");
+    },
+  );
 
   it.each([true, false])(
     "returns the typed ambiguous policy before output/spawn (json=%s)",
@@ -141,7 +256,7 @@ describe("claudexor profiles login machine output", () => {
         stderr += String(chunk);
         return true;
       }) as never);
-      const spawnVendor = vi.fn();
+      const ensureDaemon = vi.fn();
       const listing = {
         profiles: [row("agy", "one"), row("agy", "two")],
         harnessAccounts: [],
@@ -150,11 +265,12 @@ describe("claudexor profiles login machine output", () => {
       const code = await profilesCommandWithDeps(
         parseArgs(["profiles", "login", "agy", "one", ...(json ? ["--json"] : [])]),
         json,
-        { daemonGet: async () => listing, spawnSync: spawnVendor as never, platform: "win32" },
+        { daemonGet: async () => listing, ensureDaemon, platform: "win32" },
       );
 
       expect(code).toBe(1);
-      expect(spawnVendor).not.toHaveBeenCalled();
+      // Refused before any daemon job, attachment or vendor process.
+      expect(ensureDaemon).not.toHaveBeenCalled();
       if (json) {
         expect(stderr).toBe("");
         expect(JSON.parse(stdout)).toMatchObject({
@@ -235,6 +351,11 @@ describe("claudexor profiles login machine output", () => {
       expect(order).toEqual(["prepare", "spawn"]);
       expect(prepare).toHaveBeenCalledOnce();
       expect(spawnSync).toHaveBeenCalledOnce();
+      // Interactive sign-in stays visible in THIS terminal; only background
+      // helpers hide their Windows console.
+      const [, , loginOptions] = spawnSync.mock.calls[0] as unknown as [string, string[], object];
+      expect(loginOptions).toMatchObject({ stdio: "inherit" });
+      expect(loginOptions).not.toHaveProperty("windowsHide");
     } finally {
       if (previous === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
       else process.env.CLAUDEXOR_CONFIG_DIR = previous;
@@ -242,6 +363,124 @@ describe("claudexor profiles login machine output", () => {
       else process.env.CLAUDEXOR_AGY_BIN = previousBin;
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  const loginDeps = (
+    ensureDaemon: () => Promise<{ addr: { baseUrl: string; token: string } }>,
+    order: string[],
+    options: { receipt: boolean; interruptDuringAttach?: boolean },
+  ) => {
+    let interrupt: (() => void) | null = null;
+    return {
+      daemonGet: async () => {
+        order.push("get");
+        return { profiles: [row("cursor", "work")], harnessAccounts: [], accountPools: [] };
+      },
+      ensureDaemon,
+      attach: async (_addr: unknown, jobId: string) => {
+        order.push(`attach ${jobId}`);
+        // The terminal's Ctrl-C reaches this client (and the attached runner).
+        if (options.interruptDuringAttach) interrupt?.();
+        return 0;
+      },
+      receiptExists: () => options.receipt,
+      onInterrupt: (handler: () => void) => {
+        interrupt = handler;
+        return () => {
+          order.push("unsubscribe");
+          interrupt = null;
+        };
+      },
+      pollMs: 1,
+    };
+  };
+
+  it.each([
+    ["succeeded", 0],
+    ["failed", 1],
+  ] as const)(
+    "attaches this terminal, then reports the daemon's durable %s outcome (#363)",
+    async (outcome, exitCode) => {
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      const order: string[] = [];
+      await withScriptedSetupDaemon(
+        { afterCreate: ["running", outcome] },
+        async (ensureDaemon, calls, requests) => {
+          const code = await profilesCommandWithDeps(
+            parseArgs(["profiles", "login", "cursor", "work"]),
+            false,
+            loginDeps(ensureDaemon, order, { receipt: true }),
+          );
+          expect(code).toBe(exitCode);
+          // The vendor's own receipt exists: nothing is cancelled, the durable
+          // job is followed to its end and only then is the row re-read.
+          expect(calls).toEqual(["create", "status", "status"]);
+          expect(requests).toEqual([
+            {
+              harness: "cursor",
+              action: "login",
+              authRequest: "subscription",
+              profileId: "work",
+              transport: "client_pty",
+            },
+          ]);
+        },
+      );
+      expect(order).toEqual(["get", "attach setup-scripted-1", "unsubscribe", "get"]);
+    },
+  );
+
+  it("turns Ctrl-C into a daemon-side cancel and exits 130 after the job's proven end (#363)", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const order: string[] = [];
+    await withScriptedSetupDaemon({ afterCreate: [] }, async (ensureDaemon, calls) => {
+      const code = await profilesCommandWithDeps(
+        parseArgs(["profiles", "login", "cursor", "work"]),
+        false,
+        loginDeps(ensureDaemon, order, { receipt: false, interruptDuringAttach: true }),
+      );
+      expect(code).toBe(130);
+      expect(calls).toEqual(["create", "cancel", "status"]);
+    });
+  });
+
+  it("cancels a job whose terminal attachment ended without the vendor's receipt (#363)", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const order: string[] = [];
+    await withScriptedSetupDaemon({ afterCreate: [] }, async (ensureDaemon, calls) => {
+      const code = await profilesCommandWithDeps(
+        parseArgs(["profiles", "login", "cursor", "work"]),
+        false,
+        loginDeps(ensureDaemon, order, { receipt: false }),
+      );
+      expect(code).toBe(1);
+      expect(calls).toEqual(["create", "cancel", "status"]);
+    });
+  });
+
+  it("leaves the job to the daemon when this terminal could not attach (#363)", async () => {
+    const stderr: string[] = [];
+    vi.spyOn(process.stderr, "write").mockImplementation(((chunk: unknown) => {
+      stderr.push(String(chunk));
+      return true;
+    }) as never);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    await withScriptedSetupDaemon({ afterCreate: [] }, async (ensureDaemon, calls) => {
+      const code = await profilesCommandWithDeps(
+        parseArgs(["profiles", "login", "cursor", "work"]),
+        false,
+        {
+          ...loginDeps(ensureDaemon, [], { receipt: false }),
+          attach: async () => {
+            throw new Error("setup job already has a client_pty attachment");
+          },
+        },
+      );
+      expect(code).toBe(1);
+      // Another terminal owns the attachment: no cancel from here.
+      expect(calls).toEqual(["create"]);
+    });
+    expect(stderr.join("")).toContain("setup job already has a client_pty attachment");
   });
 });
 

@@ -1,0 +1,82 @@
+{
+  "$ref": "#/definitions/McpThreadTurnResult",
+  "definitions": {
+    "McpThreadTurnResult": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "type": "string",
+              "description": "Daemon job id backing the run."
+            },
+            "runId": {
+              "type": "string",
+              "description": "Run id."
+            },
+            "taskId": {
+              "type": "string",
+              "description": "Task id, when already allocated."
+            },
+            "runDir": {
+              "type": "string",
+              "description": "On-disk run artifact directory."
+            },
+            "threadId": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Non-empty identifier string."
+            },
+            "turnId": {
+              "$ref": "#/definitions/McpThreadTurnResult/anyOf/0/properties/threadId"
+            },
+            "summary": {
+              "type": "string",
+              "description": "Human-readable turn handle summary (same as the tool's text content)."
+            }
+          },
+          "required": [
+            "runId",
+            "runDir",
+            "threadId",
+            "turnId",
+            "summary"
+          ],
+          "additionalProperties": false,
+          "description": "Response for a successfully enqueued run."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/McpThreadTurnResult/anyOf/0/properties/threadId"
+            },
+            "threadId": {
+              "$ref": "#/definitions/McpThreadTurnResult/anyOf/0/properties/threadId"
+            },
+            "turnId": {
+              "$ref": "#/definitions/McpThreadTurnResult/anyOf/0/properties/threadId"
+            },
+            "state": {
+              "type": "string",
+              "minLength": 1
+            },
+            "summary": {
+              "$ref": "#/definitions/McpThreadTurnResult/anyOf/0/properties/summary"
+            }
+          },
+          "required": [
+            "jobId",
+            "threadId",
+            "turnId",
+            "state",
+            "summary"
+          ],
+          "additionalProperties": false
+        }
+      ],
+      "description": "Structured MCP result for claudexor_thread_turn: the durable thread-turn handle."
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

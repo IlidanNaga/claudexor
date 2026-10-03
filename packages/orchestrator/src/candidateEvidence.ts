@@ -59,9 +59,11 @@ export interface CandidateRun {
  * exhausted window still exhausted. An unknown reset anywhere makes the run's
  * reset unknown — a partial answer here is worse than none.
  */
-export function unanimousDeclaredFailure(runs: readonly CandidateRun[]): DeclaredFailure | null {
+export function unanimousDeclaredFailure(
+  runs: readonly Pick<CandidateRun, "declaredFailure">[],
+): DeclaredFailure | null {
   const first = runs[0]?.declaredFailure;
-  if (!first?.code) return null;
+  if (!first || (!first.code && first.category !== "config_error")) return null;
   const declared = runs.map((run) => run.declaredFailure);
   const agrees = declared.every((d) => d?.code === first.code && d?.category === first.category);
   if (!agrees) return null;

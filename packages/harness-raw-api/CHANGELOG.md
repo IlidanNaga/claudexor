@@ -1,5 +1,97 @@
 # @claudexor/harness-raw-api
 
+## 3.19.0
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/core@3.19.0
+  - @claudexor/schema@3.19.0
+  - @claudexor/secrets@3.19.0
+  - @claudexor/util@3.19.0
+
+## 3.18.0
+
+### Patch Changes
+
+- Updated dependencies [b00408e]
+  - @claudexor/core@3.18.0
+  - @claudexor/schema@3.18.0
+  - @claudexor/secrets@3.18.0
+  - @claudexor/util@3.18.0
+
+## 3.17.2
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.17.2
+  - @claudexor/core@3.17.2
+  - @claudexor/secrets@3.17.2
+  - @claudexor/util@3.17.2
+
+## 3.17.1
+
+### Patch Changes
+
+- Updated dependencies [72825b9]
+  - @claudexor/schema@3.17.1
+  - @claudexor/core@3.17.1
+  - @claudexor/secrets@3.17.1
+  - @claudexor/util@3.17.1
+
+## 3.17.0
+
+### Patch Changes
+
+- Updated dependencies [092ec2b]
+- Updated dependencies [951489f]
+  - @claudexor/core@3.17.0
+  - @claudexor/schema@3.17.0
+  - @claudexor/secrets@3.17.0
+  - @claudexor/util@3.17.0
+
+## 3.16.0
+
+### Patch Changes
+
+- Updated dependencies [788ddca]
+  - @claudexor/schema@3.16.0
+  - @claudexor/core@3.16.0
+  - @claudexor/secrets@3.16.0
+  - @claudexor/util@3.16.0
+
+## 3.15.1
+
+### Patch Changes
+
+- @claudexor/core@3.15.1
+- @claudexor/schema@3.15.1
+- @claudexor/secrets@3.15.1
+- @claudexor/util@3.15.1
+
+## 3.15.0
+
+### Patch Changes
+
+- Updated dependencies [3bc8af4]
+  - @claudexor/core@3.15.0
+  - @claudexor/schema@3.15.0
+  - @claudexor/secrets@3.15.0
+  - @claudexor/util@3.15.0
+
+## 3.14.0
+
+### Patch Changes
+
+- Updated dependencies [2c024ac]
+- Updated dependencies [7e615b6]
+- Updated dependencies [fb42a94]
+  - @claudexor/core@3.14.0
+  - @claudexor/schema@3.14.0
+  - @claudexor/secrets@3.14.0
+  - @claudexor/util@3.14.0
+
 ## 3.13.0
 
 ### Patch Changes
