@@ -270,7 +270,7 @@ at every wire boundary.
   follows the retained set, not the file.
 - `packages/cli`: thin command surface plus local host-integration lifecycle
   (`claudexor plugin`) for generated Claude Code/Codex/Cursor/OpenCode
-  skill/MCP artifacts and command artifacts where hosts support them. Plugin
+  skill/MCP artifacts and commands; portable distributions live under `plugins/`. Plugin
   lifecycle state is user-level local setup state, not a schema/control-api
   contract.
 - `packages/claudexor`: the bare-name npm bin wrapper — `claudexor` and

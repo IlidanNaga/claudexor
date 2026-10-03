@@ -615,10 +615,11 @@ modes) run `node scripts/cursor-itest.mjs`; the real-harness battery covers
 (phases 10-12, filterable via `CLAUDEXOR_BATTERY_PHASES=10,11,12`). Use `claudexor doctor` for Codex/Claude/Cursor/
 OpenCode harness availability and smoke status.
 
-### Portable Agent Skill and Copilot plugin
+### Portable Agent Skill and host packages
 
-`plugins/copilot` is the portable GitHub Copilot distribution. It contains one
-canonical `skills/claudexor/SKILL.md` and a `.mcp.json` descriptor that invokes
+`plugins/copilot` owns the canonical portable `skills/claudexor/SKILL.md` and
+`.mcp.json` descriptor. `plugins/cursor` and `plugins/claude` contain generated
+copies of those same assets in their host-native layouts. Each invokes
 the preinstalled `claudexor mcp serve` command. It intentionally carries no
 absolute runtime path, frozen config root, plugin-version environment marker,
 credential, hook, command alias, or host-local business logic.
@@ -646,10 +647,35 @@ acceptance and overrides remain human decisions.
 The public MCP Registry descriptor is `server.json`. It points to the executable
 `claudexor` npm package and supplies fixed `mcp serve` package arguments for the
 embedded local stdio server. `mcpName` in that package, the Registry name, the
-package version, and the portable plugin version are release-parity checked.
+package version, and all portable plugin versions are release-parity checked.
 Registry publication runs only through the separate manual tag-bound
 `publish-mcp.yml` GitHub OIDC workflow after the npm package and public stable
 GitHub Release exist; it is idempotent and confirms the exact registry record.
+
+The repository-owned `.cursor-plugin/marketplace.json` and
+`.claude-plugin/marketplace.json` index the corresponding portable packages.
+For Claude Code, distribution is directly from this GitHub repository:
+
+```bash
+claude plugin marketplace add razzant/claudexor
+claude plugin install claudexor@claudexor
+```
+
+Cursor can load `plugins/cursor` as a local plugin; its repository marketplace
+index also describes that same package. These files do not imply a listing in
+either vendor's hosted catalog. Enable only one Claudexor integration per host
+to avoid duplicate MCP servers and Skills. The portable Claude package has no
+status-line collector and does not replace the managed installer described above.
+
+Before enabling either package, the host must see the preinstalled `claudexor`
+command on PATH and the intended existing daemon/account configuration. For an
+operator-selected non-default root, launch the host with that installation's
+`CLAUDEXOR_CONFIG_DIR`; portable manifests neither set nor discover it. They do
+not change daemon ownership, install a runtime, or initiate authentication.
+Manifest/asset checks do not certify installation, tool discovery, or a real
+agent turn in the host. Those acceptance checks remain explicitly unrun in the
+feature ledger. `pnpm gen:version` refreshes portable asset copies and versions;
+the source Skill and MCP descriptor remain under `plugins/copilot`.
 
 Harness readiness is route/context-specific. `auth_sources` / `authSources`
 separates credential availability (`available | unavailable | unknown`) from

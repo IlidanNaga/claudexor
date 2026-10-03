@@ -4,8 +4,8 @@
  * package.json `version` — and writes the generated `CLAUDEXOR_VERSION`
  * constant that the CLI banner / --version, generated plugin shims, MCP/ACP
  * servers, and adapter manifests all import. It also projects the version into
- * the two tracked distribution descriptors that cannot import TypeScript:
- * server.json and the portable Copilot plugin manifest. Changesets keeps the
+ * tracked distribution descriptors that cannot import TypeScript:
+ * server.json and the portable plugin manifests. Changesets keeps the
  * workspace manifests in lockstep (`fixed`); the docs-truth and release parity
  * gates enforce that every projection matches the root version.
  *
@@ -14,6 +14,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { PORTABLE_MANIFESTS, syncPortableAssets } from "./lib/portable-plugins.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "..");
@@ -33,7 +34,7 @@ writeFileSync(out, body);
 
 const jsonVersionPaths = [
   join(root, "server.json"),
-  join(root, "plugins", "copilot", "plugin.json"),
+  ...PORTABLE_MANIFESTS.map((path) => join(root, path)),
 ];
 // These files are hand-maintained and Prettier-formatted; only their version
 // strings are generated. Re-serializing the parsed object would reflow every
@@ -57,5 +58,6 @@ for (const path of jsonVersionPaths) {
   }
   writeFileSync(path, updated);
 }
+syncPortableAssets(root);
 
 process.stdout.write(`Wrote CLAUDEXOR_VERSION="${version}" and portable distribution versions\n`);

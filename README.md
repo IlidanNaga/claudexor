@@ -766,8 +766,14 @@ The portable plugin supports macOS and Linux and requires the `claudexor`
 command on `PATH`; Windows is not currently supported. It bundles one Agent
 Skill plus MCP wiring and never collects credentials or bypasses Claudexor's
 typed apply and human-decision gates. See
-[`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md#portable-agent-skill-and-copilot-plugin)
+[`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md#portable-agent-skill-and-host-packages)
 for lifecycle and precedence details.
+
+The same portable package is also available to Claude Code straight from this
+repository (`claude plugin marketplace add razzant/claudexor`, then
+`claude plugin install claudexor@claudexor`) and to Cursor as the local plugin
+in `plugins/cursor`. Enable only one Claudexor integration per host; the
+`claudexor` command must already be installed.
 
 The explicit Claude install also enables the official subscription-quota
 status-line source. If `~/.claude/settings.json` already has a `statusLine`

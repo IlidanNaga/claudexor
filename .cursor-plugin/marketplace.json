@@ -1,0 +1,11 @@
+{
+  "name": "claudexor",
+  "owner": { "name": "Anton Razzhigaev" },
+  "plugins": [
+    {
+      "name": "claudexor",
+      "source": "./plugins/cursor",
+      "description": "Multi-harness planning, execution, and review through the local Claudexor installation."
+    }
+  ]
+}
