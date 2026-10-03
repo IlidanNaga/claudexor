@@ -510,13 +510,14 @@ frequency and volume are. The contracts:
     threads, so empty folders do not persist and one name used on several
     engines is ONE section. With no folder anywhere the list is the plain list,
     with no section header; once a folder exists, the list shows one section
-    per folder (sorted; header menu Rename… / Remove Folder…) and then
-    "Ungrouped". Filing a thread does not reorder the list (a folder-only PATCH
-    keeps `updatedAt`). Rename/Remove re-file each member — a thread in the
-    trash keeps its folder — and report a partial result as "Updated N of M
-    threads; K failed."; the folder sheet takes 1–120 characters and says so
-    while Create is disabled; an engine older than folders answers "The engine
-    is too old for folders. Update Claudexor." The sidebar's BOTTOM-LEFT
+    per folder (sorted; header menu Rename… / Remove Folder…), then
+    "Ungrouped" for threads without one. Filing a thread does not reorder the
+    list (a folder-only PATCH keeps `updatedAt`). Rename/Remove re-file each
+    member — a thread in the trash keeps its folder — and report a partial
+    result as "Updated N of M threads; K failed."; the folder sheet disables
+    Create for a name outside 1–120 characters and says why on a reserved
+    line; an engine older than folders is reported as "The engine is too old
+    for folders. Update Claudexor." The sidebar's BOTTOM-LEFT
     carries ONE compact accounts control (Claude-Code style, INV-135): a quiet
     single-line trigger — worst-readiness dot + the account name (or "N
     accounts") + worst quota % + chevron — that opens a popover to manage
