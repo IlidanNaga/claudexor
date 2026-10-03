@@ -816,7 +816,7 @@ import Testing
         let rich = #"{"id":"th-folder","title":"t","repoRoot":"/p","mode":"agent","workspaceMode":"in_place","authPreference":"auto","folder":"Research","primaryHarness":null,"eligibleHarnesses":[],"state":"active","runIds":[],"headRunId":null,"needsHuman":false,"createdAt":"t","updatedAt":"t"}"#
         let thread = try JSONDecoder().decode(ThreadSummary.self, from: Data(rich.utf8))
         #expect(thread.folder == "Research")
-        let clear = UpdateThreadRequest(folder: .some(nil))
+        let clear = ThreadFolderUpdateRequest(folder: nil)
         let object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(clear)) as? [String: Any]
         #expect(object?.keys.contains("folder") == true)
         #expect(object?["folder"] is NSNull)

@@ -419,8 +419,6 @@ public struct CreateThreadRequest: Codable, Sendable {
 /// sticky primary harness / eligible pool. Encoded only (request body).
 public struct UpdateThreadRequest: Encodable, Sendable {
     public var title: String?
-    /// Double-optional: .some(nil) moves back to ungrouped; .none leaves unchanged.
-    public var folder: String??
     public var state: String?
     /// Double-optional: .some(nil) clears primary back to auto; .none leaves unchanged.
     public var primaryHarness: String??
@@ -434,11 +432,10 @@ public struct UpdateThreadRequest: Encodable, Sendable {
     /// same five-value `access` enum as a run start (verified in
     /// packages/schema/generated/ControlThreadUpdateRequest.schema.json).
     public var access: String??
-    public init(title: String? = nil, folder: String?? = nil, state: String? = nil,
+    public init(title: String? = nil, state: String? = nil,
                 primaryHarness: String?? = nil, eligibleHarnesses: [String]? = nil,
                 credentialProfileId: String?? = nil, access: String?? = nil) {
         self.title = title
-        self.folder = folder
         self.state = state
         self.primaryHarness = primaryHarness
         self.eligibleHarnesses = eligibleHarnesses
@@ -447,13 +444,12 @@ public struct UpdateThreadRequest: Encodable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case title, folder, state, primaryHarness, eligibleHarnesses, credentialProfileId, access
+        case title, state, primaryHarness, eligibleHarnesses, credentialProfileId, access
     }
 
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encodeIfPresent(title, forKey: .title)
-        if let folder { try c.encode(folder, forKey: .folder) }
         try c.encodeIfPresent(state, forKey: .state)
         // .some(nil) encodes an explicit JSON null (= clear primary to auto).
         if let primaryHarness { try c.encode(primaryHarness, forKey: .primaryHarness) }

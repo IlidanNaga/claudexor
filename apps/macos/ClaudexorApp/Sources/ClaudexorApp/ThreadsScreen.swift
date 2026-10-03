@@ -297,24 +297,7 @@ struct ThreadsScreen: View {
                                 id: located.thread.id)
                         }
                     }
-                )) {
-                    ForEach(model.threadFolderNames, id: \.self) { folder in
-                        Section {
-                            ForEach(model.threads(in: folder)) { located in
-                                threadRow(located).tag(located.id)
-                            }
-                        } header: {
-                            threadFolderHeader(folder)
-                        }
-                    }
-                    if !model.threads(in: nil).isEmpty {
-                        Section("Ungrouped") {
-                            ForEach(model.threads(in: nil)) { located in
-                                threadRow(located).tag(located.id)
-                            }
-                        }
-                    }
-                }
+                )) { threadListRows }
                 .listStyle(.sidebar)
                 .scrollContentBackground(.hidden)   // let the Liquid Glass panel show through
             }
@@ -322,6 +305,7 @@ struct ThreadsScreen: View {
             SidebarFooter()
         }
         .padding(.top, Theme.Spacing.xs)
+        .modifier(ThreadFolderDialogs(editor: $folderEditor))
         .sheet(isPresented: Binding(
             get: { renameTargetId != nil },
             set: {
@@ -331,41 +315,12 @@ struct ThreadsScreen: View {
                 }
             }
         )) { renameSheet }
-        .sheet(isPresented: Binding(
-            get: { folderThreadTarget != nil || renameFolderTarget != nil },
-            set: {
-                if !$0 {
-                    folderThreadTarget = nil
-                    renameFolderTarget = nil
-                }
-            }
-        )) { threadFolderSheet }
-        .confirmationDialog(
-            "Remove folder “\(removeFolderTarget ?? "")”?",
-            isPresented: Binding(
-                get: { removeFolderTarget != nil },
-                set: { if !$0 { removeFolderTarget = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button("Remove Folder", role: .destructive) {
-                guard let folder = removeFolderTarget else { return }
-                removeFolderTarget = nil
-                Task { await model.removeThreadFolder(folder) }
-            }
-            Button("Cancel", role: .cancel) { removeFolderTarget = nil }
-        } message: {
-            Text("Threads will move to Ungrouped. No threads or files will be deleted.")
-        }
     }
 
+    @State var folderEditor = ThreadFolderEditor()
     @State var renameDraft = ""
     @State var renameTargetId: String?
     @State var renameTargetLocation: ExecutionLocationID?
-    @State var folderDraft = ""
-    @State var folderThreadTarget: LocatedThread?
-    @State var renameFolderTarget: String?
-    @State var removeFolderTarget: String?
     // MARK: Conversation pane
 
     private var conversation: some View {
