@@ -33,6 +33,15 @@ struct ThreadSidebarSections: Equatable {
     }
 }
 
+/// Where a thread stands after a "Delete Now" request failed, as the engine's
+/// list read right after the failure shows it.
+enum DeleteNowFailure: Equatable {
+    case inTrash      // still listed in Trash (a refusal): Restore works
+    case gone         // no longer listed: the engine purged it after all
+    case elsewhere    // listed outside Trash (restored meanwhile)
+    case unconfirmed  // the list could not be read: no promise either way
+}
+
 /// Product copy of the trash lifecycle, one owner (INV-134): the honest
 /// "Delete Now…" text by workspace mode, the disabled-control reasons, and the
 /// Trash row caption. English-only, independent of the host locale (INV-141).
@@ -60,6 +69,19 @@ enum ThreadLifecycleCopy {
         "A turn is running in this thread. Stop it or let it finish before deleting the thread."
     static let deleteNowBusyReason =
         "A turn is still running in this thread. Delete Now becomes available when it finishes."
+
+    /// A failed "Delete Now", said by what the re-read list shows. Only a
+    /// thread still listed in Trash is promised to stay there.
+    static func deleteNowFailure(_ outcome: DeleteNowFailure, reason: String) -> String {
+        switch outcome {
+        case .inTrash: return "Could not delete the thread now; it stays in Trash: \(reason)"
+        case .gone: return "The thread was deleted, though the request reported an error: \(reason)"
+        case .elsewhere: return "Could not delete the thread now: \(reason)"
+        case .unconfirmed:
+            return "Could not confirm whether the thread was deleted; check Trash once the engine"
+                + " responds: \(reason)"
+        }
+    }
 
     /// Trash row caption: where the thread lives and how long Restore works.
     static func trashCaption(

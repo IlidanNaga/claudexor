@@ -523,9 +523,15 @@ frequency and volume are. The contracts:
     owner (`ThreadLifecycleCopy`) and never promises to erase the conversation.
     While a turn of the thread runs, Delete and Delete Now… are disabled with
     the reason as hover help, and a Trash row also says it in place (the
-    engine refuses that purge for every client). A refused or failed purge
-    leaves the thread in Trash with Restore. No local-only thread state. The
-    sidebar's BOTTOM-LEFT
+    engine refuses that purge for every client). A refused purge (`409`)
+    leaves the thread in Trash with Restore. The engine journals a purge
+    before it deletes the thread's directories, so after any other failure or
+    a lost answer the app re-reads the list and says only what it shows: still
+    in Trash (Restore works), deleted after all (no Restore), or, when the list
+    cannot be read either, that the outcome is unconfirmed (check Trash once
+    the engine responds). A later list without the thread retires that message,
+    and a successful Restore or Delete Now clears it. No local-only thread
+    state. The sidebar's BOTTOM-LEFT
     carries ONE compact accounts control (Claude-Code style, INV-135): a quiet
     single-line trigger — worst-readiness dot + the account name (or "N
     accounts") + worst quota % + chevron — that opens a popover to manage

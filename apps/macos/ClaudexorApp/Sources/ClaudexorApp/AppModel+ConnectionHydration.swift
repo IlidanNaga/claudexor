@@ -55,6 +55,7 @@ extension AppModel {
             guard requestIsCurrent() else { return false }
             threads = list.threads
             projectListingProblems = list.problems
+            retireDeleteNowBanner(at: .local)
             if list.droppedThreads > 0 {
                 // Per-row salvage disclosed: the store carried rows this
                 // app build cannot decode, so disclose it instead of hiding it.

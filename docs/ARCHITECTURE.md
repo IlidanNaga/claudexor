@@ -1945,12 +1945,13 @@ Endpoint semantics beyond the inventory:
   with its `claudexor/thread-*` branch and every lane home (the per-thread HOME
   of its Ask/Plan turns and its cached continuation summaries). A directory
   error after that commit (ENOTEMPTY, EBUSY, a Windows lock) fails the request
-  although the thread is already purged and no longer restorable; a repeated
-  purge or the next disk-retention pass (below) finishes the cleanup, and
-  nothing makes a partially deleted thread restorable again. Purge does not
-  erase the conversation: the thread and turn records stay in the journal, run
-  trees follow the run retention below, native sessions that a route keeps
-  outside the lane home stay in the agent's own storage (Agent turns, and Codex
+  although the thread is already purged and no longer restorable, so a client
+  re-reads the list instead of promising Trash; a repeated purge or the next
+  disk-retention pass (below) finishes the cleanup, and nothing makes a
+  partially deleted thread restorable again. Purge does not erase the
+  conversation: the thread and turn records stay in the journal, run trees
+  follow the run retention below, native sessions that a route keeps outside
+  the lane home stay in the agent's own storage (Agent turns, and Codex
   config-dir login profiles and Antigravity, which keep sessions in the
   account's directory), and project files are untouched. A purged thread
   leaves every listing (ACP's view of trashed threads is in INTEGRATIONS).

@@ -53,6 +53,17 @@ struct ThreadLifecycleTests {
         #expect(ThreadLifecycleCopy.deleteNowMessage(workspaceMode: nil) == direct)
     }
 
+    @Test func aFailedDeleteNowPromisesTrashOnlyWhileTheListStillHasItThere() {
+        let reason = "Cannot reach the engine — is the daemon running?"
+        let texts = [DeleteNowFailure.inTrash, .gone, .elsewhere, .unconfirmed].map {
+            ($0, ThreadLifecycleCopy.deleteNowFailure($0, reason: reason))
+        }
+        for (outcome, text) in texts {
+            #expect(text.hasSuffix(reason))
+            #expect(text.contains("stays in Trash") == (outcome == .inTrash))
+        }
+    }
+
     @Test func trashCaptionStatesHowLongRestoreWorks() {
         let now = Date(timeIntervalSince1970: 1_790_000_000)
         #expect(ThreadLifecycleCopy.trashCaption(
@@ -132,7 +143,7 @@ struct ThreadLifecycleTests {
     @MainActor
     @Test func aRefusedDeleteNowLeavesTheThreadInTrashAndRestoreBringsItBack() async throws {
         defer { LifecycleStubURLProtocol.handler = nil }
-        let server = LifecycleServer(states: ["th-1": "trashed"], refusePurge: true)
+        let server = LifecycleServer(states: ["th-1": "trashed"], purge: .refuse)
         let model = lifecycleModel(server)
         model.threads = [try lifecycleThread(id: "th-1", state: "trashed")]
 
@@ -147,6 +158,51 @@ struct ThreadLifecycleTests {
 
         #expect(server.posts == ["POST /v2/threads/th-1/purge", "POST /v2/threads/th-1/restore"])
         #expect(ThreadSidebarSections(model.locatedThreads).active.map(\.thread.id) == ["th-1"])
+        // The refused purge's banner does not outlive the successful Restore.
+        #expect(model.threadStatus == nil)
+    }
+
+    @MainActor
+    @Test func aLostPurgeAnswerSaysTheThreadWasDeletedAndPromisesNoTrash() async throws {
+        defer { LifecycleStubURLProtocol.handler = nil }
+        // The engine journals the purge, then its answer is lost on the way back.
+        let server = LifecycleServer(states: ["th-1": "trashed"], purge: .applyThenDropAnswer)
+        let model = lifecycleModel(server)
+        model.threads = [try lifecycleThread(id: "th-1", state: "trashed")]
+
+        await model.deleteThreadNow(locationID: .local, id: "th-1")
+
+        #expect(server.posts == ["POST /v2/threads/th-1/purge"])
+        #expect(server.recorded.last == "GET /v2/threads")
+        #expect(ThreadSidebarSections(model.locatedThreads).trash.isEmpty)
+        let status = try #require(model.threadStatus)
+        #expect(status.hasPrefix("The thread was deleted"))
+        #expect(!status.contains("Trash"))
+    }
+
+    @MainActor
+    @Test func anUnreadableListAfterAFailedPurgeConfirmsNothingUntilALaterListShowsTheThreadGone() async throws {
+        defer { LifecycleStubURLProtocol.handler = nil }
+        // The purge request never reaches the engine, and the list cannot be read either.
+        let server = LifecycleServer(states: ["th-1": "trashed"], purge: .dropBeforeApply)
+        server.listUnreachable = true
+        let model = lifecycleModel(server)
+        model.threads = [try lifecycleThread(id: "th-1", state: "trashed")]
+
+        await model.deleteThreadNow(locationID: .local, id: "th-1")
+
+        let unconfirmed = try #require(model.threadStatus)
+        #expect(unconfirmed.hasPrefix("Could not confirm whether the thread was deleted"))
+        #expect(!unconfirmed.contains("stays in Trash"))
+        // A later list that still has the thread in Trash keeps the banner...
+        server.listUnreachable = false
+        #expect(await model.refreshThreads())
+        #expect(ThreadSidebarSections(model.locatedThreads).trash.map(\.thread.id) == ["th-1"])
+        #expect(model.threadStatus == unconfirmed)
+        // ...and a later list without the thread retires it.
+        server.setState("th-1", "purged")
+        #expect(await model.refreshThreads())
+        #expect(model.threadStatus == nil)
     }
 }
 
@@ -200,27 +256,46 @@ private func lifecycleModel(_ server: LifecycleServer) -> AppModel {
     return model
 }
 
+/// How the tiny engine answers a purge request.
+private enum PurgeBehavior {
+    case apply                // 200 with the purged thread
+    case refuse               // 409 thread_busy; nothing changes
+    case applyThenDropAnswer  // the engine purges, but its answer never arrives
+    case dropBeforeApply      // the request never reaches the engine
+}
+
 /// A tiny in-memory engine for the lifecycle routes and the thread list.
+/// `handle` returns nil when the connection drops instead of answering.
 private final class LifecycleServer: @unchecked Sendable {
     private let lock = NSLock()
     private var states: [String: String]
     private var calls: [String] = []
-    private let refusePurge: Bool
+    private let purge: PurgeBehavior
+    private var listDown = false
 
-    init(states: [String: String], refusePurge: Bool = false) {
+    init(states: [String: String], purge: PurgeBehavior = .apply) {
         self.states = states
-        self.refusePurge = refusePurge
+        self.purge = purge
     }
 
     var recorded: [String] { lock.withLock { calls } }
     var posts: [String] { recorded.filter { $0.hasPrefix("POST ") } }
+    /// While true, `GET /v2/threads` drops the connection.
+    var listUnreachable: Bool {
+        get { lock.withLock { listDown } }
+        set { lock.withLock { listDown = newValue } }
+    }
 
-    func handle(_ request: URLRequest) -> (HTTPURLResponse, Data) {
+    /// Another client (or the engine itself) changes a thread's state.
+    func setState(_ id: String, _ state: String) { lock.withLock { states[id] = state } }
+
+    func handle(_ request: URLRequest) -> (HTTPURLResponse, Data)? {
         lock.withLock {
             let path = request.url?.path ?? ""
             let method = request.httpMethod ?? "GET"
             calls.append("\(method) \(path)")
             if method == "GET", path == "/v2/threads" {
+                if listDown { return nil }
                 let rows = states.keys.sorted()
                     .filter { states[$0] != "purged" }
                     .map { lifecycleJSON(id: $0, state: states[$0] ?? "active") }
@@ -234,9 +309,16 @@ private final class LifecycleServer: @unchecked Sendable {
             switch parts[3] {
             case "trash": states[id] = "trashed"
             case "restore": states[id] = "active"
-            case "purge" where refusePurge:
-                return reply(request, 409, #"{"code":"thread_busy","message":"thread \#(id) has an active turn (running)","retryable":false}"#)
-            case "purge": states[id] = "purged"
+            case "purge":
+                switch purge {
+                case .refuse:
+                    return reply(request, 409, #"{"code":"thread_busy","message":"thread \#(id) has an active turn (running)","retryable":false}"#)
+                case .dropBeforeApply: return nil
+                case .applyThenDropAnswer:
+                    states[id] = "purged"
+                    return nil
+                case .apply: states[id] = "purged"
+                }
             default: return reply(request, 404, #"{"error":"not found"}"#)
             }
             return reply(request, 200, lifecycleJSON(id: id, state: states[id] ?? "active"))
@@ -254,7 +336,7 @@ private final class LifecycleServer: @unchecked Sendable {
 }
 
 private final class LifecycleStubURLProtocol: URLProtocol {
-    nonisolated(unsafe) static var handler: ((URLRequest) -> (HTTPURLResponse, Data))?
+    nonisolated(unsafe) static var handler: ((URLRequest) -> (HTTPURLResponse, Data)?)?
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -264,7 +346,11 @@ private final class LifecycleStubURLProtocol: URLProtocol {
             client?.urlProtocol(self, didFailWithError: URLError(.cannotConnectToHost))
             return
         }
-        let (response, data) = handler(request)
+        guard let answer = handler(request) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.networkConnectionLost))
+            return
+        }
+        let (response, data) = answer
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: data)
         client?.urlProtocolDidFinishLoading(self)
