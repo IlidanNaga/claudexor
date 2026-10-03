@@ -408,7 +408,102 @@
             }
           },
           "additionalProperties": false,
-          "description": "Generation options only, not a caller's context/output reserve; unsupported explicit options refuse before inference."
+          "description": "Generation options only, not a caller's context/output reserve; reasoningEffort is an adaptive preference, while unsupported other explicit options refuse before inference."
+        },
+        "effortResolution": {
+          "type": "object",
+          "properties": {
+            "requested": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/tool_calls/items/properties/function/properties/name"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Original effort preference before adaptation; null when none was requested."
+            },
+            "submitted": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/tool_calls/items/properties/function/properties/name"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Native option prepared for transport; null means omitted, never the explicit token none. Not proof of dispatch."
+            },
+            "resolution": {
+              "type": "string",
+              "enum": [
+                "exact",
+                "downward",
+                "floor",
+                "omitted",
+                "unverifiable",
+                "rejected"
+              ]
+            },
+            "source": {
+              "type": "string",
+              "enum": [
+                "account_catalog",
+                "live_probe",
+                "versioned_snapshot",
+                "adapter"
+              ]
+            },
+            "parameter": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/tool_calls/items/properties/function/properties/name"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Native carrier, such as reasoning.effort, model_reasoning_effort or --effort; null when no separate knob is carried."
+            },
+            "observed": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/tool_calls/items/properties/function/properties/name"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Provider-reported effort only; null when unobserved, never copied from submission."
+            },
+            "observedSource": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/tool_calls/items/properties/function/properties/name"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Provider event/field that reported observed effort; null when unobserved."
+            },
+            "reason": {
+              "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/tool_calls/items/properties/function/properties/name",
+              "description": "Diagnostic explanation; consumers branch on resolution, never prose."
+            }
+          },
+          "required": [
+            "requested",
+            "submitted",
+            "resolution",
+            "source",
+            "parameter",
+            "observed",
+            "observedSource"
+          ],
+          "additionalProperties": false,
+          "description": "Prepared and observed effort evidence; model operations retain it only when creation requests captureEffortEvidence=true. Legacy results omit it before immutable publication."
         },
         "processing": {
           "type": "object",

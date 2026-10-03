@@ -10,6 +10,11 @@ export class ClaudexorError extends Error {
 }
 
 export class HarnessUnavailableError extends ClaudexorError {}
+/** A final-route effort preference cannot be placed; changing routes cannot repair it. */
+export class EffortPreferenceRejectedError extends ClaudexorError {
+  readonly code = "effort_preference_rejected";
+  readonly retryable = false;
+}
 export class ContextOverflowError extends ClaudexorError {}
 export class WorkspaceError extends ClaudexorError {}
 

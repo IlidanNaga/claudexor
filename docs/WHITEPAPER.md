@@ -114,7 +114,11 @@ ordinary row at startup (its credential bytes never move; the vendor's
 ordinary host stores are never read or mutated). An unpinned run routes
 through the quota-aware pool of enabled ready rows, an unpinned conversation
 stays sticky on its account and switches only with a disclosed lane change,
-and an explicit pin is strict — that account or a typed refusal.
+and an explicit pin is strict — that account or a typed refusal. A Cursor
+probe timeout may use that store's bounded previous positive for unpinned
+selection, disclosed as stale unknown; it never becomes a fresh authentication
+claim or relaxes an explicit pin. Managed login invalidates the affected
+observations through the existing setup lifecycle.
 Catalog visibility and execution eligibility are different facts. Discovery can
 show the separate inventories of enabled accounts, including unavailable ones,
 without implying that their combined capabilities belong to any single route.

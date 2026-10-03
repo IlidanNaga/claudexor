@@ -1,3 +1,4 @@
+import { EffortResolution } from "./effort.js";
 import { z } from "zod/v3";
 import { CostEvidence } from "./budget.js";
 import { CostKnowledge } from "./auth.js";
@@ -111,7 +112,7 @@ export const ModelCallOptions = z
   })
   .strict()
   .describe(
-    "Generation options only, not a caller's context/output reserve; unsupported explicit options refuse before inference.",
+    "Generation options only, not a caller's context/output reserve; reasoningEffort is an adaptive preference, while unsupported other explicit options refuse before inference.",
   );
 export type ModelCallOptions = z.infer<typeof ModelCallOptions>;
 
@@ -195,6 +196,9 @@ export const ModelCallResult = z
     usage: ModelUsage,
     cost: ModelCostEvidence,
     appliedOptions: ModelCallOptions,
+    effortResolution: EffortResolution.optional().describe(
+      "Prepared and observed effort evidence; model operations retain it only when creation requests captureEffortEvidence=true. Legacy results omit it before immutable publication.",
+    ),
     processing: ProcessingReceipt.optional(),
     problem: ControlProblem.nullable(),
     failureEvidence: ModelFailureEvidence.optional(),
@@ -220,6 +224,18 @@ export const ModelCatalogEntry = z
     maxOutputTokens: z.number().int().positive().nullable(),
     inputModalities: z.array(z.string()),
     reasoningEfforts: z.array(z.string()),
+    reasoningEffortPreferenceOrder: z
+      .array(NonBlankString)
+      .optional()
+      .describe(
+        "Internal vendor order for preference adaptation when it includes choices the raw transport cannot submit. Not accepted values; projected out of both public catalog views.",
+      ),
+    reasoningEffortsVerified: z
+      .boolean()
+      .optional()
+      .describe(
+        "Whether the provider supplied a fully parsed effort array, including a known empty array. Missing on historical catalogs means unverified.",
+      ),
     defaultReasoningEffort: z.string().nullable(),
     supportedOptions: z.array(z.string()),
     processing: ProcessingCapability.optional(),
@@ -276,6 +292,22 @@ export const ControlModelCatalogResponse = z
     provenance: NonBlankString.describe(
       "provider_http means the catalog body was read and validated from a successful upstream HTTP response at observedAt. Other values do not certify provider contact.",
     ),
+    /** The backend filters this catalog by the client version the transport
+     * declared; a model above that version's floor is absent here even when
+     * the same account can generate with it. Null only for catalogs handed
+     * over by an older engine. */
+    clientVersion: NonBlankString.nullable()
+      .default(null)
+      .describe(
+        "Client version the transport declared when it read this catalog; the backend lists only models whose minimum client version is at or below it. Null for catalogs from an older engine.",
+      ),
+    clientVersionSource: z
+      .enum(["verified_transport", "installed_cli"])
+      .nullable()
+      .default(null)
+      .describe(
+        "Where the declared client version came from: verified_transport (the version this Claudexor release verified its HTTP transport against) or installed_cli (a newer installed Codex CLI raised it). Null for catalogs from an older engine.",
+      ),
     models: z.array(ModelCatalogEntry),
   })
   .strict()
@@ -322,7 +354,9 @@ export const ModelDispatch = z
     route: ModelRoute.nullable(),
   })
   .strict()
-  .describe("Started means the physical send may have begun, not proof the upstream accepted it.");
+  .describe(
+    "Started means the physical send may have begun, not proof the upstream accepted it. A terminal not_started may refine that attempted send only with typed proof no complete inference request was delivered; startedAt and route retain the attempt.",
+  );
 export type ModelDispatch = z.infer<typeof ModelDispatch>;
 
 export const ModelResponseCustody = z
@@ -353,6 +387,7 @@ export const ModelOperationParams = z
     kind: z.literal("model"),
     request: ModelPayloadRef,
     captureFailureEvidence: z.literal(true).optional(),
+    captureEffortEvidence: z.literal(true).optional(),
   })
   .strict();
 export type ModelOperationParams = z.infer<typeof ModelOperationParams>;

@@ -67,18 +67,25 @@ export function makeSandbox(): Sandbox {
   // install. The stub only answers liveness probes; the manifest
   // known_models stay the truth source, and no canary run ever executes it
   // (fake harnesses / typed refusals).
-  const codexStub = join(base, "codex-stub");
-  writeFileSync(
-    codexStub,
-    '#!/bin/sh\ncase "$1" in\n  --version) echo "codex-cli 0.0.0-stub" ;;\n  *) exit 1 ;;\nesac\n',
-  );
-  chmodSync(codexStub, 0o755);
+  const codexStub = versionOnlyStub(base, "codex-stub", "codex-cli 0.0.0-stub");
+  // Same discipline for claude and agy: the claude adapter now has a live
+  // `models()` probe (the prompt-free initialize handshake), so an unstubbed
+  // sandbox would spawn a DEVELOPER's real `claude` from a story. Against a
+  // `--version`-only stub that probe fails and answers the frozen hint rows —
+  // the intended hermetic path, identical on a dev box and a CI runner. agy's
+  // manifest hint list is the AUTHORITATIVE truth source the
+  // settings-write-strict canary needs (codex and claude declare absence
+  // advisory, so they can no longer refuse an unlisted model).
+  const claudeStub = versionOnlyStub(base, "claude-stub", "0.0.0-stub (Claude Code)");
+  const agyStub = versionOnlyStub(base, "agy-stub", "agy 0.0.0-stub");
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     HOME: home,
     CLAUDEXOR_CONFIG_DIR: configDir,
     CLAUDEXOR_DISABLE_STORED_SECRETS: "1",
     CLAUDEXOR_CODEX_BIN: codexStub,
+    CLAUDEXOR_CLAUDE_BIN: claudeStub,
+    CLAUDEXOR_AGY_BIN: agyStub,
     // Keep daemon state inside the sandbox too (config dir owns it).
   };
   return {
@@ -119,6 +126,17 @@ export function makeSandbox(): Sandbox {
       }
     },
   };
+}
+
+/** A vendor CLI stub that answers ONLY `--version`; every other argv exits 1. */
+function versionOnlyStub(base: string, name: string, version: string): string {
+  const stub = join(base, name);
+  writeFileSync(
+    stub,
+    `#!/bin/sh\ncase "$1" in\n  --version) echo "${version}" ;;\n  *) exit 1 ;;\nesac\n`,
+  );
+  chmodSync(stub, 0o755);
+  return stub;
 }
 
 export interface CliResult {

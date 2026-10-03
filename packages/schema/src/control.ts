@@ -73,7 +73,7 @@ export const ControlRunStartRequest = z
       .string()
       .optional()
       .describe(
-        "System-level instructions layered onto every task-producing lane; delivered natively (append-system-prompt / developer_instructions) or as a delimited prompt prefix.",
+        "System-level instructions layered onto every task-producing lane; delivered natively (append-system-prompt-file / developer_instructions) or as a delimited prompt prefix.",
       ),
     /** Immutable daemon resource ids; upload/finalize happens before enqueue. */
     attachments: z
@@ -1532,6 +1532,7 @@ export const ControlSettingsSnapshot = z
       )
       .default({})
       .describe("Per-harness settings keyed by harness id."),
+    notes: z.array(z.string()).default([]).describe("Admission notes of this write (INV-104)."),
   })
   .describe("Effective settings snapshot served by GET /settings.");
 export type ControlSettingsSnapshot = z.infer<typeof ControlSettingsSnapshot>;

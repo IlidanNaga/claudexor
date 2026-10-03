@@ -155,7 +155,7 @@ export function currentSubjectProber(args: {
 }
 
 /**
- * Fresh profile readiness for one rotation decision epoch (hoisted from the
+ * Unpinned profile readiness for one rotation decision epoch (hoisted from the
  * orchestrator so the composition lives beside the probe it siblings).
  * Accounts uses the same probe wrapper + vendor overlay + admission predicate
  * when projecting next_up. A LIVE `credential_unusable` observation refuses a
@@ -195,7 +195,9 @@ export async function readyProfilesForRotation(args: {
     entries
       .filter(
         ({ profile, status }) =>
-          profileStatusAdmits(profile, status) &&
+          // Pool and rotation choices are unpinned by construction (a pin
+          // never rotates): a last positive after a timeout may admit (#363).
+          profileStatusAdmits(profile, status, { unpinned: true }) &&
           liveUnusableFor(args.unusable ?? [], args.harnessId, profile.profile_id, args.model) ===
             null,
       )

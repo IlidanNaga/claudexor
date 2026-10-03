@@ -7882,9 +7882,8 @@ describe("Orchestrator", () => {
 
   it("discloses a requested effort on a harness with no declared ladder via ignored_settings (INV-105)", async () => {
     const repo = await initRepo();
-    // realLikeAdapter declares NO effort_levels — a configured per-harness
-    // effort must be DISCLOSED as ignored on harness.started, never silently
-    // dropped (and never forwarded to a CLI that has no such flag).
+    // A carrier-less adapter must disclose omission and retain the preference
+    // in final typed telemetry, without injecting assistant conversation text.
     const registry = new Map<string, HarnessAdapter>([
       ["codex", realLikeAdapter("codex", "openai")],
     ]);
@@ -7904,7 +7903,18 @@ describe("Orchestrator", () => {
       const events = readFileSync(join(res.runDir, "events.jsonl"), "utf8");
       expect(events).toContain("ignored_settings");
       expect(events).toContain("effort=high");
-      expect(events).toContain("effort_levels is empty");
+      const telemetry = new ArtifactStore(repo).readYaml<{
+        attempts: Array<{ effort_resolution: unknown }>;
+      }>(join(res.runDir, "final", "telemetry.yaml"));
+      expect(telemetry?.attempts[0]?.effort_resolution).toEqual({
+        requested: "high",
+        submitted: null,
+        resolution: "omitted",
+        source: "adapter",
+        parameter: null,
+        observed: null,
+        observedSource: null,
+      });
     } finally {
       if (prev === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
       else process.env.CLAUDEXOR_CONFIG_DIR = prev;

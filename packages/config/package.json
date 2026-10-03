@@ -1,6 +1,6 @@
 {
   "name": "@claudexor/config",
-  "version": "3.13.0",
+  "version": "3.19.0",
   "license": "MIT",
   "description": "Layered config loader (precedence + trust). Sensitive settings never from versioned repo config.",
   "type": "module",
@@ -22,8 +22,8 @@
   "dependencies": {
     "@claudexor/schema": "workspace:*",
     "@claudexor/util": "workspace:*",
-    "yaml": "^2.6.1",
-    "zod": "^4.4.3"
+    "yaml": "^2.9.1",
+    "zod": "^4.6.5"
   },
   "repository": {
     "type": "git",

@@ -1,10 +1,16 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { ControlTimelineEvent, type HarnessEvent } from "@claudexor/schema";
+import { countsAsAgentProgress } from "../../core/src/inactivity.js";
 import { createClaudeParser } from "../../harness-claude/src/parse.js";
 import { parseCodexEvent } from "../../harness-codex/src/parse.js";
+import { codexAppServerEvents } from "../../harness-codex/src/app-server-protocol.js";
 import { createCursorParser } from "../../harness-cursor/src/parse.js";
 import { harnessEventPayload } from "../../orchestrator/src/runSupport.js";
+import {
+  createAttemptTelemetry,
+  observeAttemptTelemetry,
+} from "../../orchestrator/src/attemptTelemetry.js";
 import { timelineEvents } from "./run-timeline.js";
 
 function runEvents(harnessId: string, events: HarnessEvent[]): Record<string, unknown>[] {
@@ -16,6 +22,52 @@ function runEvents(harnessId: string, events: HarnessEvent[]): Record<string, un
 }
 
 describe("timeline text metadata across native parser and event-log projection", () => {
+  it("keeps Codex retry text and native evidence without triggering outer retry policy", () => {
+    const notifications = readFileSync(
+      new URL(
+        "../../harness-codex/fixtures/app-server/retry-status-0.156.1.jsonl",
+        import.meta.url,
+      ),
+      "utf8",
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const notification = notifications[1];
+    const token = `sk-ant-${"a".repeat(40)}`;
+    notification.params.error.message += ` ${token}`;
+    notification.params.error.additionalDetails += ` ${token}`;
+    const events = codexAppServerEvents(notification, "retry-session", {})!;
+    expect(events).toHaveLength(1);
+    const telemetry = createAttemptTelemetry("auto", false);
+    observeAttemptTelemetry(telemetry, events[0]!);
+    expect(telemetry.transientFailures).toEqual([]);
+    expect(telemetry.rateLimits).toEqual([]);
+    expect(countsAsAgentProgress(events[0]!)).toBe(false);
+
+    const projected = runEvents("codex", events);
+    const payload = projected[0]!["payload"] as Record<string, unknown>;
+    expect(payload["status"]).toEqual({ kind: "api_retry" });
+    expect(payload["payload"]).toMatchObject({
+      willRetry: true,
+      threadId: "thread-retry-fixture",
+      turnId: "turn-retry-fixture",
+      error: { codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 403 } } },
+    });
+    expect(JSON.stringify(projected)).not.toContain(token);
+    expect(JSON.stringify(payload["payload"])).toContain("[redacted]");
+    const rows = timelineEvents({}, projected);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      title: "Reconnecting... 1/5 [redacted]",
+      detail: "Reconnecting... 1/5 [redacted]",
+      severity: "info",
+      textKind: null,
+      textDelta: false,
+      errorSummary: null,
+    });
+  });
+
   it("projects Cursor fragments, tool boundaries, and complete messages distinctly", () => {
     const parse = createCursorParser();
     const native = readFileSync(

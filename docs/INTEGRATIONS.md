@@ -43,6 +43,24 @@ A confirmed processing refusal may authorize a separate caller-owned Standard
 request/reservation; it does not erase the first operation's physical dispatch
 or permit retrying an unknown outcome.
 
+Effort preferences resolve in the engine at the final model/account/harness.
+Embedding callers preserve the original request and consume the typed
+receipt; they do not duplicate adaptation or parse disclosure text. The
+[effort contract](ARCHITECTURE.md#4-routing) specifies existing result/artifact
+locations, omission versus explicit `none`, and independent provider observation.
+Raw model clients discover `captureEffortEvidence` on the model-operation POST
+descriptor and freeze that query choice for each operation; omission retains the
+legacy strict result shape. GET and ACK always use the exact stored bytes.
+The shared fixture is `packages/schema/fixtures/effort-resolution.json`.
+
+Codex raw-model catalogs list inference efforts rather than native agent modes.
+An existing `ultra` preference resolves within the vendor's ordered choices to
+the strongest supported ordinary generation effort (currently Astra `max`).
+The effort receipt preserves `requested: ultra`, the prepared value and independent
+provider observation; it discloses that raw calls do not execute native automatic
+delegation. Native Codex sessions retain their full Ultra mode. Catalog object
+shapes and the opt-in result contract are unchanged.
+
 ## Embedded Engine Runtime
 
 An embedding host reuses `claudexor-runtime-<version>.tar.gz`, the same closure
@@ -52,12 +70,18 @@ and deliberately excludes Node while including top-level
 build SHA, SHA-256, size, protocol major, separate daemon/CLI entrypoints, and
 tested full Node toolchain; after extraction it requires
 `node claudexord.bundle.cjs --probe` to report the same version/build identity.
-On POSIX, a host invoking
+A host invoking
 `node claudexor.bundle.cjs harness install <harness> --target local --yes --json`
-must provide `<node-root>/bin/node` plus the exact adjacent
-`<node-root>/lib/node_modules/npm/bin/npm-cli.js`; no system/PATH npm is used.
-Local Windows installation is a typed unsupported-platform outcome in this
-release. The existing signed runtime manifest remains the
+must provide the toolchain's own npm entrypoint next to the Node it runs the
+CLI on: `<node-root>/bin/node` plus `<node-root>/lib/node_modules/npm/bin/npm-cli.js`
+on POSIX, `<node-dir>\node.exe` plus `<node-dir>\node_modules\npm\bin\npm-cli.js`
+(the official zip layout) on Windows; no system/PATH npm is used. On Windows
+the local target is supported for Codex only: npm's `.cmd` shim is never the
+launcher, the receipt's `installedBinary` is the package-native
+`codex.exe` under `~/.claudexor/node/node_modules/@openai/codex/node_modules/@openai/codex-win32-<arch>/vendor/<triple>/bin`,
+and the host's `HOME` (or the user profile when unset) anchors that root exactly
+as the engine's own harness PATH does. Every other vendor is a typed
+`unsupported_platform` refusal before any side effect. The existing signed runtime manifest remains the
 publication authority, so an embedder does not create a second artifact or
 trust root.
 
@@ -76,7 +100,8 @@ JSON object. Every executed result carries `ok: boolean`, `dryRun: false`,
 `exitCode: number`, `target: "local" | "remote"`, `harness: string`,
 `command: string`, `installLocation: string`, `pinnedVersion: string | null`, and
 `verification: string`. Every successful `--target local` result additionally carries
-`installedBinary` (an absolute launcher path) and `installedVersion` (the exact
+`installedBinary` (an absolute launcher path; on Windows the package-native
+image) and `installedVersion` (the exact
 npm pin, or Cursor's bounded non-empty version line). On the local target,
 child exit zero is not sufficient: if that launcher/version proof fails, the
 result is `ok: false`, `code: "install_verification_failed"`. A remote success
@@ -325,7 +350,10 @@ typed 409. Cancel is asynchronous and
 resolves only after termination is proved; duplicate create returns the same
 active login instead of launching a second runner.
 `POST /v2/setup/jobs/:id/reconcile` is the sole replacement-fence recovery
-path. The execution mechanics behind these jobs — the bundled runner, the
+path. Full CLI `claudexor setup cancel <jobId>` and `claudexor setup reconcile
+<jobId>` are thin clients over the corresponding routes, with optional `--json`.
+Their success reports the operation's job state, not a completed authentication.
+`setup attach` remains interactive. The execution mechanics behind these jobs — the bundled runner, the
 journal authority, process-identity fences, and the same-harness capability
 smoke — are engine internals owned by `docs/ARCHITECTURE.md` (native login
 and setup jobs); API-key fallback goes through `/secrets` as a separate
@@ -389,6 +417,30 @@ wait. Pending and resolved interaction projections are
 fsynced in the run's journal partition; daemon restart terminalizes unresolved
 questions instead of presenting a stale prompt as live.
 
+Live messages into a RUNNING attempt are the separate `POST /v2/runs/:id/messages`
+verb (protocol major stays 3; clients discover the route by its row in
+`GET /v2/operations`). Send `{text, expectedAttemptId?}` with an
+`Idempotency-Key` that is the message id. Every typed outcome answers HTTP 200:
+`delivered` (a correlated native consumption event was observed), `accepted`
+(the harness's acceptance boundary was observed, consumption unproved),
+`rejected`, `not_active`, `unsupported`, `delivery_unknown`, each with a typed
+`reason`; only `delivered` and `accepted` set `accepted:true`. A replay under
+the same key returns the stored receipt instead of delivering twice, so reuse a
+key ONLY after `delivery_unknown` and mint a new one for a new message. Read
+the harness's declared channel from the `liveInput` field of its
+`GET /v2/agent-capabilities` row (`mid_turn` | `next_tool_boundary` | `none`; an
+engine older than 3.16.0 omits both the field and the route): Codex declares
+`mid_turn` (app-server `turn/steer` into the active turn); Claude Code declares
+`next_tool_boundary` (the message is queued on the live stream-json stdin and
+picked up right after the current tool batch, or as the next native turn of
+the same run when it arrives during the final text; recorded on Claude Code
+2.1.283); Cursor, Antigravity, OpenCode and raw-api declare `none` and answer
+`unsupported` without any native write. The message is admitted journal-first
+(`message.accepted`) and closed with `message.delivered` or `message.refused`
+on the run's event stream and timeline, where the text shows as the row detail;
+a consumption echo that arrives after an `accepted` receipt surfaces there as
+the adapter's status event with code live_input_delivered carrying the `message_id`.
+
 A thread turn whose run is refused before it starts (trust gate, preflight)
 carries a persisted sanitized problem in its projection (`enqueueError`):
 message, code, retryability, bounded required actions, and bounded structured
@@ -433,6 +485,7 @@ completion; follow the handle with the status/result tools before claiming an
 answer, finished work, or applyability.
 The implemented tools include `claudexor_ask` (with `deepScan`), `claudexor_run`,
 `claudexor_best_of`, `claudexor_plan`, `claudexor_create`,
+`claudexor_thread_create`, `claudexor_thread_turn`, `claudexor_thread_read`,
 `claudexor_status`, `claudexor_capabilities`
 (the derived AgentCapabilityCatalog: per-harness live capabilities, modes,
 the mutability matrix, run-control keys), and the read-only recovery tools
@@ -446,8 +499,26 @@ honors per-vendor rate-limit cooldowns),
 `claudexor_apply_check`, and
 `claudexor_journal_recovery`. The destructive
 `claudexor_quarantine_journal` requires an exact partition fingerprint and
-explicit `quarantine_and_start_fresh` confirmation. MCP does not claim live
-thread parity.
+explicit `quarantine_and_start_fresh` confirmation. One-shot runs and thread
+turns accept `credentialProfileId` (CLI `--profile`) as a strict account pin.
+Create a thread once, enqueue follow-ups with `claudexor_thread_turn`, then
+follow each returned `runId` with the ordinary status/result tools. If a turn
+returns only a queued `jobId`, use `claudexor_runs` to recover its `runId`
+after binding.
+Creation starts no model. The default `workspace: in_place` lets write turns edit
+the project directory directly. Choose `workspace: isolated` for a persistent
+thread worktree created on the first write turn, then use thread Apply to merge
+its changes into the project. The create result discloses the daemon's current
+`workspaceMode` and anchored `repoRoot`, including where write turns change files.
+Thread create/turn accept an optional caller-owned `idempotencyKey`. An omitted
+key is generated per invocation; retry an unknown outcome with the same key
+and body, and use a new key for a deliberately new turn. Changed content under
+the same key conflicts. `claudexor_thread_turn` declares the durable
+`McpThreadTurnResult` handle as its outputSchema. `claudexor_thread_read`
+returns daemon-owned thread, turn and session records without starting work or
+a daemon; with no daemon running it fails with retryable `daemon_unavailable`.
+Final output remains on the run result surface. Thread tools do not add a
+separate budget or lifecycle.
 
 Tools declare MCP behavior annotations (readOnlyHint for every non-agent
 route — ask/plan are read-only) and, for run tools and
@@ -544,10 +615,11 @@ modes) run `node scripts/cursor-itest.mjs`; the real-harness battery covers
 (phases 10-12, filterable via `CLAUDEXOR_BATTERY_PHASES=10,11,12`). Use `claudexor doctor` for Codex/Claude/Cursor/
 OpenCode harness availability and smoke status.
 
-### Portable Agent Skill and Copilot plugin
+### Portable Agent Skill and host packages
 
-`plugins/copilot` is the portable GitHub Copilot distribution. It contains one
-canonical `skills/claudexor/SKILL.md` and a `.mcp.json` descriptor that invokes
+`plugins/copilot` owns the canonical portable `skills/claudexor/SKILL.md` and
+`.mcp.json` descriptor. `plugins/cursor` and `plugins/claude` contain generated
+copies of those same assets in their host-native layouts. Each invokes
 the preinstalled `claudexor mcp serve` command. It intentionally carries no
 absolute runtime path, frozen config root, plugin-version environment marker,
 credential, hook, command alias, or host-local business logic.
@@ -575,10 +647,35 @@ acceptance and overrides remain human decisions.
 The public MCP Registry descriptor is `server.json`. It points to the executable
 `claudexor` npm package and supplies fixed `mcp serve` package arguments for the
 embedded local stdio server. `mcpName` in that package, the Registry name, the
-package version, and the portable plugin version are release-parity checked.
+package version, and all portable plugin versions are release-parity checked.
 Registry publication runs only through the separate manual tag-bound
 `publish-mcp.yml` GitHub OIDC workflow after the npm package and public stable
 GitHub Release exist; it is idempotent and confirms the exact registry record.
+
+The repository-owned `.cursor-plugin/marketplace.json` and
+`.claude-plugin/marketplace.json` index the corresponding portable packages.
+For Claude Code, distribution is directly from this GitHub repository:
+
+```bash
+claude plugin marketplace add razzant/claudexor
+claude plugin install claudexor@claudexor
+```
+
+Cursor can load `plugins/cursor` as a local plugin; its repository marketplace
+index also describes that same package. These files do not imply a listing in
+either vendor's hosted catalog. Enable only one Claudexor integration per host
+to avoid duplicate MCP servers and Skills. The portable Claude package has no
+status-line collector and does not replace the managed installer described above.
+
+Before enabling either package, the host must see the preinstalled `claudexor`
+command on PATH and the intended existing daemon/account configuration. For an
+operator-selected non-default root, launch the host with that installation's
+`CLAUDEXOR_CONFIG_DIR`; portable manifests neither set nor discover it. They do
+not change daemon ownership, install a runtime, or initiate authentication.
+Manifest/asset checks do not certify installation, tool discovery, or a real
+agent turn in the host. Those acceptance checks remain explicitly unrun in the
+feature ledger. `pnpm gen:version` refreshes portable asset copies and versions;
+the source Skill and MCP descriptor remain under `plugins/copilot`.
 
 Harness readiness is route/context-specific. `auth_sources` / `authSources`
 separates credential availability (`available | unavailable | unknown`) from
@@ -644,10 +741,12 @@ Terminal window.
 `session/new` creates a daemon thread (default `in_place`) and returns that
 thread id. `session/list`, `session/load`, `session/resume`, `session/close`,
 `session/prompt`, and `session/cancel` all resolve through the same `/v2`
-authority; no second in-memory session catalog exists. Images and embedded
-resources are uploaded/finalized into immutable daemon resource IDs before the
-turn enqueues. Blocked/failed daemon outcomes return ACP `refusal` plus typed
-`_meta.claudexor` run/status/apply evidence rather than a false `end_turn`.
+authority; no second in-memory session catalog exists. A prompt may pin its
+turn to one account with `_meta.claudexor.credentialProfileId`, the same strict
+pin MCP run tools accept. Images and embedded resources are uploaded/finalized
+into immutable daemon resource IDs before the turn enqueues. Blocked/failed
+daemon outcomes return ACP `refusal` plus typed `_meta.claudexor`
+run/status/apply evidence rather than a false `end_turn`.
 Terminal turns also carry the exact validated RunFacts receipt at
 `_meta.claudexor.runFacts` (`null` for active runs and legacy runs without a
 receipt). A missing/404 or transport-unavailable detail keeps the receipt
@@ -723,9 +822,15 @@ code (zero importers). External adapter authors currently integrate in-tree by
 implementing the `HarnessAdapter` contract from `@claudexor/core` (discovery,
 doctor/capability reporting, run, review, cancel). Native capabilities may
 expose richer surfaces, such as Codex app-server JSON-RPC or Claude stream-json
-stdin, but do not assume resume, estimate, live steering, or structured output
-support unless the capability profile and adapter doctor output prove it for
-the active run.
+stdin, but do not assume resume, estimate, or structured output support unless
+the capability profile and adapter doctor output prove it for the active run.
+Live input is declared, not probed: an adapter that can truthfully place a
+message into a running session declares `capability_profile.live_input`
+(`mid_turn` or `next_tool_boundary`) and implements
+`message(sessionId, {messageId, text})` beside `cancel`; every other adapter
+keeps the default `none`, and the daemon answers `unsupported` for it without a
+native write. The ACP server's `session/prompt` on an active session is refused
+and does not steer that session.
 
 The Antigravity adapter is the one closed-source vendor CLI in tree: `agy`
 ships as a signed Go binary with no npm artifact and no source repository, so
@@ -781,8 +886,9 @@ re-record the `recorded-*` fixture and re-verify the expectations; the
 fixture-freshness gate discloses drift.
 
 **Claude Code** — wire: `claude -p … --output-format stream-json --verbose`
-(one-shot prompt as argv; interactive runs add `--input-format stream-json`
-and deliver the prompt plus an `initialize` control handshake on stdin).
+(one-shot prompt uses `--input-format text` and stdin; interactive runs keep
+`stream-json` stdin with their `initialize` handshake). System additions use
+`--append-system-prompt-file`, preserving their role without argv payloads.
 Events: `system/init` → `started` (carries `native_session_id` for
 `--resume`); `system/api_retry` → typed `status` (kind `api_retry`, typed
 `rate_limit`/`transient` enrichment); `assistant` content blocks → `message` /
@@ -800,38 +906,53 @@ block/lifecycle frames never do — the complete message always follows.
 Plumbing: other `system` subtypes and `control_response`/`control_cancel_request`
 frames are recognized and consumed, never timeline events.
 
-**Codex** — wire: `codex exec --json … [-i <img>… --] -` with the one-shot
-prompt on stdin (resume: `codex exec resume <id> --json … -`; sandbox rides
-`-c sandbox_mode` on resume).
-Events: `thread.started` → `started` (thread id = `native_session_id`);
-`turn.started` → `started` (a lifecycle boundary — deliberately NOT
-`thinking`: mapping it there once planted junk blocks at the top of every
-transcript); `item.*` for `reasoning` → `thinking`, `command_execution`/
-`mcp_tool_call`/`web_search` → `tool_call`+`tool_result` (exit-code aware),
-`file_change` → `file_change`, `agent_message` → `message`, `todo_list` →
-plan progress; `turn.completed` → `usage` + the FINAL `message`. Finality:
-codex has NO typed final marker on the wire — the adapter tracks the turn's
-last `agent_message` and finalizes it (`final: true`,
-`payload.final_source: "last_agent_message"`) on `turn.completed`; a failed
-turn never finalizes its partial message and a new turn clears stale state.
-Consumers MUST thread `CodexParseState` through the parser or finality never
-exists. Deltas: none (no partial-output flag is wired). Rate limits surface
-as `error`/`turn.failed` with typed `rate_limit` (`resets_at`) and
-`transient` enrichment — there is no separate status event.
-Post-terminal side channel: the `--json` stream reduces a failed turn to a
-sentence, while codex's own session rollout keeps the typed record
+**Codex** — wire: one `codex app-server --stdio` JSON-RPC child per Claudexor
+run. Fresh lanes use `thread/start`; later lane turns use `thread/resume`; input,
+verified local images and output schema ride `turn/start`. `turn/started`
+provides the exact active turn id. `item/*` maps `reasoning` → `thinking`,
+`commandExecution`/`mcpToolCall`/`webSearch` → `tool_call`+`tool_result`,
+`fileChange` → `file_change`, `agentMessage` → `message`; `turn/plan/updated`
+maps plan progress and `thread/tokenUsage/updated` maps usage.
+An `error` notification with `willRetry: true` maps to nonterminal `status`
+(`api_retry`), preserving the native message as text and native fields in the
+payload. The vendor owns that in-turn retry: no retry count, delay, category,
+`transient` or `rate_limit` signal is inferred. Other `error` notifications keep
+the existing terminal and dropped-event handling.
+
+Finality is quiescence-based: an individual `turn/completed` is intermediate
+while the native thread is active, its goal is active, or a background terminal
+belongs to a command item observed in this Claudexor run. The last assistant
+message becomes `final: true` only after the thread is idle, the goal is
+non-active and the owned terminal inventory is empty. A goal-driven next
+`turn/started` replaces the stored turn id without terminalizing the Claudexor
+run. Stop pauses the goal, interrupts that exact turn id, terminates only owned
+background process ids, verifies quiescence, and then reaps app-server; missing
+acknowledgement is typed `codex_control_loss`, never success. Deltas remain
+unwired. Consumers of the retained exec-event mapper still thread
+`CodexParseState` for message finality.
+
+Post-terminal side channel: codex's own session rollout keeps the typed record
 (`event_msg` / `task_complete` / `error.{message, codex_error_info}`). When the
-run loop disclosed that codex voiced its own error, the adapter reads that
+adapter disclosed that codex voiced its own error, it reads that
 record once after exit and attaches it to the terminal `completed` payload as
 `vendor_failure` (`source: "codex_rollout"`), verbatim and uninterpreted; a
 tagged-object variant yields its variant name. Skipped for an aborted run and
 under `evidence_policy: stream_only`. Pin: `fixtures/rollout/recorded-*.jsonl`
 (session-rollout records, not stream captures).
 
-**Cursor** — wire: `cursor-agent -p --output-format stream-json <sandbox
+**Cursor** — binary: `CLAUDEXOR_CURSOR_BIN`, else `cursor-agent` on the harness
+PATH, else Cursor's primary `agent` only when its realpath is the installer's
+`…/cursor-agent/versions/<v>/cursor-agent`; that `agent` is spawned by absolute
+path, resolved per call by discovery, doctor, status, models, the API-key
+smoke, runs and login, and never executed to identify it. This fallback covers
+Cursor's POSIX installer layout. On native Windows the shared resolver accepts
+executable images (`.exe`/`.com`) only; `.cmd`/`.ps1` launcher installations
+remain unavailable. This alias fallback does not add Windows `agent.exe`
+discovery or change explicit overrides and the existing `cursor-agent` route.
+Wire: `cursor-agent -p --output-format stream-json <sandbox
 args> [--stream-partial-output]` with the composed prompt on piped stdin (no
 positional prompt or native system-prompt flag — instructions ride a delimited
-prompt prefix; full access is refused pre-spawn). Events: `system/init` →
+prompt prefix; Full uses the native disabled-sandbox arguments). Events: `system/init` →
 `started` (session id under
 `chatId`/`chat_id`/`session_id`, version-tolerant); `assistant` →
 `message` — with `--stream-partial-output`, a frame with `timestamp_ms` and
@@ -856,8 +977,10 @@ fabricated ISO instant (the daemon's quota registry bounds the resulting
 cooldown at end-of-that-day UTC). Other transient conditions still surface as
 generic `error` events — honest degradation, never invented status.
 
-**Antigravity CLI (`agy`)** — wire: `agy -p "<prompt>" --output-format
-stream-json --model <slug> --mode <plan|accept-edits> --add-dir <cwd>`
+**Antigravity CLI (`agy`)** — wire: `agy --output-format stream-json
+--model <slug> --mode <plan|accept-edits> --add-dir <cwd>` with the composed
+prompt on piped stdin, without a print flag (agy 1.1.13 selects print mode
+from non-empty non-TTY stdin)
 (`--dangerously-skip-permissions` for full access; `--conversation <id>`
 resumes). Events: `init` → `started` (the vendor `conversation_id` is the
 resumable native session id); `step_update` with `step_type: "tool"` → a
@@ -916,7 +1039,7 @@ Known traps (class → CURRENT rule → pin):
   Pins: `stream-deltas.jsonl` + `delta_messages` expectations.
 - Rate limit read from prose: retry/limit conditions scraped from message
   text. Rule: adapters attach the typed `rate_limit`/`transient` fields (or a
-  typed `status` event for claude's `api_retry`); consumers never regex
+  typed `status` event for a harness-owned `api_retry`); consumers never regex
   prose. Pin: `session-resume-rate-limit.jsonl` + `typed_rate_limit`
   expectations.
 - Retry CLASS silently degrading to `unknown`: the signal survives but its

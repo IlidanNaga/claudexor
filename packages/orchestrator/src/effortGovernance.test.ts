@@ -66,30 +66,15 @@ describe("governRouteEffort", () => {
     expect(governRouteEffort("high", route)).toEqual({ effort: "high", ignored: null });
   });
 
-  it("discloses a level the merged ladder has never seen, naming the ladder", () => {
-    const governed = governRouteEffort("banana", route);
-    expect(governed.effort).toBeNull();
-    expect(governed.ignored).toContain("effort=banana");
-    expect(governed.ignored).toContain("codex");
-    expect(governed.ignored).toContain("low, medium, high, xhigh, max, ultra");
-  });
-
-  it("never clamps: refusal is pure ladder membership, with nothing left to rank against", () => {
-    // A ladder capped at xhigh does not know `ultra`, so the request is
-    // disclosed rather than silently landed on some "nearest" level — with the
-    // rank table gone there is no order here to invent one from.
-    const governed = governRouteEffort("ultra", {
-      id: "codex",
-      effortLevels: ["low", "medium", "high", "xhigh"],
+  it.each([
+    ["banana", ["low", "high"]],
+    ["ultra", ["low", "high"]],
+    ["high", []],
+  ] as const)("preserves %s despite default-account discovery gaps", (requested, effortLevels) => {
+    expect(governRouteEffort(requested, { id: "adapter", effortLevels })).toEqual({
+      effort: requested,
+      ignored: null,
     });
-    expect(governed.effort).toBeNull();
-    expect(governed.ignored).toContain("effort=ultra");
-  });
-
-  it("discloses when the harness has no effort surface at all", () => {
-    const governed = governRouteEffort("high", { id: "fake", effortLevels: [] });
-    expect(governed.effort).toBeNull();
-    expect(governed.ignored).toContain("capabilities.effort_levels is empty");
   });
 
   it("sends no flag and discloses nothing when nothing was requested", () => {

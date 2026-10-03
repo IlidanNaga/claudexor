@@ -1,6 +1,6 @@
 import type { CaptureResult } from "@claudexor/core";
 import type { AuthSourceReadiness, HarnessEvent } from "@claudexor/schema";
-import { labelStreams, runCapture } from "@claudexor/core";
+import { credentialMutationWindowOpen, labelStreams, runCapture } from "@claudexor/core";
 import { nowIso, redactSecrets } from "@claudexor/util";
 
 /**
@@ -102,7 +102,7 @@ export function claudeAuthSourceReadiness(input: {
 
 export function staleClaudeAuthStatusEvent(sessionId: string, ageMs?: number): HarnessEvent {
   return {
-    type: "message",
+    type: "status",
     session_id: sessionId,
     ts: nowIso(),
     text: `[auth] native auth-status probe stale; using last-known-good session${
@@ -232,6 +232,10 @@ async function probeUnshared(
   options: ClaudeAuthStatusCoordinatorOptions,
   key: string,
 ): Promise<ClaudeAuthStatusProbe> {
+  // #363: while a login may be rewriting the Claude store, a verdict is the
+  // vendor's live answer only: it neither seeds the LKG nor leans on it.
+  const fenced = credentialMutationWindowOpen("claude");
+  const settled = () => !fenced && !credentialMutationWindowOpen("claude");
   const deadline = Date.now() + CLAUDE_AUTH_STATUS_TOTAL_TIMEOUT_MS;
   let latest = await attempt(bin, options, Math.max(1, deadline - Date.now()));
   if (options.abortSignal?.aborted) return abortedProbe();
@@ -240,7 +244,7 @@ async function probeUnshared(
     // invalidate an older positive cache entry, so it cannot resurrect a
     // session that the vendor explicitly says is gone.
     if (!latest.result.authed) cache.delete(key);
-    else cache.set(key, { result: latest.result, checkedAt: Date.now() });
+    else if (settled()) cache.set(key, { result: latest.result, checkedAt: Date.now() });
     return latest.result;
   }
 
@@ -260,14 +264,14 @@ async function probeUnshared(
 
   if (latest.result !== undefined) {
     if (!latest.result.authed) cache.delete(key);
-    else cache.set(key, { result: latest.result, checkedAt: Date.now() });
+    else if (settled()) cache.set(key, { result: latest.result, checkedAt: Date.now() });
     return latest.result;
   }
 
   // Only a transport failure can use LKG.  A parseable vendor error is a real
   // negative signal and remains a probe error, preserving the tri-state caller
   // contract instead of hiding configuration corruption behind stale data.
-  if (latest.transportFailure && !options.abortSignal?.aborted) {
+  if (latest.transportFailure && !options.abortSignal?.aborted && settled()) {
     const prior = cache.get(key);
     if (prior !== undefined) {
       const staleAgeMs = Math.max(0, Date.now() - prior.checkedAt);

@@ -201,7 +201,7 @@ describe("reviewer effort gate", () => {
     ).rejects.toThrow(/harness declares no effort controls/);
   });
 
-  it("validates a MODEL-naming entry against THAT model's advertised ladder, not the union", async () => {
+  it("preserves a known preference for resolution against the final reviewer model", async () => {
     // The union carries `ultra` (a sibling model advertises it); the named
     // reviewer model stops at `high`. The gate must speak for the model that
     // will actually review.
@@ -217,9 +217,7 @@ describe("reviewer effort gate", () => {
       resolveExplicitReviewerPanel(deps([codexish()]), [
         { harness: "codexish", model: "m-small", effort: "ultra" },
       ]),
-    ).rejects.toThrow(
-      /does not support requested effort 'ultra'.*model 'm-small' advertises: low, medium, high/,
-    );
+    ).resolves.toMatchObject([{ requestedModel: "m-small", requestedEffort: "ultra" }]);
     // The SAME level on the model that advertises it passes.
     const specs = await resolveExplicitReviewerPanel(deps([codexish()]), [
       { harness: "codexish", model: "m-big", effort: "ultra" },
@@ -309,6 +307,7 @@ describe("reviewer effort gate", () => {
       [{ harness: "cursor", model: "target-model" }],
     );
     expect(specs[0]?.credentialProfile?.profile_id).toBe(second.profile_id);
+    expect(specs[0]?.profilePinned).toBe(false);
     expect(inventoryCalls).toEqual([first.profile_id, second.profile_id]);
     expect([...(resolverCalls[1] ?? [])]).toEqual([first.profile_id]);
   });
@@ -572,14 +571,15 @@ describe("reviewer inventory route applicability", () => {
       secret_ref: "openai:api",
     });
     const d = { ...deps([adapter]), resolveReviewerProfile: async () => profile };
-    expect(
-      await resolveExplicitReviewerPanel(d, [
-        { harness: "generic", model: "api-model", credentialProfileId: "api" },
-      ]),
-    ).toHaveLength(1);
-    expect(
-      await resolveAutoReviewerPanel(d, { reviewerModels: { openai: "api-model" } }),
-    ).toHaveLength(1);
+    const explicit = await resolveExplicitReviewerPanel(d, [
+      { harness: "generic", model: "api-model", credentialProfileId: "api" },
+    ]);
+    expect(explicit).toHaveLength(1);
+    const auto = await resolveAutoReviewerPanel(d, { reviewerModels: { openai: "api-model" } });
+    expect(auto).toHaveLength(1);
+    // #363: the same account is a pin only when the entry named it.
+    expect(explicit[0]?.profilePinned).toBe(true);
+    expect(auto[0]?.profilePinned).toBe(false);
     expect(models).not.toHaveBeenCalled();
     const nativeProfile = CredentialProfile.parse({
       ...profile,
@@ -599,3 +599,68 @@ describe("reviewer inventory route applicability", () => {
     expect(models.mock.calls.length).toBeGreaterThan(0);
   });
 });
+
+describe("reviewer manifest truth under the harness's absence declaration (INV-104)", () => {
+  /** A claude-shaped reviewer with NO live producer: the manifest branch is the
+   * only truth, and the hint list deliberately lacks the requested model. */
+  const manifestAdapter = async (absence?: "advisory" | "authoritative") => {
+    const adapter = reviewerAdapter("claude", "anthropic", ["high"], {
+      knownModels: ["listed-model"],
+    });
+    if (absence) {
+      const manifest = await adapter.discover();
+      manifest.capabilities.model_inventory_absence = absence;
+      adapter.discover = async () => manifest;
+    }
+    return adapter;
+  };
+
+  it("an ADVISORY harness's manifest branch forwards an explicit reviewer model its hints lack", async () => {
+    const specs = await resolveExplicitReviewerPanel(deps([await manifestAdapter("advisory")]), [
+      { harness: "claude", model: "claude-opus-5-5" },
+    ]);
+    expect(specs).toHaveLength(1);
+    expect(specs[0]?.requestedModel).toBe("claude-opus-5-5");
+  });
+
+  it("an AUTHORITATIVE harness's manifest branch (declared or by omission) still refuses with today's exact text", async () => {
+    for (const adapter of [await manifestAdapter(), await manifestAdapter("authoritative")]) {
+      await expect(
+        resolveExplicitReviewerPanel(deps([adapter]), [
+          { harness: "claude", model: "claude-opus-5-5" },
+        ]),
+      ).rejects.toThrow(
+        "reviewer harness 'claude' refused requested model 'claude-opus-5-5': " +
+          'model "claude-opus-5-5" is not in the harness\'s manifest known-model list ' +
+          "(listed-model); run `claudexor models --harness claude`",
+      );
+    }
+  });
+
+  it("the AUTO panel keeps skipping an unlisted family at zero cost, whatever the harness declares", async () => {
+    const ignored: string[] = [];
+    const specs = await resolveAutoReviewerPanel(
+      { ...deps([await manifestAdapter("advisory")]), onIgnoredSetting: (d) => ignored.push(d) },
+      { reviewerModels: { anthropic: "claude-opus-5-5" } },
+    );
+    expect(specs).toEqual([]);
+    expect(ignored).toEqual([
+      expect.stringContaining("requested model 'claude-opus-5-5' is unavailable"),
+    ]);
+  });
+});
+
+it.each(["cursor-grok-4.6-xhigh", "gemini-3.7-flash-high"])(
+  "preserves compound route %s and refuses a conflicting separate knob",
+  async (slug) => {
+    const adapter = reviewerAdapter("compound", "openai", [], { knownModels: [slug] });
+    expect(
+      await resolveExplicitReviewerPanel(deps([adapter]), [{ harness: "compound", model: slug }]),
+    ).toMatchObject([{ requestedModel: slug, requestedEffort: null }]);
+    await expect(
+      resolveExplicitReviewerPanel(deps([adapter]), [
+        { harness: "compound", model: slug, effort: "low" },
+      ]),
+    ).rejects.toThrow(/does not support requested effort/);
+  },
+);

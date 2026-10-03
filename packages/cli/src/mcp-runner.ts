@@ -32,6 +32,8 @@ import {
 } from "./mcp-run-projections.js";
 import { readRunDetailResponse } from "./run-detail-response.js";
 import { catalogQuery } from "./mcp-catalog-query.js";
+import { threadQuery } from "./mcp-thread-query.js";
+import { journalRecoveryQuery } from "./mcp-journal-recovery.js";
 
 export interface SurfaceRunnerHooks {
   onEvent?: (event: any) => void;
@@ -93,6 +95,13 @@ export function mcpSurfaceRunner(options: McpSurfaceRunnerOptions = {}) {
       );
     }
     if (p?.mode === "__journal_recovery") return journalRecoveryQuery(p);
+    if (
+      p?.mode === "__thread_create" ||
+      p?.mode === "__thread_turn" ||
+      p?.mode === "__thread_read"
+    ) {
+      return threadQuery(p, options.requireExistingDaemon === true);
+    }
     if (typeof p?.mode === "string" && p.mode.startsWith("__acp_session_")) {
       if (!options.acpSessionQuery) {
         throw new Error("ACP session operation reached a non-ACP surface");
@@ -133,6 +142,7 @@ export function mcpSurfaceRunner(options: McpSurfaceRunnerOptions = {}) {
       ...(p?.council === true ? { council: true } : {}),
       ...(Array.isArray(p?.tests) ? { tests: p.tests } : {}),
       ...(p?.paidBudget ? { paidBudget: p.paidBudget } : {}),
+      ...(p?.credentialProfileId ? { credentialProfileId: String(p.credentialProfileId) } : {}),
       ...(p?.access ? { access: String(p.access) } : {}),
       // `externalContextPolicy` is the control-api-parity alias of `web`; the
       // validator already enforced equality when both are present. Honor the
@@ -437,44 +447,6 @@ async function recoveryQuery(
     eligible: true,
     check: body,
   };
-}
-
-async function journalRecoveryQuery(input: Record<string, unknown>): Promise<unknown> {
-  const conn = await connectDaemonIfRunning();
-  if (!conn) throw new Error("the Claudexor daemon is not running");
-  const action = String(input["action"] ?? "inspect");
-  const partition = String(input["partition"] ?? "");
-  if (!partition) throw new Error("partition is required");
-  const base = `/recovery/partitions/${encodeURIComponent(partition)}`;
-  const suffix =
-    action === "inspect"
-      ? ""
-      : action === "validate" || action === "export" || action === "quarantine"
-        ? `/${action}`
-        : null;
-  if (suffix === null) throw new Error(`unknown journal recovery action '${action}'`);
-  const body =
-    action === "quarantine"
-      ? {
-          expectedFingerprint: String(input["expectedFingerprint"] ?? ""),
-          confirmation: String(input["confirmation"] ?? ""),
-        }
-      : undefined;
-  const response = await controlApiFetch(conn.addr, `${base}${suffix}`, {
-    method: action === "inspect" ? "GET" : "POST",
-    ...(body
-      ? { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }
-      : {}),
-  });
-  const result = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-  if (!response.ok) {
-    throw new Error(
-      typeof result["message"] === "string"
-        ? (result["message"] as string)
-        : `journal recovery failed (HTTP ${response.status})`,
-    );
-  }
-  return result;
 }
 
 /**

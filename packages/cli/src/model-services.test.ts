@@ -13,7 +13,7 @@ import {
   QuotaRegistry,
   ResourceStore,
 } from "@claudexor/daemon";
-import { createCodexAdapter } from "@claudexor/harness-codex";
+import { createCodexAdapter, createCodexModelAdapter } from "@claudexor/harness-codex";
 import {
   ControlGcReceipt,
   ControlProblem,
@@ -49,7 +49,7 @@ function model(id = "test-model"): ModelCatalogEntry {
   };
 }
 
-async function fixture(options: { lazy?: boolean } = {}) {
+async function fixture(options: { lazy?: boolean; adapter?: ModelAdapter } = {}) {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "cx-ms-")));
   const journal = new DurableJournal({ rootDir: join(root, "journal"), partition: "global" });
   const store = new CommandStore(journal);
@@ -98,6 +98,8 @@ async function fixture(options: { lazy?: boolean } = {}) {
     accountFingerprint: profile.profile_id,
     observedAt: new Date().toISOString(),
     provenance: "fixture exact catalog",
+    clientVersion: "0.156.1",
+    clientVersionSource: "verified_transport",
     models: catalogModels[profile.profile_id]!,
   }));
   const invoke = vi.fn<ModelAdapter["invoke"]>(async (request, context) => {
@@ -157,7 +159,11 @@ async function fixture(options: { lazy?: boolean } = {}) {
     migrationGate: () => null,
     registry: new Map([["codex", { ...createCodexAdapter(), probeCredentialProfile: probe }]]),
     sources: [
-      { adapter: { id: "codex", catalog, invoke }, label: "Codex", credentialHarness: "codex" },
+      {
+        adapter: options.adapter ?? { id: "codex", catalog, invoke },
+        label: "Codex",
+        credentialHarness: "codex",
+      },
     ],
   });
   const agentRunner = vi.fn(async () => ({ lifecycle: "succeeded" }));
@@ -222,6 +228,83 @@ async function fixture(options: { lazy?: boolean } = {}) {
 }
 
 describe("production model service composition", () => {
+  it("preserves raw Ultra preference order through catalog parsing into the only generation", async () => {
+    const provider = vi.fn<typeof fetch>(async (_url, init) => {
+      if (init?.method !== "POST")
+        return Response.json({
+          models: [
+            {
+              slug: "test-model",
+              supported_reasoning_levels: ["low", "max", "ultra"].map((effort) => ({ effort })),
+              multi_agent_version: "v2",
+              multi_agent_reasoning_effort: "low",
+            },
+          ],
+        });
+      const body = JSON.parse(await new Response(init.body).text());
+      expect(body.reasoning.effort).toBe("max");
+      return new Response(
+        `data: ${JSON.stringify({
+          type: "response.completed",
+          response: {
+            model: "test-model",
+            output: [],
+            reasoning: { effort: "max" },
+          },
+        })}\n\n`,
+      );
+    });
+    const adapter = createCodexModelAdapter({
+      fetch: provider,
+      now: () => 1900000000000,
+      clientVersion: async () => ({ version: "0.156.1", source: "verified_transport" }),
+      readAuthFile: async () =>
+        JSON.stringify({
+          auth_mode: "chatgpt",
+          tokens: {
+            account_id: "fixture",
+            id_token: `fixture.${Buffer.from('{"sub":"fixture"}').toString("base64url")}.signature`,
+            access_token: `fixture.${Buffer.from('{"exp":2100000000}').toString("base64url")}.signature`,
+          },
+        }),
+    });
+    const f = await fixture({ adapter });
+    // The real adapter validates its managed home, unlike the fixture's fake
+    // adapter. Keep both profile and auth resolution under this test's root.
+    process.env.CLAUDEXOR_CONFIG_DIR = f.root;
+    const request = ModelCallRequest.parse({
+      source: "codex",
+      model: "test-model",
+      account: { mode: "pin", profileId: "a" },
+      messages: [{ role: "user", content: "test" }],
+      options: { reasoningEffort: "ultra" },
+    });
+    const ref = f.resources().publishModel(Buffer.from(JSON.stringify(request)));
+    const started = await f.services.routes.createModelOperation(
+      ref,
+      randomUUID(),
+      undefined,
+      true,
+    );
+    await vi.waitFor(async () =>
+      expect((await f.services.routes.getModelOperation(started.id)).state).toBe("succeeded"),
+    );
+    const result = ModelCallResult.parse(
+      JSON.parse((await f.services.routes.readModelResult(started.id)).bytes.toString()),
+    );
+    expect(result).toMatchObject({
+      outcome: "completed",
+      effortResolution: {
+        requested: "ultra",
+        submitted: "max",
+        observed: "max",
+        resolution: "downward",
+      },
+    });
+    expect(provider.mock.calls.map(([, init]) => init?.method ?? "GET")).toEqual(["GET", "POST"]);
+    expect(f.agentRunner).not.toHaveBeenCalled();
+  });
+
   it("enumerates distinct enabled account inventories without selecting the inference account", async () => {
     const f = await fixture({ lazy: true });
     f.catalogModels.a = [model("only-a")];
@@ -284,6 +367,8 @@ describe("production model service composition", () => {
         accountFingerprint: "a",
         observedAt,
         provenance: "existing_cache",
+        clientVersion: null,
+        clientVersionSource: null,
         models: [model()],
       };
     });
@@ -412,6 +497,9 @@ describe("production model service composition", () => {
     expect(f.invoke).toHaveBeenCalledTimes(1);
     const pinned = await f.run({ mode: "pin", profileId: "b" });
     expect(pinned.problem?.code).toBe("model_unavailable");
+    // The first gate a pinned caller hits names the declared client version
+    // too (issue #339): the version filter, not the account, decided the list.
+    expect(pinned.problem?.message).toContain("client_version 0.156.1");
     expect(pinned.dispatch.state).toBe("not_started");
     f.catalogModels.a = [];
     const unsupported = await f.run();

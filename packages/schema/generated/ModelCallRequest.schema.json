@@ -307,7 +307,7 @@
             }
           },
           "additionalProperties": false,
-          "description": "Generation options only, not a caller's context/output reserve; unsupported explicit options refuse before inference.",
+          "description": "Generation options only, not a caller's context/output reserve; reasoningEffort is an adaptive preference, while unsupported other explicit options refuse before inference.",
           "default": {}
         },
         "nativeContinuation": {

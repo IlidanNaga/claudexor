@@ -1,4 +1,4 @@
-import type { HarnessRunSpec } from "@claudexor/schema";
+import type { HarnessEvent, HarnessRunSpec } from "@claudexor/schema";
 import { join } from "node:path";
 import {
   canonicalIsolationLocator,
@@ -66,25 +66,50 @@ export function cursorProfileRunEnv(profileHome: string, specEnv: EnvMap = {}): 
   };
 }
 
-export type CursorResolvedProfileRoute =
-  { kind: "native"; env: EnvMap } | { kind: "api_key"; key: string } | { refusal: string };
+/** A row store's bounded last positive status answer, standing in after a
+ * probe that did not answer (#363); disclosed, never a fresh pass. */
+export type CursorStaleAuth = { observedAt: string; ageMs: number };
 
-/** Strict profile resolution: the named identity or a typed refusal, never default auth. */
+export type CursorResolvedProfileRoute =
+  | { kind: "native"; env: EnvMap; staleAuth?: CursorStaleAuth }
+  | { kind: "api_key"; key: string }
+  | { refusal: string };
+
+/** Readiness wording for a timed-out probe that carries a bounded last positive. */
+function cursorStaleDetail(probeError: string, stale: CursorStaleAuth): string {
+  return `${probeError}; the last positive status answer (${stale.observedAt}, ${stale.ageMs}ms old) stands in for unpinned routing only`;
+}
+
+/** Strict profile resolution: the named identity or a typed refusal, never default auth.
+ * `admitLastPositive` is the caller's decision, never inferred from the profile:
+ * absent, a timeout's bounded last positive refuses like any unknown answer. */
 export async function resolveCursorProfileRoute(
   profile: CredentialProfile,
   specEnv: EnvMap,
   runtime: CursorProfileRuntimeDeps,
   abortSignal?: AbortSignal,
+  options: { admitLastPositive?: boolean } = {},
 ): Promise<CursorResolvedProfileRoute> {
   if (profile.credential_kind === "config_dir_login") {
     try {
       const env = cursorProfileRunEnv(profile.isolation_locator ?? "", specEnv);
       const probe = await runtime.nativeAuthOk(env, abortSignal);
       if (cursorObservationAuthenticated(probe)) return { kind: "native", env };
+      // INV-135 #363: the bounded last positive starts only an unpinned
+      // choice, disclosed; an explicit pin refuses on it below.
+      const lastPositive = probe.kind === "unknown" ? probe.lastPositive : undefined;
+      if (lastPositive && options.admitLastPositive === true)
+        return { kind: "native", env, staleAuth: lastPositive };
       const probeError = cursorObservationError(probe);
+      // Unknown is not a logout: only a positive logged-out answer carries
+      // login advice (#363).
       return {
         refusal: probeError
-          ? `credential profile "${profile.profile_id}": Cursor status probe failed — ${probeError}`
+          ? `credential profile "${profile.profile_id}": Cursor login state is unknown (status probe failed — ${probeError})${
+              lastPositive
+                ? `; its last positive status answer (${lastPositive.observedAt}) serves unpinned routing only, never an explicit pin`
+                : ""
+            }`
           : `credential profile "${profile.profile_id}" has no Cursor login in its profile HOME (run the profile login first)`,
       };
     } catch (err) {
@@ -102,6 +127,7 @@ export type CursorRunRoute = {
   key: string | null;
   nativeAuthed: boolean;
   scopedHome: boolean;
+  staleAuth?: CursorStaleAuth;
 };
 
 export type CursorDefaultRouteInput = {
@@ -127,11 +153,13 @@ export async function resolveCursorRunRoute(
   },
   runtime: CursorProfileRuntimeDeps,
   resolveDefaultRoute: (input: CursorDefaultRouteInput) => Promise<CursorRunRoute>,
-  abortSignal?: AbortSignal,
+  abortSignal: AbortSignal | undefined,
+  /** Whether a named row may ride its bounded last positive (#363). */
+  options: { admitLastPositive: boolean },
 ): Promise<CursorRunRoute | { refusal: string }> {
   const profile = spec.credential_profile;
   const profileRoute = profile
-    ? await resolveCursorProfileRoute(profile, spec.env, runtime, abortSignal)
+    ? await resolveCursorProfileRoute(profile, spec.env, runtime, abortSignal, options)
     : null;
   if (profileRoute && "refusal" in profileRoute) return profileRoute;
   if (profileRoute?.kind === "native")
@@ -141,6 +169,7 @@ export async function resolveCursorRunRoute(
       key: null,
       nativeAuthed: true,
       scopedHome: Boolean(spec.env["HOME"]),
+      ...(profileRoute.staleAuth ? { staleAuth: profileRoute.staleAuth } : {}),
     };
   const keyOverride = profileRoute?.kind === "api_key" ? profileRoute.key : null;
   return resolveDefaultRoute({
@@ -149,6 +178,19 @@ export async function resolveCursorRunRoute(
     abortSignal,
     ...(keyOverride === null ? {} : { cursorApiKey: () => keyOverride }),
   });
+}
+
+/** Run-stream disclosure that a row's spawn rides its bounded last positive
+ * status answer (same payload keys as the Claude adapter's stale disclosure).
+ * A `status` event: it never joins the answer text or reads as a deliverable. */
+export function staleCursorAuthEvent(sessionId: string, stale: CursorStaleAuth): HarnessEvent {
+  return {
+    type: "status",
+    session_id: sessionId,
+    ts: nowIso(),
+    text: `[auth] cursor-agent status did not answer; using the last positive status answer from ${stale.observedAt} (${stale.ageMs}ms old)`,
+    payload: { auth_status_stale: true, auth_status_stale_age_ms: stale.ageMs },
+  };
 }
 
 /** INV-135 attribution: stamp every parsed run event with the profile that ran it. */
@@ -169,15 +211,31 @@ function cursorProfileNativeStatus(
   probe: CursorStatusObservation,
 ): CredentialProfileStatus {
   const base = { profile_id: profile.profile_id, harness_id: "cursor" };
-  if (cursorObservationAuthenticated(probe))
+  if (probe.kind === "authenticated")
     return CredentialProfileStatusSchema.parse({
       ...base,
       availability: "available",
       verification: "passed",
-      detail: "Cursor login verified in the profile HOME file store",
-      last_verified_at: nowIso(),
+      verification_source: probe.vendorAuthenticated ? "vendor" : "local_store",
+      detail: probe.vendorAuthenticated
+        ? "Cursor server accepted the profile HOME login"
+        : "Cursor login verified in the profile HOME file store",
+      // A reused positive answer keeps the instant the vendor gave it.
+      last_verified_at: probe.observedAt ?? nowIso(),
     });
   const probeError = cursorObservationError(probe);
+  // Still unknown/not_run: the stale basis lets unpinned admission alone
+  // consume the bounded last positive answer (INV-135 #363).
+  if (probeError && probe.kind === "unknown" && probe.lastPositive)
+    return CredentialProfileStatusSchema.parse({
+      ...base,
+      availability: "unknown",
+      verification: "not_run",
+      stale: true,
+      stale_age_ms: probe.lastPositive.ageMs,
+      stale_basis: "last_positive_after_timeout",
+      detail: cursorStaleDetail(probeError, probe.lastPositive),
+    });
   if (probeError)
     return CredentialProfileStatusSchema.parse({
       ...base,

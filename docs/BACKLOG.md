@@ -313,10 +313,11 @@ deferred; they are recorded here now.
 - W-d: redaction straddle — a secret split exactly at the 4096/4000 tail
   boundaries escapes prefix-anchored rules; consider redacting pre-slice or
   overlap-aware slicing.
-- W-f: `claudexor profiles login` runs the vendor login outside the daemon,
-  so noteCredentialChange never fires and a previously logged-out subject's
-  quota can stay absent for up to 15 minutes; expose a credential-changed
-  nudge on the control API and call it after a verified profile login.
+- W-f: Claude/AGY `profiles login` retains its direct scoped vendor terminal
+  path. It does not notify the daemon of credential changes, so old readiness,
+  quota absence and refusal evidence can survive a successful or interrupted
+  login. A future migration must preserve their input and vendor-window
+  behavior through the existing setup owner; Cursor already uses that owner.
 - W-e: Bible INV-137 note wording — the a-b-a continuity proof lives in a
   pnpm-test suite, not the canary golden-story home the note implies.
 - Q-b: quota sources (`claude-oauth-usage.ts`, `codex-quota-source.ts`) live in
@@ -681,10 +682,13 @@ default-reachable regression on a supported platform.
   un-skip the four `itPosixReplace` cases on the Windows lane as its proof.
 - npm shim spawning on Windows (issue #191): default npm installs ship
   `codex.cmd`/sh shims with no `.exe`, so ordinary runs and login refuse with
-  the typed shim advisory. Candidate fix: resolve the shim to its JS entry and
-  spawn `process.execPath <entry>` without a shell at the single resolver
-  owner (manifest evidence then binds an interpreter — schema-first), or
-  prefer the vendor's native archive in `claudexor harness install`.
+  the typed shim advisory. The managed local Codex installer proves the
+  package-native `codex.exe` inside the pinned platform package; both x64
+  Windows CI legs proved this path in PR #352 (run 36075171287). Still open for an
+  operator's own ambient npm install (any prefix Claudexor did not lay out)
+  and for claude/opencode, whose platform-package layouts are not verified;
+  the remaining candidate fix is unchanged (spawn the shim's JS entry on
+  `process.execPath` at the single resolver owner, schema-first).
 
 ## 3.4.0 operator-subagent panel advisories (2026-08-15)
 

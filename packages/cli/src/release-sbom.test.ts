@@ -21,7 +21,11 @@ const nodeVersion = readFileSync(resolve(".node-version"), "utf8").trim();
 const rootVersion = (
   JSON.parse(readFileSync(resolve("package.json"), "utf8")) as { version: string }
 ).version;
-const browserVersion = "0.0.78";
+const browserVersion = (
+  JSON.parse(readFileSync(resolve("packages/core/package.json"), "utf8")) as {
+    dependencies: Record<string, string>;
+  }
+).dependencies["@playwright/mcp"];
 const licenses = {
   "Apache-2.0": [{ name: "@playwright/mcp", versions: [browserVersion], license: "Apache-2.0" }],
   MIT: [

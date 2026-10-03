@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ControlModelOperationDetail, ModelUsage } from "@claudexor/schema";
 import { DaemonControlApiServer, type DaemonControlApiOptions } from "./daemon-server.js";
+import { parseCodexModelCatalog } from "../../harness-codex/src/model.js";
 import { OPERATION_CATALOG } from "./operation-catalog.js";
 
 const servers: DaemonControlApiServer[] = [];
@@ -96,6 +97,134 @@ describe("raw model operation HTTP surface", () => {
       }),
     );
   });
+  it("negotiates effort capture independently while preserving omitted/false calls", async () => {
+    const createModelOperation = vi.fn(async () => detail());
+    const f = await fixture({ createModelOperation });
+    const headers = { "Idempotency-Key": "effort" };
+    for (const query of ["", "?captureEffortEvidence=false"]) {
+      expect((await f.request(`/model-operations${query}`, { request: ref }, headers)).status).toBe(
+        202,
+      );
+      expect(createModelOperation).toHaveBeenLastCalledWith(ref, "effort");
+    }
+    expect(
+      (
+        await f.request(
+          "/model-operations?captureEffortEvidence=true&unrelated=ignored",
+          { request: ref },
+          headers,
+        )
+      ).status,
+    ).toBe(202);
+    expect(createModelOperation).toHaveBeenLastCalledWith(ref, "effort", undefined, true);
+    expect(
+      (
+        await f.request(
+          "/model-operations?captureEffortEvidence=true&captureFailureEvidence=true",
+          { request: ref },
+          headers,
+        )
+      ).status,
+    ).toBe(202);
+    expect(createModelOperation).toHaveBeenLastCalledWith(ref, "effort", true, true);
+    for (const value of ["", "1", "TRUE", "true&captureEffortEvidence=false"]) {
+      expect(
+        (
+          await f.request(
+            `/model-operations?captureEffortEvidence=${value}`,
+            { request: ref },
+            headers,
+          )
+        ).status,
+      ).toBe(400);
+    }
+    expect(createModelOperation).toHaveBeenCalledTimes(4);
+    expect(
+      OPERATION_CATALOG.operations.find(
+        (op) => op.method === "POST" && op.path === "/v2/model-operations",
+      )?.parameters,
+    ).toContainEqual(
+      expect.objectContaining({
+        name: "captureEffortEvidence",
+        location: "query",
+        enum: ["true", "false"],
+      }),
+    );
+  });
+
+  it.each([{ levels: [] }, { levels: ["high", "ultra"] }])(
+    "projects the real Codex catalog $levels to both frozen HTTP shapes",
+    async ({ levels }) => {
+      const models = parseCodexModelCatalog({
+        models: [
+          { slug: "test-model", supported_reasoning_levels: levels.map((effort) => ({ effort })) },
+        ],
+      });
+      expect(models[0]?.reasoningEffortsVerified).toBe(true);
+      const catalog = {
+        source: "codex",
+        credentialProfileId: "fixture",
+        accountFingerprint: null,
+        observedAt: "2026-09-12T00:00:00.000Z",
+        provenance: "provider_http",
+        models,
+        clientVersion: "0.156.1",
+        clientVersionSource: "verified_transport",
+      };
+      const accountView = {
+        source: "codex",
+        accounts: [
+          { credentialProfileId: "fixture", availability: "available", problem: null, catalog },
+        ],
+        partial: false,
+      };
+      const f = await fixture({
+        modelCatalog: async () => catalog,
+        modelAccountCatalog: async () => accountView,
+      });
+      const legacy = await f.request("/model-sources/codex/models");
+      expect(legacy.status).toBe(200);
+      expect(await legacy.json()).toEqual({
+        source: "codex",
+        credentialProfileId: "fixture",
+        accountFingerprint: null,
+        observedAt: "2026-09-12T00:00:00.000Z",
+        provenance: "provider_http",
+        models: [
+          {
+            id: "test-model",
+            label: null,
+            isDefault: false,
+            contextWindow: null,
+            maxContextWindow: null,
+            maxOutputTokens: null,
+            inputModalities: [],
+            reasoningEfforts: levels.filter((level) => level !== "ultra"),
+            defaultReasoningEffort: null,
+            supportedOptions: [
+              "toolChoice",
+              "cacheKey",
+              "serviceTier",
+              "processingPreference",
+              ...(levels.length ? ["reasoningEffort"] : []),
+            ],
+          },
+        ],
+      });
+      const modern = await f.request("/model-sources/codex/models?view=accounts");
+      expect(modern.status).toBe(200);
+      const publicModels = models.map(
+        ({ reasoningEffortPreferenceOrder: _order, ...model }) => model,
+      );
+      expect(await modern.json()).toEqual({
+        ...accountView,
+        accounts: [{ ...accountView.accounts[0], catalog: { ...catalog, models: publicModels } }],
+      });
+      expect(models[0]?.reasoningEffortsVerified).toBe(true);
+      if (levels.length) expect(models[0]?.reasoningEffortPreferenceOrder).toEqual(levels);
+    },
+  );
+
   it("requires idempotency before accepting refs and never enqueues an Agent Run", async () => {
     const createModelOperation = vi.fn(async () => detail());
     const f = await fixture({ createModelOperation });
@@ -178,6 +307,8 @@ describe("raw model operation HTTP surface", () => {
       accountFingerprint: null,
       observedAt: "2026-09-06T00:00:00.000Z",
       provenance,
+      clientVersion: "0.156.1",
+      clientVersionSource: "verified_transport",
       models: [],
     }));
     const f = await fixture({ modelSources, modelCatalog });
@@ -192,6 +323,9 @@ describe("raw model operation HTTP surface", () => {
     provenance = "provider_http";
     const observed = await f.request("/model-sources/codex/models?credentialProfileId=chosen");
     expect(observed.status).toBe(200);
+    // The legacy query keeps its pre-negotiation shape: the declared client
+    // version the transport recorded is NOT projected here (the account view
+    // below carries it), exactly like `processing` per row.
     expect(await observed.json()).toEqual({
       source: "codex",
       credentialProfileId: "chosen",
@@ -254,6 +388,8 @@ describe("raw model operation HTTP surface", () => {
       accountFingerprint: null,
       observedAt: "2026-09-12T00:00:00.000Z",
       provenance: "provider_http",
+      clientVersion: "0.156.1",
+      clientVersionSource: "installed_cli",
       models: [model],
     };
     const accountView = {
@@ -288,7 +424,13 @@ describe("raw model operation HTTP surface", () => {
       "/model-sources/codex/models?view=accounts&credentialProfileId=a",
     );
     expect(modern.status).toBe(200);
-    expect(await modern.json()).toEqual(accountView);
+    // The negotiated view carries the declared client version per catalog.
+    const modernBody = (await modern.json()) as { accounts: Array<{ catalog: unknown }> };
+    expect(modernBody).toEqual(accountView);
+    expect(modernBody.accounts[0]?.catalog).toMatchObject({
+      clientVersion: "0.156.1",
+      clientVersionSource: "installed_cli",
+    });
     expect(modelAccountCatalog).toHaveBeenCalledExactlyOnceWith("codex", "a");
     expect(modelCatalog).toHaveBeenCalledTimes(1);
     for (const query of [

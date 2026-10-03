@@ -1,6 +1,6 @@
 {
   "name": "@claudexor/daemon",
-  "version": "3.13.0",
+  "version": "3.19.0",
   "license": "MIT",
   "description": "Managed local daemon: Unix-socket JSON-RPC, token auth, task queue. Runner injected (no second scheduler).",
   "type": "module",
@@ -24,7 +24,7 @@
     "@claudexor/journal": "workspace:*",
     "@claudexor/schema": "workspace:*",
     "@claudexor/util": "workspace:*",
-    "yaml": "^2.8.2"
+    "yaml": "^2.9.1"
   },
   "repository": {
     "type": "git",

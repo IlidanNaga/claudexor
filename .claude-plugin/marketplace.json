@@ -1,0 +1,12 @@
+{
+  "name": "claudexor",
+  "description": "Portable Claudexor integration from the project's own GitHub repository.",
+  "owner": { "name": "Anton Razzhigaev" },
+  "plugins": [
+    {
+      "name": "claudexor",
+      "source": "./plugins/claude",
+      "description": "Multi-harness planning, execution, and review through the local Claudexor installation."
+    }
+  ]
+}

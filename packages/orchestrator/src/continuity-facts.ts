@@ -95,6 +95,8 @@ export interface ContinuitySummaryInputs {
   >;
   processingAdmission?: ProcessingAdmission;
   physicalDispatchStarted?: () => void;
+  billingVerificationForProfile?: import("./modelGovernance.js").ModelGovernedRoute["billingVerificationForProfile"];
+  paidFallback?: import("./modelGovernance.js").ModelGovernedRoute["paidFallback"];
 }
 
 /**
@@ -130,6 +132,8 @@ export async function resolveContinuitySummary(
       processing: inputs.processing,
       processingAdmission: inputs.processingAdmission,
       physicalDispatchStarted: inputs.physicalDispatchStarted,
+      billingVerificationForProfile: inputs.billingVerificationForProfile,
+      paidFallback: inputs.paidFallback,
     });
     if (!text) return null;
     writeThreadSummary(projectRoot, threadId, upToTurnId, text);

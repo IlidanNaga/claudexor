@@ -55,6 +55,16 @@ Read these together before changing shared behavior:
 - `benchmarks/runner` holds the SWE-bench benchmark runner and is part of the
   pnpm workspace.
 
+## Native input transport changes
+
+Keep native text limits separate from model windows and process argument limits.
+Preserve exact payload bytes and instruction roles. Verify both oversized and
+ordinary inputs, final typed failures, account failover, resume and cleanup.
+HTTP delivery proof must distinguish local handoff from provider acceptance:
+exercise partial/full uploads, unchanged proxy ownership, unsupported observation,
+replay and crash custody on the supported Node floor and bundled runtime. Test
+lazy dispatcher initialization from the built artifact as well as source modules.
+
 ## Development Commands
 
 Use the repository package manager and keep generated schema output checked.
@@ -66,6 +76,7 @@ pnpm typecheck
 pnpm typecheck:tests   # type-checks *.test.ts, schema scripts, and canary sources
 pnpm test
 pnpm schema:gen
+pnpm gen:version  # root-version projections and canonical portable plugin asset copies
 git diff --exit-code packages/schema/generated
 node scripts/validate-generated-schemas.mjs   # ajv-compiles every generated schema (draft-07)
 pnpm docs:check    # docs-truth gate (endpoints / mode ids / CLI flags vs source)
@@ -168,9 +179,11 @@ symlink semantics. It rejects escaping links, special files, and `.node`
 addons. The closure includes both top-level `claudexord.bundle.cjs` and
 `claudexor.bundle.cjs`, while Node remains host-owned. Embedders keep one exact
 tested full Node toolchain plus protocol/separate daemon-and-CLI
-entrypoints/size in their reviewed pin; POSIX local harness installation
-requires the adjacent `lib/node_modules/npm/bin/npm-cli.js` from that same
-toolchain and must never fall back to ambient PATH npm. The npm `engines` range
+entrypoints/size in their reviewed pin; local harness installation
+requires the toolchain's own adjacent npm entrypoint
+(`lib/node_modules/npm/bin/npm-cli.js` beside `bin/node`, or
+`node_modules\npm\bin\npm-cli.js` beside `node.exe`) and must never fall back
+to ambient PATH npm. The npm `engines` range
 is not closure-smoke evidence. The existing signed manifest is the publication
 authority used to form that pin; runtime consumers may verify it directly or
 rely on a review-bound exact URL/`buildSha`/SHA-256/size pin, without a second
@@ -178,8 +191,10 @@ manifest or verifier. The focused builder test must cover an internal link's
 expected materialized bytes and an escaping-link refusal. A Windows claim also
 requires a native extract/exact-Node probe/isolated handshake/graceful-stop
 smoke; feature support must not be inferred from portable extraction alone,
-and local Windows harness installation remains typed-unsupported until its own
-bounded support contract exists.
+and local Windows harness installation is bounded to vendors with a
+verified package-native image (Codex). The Windows CI lane must PROVE the real
+pinned install before this candidate can be released; until then it is not a
+Windows success claim. Other vendors stay typed-unsupported there.
 
 The `publish` mode also carries `remote_runtime_manifest_b64`:
 the OWNER-SIGNED four-target SSH runtime manifest, transported the same way.

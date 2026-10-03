@@ -31,7 +31,7 @@ with a vendor usage source (Antigravity, Claude, and Codex); Cursor has none
 yet. Everything runs on your machine, files are the source of truth, and there
 is no telemetry.
 
-Current status: **v3.13.0**. See "Stability at 2.0" below for what is a stable
+Current status: **v3.19.0**. See "Stability at 2.0" below for what is a stable
 contract and what remains experimental; retired verbs and mode ids hard-error
 with the new spelling instead of silently aliasing.
 
@@ -93,7 +93,7 @@ composer](docs/assets/app-agent-run.jpg)
   Explicit directory execution supports direct work and selected-input copies
   without Git; Doctor reports Git availability, and
   the app's Workspace Git check explains whether a Git-backed shape is admitted.
-- At least one logged-in vendor CLI — `codex`, `claude`, `cursor-agent`,
+- At least one logged-in vendor CLI — `codex`, `claude`, `cursor-agent` (or Cursor’s `agent`),
   `opencode`, or `agy` (Antigravity, for a Gemini subscription) — OR a
   provider API key (adapters accept `OPENAI_API_KEY`,
   `ANTHROPIC_API_KEY`, ... as fallbacks; the raw-API route needs only a key).
@@ -139,7 +139,10 @@ Exact npm pins install under `~/.claudexor/node`; Cursor remains unpinned, so
 the JSON receipt records the downloaded installer's SHA-256 and byte length.
 Every successful executed receipt also records the absolute installed launcher
 and its verified version; a zero-exit installer without that postcondition is a
-typed failure.
+typed failure. On Windows that launcher is the vendor's own `codex.exe` inside
+the pinned npm platform package (never npm's `.cmd` shim), and the same
+managed-root path is what doctor, login and runs resolve; Codex is the one
+vendor with that verified image in this release, the others refuse typed.
 Omitting `--target` preserves the disclosed remote-host flow, its prefix and
 its exit-code contract; the install lease and the post-install proof are part
 of the unattended local contract and do not apply there.
@@ -224,10 +227,12 @@ client verifiers themselves stay fail-closed for the waived versions too).
   `CLAUDEXOR_DAEMON_SOCK`, or the lifecycle command may address another daemon.
   A Windows consumer still owns a native
   extract/`--probe`/handshake/`--stop` smoke before claiming Windows support.
-  The local harness installer is intentionally typed-unsupported on Windows in
-  this release. On POSIX, npm-backed local installation additionally requires
-  `<node-root>/lib/node_modules/npm/bin/npm-cli.js`; Claudexor never falls back
-  to a `npm` found on ambient `PATH`.
+  npm-backed local installation additionally requires the toolchain's own
+  npm entrypoint — `<node-root>/lib/node_modules/npm/bin/npm-cli.js` beside
+  `bin/node` on POSIX, `node_modules\npm\bin\npm-cli.js` beside `node.exe`
+  on Windows; Claudexor never falls back to a `npm` found on ambient `PATH`.
+  On Windows only Codex installs locally (its package-native image); the
+  other vendors are a typed `unsupported_platform` refusal.
 - **npm** — CLI/daemon installs update the ordinary way:
   `npm install -g claudexor@latest`. `claudexor release check` reports whether a
   newer engine runtime is published, verifying the same signed manifest
@@ -497,7 +502,9 @@ claudexor profiles                         # every account per harness + the inf
 claudexor accounts --json                  # read-only snapshot doorway for agents, with freshness/quota state
 claudexor auth login claude                # bootstrap sugar: sign into the claude-default row
 claudexor profiles add claude work         # register another account
-claudexor profiles login claude work       # the vendor's own login, scoped to the row's dir
+claudexor profiles login claude work       # direct vendor login in this terminal, scoped to the row's dir
+claudexor profiles add cursor work        # a separate Cursor account row
+claudexor profiles login cursor work       # daemon-managed login in this terminal; setup cancel/reconcile can recover it
 claudexor profiles disable claude work     # Enabled toggle: a disabled account is never routable
 claudexor profiles enable claude work
 claudexor profiles remove claude work      # remove the binding + any Claudexor-owned state/managed secret
@@ -599,7 +606,7 @@ localhost-callback flow. See
 claudexor auth status
 claudexor auth login codex    # codex login (device-auth by default)
 claudexor auth login claude   # claude auth login (claude.ai subscription route)
-claudexor auth login cursor   # cursor-agent login 
+claudexor auth login cursor   # cursor-agent login (or Cursor's own `agent`)
 claudexor profiles add agy work    # register a named Antigravity binding
 claudexor profiles login agy work  # login with its scoped HOME and platform credential policy
 claudexor secrets set openai --from-env OPENAI_API_KEY
@@ -690,7 +697,10 @@ future verified host-side-effect mode is explicitly selected.
 Claudexor can be driven by other tools through CLI JSON on supported commands, the
 local daemon/control API, MCP, and ACP. These surfaces are capability-gated;
 integrations should not assume every subcommand has JSON output or every
-harness supports live steering (see "Stability at 2.0").
+harness supports live steering: read a harness's `liveInput` channel from
+`GET /v2/agent-capabilities` and send a live message through
+`POST /v2/runs/:id/messages`, which answers a typed outcome instead of guessing
+(see "Stability at 2.0").
 
 The CLI accepts repeatable/comma-separated `--attach <path>` or `--image <path>`
 and immediately streams each regular, non-symlink file through `/v2/uploads`.
@@ -756,8 +766,14 @@ The portable plugin supports macOS and Linux and requires the `claudexor`
 command on `PATH`; Windows is not currently supported. It bundles one Agent
 Skill plus MCP wiring and never collects credentials or bypasses Claudexor's
 typed apply and human-decision gates. See
-[`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md#portable-agent-skill-and-copilot-plugin)
+[`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md#portable-agent-skill-and-host-packages)
 for lifecycle and precedence details.
+
+The same portable package is also available to Claude Code straight from this
+repository (`claude plugin marketplace add razzant/claudexor`, then
+`claude plugin install claudexor@claudexor`) and to Cursor as the local plugin
+in `plugins/cursor`. Enable only one Claudexor integration per host; the
+`claudexor` command must already be installed.
 
 The explicit Claude install also enables the official subscription-quota
 status-line source. If `~/.claude/settings.json` already has a `statusLine`

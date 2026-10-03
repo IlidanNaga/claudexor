@@ -1,6 +1,6 @@
 {
   "name": "@claudexor/artifact-store",
-  "version": "3.13.0",
+  "version": "3.19.0",
   "license": "MIT",
   "description": "Files-first canonical artifact store in an external per-project runtime namespace.",
   "type": "module",
@@ -21,7 +21,7 @@
   },
   "dependencies": {
     "@claudexor/util": "workspace:*",
-    "yaml": "^2.6.1"
+    "yaml": "^2.9.1"
   },
   "repository": {
     "type": "git",

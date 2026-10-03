@@ -1,5 +1,81 @@
 # @claudexor/mcp-server
 
+## 3.19.0
+
+### Patch Changes
+
+- Claudexor ships as portable Claude Code and Cursor packages (`plugins/claude`, `plugins/cursor`) that carry the canonical Skill and the MCP server registration (no runtime, credentials, hooks or status-line collector; those stay with the managed `claudexor plugin install` integration), and the canonical Skill plus the managed-integration text describe `claudexor_accounts` truthfully (the plain call returns the cached listing; `fresh: true` is the expensive atomic snapshot). Production dependencies move to @agentclientprotocol/sdk 1.5.1, @modelcontextprotocol/server 2.2.0, @playwright/mcp 0.0.83, zod 4.6.5 and yaml 2.9.1; the release SBOM test reads the packaged Browser MCP version from packages/core instead of a literal.
+- Updated dependencies
+  - @claudexor/schema@3.19.0
+  - @claudexor/util@3.19.0
+
+## 3.18.0
+
+### Minor Changes
+
+- Release the integrated persistent MCP conversation tools and macOS agent-file previews. Thanks to @IlidanNaga for these contributions, including selected-profile billing repairs, to @Petyok for Cursor launcher discovery, and to @kzmx23 for Windows background-process and reconnect investigations.
+
+### Patch Changes
+
+- @claudexor/schema@3.18.0
+- @claudexor/util@3.18.0
+
+## 3.17.2
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.17.2
+  - @claudexor/util@3.17.2
+
+## 3.17.1
+
+### Patch Changes
+
+- Updated dependencies [72825b9]
+  - @claudexor/schema@3.17.1
+  - @claudexor/util@3.17.1
+
+## 3.17.0
+
+### Patch Changes
+
+- Updated dependencies [951489f]
+  - @claudexor/schema@3.17.0
+  - @claudexor/util@3.17.0
+
+## 3.16.0
+
+### Patch Changes
+
+- Updated dependencies [788ddca]
+  - @claudexor/schema@3.16.0
+  - @claudexor/util@3.16.0
+
+## 3.15.1
+
+### Patch Changes
+
+- @claudexor/schema@3.15.1
+- @claudexor/util@3.15.1
+
+## 3.15.0
+
+### Patch Changes
+
+- @claudexor/schema@3.15.0
+- @claudexor/util@3.15.0
+
+## 3.14.0
+
+### Patch Changes
+
+- Updated dependencies [2c024ac]
+- Updated dependencies [7e615b6]
+- Updated dependencies [fb42a94]
+  - @claudexor/schema@3.14.0
+  - @claudexor/util@3.14.0
+
 ## 3.13.0
 
 ### Patch Changes

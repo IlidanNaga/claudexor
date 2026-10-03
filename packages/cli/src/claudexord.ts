@@ -27,6 +27,7 @@ import {
   ensureDaemonRuntimeRoot,
   logPath,
   socketAlive,
+  LiveInputRegistry,
 } from "@claudexor/daemon";
 import { DaemonControlApiServer } from "@claudexor/control-api";
 import {
@@ -49,9 +50,10 @@ import { runtimeConcurrencyCaps } from "@claudexor/schema";
 import { scheduleStartupRetention } from "./retention-service.js";
 import { controlServices } from "./control-services.js";
 import { AuthReadinessService } from "@claudexor/gateway";
+import { bindCredentialMutationWindow } from "@claudexor/core";
 import { buildGateway } from "./registry.js";
 import { createSetupJobManager } from "./setup-jobs.js";
-import { bustGlobalCredentialStatusCaches } from "./credential-status-invalidation.js";
+import { bustLoginCredentialState } from "./credential-status-invalidation.js";
 import { SetupJobStore } from "./setup-job-store.js";
 import { SetupLifecycleBinding } from "./setup-lifecycle-binding.js";
 import { DaemonRuntimeShutdown } from "./daemon-runtime-shutdown.js";
@@ -171,6 +173,11 @@ export async function main(): Promise<void> {
       forRequest: (params) => threads.interactionsForRequest(params),
       all: () => threads.interactionStores(),
     });
+    // Live-input targets (POST /v2/runs/:id/messages): in-process only, fed by
+    // the agent runner per attempt; a pending question blocks a send (INV-048).
+    const liveInputs = new LiveInputRegistry({
+      pendingForRun: (runId) => interactions.pendingForRun(runId),
+    });
     // C5b: construction mkdirs under the daemon dir and the recovery plane
     // serves no resources — the store materializes on first product use.
     let resourceStore: ResourceStore | null = null;
@@ -190,6 +197,7 @@ export async function main(): Promise<void> {
       quotaStore: () => quotaStoreSlot.current(),
       threads,
       interactions,
+      liveInputs,
       resources,
       bus,
       runtimeConcurrencyCaps: startupConcurrencyCaps,
@@ -205,6 +213,7 @@ export async function main(): Promise<void> {
       onCommandTerminal: (record) => models.operations.onCommandTerminal(record),
       onRunTerminal: (runId, threadId) => {
         interactions.dropForRun(runId);
+        liveInputs.dropForRun(runId);
         // Run-terminal is the one W12 path with no thread-store mutation to
         // ride — the terminal changes the thread's presented state, so ping.
         if (threadId) threads.pingThreadHead(threadId);
@@ -239,11 +248,14 @@ export async function main(): Promise<void> {
       createSetupJobManager({
         rootDir: daemonDir(),
         store,
-        onCredentialStateMayHaveChanged: (harness) => {
-          bustGlobalCredentialStatusCaches(() => quotaStoreSlot.current());
-          authReadiness.invalidate(harness);
-        },
+        onCredentialStateMayHaveChanged: (harness) =>
+          bustLoginCredentialState(() => quotaStoreSlot.current(), authReadiness, harness),
       }),
+    );
+    // #363: every process-local credential observer reads the login window from
+    // the durable setup lifecycle; an unbound or recovering generation reads open.
+    bindCredentialMutationWindow((harness) =>
+      setupBinding.current().credentialMutationOpen(harness),
     );
     let control: DaemonControlApiServer | null = null;
     shutdownRuntime = new DaemonRuntimeShutdown({
@@ -269,6 +281,7 @@ export async function main(): Promise<void> {
     // the startup retention pass below consumes them directly.
     const services = controlServices(
       interactions,
+      liveInputs,
       () => projectStoreSlot.current(),
       threads,
       setupBinding,

@@ -275,7 +275,7 @@ export async function runDeepScanReducer(
 
   const built = prepared.built;
   const spec = built.spec;
-  bindProcessingAdmission(spec, ledger, lease.lease!.lease_id, adapter.id, attemptId);
+  bindProcessingAdmission(spec, ledger, lease.lease!, adapter.id, attemptId);
   activeSessionId = spec.session_id;
   if (stopReason) {
     cancelActiveSession();
