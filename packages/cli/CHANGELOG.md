@@ -1,5 +1,39 @@
 # @claudexor/cli
 
+## 3.19.0
+
+### Minor Changes
+
+- Claudexor ships as portable Claude Code and Cursor packages (`plugins/claude`, `plugins/cursor`) that carry the canonical Skill and the MCP server registration (no runtime, credentials, hooks or status-line collector; those stay with the managed `claudexor plugin install` integration), and the canonical Skill plus the managed-integration text describe `claudexor_accounts` truthfully (the plain call returns the cached listing; `fresh: true` is the expensive atomic snapshot). Production dependencies move to @agentclientprotocol/sdk 1.5.1, @modelcontextprotocol/server 2.2.0, @playwright/mcp 0.0.83, zod 4.6.5 and yaml 2.9.1; the release SBOM test reads the packaged Browser MCP version from packages/core instead of a literal.
+
+### Patch Changes
+
+- Updated dependencies [386bbf1]
+- Updated dependencies
+  - @claudexor/harness-agy@3.19.0
+  - @claudexor/acp-server@3.19.0
+  - @claudexor/mcp-server@3.19.0
+  - @claudexor/core@3.19.0
+  - @claudexor/config@3.19.0
+  - @claudexor/schema@3.19.0
+  - @claudexor/daemon@3.19.0
+  - @claudexor/delivery@3.19.0
+  - @claudexor/gateway@3.19.0
+  - @claudexor/harness-claude@3.19.0
+  - @claudexor/harness-codex@3.19.0
+  - @claudexor/harness-cursor@3.19.0
+  - @claudexor/harness-fake@3.19.0
+  - @claudexor/harness-opencode@3.19.0
+  - @claudexor/harness-raw-api@3.19.0
+  - @claudexor/orchestrator@3.19.0
+  - @claudexor/review@3.19.0
+  - @claudexor/workspace@3.19.0
+  - @claudexor/control-api@3.19.0
+  - @claudexor/artifact-store@3.19.0
+  - @claudexor/journal@3.19.0
+  - @claudexor/secrets@3.19.0
+  - @claudexor/util@3.19.0
+
 ## 3.18.0
 
 ### Minor Changes

@@ -1,5 +1,14 @@
 # @claudexor/acp-server
 
+## 3.19.0
+
+### Patch Changes
+
+- Claudexor ships as portable Claude Code and Cursor packages (`plugins/claude`, `plugins/cursor`) that carry the canonical Skill and the MCP server registration (no runtime, credentials, hooks or status-line collector; those stay with the managed `claudexor plugin install` integration), and the canonical Skill plus the managed-integration text describe `claudexor_accounts` truthfully (the plain call returns the cached listing; `fresh: true` is the expensive atomic snapshot). Production dependencies move to @agentclientprotocol/sdk 1.5.1, @modelcontextprotocol/server 2.2.0, @playwright/mcp 0.0.83, zod 4.6.5 and yaml 2.9.1; the release SBOM test reads the packaged Browser MCP version from packages/core instead of a literal.
+- Updated dependencies
+  - @claudexor/schema@3.19.0
+  - @claudexor/util@3.19.0
+
 ## 3.18.0
 
 ### Patch Changes
